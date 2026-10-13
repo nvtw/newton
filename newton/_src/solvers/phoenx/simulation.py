@@ -374,6 +374,7 @@ class PhoenXWorld:
         direct_joint_projection_passes: int | None = None,
         mass_splitting_unrolled: bool = False,
         partitioner_algorithm: str = "greedy",
+        joint_coloring_priority: bool = False,
         max_greedy_outer_iters: int | None = None,
         enable_warm_start_coloring: bool = True,
         symmetric_color_sweep: bool = False,
@@ -470,6 +471,10 @@ class PhoenXWorld:
                 endpoint elections for single-world mass splitting, and
                 ``"luby_fixed"`` uses fixed launches with overflow on
                 saturation.
+            joint_coloring_priority: Prefer joints in priority-based graph
+                coloring. Defaults to ``False`` to preserve the established
+                solve order; priority can worsen convergence of joint loops.
+                Sequential per-world greedy ordering is unaffected.
             device: Warp device. Defaults to ``bodies.position.device``.
         """
         if device is None:
@@ -942,6 +947,7 @@ class PhoenXWorld:
         # ``[0, num_bodies)`` are rigid bodies; ``[num_bodies,
         # num_bodies + num_particles)`` are particles.
         self.partitioner_algorithm: str = str(partitioner_algorithm)
+        self.joint_coloring_priority = bool(joint_coloring_priority)
         if self.partitioner_algorithm == "endpoint_owner":
             if step_layout != "single_world" or not self.mass_splitting_enabled:
                 raise ValueError("partitioner_algorithm=endpoint_owner requires single-world mass splitting")
@@ -3189,6 +3195,7 @@ class PhoenXWorld:
                 wp.int32(self.num_joints),
                 self._joint_pgs_enabled,
                 wp.int32(1 if self._sleeping_enabled else 0),
+                wp.int32(self.joint_coloring_priority),
                 wp.int32(self.num_cloth_triangles),
                 wp.int32(self.num_cloth_bending),
                 wp.int32(self.num_soft_tetrahedra),
