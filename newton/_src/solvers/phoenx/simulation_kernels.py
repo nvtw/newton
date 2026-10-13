@@ -4075,6 +4075,28 @@ def _make_singleworld_rigid_direct_color_func(
                 count_single = singleton_end - contact_start
                 count_multi = color_end - singleton_end
                 contact_lanes = stride - contact_lane_base
+                # Lanes only help while the color fits in one pass; a full
+                # color gains more from one column per lane. Both schedules
+                # are bitwise identical.
+                if count_single + wp.int32(4) * count_multi > contact_lanes:
+                    while base >= wp.int32(0) and base < count_contacts:
+                        cid = read1d_i32(element_ids_by_color, contact_start + base)
+                        _dispatch_rigid_contact(
+                            contact_cols,
+                            bodies,
+                            particles,
+                            cc,
+                            contacts,
+                            copy_state,
+                            num_bodies,
+                            idt,
+                            sor_boost,
+                            cid - num_joints,
+                            contact_start + base,
+                            wp.int32(0),
+                        )
+                        base = base + contact_lanes
+                    return
                 if count_single > wp.int32(0) and count_multi > wp.int32(0) and contact_lanes < wp.int32(64):
                     singleton_end = contact_start
                     count_single = wp.int32(0)
