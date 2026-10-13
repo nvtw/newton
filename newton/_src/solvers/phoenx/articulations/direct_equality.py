@@ -22,6 +22,7 @@ from newton._src.sim.articulation import (
 )
 from newton._src.solvers.phoenx.articulations.fixed_pattern_llt import (
     FixedPatternPanelLLT,
+    any_panel_subgroup,
     make_subgroup_panel_solve_func,
     packed_lower_size,
     sync_panel_subgroup,
@@ -1755,6 +1756,7 @@ def _make_fused_subgroup_projection_kernel(width: int, packed: bool):
         accumulated_impulse: wp.array[wp.float32],
         dynamic_mass: wp.array[wp.float32],
         use_bias: wp.bool,
+        relax_tolerance: wp.float32,
         row_scale: wp.array[wp.float32],
         mechanism_body_start: wp.array[wp.int32],
         mechanism_bodies: wp.array[wp.int32],
@@ -1796,6 +1798,12 @@ def _make_fused_subgroup_projection_kernel(width: int, packed: bool):
                 row_scale,
             )
             rhs[row] = value
+        if not use_bias:
+            # Repeat relaxation skips negligible corrections per mechanism
+            # instead of requiring every mechanism in the scene to be quiet.
+            active = lane < dimension and wp.abs(value) > relax_tolerance
+            if not any_panel_subgroup(active, wp.static(width)):
+                return
         value = solve_panel(factor, base, dimension, lane, value)
         if lane < dimension:
             delta[row] = value
@@ -2272,6 +2280,7 @@ class DirectEqualitySystem:
         self.row_scale = wp.ones(row_count, dtype=wp.float32, device=device)
         self.max_dimension = max(self.topology.dimensions)
         self._fused_projection = None
+        self._fused_relax_tolerance = _DIRECT_RELAX_RESIDUAL_TOLERANCE
         solver = self.solver
         if (
             solver.subgroup_mechanism.size == len(self.topology.dimensions)
@@ -2753,9 +2762,9 @@ class DirectEqualitySystem:
     def solve(self, *, use_bias: bool, refine: bool = True) -> None:
         if not self.enabled:
             return
-        if use_bias and self._fused_projection is not None:
-            # Biased projections are never skipped, so no activity flag or
-            # conditional graph node is needed.
+        if self._fused_projection is not None:
+            # Each subgroup decides whether its own unbiased correction is
+            # negligible, so no global activity flag or conditional node is needed.
             solver = self.solver
             wp.launch(
                 self._fused_projection,
@@ -2780,7 +2789,8 @@ class DirectEqualitySystem:
                     self.velocity_reference,
                     self.accumulated_impulse,
                     self.dynamic_mass,
-                    wp.bool(True),
+                    wp.bool(use_bias),
+                    wp.float32(self._fused_relax_tolerance),
                     self.row_scale,
                     self._mechanism_body_start,
                     self._mechanism_bodies,
