@@ -79,6 +79,29 @@ class DirectEqualityTopology:
     body_rows: np.ndarray
 
 
+def _build_body_row_wrench_descriptors(
+    topology: DirectEqualityTopology,
+    joint_to_structural: np.ndarray,
+    joint_parent: np.ndarray,
+    joint_child: np.ndarray,
+    row_width: int,
+) -> np.ndarray:
+    """Cache endpoint addresses without changing body incidence order."""
+    rows = topology.body_rows
+    joints = topology.row_joint[rows]
+    bodies = np.repeat(
+        np.arange(len(topology.body_row_start) - 1, dtype=np.int32),
+        np.diff(topology.body_row_start),
+    )
+    parent = joint_parent[joints] + 1
+    child = joint_child[joints] + 1
+    if not np.all((bodies == parent) | (bodies == child)):
+        raise ValueError("Equality body incidence must reference a joint endpoint")
+    source = joint_to_structural[joints] * row_width + topology.row_local[rows]
+    side = (bodies != parent).astype(np.int32)
+    return np.column_stack((rows, source * 2 + side)).astype(np.int32)
+
+
 def _select_panel_block_size(
     topology: DirectEqualityTopology,
     joint_parent: np.ndarray,
@@ -1616,16 +1639,11 @@ def _gather_direct_friction_wrenches_kernel(
 
 
 @wp.kernel(enable_backward=False)
-def _apply_direct_equality_delta_kernel(
+def _apply_direct_equality_descriptor_kernel(
     body_row_start: wp.array[wp.int32],
-    body_rows: wp.array[wp.int32],
-    row_joint: wp.array[wp.int32],
-    row_local: wp.array[wp.int32],
-    joint_to_structural: wp.array[wp.int32],
-    joint_parent: wp.array[wp.int32],
-    joint_child: wp.array[wp.int32],
-    row_wrench0: wp.array2d[wp.spatial_vector],
-    row_wrench1: wp.array2d[wp.spatial_vector],
+    descriptor: wp.array[wp.vec2i],
+    row_wrench0: wp.array[wp.spatial_vector],
+    row_wrench1: wp.array[wp.spatial_vector],
     delta: wp.array[wp.float32],
     row_scale: wp.array[wp.float32],
     bodies: BodyContainer,
@@ -1635,24 +1653,11 @@ def _apply_direct_equality_delta_kernel(
         return
     wrench = wp.spatial_vector()
     for incidence in range(body_row_start[body], body_row_start[body + wp.int32(1)]):
-        row = body_rows[incidence]
-        joint = row_joint[row]
-        structural_index = joint_to_structural[joint]
-        local_row = row_local[row]
-        wrench += (
-            row_scale[row]
-            * delta[row]
-            * _row_wrench_for_body(
-                body,
-                joint,
-                structural_index,
-                local_row,
-                joint_parent,
-                joint_child,
-                row_wrench0,
-                row_wrench1,
-            )
-        )
+        metadata = descriptor[incidence]
+        row = metadata[0]
+        source = metadata[1] >> wp.int32(1)
+        row_wrench = row_wrench0[source] if (metadata[1] & wp.int32(1)) == wp.int32(0) else row_wrench1[source]
+        wrench += row_scale[row] * delta[row] * row_wrench
     force = wp.spatial_top(wrench)
     bodies.velocity[body] += bodies.inverse_mass[body] * force
     bodies.angular_velocity[body] += mat33_from_sym6(bodies.inverse_inertia_world[body]) * wp.spatial_bottom(wrench)
@@ -1983,6 +1988,16 @@ class DirectEqualitySystem:
         self.row_wrench0 = wp.zeros(row_shape, dtype=wp.spatial_vector, device=device)
         self.row_wrench1 = wp.zeros(row_shape, dtype=wp.spatial_vector, device=device)
         self.row_bias = wp.zeros(row_shape, dtype=wp.float32, device=device)
+        descriptor = _build_body_row_wrench_descriptors(
+            self.topology,
+            joint_to_structural,
+            np.asarray(model.joint_parent.numpy(), dtype=np.int32),
+            np.asarray(model.joint_child.numpy(), dtype=np.int32),
+            row_width,
+        )
+        self._body_row_wrench_descriptors = wp.array(descriptor, dtype=wp.vec2i, device=device)
+        self._apply_wrench0 = self.row_wrench0.flatten()
+        self._apply_wrench1 = self.row_wrench1.flatten()
         self.row_error = wp.zeros(row_shape, dtype=wp.float32, device=device)
         self.row_stiffness = wp.zeros(row_shape, dtype=wp.float32, device=device)
         self.row_damping = wp.zeros(row_shape, dtype=wp.float32, device=device)
@@ -2596,18 +2611,13 @@ class DirectEqualitySystem:
                 device=self.model.device,
             )
             wp.launch(
-                _apply_direct_equality_delta_kernel,
+                _apply_direct_equality_descriptor_kernel,
                 dim=int(self.model.body_count) + 1,
                 inputs=[
                     self.body_row_start,
-                    self.body_rows,
-                    self.row_joint,
-                    self.row_local,
-                    self.joint_to_structural,
-                    self.model.joint_parent,
-                    self.model.joint_child,
-                    self.row_wrench0,
-                    self.row_wrench1,
+                    self._body_row_wrench_descriptors,
+                    self._apply_wrench0,
+                    self._apply_wrench1,
                     self.delta,
                     self.row_scale,
                     self.bodies,
