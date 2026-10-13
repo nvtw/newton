@@ -459,6 +459,60 @@ def make_subgroup_panel_solve_func(width: int):
 
 
 @functools.cache
+def _make_subgroup_factor_kernel(width: int):
+    """Factor a one-panel mechanism in registers within a subgroup.
+
+    Lane ``i`` owns row ``i`` of the lower triangle. Rows and columns past
+    the mechanism dimension are identity padding and the stored upper triangle
+    is zero, matching the cooperative tile factor's panel layout.
+    """
+    Row = wp.types.vector(length=width, dtype=wp.float32)
+
+    @wp.kernel(enable_backward=False, module="unique")
+    def factor_subgroup(
+        mechanisms: wp.array[wp.int32],
+        dimensions: wp.array[wp.int32],
+        tables: wp.array[wp.int32],
+        panels: wp.array[wp.int32],
+        matrix: wp.array[wp.float32],
+        factor: wp.array[wp.float32],
+    ):
+        task, lane = wp.tid()
+        mechanism = mechanisms[task]
+        dimension = dimensions[mechanism]
+        base = panels[tables[mechanism]] * wp.static(width * width)
+        row = Row(0.0)
+        for column in range(wp.static(width)):
+            if lane < dimension:
+                if column <= lane:
+                    row[column] = matrix[base + lane * wp.static(width) + column]
+            elif column == lane:
+                row[column] = wp.float32(1.0)
+        # Right-looking Cholesky: column k is scaled by its pivot, then
+        # broadcast one entry at a time to update the trailing rows.
+        for k in range(wp.static(width)):
+            pivot = wp.float32(0.0)
+            if lane == k:
+                pivot = wp.sqrt(row[k])
+                row[k] = pivot
+            pivot = _shuffle_panel_value(pivot, k, wp.static(width))
+            if lane > k:
+                row[k] = row[k] / pivot
+            for column in range(wp.static(width)):
+                if column > k:
+                    trailing = _shuffle_panel_value(row[k], column, wp.static(width))
+                    if lane >= column:
+                        row[column] = row[column] - row[k] * trailing
+        for column in range(wp.static(width)):
+            value = wp.float32(0.0)
+            if column <= lane:
+                value = row[column]
+            factor[base + lane * wp.static(width) + column] = value
+
+    return factor_subgroup
+
+
+@functools.cache
 def _make_subgroup_solve_kernel(width: int):
     """Solve a one-panel mechanism in registers within a subgroup."""
     solve_panel = make_subgroup_panel_solve_func(width)
@@ -1181,10 +1235,25 @@ class FixedPatternPanelLLT:
         mathdx_solver = wp.get_module(__name__).options.get("enable_mathdx_solver")
         if mathdx_solver is None:
             mathdx_solver = getattr(wp.config, "enable_mathdx_solver", False)
-        if use_subgroup_solve and mathdx_solver and self.device.is_cuda and block_size in (16, 32):
+        use_subgroups = use_subgroup_solve and mathdx_solver and self.device.is_cuda and block_size in (16, 32)
+        if use_subgroups:
             subgroup_mechanisms = np.intersect1d(cooperative_mechanisms, small_mechanisms, assume_unique=True)
             cooperative_mechanisms = np.setdiff1d(cooperative_mechanisms, subgroup_mechanisms, assume_unique=True)
         self.subgroup_mechanism = wp.array(subgroup_mechanisms, dtype=wp.int32, device=self.device)
+        # One-panel mechanisms factor in registers like their solves; the tile
+        # factor keeps only multi-panel mechanisms.
+        subgroup_factor_mechanisms = (
+            np.intersect1d(cooperative_factor_mechanisms, small_mechanisms, assume_unique=True)
+            if use_subgroups
+            else np.empty(0, dtype=np.int32)
+        )
+        self.subgroup_factor_mechanism = wp.array(subgroup_factor_mechanisms, dtype=wp.int32, device=self.device)
+        self._tile_factor_mechanism = wp.array(
+            np.setdiff1d(cooperative_factor_mechanisms, subgroup_factor_mechanisms, assume_unique=True),
+            dtype=wp.int32,
+            device=self.device,
+        )
+        self._factor_subgroup = _make_subgroup_factor_kernel(block_size) if subgroup_factor_mechanisms.size else None
         self._solve_subgroup = _make_subgroup_solve_kernel(block_size) if subgroup_mechanisms.size else None
         self.cooperative_mechanism = wp.array(cooperative_mechanisms, dtype=wp.int32, device=self.device)
         self._factor_cooperative = _make_cooperative_factor_kernel(block_size)
@@ -1214,7 +1283,22 @@ class FixedPatternPanelLLT:
         if self._pcr_stream is not None:
             with wp.ScopedStream(self._pcr_stream):
                 self._pcr.compute(self.matrix)
-        factor_mechanisms = [self.cooperative_factor_mechanism]
+        if self.subgroup_factor_mechanism.size > 0:
+            wp.launch(
+                self._factor_subgroup,
+                dim=(self.subgroup_factor_mechanism.size, self.block_size),
+                inputs=[
+                    self.subgroup_factor_mechanism,
+                    self.dimension,
+                    self.panel_table_offset,
+                    self.panel_index,
+                    self.matrix,
+                    self.factor,
+                ],
+                block_dim=128,
+                device=self.device,
+            )
+        factor_mechanisms = [self._tile_factor_mechanism]
         if self._grouped_rhs_factor_required:
             factor_mechanisms.append(self.grouped_rhs_factor_mechanism)
         for mechanisms in factor_mechanisms:
