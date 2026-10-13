@@ -68,7 +68,11 @@ from newton._src.solvers.phoenx.graph_coloring.warm_start import (
     warm_start_mark_boundaries_kernel,
     warm_start_reset_count_kernel,
 )
-from newton._src.solvers.phoenx.helpers.scan_and_sort import scan_variable_length
+from newton._src.solvers.phoenx.helpers.scan_and_sort import (
+    active_prefix_sort_levels,
+    radix_sort_active_prefix,
+    scan_variable_length,
+)
 from newton._src.solvers.phoenx.solver_config import NUM_INNER_WHILE_ITERATIONS
 
 __all__ = ["MAX_COLORS", "IncrementalContactPartitioner"]
@@ -495,6 +499,9 @@ class IncrementalContactPartitioner:
         # the CSR colour ordering is preserved.
         self._locality_keys = wp.zeros(2 * max_num_interactions, dtype=wp.int64, device=device)
         self._locality_values = wp.zeros(2 * max_num_interactions, dtype=wp.int32, device=device)
+        self._locality_prefix_flags = wp.zeros(
+            active_prefix_sort_levels(max_num_interactions), dtype=wp.int32, device=device
+        )
         self._locality_family = wp.zeros(max_num_interactions, dtype=wp.int32, device=device)
         family_slots = int(MAX_COLORS) * _LOCALITY_FAMILY_COUNT_HOST
         self._color_family_count = wp.zeros(family_slots, dtype=wp.int32, device=device)
@@ -1269,7 +1276,9 @@ class IncrementalContactPartitioner:
             dim=n,
             inputs=locality_inputs,
         )
-        wp.utils.radix_sort_pairs(self._locality_keys, self._locality_values, n)
+        radix_sort_active_prefix(
+            self._locality_keys, self._locality_values, self._num_elements, self._locality_prefix_flags
+        )
         wp.launch(
             _locality_writeback_kernel,
             dim=n,

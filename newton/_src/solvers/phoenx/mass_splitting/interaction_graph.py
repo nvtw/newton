@@ -36,7 +36,7 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     ElementInteractionData,
     element_interaction_data_get,
 )
-from newton._src.solvers.phoenx.helpers.scan_and_sort import sort_variable_length_int64
+from newton._src.solvers.phoenx.helpers.scan_and_sort import active_prefix_sort_levels, sort_variable_length_int64
 from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
 
 __all__ = [
@@ -89,6 +89,10 @@ class InteractionGraphScratch:
     #: Length: ``capacity``.
     dest_idx: wp.array[wp.int32]
 
+    #: Branch flags selecting the sorted prefix that holds the emitted pairs.
+    #: Length: :func:`active_prefix_sort_levels` of ``capacity``.
+    sort_prefix_flags: wp.array[wp.int32]
+
 
 def interaction_graph_scratch_zeros(
     capacity: int,
@@ -110,6 +114,7 @@ def interaction_graph_scratch_zeros(
     s.num_pairs = wp.zeros(1, dtype=wp.int32, device=device)
     s.is_boundary = wp.zeros(capacity, dtype=wp.int32, device=device)
     s.dest_idx = wp.zeros(capacity, dtype=wp.int32, device=device)
+    s.sort_prefix_flags = wp.zeros(active_prefix_sort_levels(capacity), dtype=wp.int32, device=device)
     return s
 
 
@@ -495,7 +500,11 @@ def build_interaction_graph(
     # Node ids lie in [0, num_nodes), so the packed keys need only the
     # partition word plus the node bit width.
     sort_variable_length_int64(
-        scratch.packed_keys, scratch.packed_values, scratch.num_pairs, end_bit=32 + max(1, num_nodes).bit_length()
+        scratch.packed_keys,
+        scratch.packed_values,
+        scratch.num_pairs,
+        end_bit=32 + max(1, num_nodes).bit_length(),
+        prefix_flags=scratch.sort_prefix_flags,
     )
 
     # Stage 3: boundary detect + per-node count.
