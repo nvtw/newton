@@ -415,10 +415,8 @@ def _make_contact_prepare_for_iteration_at(
     pointwise_geometry: bool = False,
     tangent_mobility_layout: bool = False,
 ):
-    if pointwise_geometry and (cloth_support or patch_friction or packed_rows or stage_body_properties):
-        raise ValueError(
-            "Pointwise geometry requires rigid contacts without patches, packed rows, or shared header writes."
-        )
+    if pointwise_geometry and (cloth_support or patch_friction or stage_body_properties):
+        raise ValueError("Pointwise geometry requires rigid contacts without patches or shared header writes.")
 
     @wp.func
     def impl(
@@ -562,7 +560,13 @@ def _make_contact_prepare_for_iteration_at(
         for i in range(contact_count):
             k = contact_first + i
             source_k = k
-            if wp.static(packed_rows):
+            if wp.static(pointwise_geometry and packed_rows):
+                # ``base_offset`` is one color-ordered row; map it back to the
+                # immutable Newton input through the column's canonical range.
+                source_k = contact_get_original_contact_first(constraints, cid) + (
+                    k - contact_get_contact_first(constraints, cid)
+                )
+            elif wp.static(packed_rows):
                 source_k = base_offset + i
 
             if wp.static(patch_friction):
@@ -1229,6 +1233,75 @@ def _contact_cached_warmstart_split(
         write_velocity_unified(bodies, particles, copy_state, b2, slot2, num_bodies, v2_new)
         write_angular_velocity_unified(bodies, copy_state, b1, slot1, w1_new)
         write_angular_velocity_unified(bodies, copy_state, b2, slot2, w2_new)
+
+
+@functools.cache
+def get_colored_point_prepare_kernel(has_soft_pd: bool):
+    """One thread per color-ordered contact row: geometry only, no velocity writes.
+
+    The warm start is applied separately per body, so rows need no coloring.
+    Rows of the mass-splitting overflow color scale body responses by their
+    copy counts like the overflow sweep; regular colors use physical bodies.
+    """
+    prepare_split = _make_contact_prepare_for_iteration_at(
+        cloth_support=False,
+        has_mass_splitting=True,
+        has_soft_contact_pd=has_soft_pd,
+        packed_rows=True,
+        pointwise_geometry=True,
+        tangent_mobility_layout=True,
+    )
+    prepare_lean = _make_contact_prepare_for_iteration_at(
+        cloth_support=False,
+        has_mass_splitting=False,
+        has_soft_contact_pd=has_soft_pd,
+        packed_rows=True,
+        pointwise_geometry=True,
+        tangent_mobility_layout=True,
+    )
+
+    @wp.kernel(enable_backward=False, module="unique")
+    def kernel(
+        columns: ContactColumnContainer,
+        row_total: wp.array[wp.int32],
+        row_slots: wp.array[wp.int32],
+        color_starts: wp.array[wp.int32],
+        overflow_color: wp.int32,
+        bodies: BodyContainer,
+        particles: ParticleContainer,
+        num_bodies: wp.int32,
+        idt: wp.float32,
+        cc: ContactContainer,
+        contacts: ContactViews,
+        copy_state: CopyStateContainer,
+    ):
+        k = wp.tid()
+        if k >= row_total[0]:
+            return
+        slot = row_slots[k]
+        b1 = contact_get_body1(columns, slot)
+        b2 = contact_get_body2(columns, slot)
+        pair = constraint_bodies_make(b1, b2)
+        if overflow_color >= wp.int32(0) and slot >= color_starts[overflow_color]:
+            if k == contact_get_contact_first(columns, slot):
+                # The overflow sweep reads body properties staged in the header.
+                contact_set_packed_body_properties(
+                    columns,
+                    slot,
+                    bodies.inverse_mass[b1],
+                    bodies.inverse_mass[b2],
+                    body_load_inv_inertia_sym6(bodies, b1),
+                    body_load_inv_inertia_sym6(bodies, b2),
+                )
+            prepare_split(
+                columns, slot, k, bodies, particles, num_bodies, pair, idt, cc, contacts, copy_state, wp.int32(0)
+            )
+        else:
+            prepare_lean(
+                columns, slot, k, bodies, particles, num_bodies, pair, idt, cc, contacts, copy_state, wp.int32(0)
+            )
+
+    return kernel
 
 
 @functools.cache
