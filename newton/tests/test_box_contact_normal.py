@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Cover top-face contacts on a wide box with an off-center partner."""
+"""Cover contact normals and footprints for convex shapes."""
 
 import gc
 import unittest
@@ -365,10 +365,11 @@ add_function_test(
 
 def test_small_convex_contact_footprint(test, device, *, split=False):
     """Preserve both sides of submillimeter contact faces in either shape order."""
-    for scale, cylinder, swap in product((1.0, 10.0), (False, True), (False, True)):
-        with test.subTest(scale=scale, cylinder=cylinder, swap=swap):
+    for scale, geometry, swap in product((1.0, 10.0), ("box", "cylinder_face", "cylinder_edge"), (False, True)):
+        with test.subTest(scale=scale, geometry=geometry, swap=swap):
             builder = newton.ModelBuilder()
-            phase = wp.pi / 64 if cylinder else 0.0
+            cylinder = geometry != "box"
+            phase = wp.pi / 64 if geometry == "cylinder_face" else 0.0
             rotation = wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), -wp.pi / 2)
             rotation *= wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), phase)
             radius = 0.00725 * scale
@@ -395,7 +396,10 @@ def test_small_convex_contact_footprint(test, device, *, split=False):
             contacts = pipeline.contacts()
             pipeline.collide(model.state(), contacts)
             count = int(contacts.rigid_contact_count.numpy()[0])
-            test.assertGreaterEqual(count, 4)
+            if geometry == "cylinder_edge":
+                test.assertEqual(count, 2)
+            else:
+                test.assertGreaterEqual(count, 4)
             shape0 = contacts.rigid_contact_shape0.numpy()[:count]
             point0 = contacts.rigid_contact_point0.numpy()[:count]
             point1 = contacts.rigid_contact_point1.numpy()[:count]
@@ -405,7 +409,7 @@ def test_small_convex_contact_footprint(test, device, *, split=False):
             np.testing.assert_allclose(
                 [world_points[:, 0].min(), world_points[:, 0].max()],
                 [0.585 - half_width, 0.585 + half_width],
-                atol=2.0e-6 * scale,
+                atol=max(2.0e-6 * scale, 1.1e-5 if geometry == "cylinder_edge" else 0.0),
                 rtol=0.0,
             )
             np.testing.assert_allclose(
@@ -437,6 +441,72 @@ add_function_test(
     TestBoxContactNormal,
     "test_small_convex_contact_footprint_split",
     test_small_convex_contact_footprint_split,
+    devices=get_test_devices(),
+)
+
+
+def test_capsule_cylinder_tangent_contact(test, device, *, split=False):
+    """Use a single contact where a capsule is tangent to a straight cylinder's side."""
+    rotations = (wp.quat_identity(), wp.quat_from_axis_angle(wp.normalize(wp.vec3(1.0, 2.0, 3.0)), 0.7))
+    for swap, rotation in product((False, True), rotations):
+        with test.subTest(swap=swap, rotation=rotation):
+            radius, capsule_radius, overlap = 0.025, 0.003, 0.0001
+            frame = wp.transform(wp.vec3(0.585, -0.22, 0.046), rotation)
+            capsule_pose = frame * wp.transform(
+                wp.vec3(0.0, radius + capsule_radius - overlap, 0.0),
+                wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), wp.pi / 2),
+            )
+            builder = newton.ModelBuilder()
+            body = builder.add_body(xform=capsule_pose)
+            for is_cylinder in (False, True) if swap else (True, False):
+                if is_cylinder:
+                    cylinder_shape = builder.add_shape_cylinder(-1, xform=frame, radius=radius, half_height=0.00465)
+                else:
+                    builder.add_shape_capsule(body, radius=capsule_radius, half_height=0.0075)
+            model = builder.finalize(device)
+            pipeline = newton.CollisionPipeline(model)
+            test.assertEqual(pipeline.narrow_phase.split_gjk_mpr, split)
+            contacts = pipeline.contacts()
+            pipeline.collide(model.state(), contacts)
+            test.assertEqual(int(contacts.rigid_contact_count.numpy()[0]), 1)
+            cylinder_first = int(contacts.rigid_contact_shape0.numpy()[0]) == cylinder_shape
+            normal = contacts.rigid_contact_normal.numpy()[0]
+            expected_normal = np.asarray(wp.quat_rotate(rotation, wp.vec3(0.0, 1.0, 0.0)))
+            np.testing.assert_allclose(normal, expected_normal if cylinder_first else -expected_normal, atol=1.0e-4)
+            point0, point1 = contacts.rigid_contact_point0.numpy()[0], contacts.rigid_contact_point1.numpy()[0]
+            cylinder_point = point0 if cylinder_first else point1
+            capsule_point = point1 if cylinder_first else point0
+            # Allow numerical error in the deepest GJK witness.
+            np.testing.assert_allclose(
+                cylinder_point, np.asarray(wp.transform_point(frame, wp.vec3(0.0, radius, 0.0))), atol=1.0e-5
+            )
+            # The capsule's radius is stored as a separate friction-anchor offset.
+            np.testing.assert_allclose(capsule_point[[0, 2]], [0.0, 0.0], atol=1.0e-5)
+            offset0, offset1 = contacts.rigid_contact_offset0.numpy()[0], contacts.rigid_contact_offset1.numpy()[0]
+            capsule_offset = offset1 if cylinder_first else offset0
+            np.testing.assert_allclose(capsule_offset, [0.0, -capsule_radius, 0.0], atol=1.0e-6)
+
+
+add_function_test(
+    TestBoxContactNormal,
+    "test_capsule_cylinder_tangent_contact",
+    test_capsule_cylinder_tangent_contact,
+    devices=get_test_devices(),
+)
+
+
+def test_capsule_cylinder_tangent_contact_split(test, device):
+    """Check tangent capsule-cylinder contacts through the split CUDA kernels."""
+    if not device.is_cuda:
+        test.skipTest("Split collision kernels run only on CUDA")
+    with patch("newton._src.sim.collide._SPLIT_GJK_MPR_FULL_PAIR_COUNT_THRESHOLD", 0):
+        test_capsule_cylinder_tangent_contact(test, device, split=True)
+
+
+add_function_test(
+    TestBoxContactNormal,
+    "test_capsule_cylinder_tangent_contact_split",
+    test_capsule_cylinder_tangent_contact_split,
     devices=get_test_devices(),
 )
 

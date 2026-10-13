@@ -23,6 +23,7 @@ from newton._src.math import orthonormal_basis
 
 from .contact_data import ContactData
 from .mpr import create_support_map_function
+from .types import GeoType
 
 # Constants
 EPS = 0.00001
@@ -673,6 +674,18 @@ def create_build_manifold(support_func: Any, writer_func: Any, post_process_cont
         _support_map_b = create_support_map_function(support_func)[0]
 
     @wp.func
+    def support_contact_feature(geom: Any, direction: wp.vec3, normal: wp.vec3, data_provider: Any) -> wp.vec3:
+        """Sample a feature without widening a straight cylinder's supporting line."""
+        point = support_func(geom, direction, data_provider)
+        if geom.shape_type == int(GeoType.CYLINDER) and geom.scale[2] == 0.0 and wp.abs(normal[2]) <= 1.0e-5:
+            # A straight cylinder's side supports a segment, not a curved
+            # polygon assembled from radially perturbed support points.
+            radial = wp.normalize(wp.vec3(normal[0], normal[1], 0.0)) * geom.scale[0]
+            point[0] = radial[0]
+            point[1] = radial[1]
+        return point
+
+    @wp.func
     def extract_4_point_contact_manifolds(
         m_a: wp.array[wp.vec2],
         m_a_count: int,
@@ -735,7 +748,12 @@ def create_build_manifold(support_func: Any, writer_func: Any, post_process_cont
 
         loop_count = trim_all_in_place(m_a, m_a_count, m_b, m_b_count)
 
-        loop_count = remove_zero_length_edges(m_b, loop_count, EPS)
+        # Segment clipping creates a strip 2 * EPS wide. Collapse its
+        # artificial short edges without merging genuine polygon features.
+        merge_distance = EPS
+        if m_a_count == 2 or m_b_count == 2:
+            merge_distance = 3.0 * EPS
+        loop_count = remove_zero_length_edges(m_b, loop_count, merge_distance)
 
         if loop_count > 1:
             result = wp.vec4i()
@@ -871,7 +889,7 @@ def create_build_manifold(support_func: Any, writer_func: Any, post_process_cont
 
             # Shape A: direction and result both in A-local frame, zero quaternion ops.
             dir_a = normal * cos_tilt + c_sin * tangent_a + s_sin * tangent_b
-            pt_a_3d = support_func(geom_a, dir_a, data_provider)
+            pt_a_3d = support_contact_feature(geom_a, dir_a, normal, data_provider)
             projected_a = pt_a_3d - center
             pt_a_2d = wp.vec2(wp.dot(tangent_a, projected_a), wp.dot(tangent_b, projected_a))
             a_count, was_added_a = add_avoid_duplicates_vec2(a_buffer, a_count, pt_a_2d, EPS)
@@ -880,7 +898,7 @@ def create_build_manifold(support_func: Any, writer_func: Any, post_process_cont
 
             # Shape B: direction in B-local, result transformed to A-local.
             local_dir_b = local_normal_b * cos_tilt + c_sin * local_ta_b + s_sin * local_tb_b
-            pt_b_local = support_func(geom_b, local_dir_b, data_provider)
+            pt_b_local = support_contact_feature(geom_b, local_dir_b, local_normal_b, data_provider)
             pt_b_3d = wp.quat_rotate(relative_orientation_b, pt_b_local) + relative_position_b
             projected_b = pt_b_3d - center
             pt_b_2d = wp.vec2(wp.dot(tangent_a, projected_b), wp.dot(tangent_b, projected_b))
