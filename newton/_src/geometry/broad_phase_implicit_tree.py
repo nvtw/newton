@@ -21,6 +21,16 @@ from .broad_phase_sap import _make_sap_process_pair_func
 wp.set_module_options({"enable_backward": False})
 
 
+@wp.struct
+class _TreeNode:
+    """One 32-byte traversal record: a visit touches a single memory sector."""
+
+    lower: wp.vec3
+    max_span: wp.float32
+    upper: wp.vec3
+    last_leaf: wp.int32
+
+
 @wp.func
 def _spread_20(v: wp.uint64) -> wp.uint64:
     v = (v | (v << wp.uint64(32))) & wp.uint64(0x001F00000000FFFF)
@@ -61,26 +71,25 @@ def _tree_leaves(
     upper: wp.array[wp.vec3],
     gap: wp.array[float],
     displacement: wp.array[wp.vec3],
-    node_lower: wp.array[wp.vec3],
-    node_upper: wp.array[wp.vec3],
+    nodes: wp.array[_TreeNode],
     node_shape: wp.array[int],
-    node_last_leaf: wp.array[int],
-    node_max_span: wp.array[float],
     leaf_base: int,
     shape_count: int,
 ):
     slot = wp.tid()
     node = leaf_base + slot
+    record = _TreeNode()
+    record.lower = wp.vec3(1.0e30, 1.0e30, 1.0e30)
+    record.upper = wp.vec3(-1.0e30, -1.0e30, -1.0e30)
+    record.max_span = wp.float32(-1.0)
+    record.last_leaf = -1
     node_shape[node] = -1
-    node_last_leaf[node] = -1
-    node_max_span[node] = wp.float32(-1.0)
-    node_lower[node] = wp.vec3(1.0e30, 1.0e30, 1.0e30)
-    node_upper[node] = wp.vec3(-1.0e30, -1.0e30, -1.0e30)
     if slot >= shape_count:
+        nodes[node] = record
         return
     shape = shape_index[sorted_values[slot]]
     node_shape[node] = shape
-    node_last_leaf[node] = slot
+    record.last_leaf = slot
     margin = wp.float32(0.0)
     if gap.shape[0] > 0:
         margin = gap[shape]
@@ -88,38 +97,35 @@ def _tree_leaves(
     if displacement.shape[0] > 0:
         shift = displacement[shape]
     expand = wp.vec3(margin, margin, margin)
-    node_lower[node] = wp.min(lower[shape], lower[shape] + shift) - expand
-    node_upper[node] = wp.max(upper[shape], upper[shape] + shift) + expand
+    low = wp.min(lower[shape], lower[shape] + shift) - expand
+    high = wp.max(upper[shape], upper[shape] + shift) + expand
     # At distant world coordinates, float32 rounding can make a swept bound
     # narrower than the equivalent moving-AABB test (which combines the two
     # gaps before subtraction). Expand by a few ulps of the coordinate scale;
     # the shared exact pair filter still decides which contacts are accepted.
-    low = node_lower[node]
-    high = node_upper[node]
     rounding = wp.vec3(
         wp.max(wp.abs(low[0]), wp.abs(high[0])) * wp.float32(4.76837158e-7) + wp.float32(1.0e-6),
         wp.max(wp.abs(low[1]), wp.abs(high[1])) * wp.float32(4.76837158e-7) + wp.float32(1.0e-6),
         wp.max(wp.abs(low[2]), wp.abs(high[2])) * wp.float32(4.76837158e-7) + wp.float32(1.0e-6),
     )
-    node_lower[node] = low - rounding
-    node_upper[node] = high + rounding
-    span = node_upper[node] - node_lower[node]
-    node_max_span[node] = wp.max(span[0], wp.max(span[1], span[2]))
+    record.lower = low - rounding
+    record.upper = high + rounding
+    span = record.upper - record.lower
+    record.max_span = wp.max(span[0], wp.max(span[1], span[2]))
+    nodes[node] = record
 
 
 @wp.kernel(enable_backward=False)
-def _tree_build_level(
-    node_lower: wp.array[wp.vec3],
-    node_upper: wp.array[wp.vec3],
-    node_last_leaf: wp.array[int],
-    node_max_span: wp.array[float],
-    start: int,
-):
+def _tree_build_level(nodes: wp.array[_TreeNode], start: int):
     node = start + wp.tid()
-    node_lower[node] = wp.min(node_lower[node * 2], node_lower[node * 2 + 1])
-    node_upper[node] = wp.max(node_upper[node * 2], node_upper[node * 2 + 1])
-    node_last_leaf[node] = wp.max(node_last_leaf[node * 2], node_last_leaf[node * 2 + 1])
-    node_max_span[node] = wp.max(node_max_span[node * 2], node_max_span[node * 2 + 1])
+    left = nodes[node * 2]
+    right = nodes[node * 2 + 1]
+    record = _TreeNode()
+    record.lower = wp.min(left.lower, right.lower)
+    record.upper = wp.max(left.upper, right.upper)
+    record.last_leaf = wp.max(left.last_leaf, right.last_leaf)
+    record.max_span = wp.max(left.max_span, right.max_span)
+    nodes[node] = record
 
 
 @wp.func
@@ -138,11 +144,8 @@ def _make_pair_kernels(filter_func: Any, filter_data_type: Any):
 
     @wp.kernel(enable_backward=False, module=module)
     def query(
-        node_lower: wp.array[wp.vec3],
-        node_upper: wp.array[wp.vec3],
+        nodes: wp.array[_TreeNode],
         node_shape: wp.array[int],
-        node_last_leaf: wp.array[int],
-        node_max_span: wp.array[float],
         leaf_base: int,
         shape_count: int,
         shape_lower: wp.array[wp.vec3],
@@ -165,9 +168,10 @@ def _make_pair_kernels(filter_func: Any, filter_data_type: Any):
         if leaf >= shape_count:
             return
         query_node = leaf_base + leaf
-        query_lower = node_lower[query_node]
-        query_upper = node_upper[query_node]
-        query_span = node_max_span[query_node]
+        query = nodes[query_node]
+        query_lower = query.lower
+        query_upper = query.upper
+        query_span = query.max_span
         shape1 = node_shape[query_node]
         # An ancestor always contains the query leaf, so its bound cannot
         # reject it. Visit only the sibling subtrees along the leaf-to-root
@@ -178,17 +182,18 @@ def _make_pair_kernels(filter_func: Any, filter_data_type: Any):
             stop = _tree_next_dfs(sibling)
             node = sibling
             while node != stop:
-                max_span = node_max_span[node]
-                if max_span < query_span or (max_span == query_span and node_last_leaf[node] <= leaf):
+                record = nodes[node]
+                max_span = record.max_span
+                if max_span < query_span or (max_span == query_span and record.last_leaf <= leaf):
                     node = _tree_next_dfs(node)
                     continue
                 if (
-                    node_lower[node][0] > query_upper[0]
-                    or query_lower[0] > node_upper[node][0]
-                    or node_lower[node][1] > query_upper[1]
-                    or query_lower[1] > node_upper[node][1]
-                    or node_lower[node][2] > query_upper[2]
-                    or query_lower[2] > node_upper[node][2]
+                    record.lower[0] > query_upper[0]
+                    or query_lower[0] > record.upper[0]
+                    or record.lower[1] > query_upper[1]
+                    or query_lower[1] > record.upper[1]
+                    or record.lower[2] > query_upper[2]
+                    or query_lower[2] > record.upper[2]
                 ):
                     node = _tree_next_dfs(node)
                     continue
@@ -268,11 +273,8 @@ class BroadPhaseImplicitTree:
         self.capacity = max(1, queue_capacity_factor * self.shape_count)
         self.keys = wp.empty(2 * self.shape_count, dtype=wp.uint64, device=device)
         self.values = wp.empty(2 * self.shape_count, dtype=wp.int32, device=device)
-        self.node_lower = wp.empty(2 * self.leaf_base, dtype=wp.vec3, device=device)
-        self.node_upper = wp.empty(2 * self.leaf_base, dtype=wp.vec3, device=device)
+        self.nodes = wp.empty(2 * self.leaf_base, dtype=_TreeNode, device=device)
         self.node_shape = wp.empty(2 * self.leaf_base, dtype=wp.int32, device=device)
-        self.node_last_leaf = wp.empty(2 * self.leaf_base, dtype=wp.int32, device=device)
-        self.node_max_span = wp.empty(2 * self.leaf_base, dtype=wp.float32, device=device)
         self._has_custom_filter = filter_func is not None
         self._empty_filter_data = EmptyFilterData()
         self._kernels = (
@@ -336,11 +338,8 @@ class BroadPhaseImplicitTree:
                 shape_upper,
                 shape_gap,
                 shape_displacement,
-                self.node_lower,
-                self.node_upper,
+                self.nodes,
                 self.node_shape,
-                self.node_last_leaf,
-                self.node_max_span,
                 self.leaf_base,
                 self.shape_count,
             ],
@@ -352,7 +351,7 @@ class BroadPhaseImplicitTree:
             wp.launch(
                 _tree_build_level,
                 dim=start,
-                inputs=[self.node_lower, self.node_upper, self.node_last_leaf, self.node_max_span, start],
+                inputs=[self.nodes, start],
                 device=device,
                 record_tape=False,
             )
@@ -378,11 +377,8 @@ class BroadPhaseImplicitTree:
             query,
             dim=self.shape_count,
             inputs=[
-                self.node_lower,
-                self.node_upper,
+                self.nodes,
                 self.node_shape,
-                self.node_last_leaf,
-                self.node_max_span,
                 self.leaf_base,
                 self.shape_count,
                 *pair_inputs,
