@@ -20,6 +20,7 @@ from newton._src.sim.articulation import (
     transform_2d_rotational_axes,
     transform_3d_rotational_axes,
 )
+from newton._src.solvers.phoenx.access_mode import ACCESS_MODE_STATIC
 from newton._src.solvers.phoenx.articulations.fixed_pattern_llt import (
     FixedPatternPanelLLT,
     any_panel_subgroup,
@@ -44,6 +45,7 @@ from newton._src.solvers.phoenx.helpers.math_helpers import (
     revolution_tracker_angle,
     revolution_tracker_update,
 )
+from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer, copy_state_container_zeros
 from newton._src.solvers.phoenx.solver_config import PHOENX_FRICTION_SLIP_VELOCITY
 
 _MAX_ROWS = 6
@@ -1765,6 +1767,8 @@ def _make_fused_subgroup_projection_kernel(width: int, packed: bool):
         apply_wrench0: wp.array[wp.spatial_vector],
         apply_wrench1: wp.array[wp.spatial_vector],
         bodies: BodyContainer,
+        copy_state: CopyStateContainer,
+        average_copies: wp.bool,
         rhs: wp.array[wp.float32],
         delta: wp.array[wp.float32],
     ):
@@ -1775,6 +1779,35 @@ def _make_fused_subgroup_projection_kernel(width: int, packed: bool):
         base = panels[tables[mechanism]] * wp.static(width * width)
         if wp.static(packed):
             base = task * wp.static(packed_lower_size(width))
+        if average_copies:
+            # Reduce this mechanism's overflow copies into its bodies before
+            # any lane reads a body velocity. The slot order and the padded
+            # eight-slot chunks match the standalone average kernel exactly.
+            for body_slot in range(mechanism_body_start[mechanism] + lane, mechanism_body_start[mechanism + 1], width):
+                body = mechanism_bodies[body_slot]
+                count = copy_state.count_per_node[body]
+                if count > wp.int32(0):
+                    slot_start = wp.int32(0)
+                    if body > wp.int32(0):
+                        slot_start = copy_state.section_end[body - wp.int32(1)]
+                    if copy_state.access_mode[slot_start] != wp.int32(ACCESS_MODE_STATIC):
+                        slot_end = slot_start + count
+                        sum_v = wp.vec3f(0.0)
+                        sum_w = wp.vec3f(0.0)
+                        for chunk in range(slot_start, slot_end, 8):
+                            for lane_slot in range(8):
+                                slot = chunk + lane_slot
+                                value_v = wp.vec3f(0.0)
+                                value_w = wp.vec3f(0.0)
+                                if slot < slot_end:
+                                    value_v = copy_state.velocity[slot]
+                                    value_w = copy_state.angular_velocity[slot]
+                                sum_v += value_v
+                                sum_w += value_w
+                        inv_count = wp.float32(1.0) / wp.float32(count)
+                        bodies.velocity[body] = sum_v * inv_count
+                        bodies.angular_velocity[body] = sum_w * inv_count
+            sync_panel_subgroup(wp.static(width))
         row = wp.int32(-1)
         value = wp.float32(0.0)
         if lane < dimension:
@@ -2281,6 +2314,8 @@ class DirectEqualitySystem:
         self.max_dimension = max(self.topology.dimensions)
         self._fused_projection = None
         self._fused_relax_tolerance = _DIRECT_RELAX_RESIDUAL_TOLERANCE
+        self._fused_covers_dynamic_bodies = False
+        self._copy_state_sentinel = copy_state_container_zeros(capacity=1, num_nodes=1, device=device)
         solver = self.solver
         if (
             solver.subgroup_mechanism.size == len(self.topology.dimensions)
@@ -2300,8 +2335,16 @@ class DirectEqualitySystem:
                 raise ValueError("Direct equality mechanisms must not share dynamic bodies")
             body_start = np.concatenate(([0], np.cumsum([len(bodies) for bodies in mechanism_bodies]))).astype(np.int32)
             self._fused_projection = _make_fused_subgroup_projection_kernel(solver.block_size, solver.subgroup_packed)
+            # Every dynamic body in a mechanism means the projection can also
+            # reduce all mass-splitting copies, replacing the separate average.
+            self._fused_covers_dynamic_bodies = int(np.count_nonzero(inverse_mass > 0.0)) == int(flat_bodies.size)
             self._mechanism_body_start = wp.array(body_start, dtype=wp.int32, device=device)
             self._mechanism_bodies = wp.array(flat_bodies, dtype=wp.int32, device=device)
+
+    @property
+    def fuses_copy_average(self) -> bool:
+        """Whether :meth:`solve` can average overflow copies for every dynamic body."""
+        return self._fused_projection is not None and self._fused_covers_dynamic_bodies
 
     @property
     def joint_mask(self) -> np.ndarray:
@@ -2759,9 +2802,25 @@ class DirectEqualitySystem:
             device=self.model.device,
         )
 
-    def solve(self, *, use_bias: bool, refine: bool = True) -> None:
+    def solve(
+        self,
+        *,
+        use_bias: bool,
+        refine: bool = True,
+        copy_state: CopyStateContainer | None = None,
+        average_copies: bool = False,
+    ) -> None:
+        """Project joint velocities.
+
+        With ``average_copies`` the fused projection first reduces the
+        mass-splitting overflow copies in ``copy_state`` into their bodies;
+        the caller must then skip the standalone average. This requires
+        :attr:`fuses_copy_average`.
+        """
         if not self.enabled:
             return
+        if average_copies and (copy_state is None or not self.fuses_copy_average):
+            raise ValueError("average_copies requires copy_state and a fused projection over all dynamic bodies")
         if self._fused_projection is not None:
             # Each subgroup decides whether its own unbiased correction is
             # negligible, so no global activity flag or conditional node is needed.
@@ -2799,6 +2858,8 @@ class DirectEqualitySystem:
                     self._apply_wrench0,
                     self._apply_wrench1,
                     self.bodies,
+                    copy_state if copy_state is not None else self._copy_state_sentinel,
+                    wp.bool(average_copies),
                     self.rhs,
                     self.delta,
                 ],
