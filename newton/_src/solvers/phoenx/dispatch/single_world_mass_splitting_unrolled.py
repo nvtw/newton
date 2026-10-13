@@ -141,6 +141,7 @@ class SingleWorldMassSplittingUnrolledDispatcher:
         sync_direct_copies = not w._singleworld_overflow_only_mass_splitting
         if not w._regular_pgs_active_this_step:
             if direct is not None and direct.enabled:
+                w._wait_direct_factor()
                 direct.solve(use_bias=False)
                 direct.resolve_bounded_drives(idt, use_bias=False)
             solve_auxiliary_constraints(w, idt, relax=True)
@@ -158,6 +159,7 @@ class SingleWorldMassSplittingUnrolledDispatcher:
             if direct is not None and direct.enabled:
                 if sync_direct_copies:
                     w._mass_splitting_writeback(already_averaged=True)
+                w._wait_direct_factor()
                 direct.solve(use_bias=False)
                 if sync_direct_copies and iteration + 1 < w._active_velocity_iterations:
                     w._mass_splitting_broadcast()
