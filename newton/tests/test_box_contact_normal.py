@@ -3,6 +3,7 @@
 
 """Cover top-face contacts on a wide box with an off-center partner."""
 
+import gc
 import unittest
 from itertools import product
 from unittest.mock import patch
@@ -200,8 +201,15 @@ def test_box_contact_split_reuse(test, device):
         state = model.state()
         contacts = pipeline.contacts()
         pipeline.collide(state, contacts)
-        with wp.ScopedCapture(device=device) as capture:
-            pipeline.collide(state, contacts)
+        # Cyclic GC can destroy SDF textures from earlier scenes during capture.
+        gc_was_enabled = gc.isenabled()
+        gc.disable()
+        try:
+            with wp.ScopedCapture(device=device) as capture:
+                pipeline.collide(state, contacts)
+        finally:
+            if gc_was_enabled:
+                gc.enable()
         poses = state.body_q.numpy()
         for height in (0.2326, 0.256, 0.27, 0.2326):
             with test.subTest(mesh=use_mesh, height=height):
@@ -311,8 +319,15 @@ def test_convex_contact_near_plate_end(test, device, *, split=False):
             depths = np.sum((world0 - world1) * normals[mask], axis=1)
             np.testing.assert_allclose(depths, penetration, atol=2.0e-5)
     if device.is_cuda:
-        with wp.ScopedCapture(device=device) as capture:
-            pipeline.collide(state, contacts)
+        # Cyclic GC can destroy SDF textures from earlier scenes during capture.
+        gc_was_enabled = gc.isenabled()
+        gc.disable()
+        try:
+            with wp.ScopedCapture(device=device) as capture:
+                pipeline.collide(state, contacts)
+        finally:
+            if gc_was_enabled:
+                gc.enable()
         for lift in (0.3, 0.0):
             lifted = poses.copy()
             for _plate_shape, body, rotation, _penetration, _description in cases:
