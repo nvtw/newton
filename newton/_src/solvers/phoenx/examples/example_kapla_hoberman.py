@@ -24,7 +24,9 @@ from newton.examples.phoenx._rigid_solver import make_colored_solver
 HOBERMAN_COUNT = 10
 WARMUP_FRAMES = 10
 TOWER_CENTRE_Y = -2.5
-SPHERE_RING_RADIUS = 6.6
+# The authored shape vertices extend 2.236 m from each sphere center.
+# Ten centers on this ring leave over 16 cm between their enclosing bounds.
+SPHERE_RING_RADIUS = 7.5
 SPHERE_START_HEIGHT = 4.8
 PICK_STIFFNESS = 300.0
 PICK_DAMPING = 30.0
@@ -242,8 +244,8 @@ class Example:
                 wp.record_event(done)
         self._render_state_prepared = False
 
-    def test_final(self) -> None:
-        """Catch invalid coupled states in the example test runner."""
+    def measure_quality(self) -> dict[str, float | int]:
+        """Measure joint closure and tower motion for tests and benchmarks."""
         poses = self.state.body_q.numpy()
         assert np.isfinite(poses).all(), "mixed scene produced non-finite poses"
         assert np.isfinite(self.state.body_qd.numpy()).all(), "mixed scene produced non-finite velocities"
@@ -278,13 +280,29 @@ class Example:
                     float(wp.length(wp.cross(direction_p, direction_c))), float(wp.dot(direction_p, direction_c))
                 )
                 worst_hinge_angle = max(worst_hinge_angle, angle)
-        print(f"[PhoenX Kapla+Hoberman] maximum_joint_attachment_error={worst_attachment:.6g} m")
-        print(f"[PhoenX Kapla+Hoberman] maximum_hinge_axis_error={math.degrees(worst_hinge_angle):.6g} deg")
         tower_positions = poses[self.tower_body_ids, :3]
         tower_delta = tower_positions - self.tower_start_positions
         maximum_tower_drop = float(np.max(-tower_delta[:, 2]))
         maximum_tower_slide = float(np.linalg.norm(tower_delta[:, :2], axis=1).max())
         fallen_bricks = int(np.count_nonzero(-tower_delta[:, 2] > 0.5))
+        return {
+            "maximum_joint_attachment_error_m": worst_attachment,
+            "maximum_hinge_axis_error_deg": math.degrees(worst_hinge_angle),
+            "tower_bricks_fallen_50cm": fallen_bricks,
+            "tower_maximum_drop_m": maximum_tower_drop,
+            "tower_maximum_slide_m": maximum_tower_slide,
+        }
+
+    def test_final(self) -> None:
+        """Catch invalid coupled states in the example test runner."""
+        quality = self.measure_quality()
+        worst_attachment = quality["maximum_joint_attachment_error_m"]
+        worst_hinge_angle = math.radians(quality["maximum_hinge_axis_error_deg"])
+        fallen_bricks = quality["tower_bricks_fallen_50cm"]
+        maximum_tower_drop = quality["tower_maximum_drop_m"]
+        maximum_tower_slide = quality["tower_maximum_slide_m"]
+        print(f"[PhoenX Kapla+Hoberman] maximum_joint_attachment_error={worst_attachment:.6g} m")
+        print(f"[PhoenX Kapla+Hoberman] maximum_hinge_axis_error={math.degrees(worst_hinge_angle):.6g} deg")
         print(f"[PhoenX Kapla+Hoberman] tower_bricks_fallen_50cm={fallen_bricks}")
         print(f"[PhoenX Kapla+Hoberman] tower_maximum_drop={maximum_tower_drop:.6g} m")
         print(f"[PhoenX Kapla+Hoberman] tower_maximum_slide={maximum_tower_slide:.6g} m")

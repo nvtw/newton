@@ -2697,6 +2697,7 @@ def _constraints_to_elements_kernel(
     num_joints: wp.int32,
     joint_pgs_enabled: wp.array[wp.int32],
     preserve_equality_island_edges: wp.int32,
+    joint_coloring_priority: wp.int32,
     num_cloth_triangles: wp.int32,
     num_cloth_bending: wp.int32,
     num_soft_tetrahedra: wp.int32,
@@ -2733,7 +2734,9 @@ def _constraints_to_elements_kernel(
     if tid < num_joints:
         element_family[tid] = wp.int32(0)
         packed_priorities[tid] = _pack_constraint_priority(
-            wp.int32(0), random_values[tid], joint_pgs_enabled[tid] != wp.int32(0)
+            wp.int32(0),
+            random_values[tid],
+            joint_coloring_priority != wp.int32(0) and joint_pgs_enabled[tid] != wp.int32(0),
         )
         if joint_pgs_enabled[tid] == wp.int32(0) and preserve_equality_island_edges == wp.int32(0):
             elements[tid] = _element_data_compact2(wp.int32(-1), wp.int32(-1))

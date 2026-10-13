@@ -284,6 +284,7 @@ class SolverPhoenX(SolverBase):
         mass_splitting_unrolled: bool = False,
         mass_splitting_overflow_only: bool = False,
         partitioner_algorithm: str = "greedy",
+        joint_coloring_priority: bool = False,
         max_greedy_outer_iters: int | None = None,
         enable_warm_start_coloring: bool = True,
         colored_contact_headers: bool = False,
@@ -413,6 +414,11 @@ class SolverPhoenX(SolverBase):
             partitioner_algorithm: ``"greedy"`` (default),
                 ``"endpoint_owner"`` (single-world mass splitting only), or
                 ``"luby_fixed"`` (single-world only).
+            joint_coloring_priority: Prioritize joints over contacts in
+                priority-based coloring. Defaults to ``False`` because
+                changing the solve order can reduce convergence of joint
+                loops. Enabling it can keep joints out of overflow. Does
+                not change sequential per-world greedy ordering.
             max_greedy_outer_iters: Optional cap on greedy partitioner
                 iterations. Remaining constraints enter the overflow
                 partition.
@@ -941,6 +947,7 @@ class SolverPhoenX(SolverBase):
             mass_splitting_unrolled=mass_splitting_unrolled,
             mass_splitting_overflow_only=mass_splitting_overflow_only,
             partitioner_algorithm=partitioner_algorithm,
+            joint_coloring_priority=joint_coloring_priority,
             max_greedy_outer_iters=max_greedy_outer_iters,
             enable_warm_start_coloring=enable_warm_start_coloring,
             colored_contact_headers=colored_contact_headers,

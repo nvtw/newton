@@ -1,0 +1,1 @@
+Restore the established PhoenX joint coloring order by default and retain joint priority as an explicit option. Separate the ten Hoberman spheres in the mixed Kapla example so their shapes do not intersect at startup.

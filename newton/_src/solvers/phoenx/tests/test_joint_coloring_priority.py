@@ -8,6 +8,7 @@ import unittest
 import numpy as np
 import warp as wp
 
+import newton
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
     ContactColumnContainer,
     contact_column_container_zeros,
@@ -21,6 +22,7 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_incremental import
 from newton._src.solvers.phoenx.graph_coloring.luby_fixed import FixedIterationLubyPartitioner
 from newton._src.solvers.phoenx.simulation_kernels import _cost_biased_priority
 from newton._src.solvers.phoenx.tests.test_graph_coloring_speculative import _make_elements
+from newton._src.solvers.phoenx.tests.test_joint_row_capacity import _make_model
 
 
 @wp.kernel
@@ -45,6 +47,36 @@ def _pack_constraints(costs: wp.array[wp.int32], random_values: wp.array[wp.int3
 
 
 class TestJointColoringPriority(unittest.TestCase):
+    def test_solver_preserves_default_joint_order(self):
+        """Preserve convergent default ordering and make joint priority explicit."""
+        if not wp.is_cuda_available():
+            self.skipTest("CUDA required")
+        for options, expected in (({}, 0), ({"joint_coloring_priority": True}, 255)):
+            with self.subTest(options=options):
+                model = _make_model(["hinge", "drive"])
+                solver = newton.solvers.SolverPhoenX(
+                    model,
+                    joint_mode="maximal_pgs",
+                    step_layout="single_world",
+                    substeps=1,
+                    solver_iterations=1,
+                    velocity_iterations=1,
+                    mass_splitting=True,
+                    mass_splitting_overflow_only=True,
+                    mass_splitting_unrolled=True,
+                    mass_splitting_batch_size=1,
+                    max_colored_partitions=9,
+                    partitioner_algorithm="endpoint_owner",
+                    **options,
+                )
+                state = model.state()
+                solver.step(state, state, model.control(), None, 1.0e-6)
+                cids = solver._joint_constraints.joint_idx_to_cid.numpy()
+                cids = cids[cids >= 0]
+                priorities = solver.world._partitioner._packed_priorities.numpy().view(np.uint32)
+                self.assertEqual(len(cids), 2)
+                np.testing.assert_array_equal(priorities[cids] >> 24, np.full(len(cids), expected))
+
     def test_constraint_priority_classes(self):
         """Reserve the top cost for joints without changing random bits."""
         costs = wp.array([0, 1, 128, 255, 300, 0], dtype=wp.int32, device="cpu")
