@@ -353,6 +353,32 @@ def _lowest_set_bit(mask: wp.int64) -> wp.int32:
     ...
 
 
+@wp.func_native("""
+#if defined(__CUDA_ARCH__)
+const unsigned active = __activemask();
+const unsigned peers = __match_any_sync(active, (unsigned)key);
+const int lane = threadIdx.x & 31;
+const int leader = __ffs(peers) - 1;
+int base = 0;
+if (lane == leader)
+    base = atomicAdd(&counts.data[key], __popc(peers));
+base = __shfl_sync(peers, base, leader);
+return base + __popc(peers & ((1u << lane) - 1u));
+#else
+const int base = counts.data[key];
+counts.data[key] = base + 1;
+return base;
+#endif
+""")
+def warp_aggregated_increment(counts: wp.array[wp.int32], key: wp.int32) -> wp.int32:
+    """Increment ``counts[key]`` and return the previous value plus this lane's rank.
+
+    Lanes of a warp that share ``key`` issue one atomic, which removes the
+    serialization of sorted or low-cardinality histograms.
+    """
+    ...
+
+
 @wp.kernel(enable_backward=False)
 def partitioning_coloring_incremental_greedy_kernel(
     partition_data_concat: wp.array[wp.int64],
@@ -1230,7 +1256,7 @@ def greedy_color_histogram_kernel(
         return
     c = wp.int32(color_plus_one - wp.int64(1))
     interaction_id_to_partition[tid] = c
-    wp.atomic_add(color_count, c, 1)
+    warp_aggregated_increment(color_count, c)
 
 
 @wp.kernel(enable_backward=False)
@@ -1277,5 +1303,5 @@ def greedy_scatter_elements_by_color_kernel(
     if color_plus_one == wp.int64(0):
         return
     c = wp.int32(color_plus_one - wp.int64(1))
-    slot = wp.atomic_add(color_offsets, c, 1)
+    slot = warp_aggregated_increment(color_offsets, c)
     element_ids_by_color[color_starts[c] + slot] = tid
