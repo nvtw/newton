@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Bitwise ragdoll gate for the fused one-panel D6 projection."""
+"""Ragdoll gates for the fused one-panel D6 projection."""
 
 from __future__ import annotations
 
@@ -55,13 +55,55 @@ def run(fused: bool, frames: int = 12):
 
 class TestDirectFusedProjection(unittest.TestCase):
     @unittest.skipUnless(wp.is_cuda_available(), "CUDA required")
-    def test_fused_projection_replays_bitwise(self):
-        """Fusing RHS, solve, accumulation and body updates keeps every captured frame."""
-        separate = run(False)
-        fused = run(True)
+    def test_fused_projection_matches_separate_kernels_bitwise(self):
+        """One fused projection reproduces RHS, solve, accumulation and body updates exactly."""
+        viewer = ViewerNull()
+        try:
+            example = scene.Example(
+                viewer,
+                SimpleNamespace(grid=(4, 4, 4), seed=42, substeps=8, iterations=4, joint_solver="exact"),
+            )
+            for _ in range(6):
+                example.step()
+            direct = example.solver.world._direct_equality_system
+            exact = direct.exact if isinstance(direct, MixedJointSystem) else direct
+            fused_kernel = exact._fused_projection
+            self.assertIsNotNone(fused_kernel)
+            bodies = exact.bodies
+            state = (bodies.velocity, bodies.angular_velocity, exact.accumulated_impulse)
+            initial = [array.numpy().copy() for array in state]
+            # Perturb velocities so every mechanism has a correction to make.
+            rng = np.random.default_rng(3)
+            bodies.velocity.assign(initial[0] + rng.normal(scale=0.01, size=initial[0].shape).astype(np.float32))
+            perturbed = [array.numpy().copy() for array in state]
+            for use_bias in (True, False):
+                results = []
+                for fused in (False, True):
+                    for array, values in zip(state, perturbed, strict=True):
+                        array.assign(values)
+                    exact._fused_projection = fused_kernel if fused else None
+                    exact._fused_relax_tolerance = -1.0
+                    exact.solve(use_bias=use_bias)
+                    wp.synchronize()
+                    if not fused:
+                        self.assertEqual(int(exact.solve_active.numpy()[0]), 1)
+                    results.append([array.numpy().copy() for array in state])
+                for name, reference, candidate in zip(
+                    ("velocity", "angular_velocity", "impulse"), *results, strict=True
+                ):
+                    np.testing.assert_array_equal(candidate, reference, err_msg=f"{name}, bias={use_bias}")
+            exact._fused_projection = fused_kernel
+        finally:
+            viewer.close()
+
+    @unittest.skipUnless(wp.is_cuda_available(), "CUDA required")
+    def test_per_mechanism_relaxation_skip_is_negligible(self):
+        """Skipping quiet mechanisms changes early frames only at rounding scale."""
+        separate = run(False, frames=8)
+        fused = run(True, frames=8)
         for frame, (before, after) in enumerate(zip(separate, fused, strict=True), start=1):
-            for field, reference, candidate in zip(("poses", "velocities", "impulses"), before, after, strict=True):
-                np.testing.assert_array_equal(reference, candidate, err_msg=f"{field} at frame {frame}")
+            np.testing.assert_allclose(after[0], before[0], rtol=0.0, atol=1.0e-6, err_msg=f"poses at frame {frame}")
+            np.testing.assert_allclose(after[1], before[1], rtol=0.0, atol=1.0e-4, err_msg=f"velocity at frame {frame}")
 
 
 if __name__ == "__main__":

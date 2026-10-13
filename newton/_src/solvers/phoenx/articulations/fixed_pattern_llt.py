@@ -403,6 +403,16 @@ def _packed_lower_index(row: wp.int32, column: wp.int32) -> wp.int32:
     return row * (row + wp.int32(1)) / wp.int32(2) + column
 
 
+@wp.func_native("""
+#if defined(__CUDA_ARCH__)
+return __any_sync(width == 32 ? 0xffffffffu : (0xffffu << ((threadIdx.x & 31) & 16)), predicate) != 0;
+#else
+return predicate;
+#endif
+""")
+def any_panel_subgroup(predicate: wp.bool, width: wp.int32) -> wp.bool: ...
+
+
 @functools.cache
 def make_subgroup_panel_solve_func(width: int, packed: bool = False):
     """Return a register solve of one permuted right-hand-side value per lane.
