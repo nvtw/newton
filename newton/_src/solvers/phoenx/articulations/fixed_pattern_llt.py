@@ -385,34 +385,30 @@ return value;
 def _shuffle_panel_value(value: wp.float32, source: wp.int32, width: wp.int32) -> wp.float32: ...
 
 
+@wp.func_native("""
+#if defined(__CUDA_ARCH__)
+__syncwarp(width == 32 ? 0xffffffffu : (0xffffu << ((threadIdx.x & 31) & 16)));
+#endif
+""")
+def sync_panel_subgroup(width: wp.int32): ...
+
+
 @functools.cache
-def _make_subgroup_solve_kernel(width: int):
-    """Solve a one-panel mechanism in registers within a subgroup."""
+def make_subgroup_panel_solve_func(width: int):
+    """Return a register solve of one permuted right-hand-side value per lane."""
     Row = wp.types.vector(length=width, dtype=wp.float32)
 
-    @wp.kernel(enable_backward=False, module="unique")
-    def solve(
-        mechanisms: wp.array[wp.int32],
-        dimensions: wp.array[wp.int32],
-        offsets: wp.array[wp.int32],
-        tables: wp.array[wp.int32],
-        panels: wp.array[wp.int32],
-        permutation: wp.array[wp.int32],
+    @wp.func
+    def solve_panel(
         factor: wp.array[wp.float32],
-        rhs: wp.array[wp.float32],
-        solution: wp.array[wp.float32],
-    ):
-        task, lane = wp.tid()
-        mechanism = mechanisms[task]
-        dimension = dimensions[mechanism]
-        start = offsets[mechanism]
-        panel = panels[tables[mechanism]]
-        base = panel * wp.static(width * width)
+        base: wp.int32,
+        dimension: wp.int32,
+        lane: wp.int32,
+        value: wp.float32,
+    ) -> wp.float32:
         diagonal = wp.float32(1.0)
-        value = wp.float32(0.0)
         lower = Row(0.0)
         if lane < dimension:
-            value = rhs[start + permutation[start + lane]]
             diagonal = factor[base + lane * wp.static(width) + lane]
             for column in range(wp.static(width)):
                 if column < lane:
@@ -457,6 +453,37 @@ def _make_subgroup_solve_kernel(width: int):
                 solved = _shuffle_panel_value(pivot, column, wp.static(width))
                 if lane < column:
                     value = value - upper[column] * solved
+        return value
+
+    return solve_panel
+
+
+@functools.cache
+def _make_subgroup_solve_kernel(width: int):
+    """Solve a one-panel mechanism in registers within a subgroup."""
+    solve_panel = make_subgroup_panel_solve_func(width)
+
+    @wp.kernel(enable_backward=False, module="unique")
+    def solve(
+        mechanisms: wp.array[wp.int32],
+        dimensions: wp.array[wp.int32],
+        offsets: wp.array[wp.int32],
+        tables: wp.array[wp.int32],
+        panels: wp.array[wp.int32],
+        permutation: wp.array[wp.int32],
+        factor: wp.array[wp.float32],
+        rhs: wp.array[wp.float32],
+        solution: wp.array[wp.float32],
+    ):
+        task, lane = wp.tid()
+        mechanism = mechanisms[task]
+        dimension = dimensions[mechanism]
+        start = offsets[mechanism]
+        base = panels[tables[mechanism]] * wp.static(width * width)
+        value = wp.float32(0.0)
+        if lane < dimension:
+            value = rhs[start + permutation[start + lane]]
+        value = solve_panel(factor, base, dimension, lane, value)
         if lane < dimension:
             solution[start + permutation[start + lane]] = value
 
