@@ -1987,8 +1987,8 @@ class JointsData:
     For unbounded implicit PD, the joint dynamics constraint includes
     ``tau_j_tot`` according to the actuation type:
 
-    - ``PASSIVE``: ``tau_j``
-    - ``FORCE``: ``tau_j + tau_j_ff``
+    - ``PASSIVE``: ``clamp(tau_j, -tau_j_max, tau_j_max)``
+    - ``FORCE``: ``clamp(tau_j + tau_j_ff, -tau_j_max, tau_j_max)``
     - ``POSITION``: ``tau_j + k_p_j * (q_j_ref - q_j^{-})``
     - ``VELOCITY``: ``tau_j + k_d_j * dq_j_ref``
     - ``POSITION_VELOCITY``:

@@ -899,6 +899,7 @@ def compute_and_write_joint_implicit_dynamics(
     model_joint_b_j: wp.array[wp.float32],
     model_joint_k_p_j: wp.array[wp.float32],
     model_joint_k_d_j: wp.array[wp.float32],
+    model_joint_tau_j_max: wp.array[wp.float32],
     model_joint_dof_act_types: wp.array[wp.int32],
     model_joint_dof_act_paths: wp.array[wp.int32],
     data_joint_q_j: wp.array[wp.float32],
@@ -966,6 +967,11 @@ def compute_and_write_joint_implicit_dynamics(
             elif act_type == JointActuationType.POSITION_VELOCITY_FORCE:
                 m_j += dt * k_d_j + dt * dt * k_p_j
                 tau_j_tot += pd_tau_j_ff + k_p_j * q_j_err + k_d_j * pd_dq_j_ref
+
+            if act_type == JointActuationType.PASSIVE or act_type == JointActuationType.FORCE:
+                # Bound the actuator command, not the passive armature/damping reaction.
+                tau_max = model_joint_tau_j_max[dofs_offset_j]
+                tau_j_tot = wp.clamp(tau_j_tot, -tau_max, tau_max)
 
         # Enforce minimum mass to avoid division by zero
         m_j = wp.max(1e-6, m_j)
@@ -1197,6 +1203,7 @@ def make_compute_joints_data_kernel(correction: JointCorrectionMode = JointCorre
             model_joint_b_j,
             model_joint_k_p_j,
             model_joint_k_d_j,
+            model_joint_tau_j_max,
             model_joint_dof_act_types,
             model_joint_dof_act_paths,
             data_joint_q_j,
