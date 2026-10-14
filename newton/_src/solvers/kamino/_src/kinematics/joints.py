@@ -13,7 +13,13 @@ import warp as wp
 
 from .....sim.articulation import transform_3d_rotational_axes
 from ..core.data import DataKamino
-from ..core.joints import DofActuationPath, JointActuationType, JointCorrectionMode, JointDoFType
+from ..core.joints import (
+    DofActuationPath,
+    JointActuationType,
+    JointCorrectionMode,
+    JointDoFType,
+    is_bounded_effort_limit_wp,
+)
 from ..core.math import FLOAT32_MAX, quat_log, quat_twist_angle
 from ..core.model import ModelKamino
 from ..core.types import (
@@ -971,7 +977,8 @@ def compute_and_write_joint_implicit_dynamics(
             if act_type == JointActuationType.PASSIVE or act_type == JointActuationType.FORCE:
                 # Bound the actuator command, not the passive armature/damping reaction.
                 tau_max = model_joint_tau_j_max[dofs_offset_j]
-                tau_j_tot = wp.clamp(tau_j_tot, -tau_max, tau_max)
+                if is_bounded_effort_limit_wp(tau_max):
+                    tau_j_tot = wp.clamp(tau_j_tot, -tau_max, tau_max)
 
         # Enforce minimum mass to avoid division by zero
         m_j = wp.max(1e-6, m_j)

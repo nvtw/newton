@@ -8,6 +8,7 @@ import unittest
 import warp as wp
 
 import newton
+from newton._src.solvers.kamino._src.core.joints import JOINT_TAUMAX
 from newton._src.solvers.kamino.solver_kamino import SolverKamino
 from newton.tests.kamino import setup_tests, test_context
 from newton.tests.kamino.utils.solver_configs import KAMINO_CONFIGS, PADMM_CONFIG_NAMES, make_single_iteration_config
@@ -119,6 +120,22 @@ class TestSolverKaminoJointEffortLimit(unittest.TestCase):
                         expected_effort = direction * effort_limit
                         expected_velocity = DT * expected_effort / _EFFECTIVE_JOINT_INERTIA
                         self.assertAlmostEqual(float(velocities[world]), expected_velocity, delta=3.0e-4)
+
+    def test_unbounded_explicit_effort_with_armature(self):
+        """Preserve commands above the unbounded sentinel on the dynamic path."""
+        requested_effort = 3.0 * JOINT_TAUMAX
+        inertia = 2.0 * JOINT_TAUMAX + _BODY_MASS * _BODY_COM_X**2
+        for config_name, config_factory in KAMINO_CONFIGS:
+            for limit in (JOINT_TAUMAX, 2.0 * JOINT_TAUMAX, float("inf")):
+                model = _build_revolute(limit, armatures=(JOINT_TAUMAX,) * 2, body_inertia=JOINT_TAUMAX)
+                solver = SolverKamino(model, config_factory())
+                control = model.control()
+                control.joint_f.assign([-requested_effort, requested_effort])
+                velocities = _step(solver, model, control).joint_qd.numpy()
+                for world, direction in enumerate((-1.0, 1.0)):
+                    with self.subTest(config=config_name, limit=limit, direction=direction):
+                        expected = DT * direction * requested_effort / inertia
+                        self.assertAlmostEqual(float(velocities[world]), expected, delta=3.0e-5)
 
     def test_explicit_effort_with_passive_dynamics(self):
         """Limit actuator torque while retaining passive inertia and damping reactions."""

@@ -345,7 +345,7 @@ class Example:
         )
         parser.add_argument(
             "--use-schur-complement",
-            action="store_true",
+            action=argparse.BooleanOptionalAction,
             default=None,
             help="Eliminate bilateral rows during DVI unilateral solves (automatic for bounded PD drives).",
         )
