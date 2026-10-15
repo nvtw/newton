@@ -18,6 +18,10 @@ newton.geometry
    BroadPhaseImplicitTree
    BroadPhaseSAP
    HydroelasticSDF
+   ImplicitBvh
+   ImplicitBvhData
+   ImplicitBvhMesh
+   ImplicitBvhMeshData
    NarrowPhase
    ParticleSurface
    SDFCachedSampling
@@ -45,6 +49,16 @@ newton.geometry
    compute_offset_mesh
    create_empty_sdf_data
    extract_particle_surface
+   implicit_bvh_make_query_pairs
+   implicit_bvh_make_query_point
+   implicit_bvh_make_query_ray
+   implicit_bvh_make_query_ray_foreach
+   implicit_bvh_mesh_query_point
+   implicit_bvh_mesh_query_ray
+   implicit_bvh_query_aabb
+   implicit_bvh_query_aabb_next
+   implicit_bvh_query_point
+   implicit_bvh_query_ray
    sdf_box
    sdf_capsule
    sdf_cone

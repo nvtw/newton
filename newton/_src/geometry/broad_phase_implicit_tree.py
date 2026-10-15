@@ -3,7 +3,7 @@
 
 """Experimental broad phase on an implicit binary BVH with stackless traversal.
 
-The tree itself is :class:`~newton._src.geometry.implicit_aabb_tree.ImplicitAABBTree`;
+The tree itself is :class:`~newton._src.geometry.implicit_bvh.ImplicitBvh`;
 this module only adds the broad-phase leaf bounds (gap, swept displacement and
 float rounding slack) and the pair filter. Its complete binary topology
 isolates the cost of BVH pair-tree traversal; it is not an implementation of
@@ -19,12 +19,12 @@ import warp as wp
 
 from .broad_phase_common import EmptyFilterData, keep_all_filter, precompute_world_map
 from .broad_phase_sap import _make_sap_process_pair_func
-from .implicit_aabb_tree import (
-    ImplicitAABBTree,
-    ImplicitAABBTreeData,
-    ImplicitTreeNode,
+from .implicit_bvh import (
+    ImplicitBvh,
+    ImplicitBvhData,
+    ImplicitBvhNode,
     aabb_disjoint,
-    implicit_tree_next_subtree,
+    implicit_bvh_next_subtree,
 )
 
 wp.set_module_options({"enable_backward": False})
@@ -70,14 +70,14 @@ def _tree_leaves(
     upper: wp.array[wp.vec3],
     gap: wp.array[float],
     displacement: wp.array[wp.vec3],
-    nodes: wp.array[ImplicitTreeNode],
+    nodes: wp.array[ImplicitBvhNode],
     leaf_item: wp.array[wp.int32],
     leaf_base: int,
     shape_count: int,
 ):
     slot = wp.tid()
     node = leaf_base + slot
-    record = ImplicitTreeNode()
+    record = ImplicitBvhNode()
     record.lower = wp.vec3(1.0e30, 1.0e30, 1.0e30)
     record.upper = wp.vec3(-1.0e30, -1.0e30, -1.0e30)
     record.max_span = wp.float32(-1.0)
@@ -120,7 +120,7 @@ def _make_pair_kernels(filter_func: Any, filter_data_type: Any):
 
     @wp.kernel(enable_backward=False, module=module)
     def query(
-        tree: ImplicitAABBTreeData,
+        tree: ImplicitBvhData,
         shape_lower: wp.array[wp.vec3],
         shape_upper: wp.array[wp.vec3],
         shape_gap: wp.array[float],
@@ -138,7 +138,7 @@ def _make_pair_kernels(filter_func: Any, filter_data_type: Any):
         max_candidate_pair: int,
     ):
         leaf = wp.tid()
-        if leaf >= tree.leaf_count:
+        if leaf >= tree.item_count:
             return
         query_node = tree.leaf_base + leaf
         query = tree.nodes[query_node]
@@ -151,12 +151,12 @@ def _make_pair_kernels(filter_func: Any, filter_data_type: Any):
         # path. These disjoint subtrees contain every other leaf exactly once.
         ancestor = query_node
         node = ancestor ^ wp.int32(1)
-        stop = implicit_tree_next_subtree(node)
+        stop = implicit_bvh_next_subtree(node)
         while ancestor > wp.int32(1):
             if node == stop:
                 ancestor = ancestor >> wp.int32(1)
                 node = ancestor ^ wp.int32(1)
-                stop = implicit_tree_next_subtree(node)
+                stop = implicit_bvh_next_subtree(node)
                 continue
             record = tree.nodes[node]
             max_span = record.max_span
@@ -166,7 +166,7 @@ def _make_pair_kernels(filter_func: Any, filter_data_type: Any):
                 or (max_span == query_span and record.last_leaf <= leaf)
                 or aabb_disjoint(record.lower, record.upper, query_lower, query_upper)
             ):
-                node = implicit_tree_next_subtree(node)
+                node = implicit_bvh_next_subtree(node)
             elif node < tree.leaf_base:
                 node = node * wp.int32(2)
             else:
@@ -195,7 +195,7 @@ def _make_pair_kernels(filter_func: Any, filter_data_type: Any):
                     candidate_pair_count,
                     max_candidate_pair,
                 )
-                node = implicit_tree_next_subtree(node)
+                node = implicit_bvh_next_subtree(node)
 
     return query
 
@@ -236,9 +236,9 @@ class BroadPhaseImplicitTree:
         self.capacity = max(1, queue_capacity_factor * self.shape_count)
         # The leaf kernel below places sorted shapes by slot, which needs all
         # leaves at one depth.
-        self.tree = ImplicitAABBTree(max(1, self.shape_count), device=device, slack=1.0, power_of_two=True)
-        self.tree.leaf_count = self.shape_count
-        self.tree.data.leaf_count = self.shape_count
+        self.tree = ImplicitBvh(max(1, self.shape_count), device=device, slack=1.0, power_of_two=True)
+        self.tree.item_count = self.shape_count
+        self.tree.data.item_count = self.shape_count
         # 60-bit Morton keys on a fixed 1 cm grid; the tree's sort order buffer
         # holds the sorted leaf -> shape_index permutation.
         self.keys = wp.empty(2 * self.shape_count, dtype=wp.uint64, device=device)

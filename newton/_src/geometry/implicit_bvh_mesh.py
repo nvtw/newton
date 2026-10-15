@@ -1,20 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Triangle-mesh queries on an :class:`~newton._src.geometry.implicit_aabb_tree.ImplicitAABBTree`.
+"""Triangle-mesh queries on an :class:`~newton.geometry.ImplicitBvh`.
 
-:class:`ImplicitTriangleTree` builds the tree over the triangles of an indexed
+:class:`ImplicitBvhMesh` builds the tree over the triangles of an indexed
 mesh and provides fused closest-hit ray casts and closest-point queries, the
 counterparts of ``wp.mesh_query_ray`` and ``wp.mesh_query_point``::
 
-    tri_tree = ImplicitTriangleTree(points, indices)
+    tri_tree = ImplicitBvhMesh(points, indices)
 
     @wp.kernel
-    def cast(mesh: ImplicitTriangleTreeData, ...):
-        face, t, u, v = implicit_triangle_tree_query_ray(mesh, origin, direction, 1.0e30)
+    def cast(mesh: ImplicitBvhMeshData, ...):
+        face, t, u, v = implicit_bvh_mesh_query_ray(mesh, origin, direction, 1.0e30)
 
-After moving ``points`` call :meth:`ImplicitTriangleTree.refit` (small motion)
-or :meth:`ImplicitTriangleTree.build` (large motion or topology-preserving
+After moving ``points`` call :meth:`ImplicitBvhMesh.refit` (small motion)
+or :meth:`ImplicitBvhMesh.build` (large motion or topology-preserving
 remeshing); both are CUDA-graph capturable.
 """
 
@@ -22,21 +22,24 @@ from __future__ import annotations
 
 import warp as wp
 
-from .implicit_aabb_tree import (
-    ImplicitAABBTree,
-    ImplicitAABBTreeData,
-    create_implicit_tree_point_closest,
-    create_implicit_tree_ray_closest,
+from .implicit_bvh import (
+    ImplicitBvh,
+    ImplicitBvhData,
+    implicit_bvh_make_query_point,
+    implicit_bvh_make_query_ray,
 )
 
 wp.set_module_options({"enable_backward": False})
 
 
 @wp.struct
-class ImplicitTriangleTreeData:
-    """Kernel-side view of an :class:`ImplicitTriangleTree`."""
+class ImplicitBvhMeshData:
+    """Kernel-side view of an :class:`ImplicitBvhMesh`.
 
-    tree: ImplicitAABBTreeData
+    .. experimental::
+    """
+
+    tree: ImplicitBvhData
     points: wp.array[wp.vec3]
     indices: wp.array[wp.int32]
 
@@ -123,7 +126,7 @@ def _closest_point_triangle(p: wp.vec3, a: wp.vec3, b: wp.vec3, c: wp.vec3) -> w
 
 
 @wp.func
-def _face_vertices(mesh: ImplicitTriangleTreeData, face: wp.int32) -> tuple[wp.vec3, wp.vec3, wp.vec3]:
+def _face_vertices(mesh: ImplicitBvhMeshData, face: wp.int32) -> tuple[wp.vec3, wp.vec3, wp.vec3]:
     return (
         mesh.points[mesh.indices[3 * face]],
         mesh.points[mesh.indices[3 * face + 1]],
@@ -133,32 +136,34 @@ def _face_vertices(mesh: ImplicitTriangleTreeData, face: wp.int32) -> tuple[wp.v
 
 @wp.func
 def _face_ray_hit(
-    face: wp.int32, origin: wp.vec3, direction: wp.vec3, max_t: wp.float32, mesh: ImplicitTriangleTreeData
+    face: wp.int32, origin: wp.vec3, direction: wp.vec3, max_t: wp.float32, mesh: ImplicitBvhMeshData
 ) -> wp.float32:
     a, b, c = _face_vertices(mesh, face)
     return _ray_triangle(origin, direction, a, b, c, max_t)[0]
 
 
 @wp.func
-def _face_distance(face: wp.int32, p: wp.vec3, max_dist: wp.float32, mesh: ImplicitTriangleTreeData) -> wp.float32:
+def _face_distance(face: wp.int32, p: wp.vec3, max_dist: wp.float32, mesh: ImplicitBvhMeshData) -> wp.float32:
     a, b, c = _face_vertices(mesh, face)
     w = _closest_point_triangle(p, a, b, c)
     return wp.length(p - (w[0] * a + w[1] * b + w[2] * c))
 
 
-_mesh_ray_closest = create_implicit_tree_ray_closest(_face_ray_hit)
-_mesh_point_closest = create_implicit_tree_point_closest(_face_distance)
+_mesh_ray_closest = implicit_bvh_make_query_ray(_face_ray_hit)
+_mesh_point_closest = implicit_bvh_make_query_point(_face_distance)
 
 
 @wp.func
-def implicit_triangle_tree_query_ray(
-    mesh: ImplicitTriangleTreeData, origin: wp.vec3, direction: wp.vec3, max_t: wp.float32
+def implicit_bvh_mesh_query_ray(
+    mesh: ImplicitBvhMeshData, origin: wp.vec3, direction: wp.vec3, max_t: wp.float32
 ) -> tuple[wp.int32, wp.float32, wp.float32, wp.float32]:
     """Closest ray hit: ``(face, t, u, v)``, ``face == -1`` on a miss.
 
     The hit point is ``origin + t * direction``, or equivalently
     ``u a + v b + (1 - u - v) c`` for the face's vertices ``a, b, c`` (the
     barycentric convention of ``wp.mesh_query_ray``).
+
+    .. experimental::
     """
     face, t = _mesh_ray_closest(mesh.tree, origin, direction, max_t, mesh)
     u = wp.float32(0.0)
@@ -172,12 +177,14 @@ def implicit_triangle_tree_query_ray(
 
 
 @wp.func
-def implicit_triangle_tree_query_point(
-    mesh: ImplicitTriangleTreeData, point: wp.vec3, max_dist: wp.float32
+def implicit_bvh_mesh_query_point(
+    mesh: ImplicitBvhMeshData, point: wp.vec3, max_dist: wp.float32
 ) -> tuple[wp.int32, wp.float32, wp.vec3]:
     """Closest point on the mesh within ``max_dist``: ``(face, distance, closest_point)``.
 
     ``face == -1`` when no triangle lies within ``max_dist``.
+
+    .. experimental::
     """
     face, dist = _mesh_point_closest(mesh.tree, point, max_dist, mesh)
     closest = point
@@ -188,12 +195,12 @@ def implicit_triangle_tree_query_point(
     return face, dist, closest
 
 
-class ImplicitTriangleTree:
-    """An :class:`ImplicitAABBTree` over the triangles of an indexed mesh.
+class ImplicitBvhMesh:
+    """An :class:`ImplicitBvh` over the triangles of an indexed mesh.
 
     The tree is built on construction. Pass :attr:`data` to kernels that call
-    :func:`implicit_triangle_tree_query_ray` or
-    :func:`implicit_triangle_tree_query_point`, or ``data.tree`` to the generic tree
+    :func:`implicit_bvh_mesh_query_ray` or
+    :func:`implicit_bvh_mesh_query_point`, or ``data.tree`` to the generic tree
     queries (items are face indices).
 
     Args:
@@ -201,9 +208,11 @@ class ImplicitTriangleTree:
             only need :meth:`refit` or :meth:`build`.
         indices: Flat triangle vertex indices, three per face.
         device: Device; defaults to that of ``points``.
+
+    .. experimental::
     """
 
-    def __init__(self, points: wp.array[wp.vec3], indices: wp.array[wp.int32], device: wp.DeviceLike = None) -> None:
+    def __init__(self, points: wp.array[wp.vec3], indices: wp.array[wp.int32], *, device: wp.DeviceLike = None) -> None:
         if indices.shape[0] % 3 != 0:
             raise ValueError("indices must hold three vertex indices per triangle")
         self.device = wp.get_device(device if device is not None else points.device)
@@ -212,9 +221,9 @@ class ImplicitTriangleTree:
         self.face_count = indices.shape[0] // 3
         self.lowers = wp.empty(max(self.face_count, 1), dtype=wp.vec3, device=self.device)
         self.uppers = wp.empty(max(self.face_count, 1), dtype=wp.vec3, device=self.device)
-        self.tree = ImplicitAABBTree(max(self.face_count, 1), device=self.device)
-        self.data = ImplicitTriangleTreeData()
-        """Kernel-side view to pass to kernels using the ``implicit_triangle_tree_query_*`` functions."""
+        self.tree = ImplicitBvh(max(self.face_count, 1), device=self.device)
+        self.data = ImplicitBvhMeshData()
+        """Kernel-side view to pass to kernels using the ``implicit_bvh_mesh_query_*`` functions."""
         self.data.tree = self.tree.data
         self.data.points = points
         self.data.indices = indices

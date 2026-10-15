@@ -20,6 +20,24 @@ from ._src.geometry import (
     collide_sphere_sphere,
 )
 from ._src.geometry.broad_phase_implicit_tree import BroadPhaseImplicitTree
+from ._src.geometry.implicit_bvh import (
+    ImplicitBvh,
+    ImplicitBvhData,
+    implicit_bvh_make_query_pairs,
+    implicit_bvh_make_query_point,
+    implicit_bvh_make_query_ray,
+    implicit_bvh_make_query_ray_foreach,
+    implicit_bvh_query_aabb,
+    implicit_bvh_query_aabb_next,
+    implicit_bvh_query_point,
+    implicit_bvh_query_ray,
+)
+from ._src.geometry.implicit_bvh_mesh import (
+    ImplicitBvhMesh,
+    ImplicitBvhMeshData,
+    implicit_bvh_mesh_query_point,
+    implicit_bvh_mesh_query_ray,
+)
 from ._src.geometry.inertia import compute_inertia_shape, transform_inertia
 from ._src.geometry.kernels import sdf_box, sdf_capsule, sdf_cone, sdf_cylinder, sdf_mesh, sdf_plane, sdf_sphere
 from ._src.geometry.narrow_phase import NarrowPhase
@@ -34,6 +52,10 @@ __all__ = [
     "BroadPhaseImplicitTree",
     "BroadPhaseSAP",
     "HydroelasticSDF",
+    "ImplicitBvh",
+    "ImplicitBvhData",
+    "ImplicitBvhMesh",
+    "ImplicitBvhMeshData",
     "NarrowPhase",
     "ParticleSurface",
     "SDFCachedSampling",
@@ -54,6 +76,16 @@ __all__ = [
     "compute_offset_mesh",
     "create_empty_sdf_data",
     "extract_particle_surface",
+    "implicit_bvh_make_query_pairs",
+    "implicit_bvh_make_query_point",
+    "implicit_bvh_make_query_ray",
+    "implicit_bvh_make_query_ray_foreach",
+    "implicit_bvh_mesh_query_point",
+    "implicit_bvh_mesh_query_ray",
+    "implicit_bvh_query_aabb",
+    "implicit_bvh_query_aabb_next",
+    "implicit_bvh_query_point",
+    "implicit_bvh_query_ray",
     "sdf_box",
     "sdf_capsule",
     "sdf_cone",

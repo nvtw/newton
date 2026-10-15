@@ -28,23 +28,23 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from gpu_idle import wait_gpu_idle
 
-import newton._src.geometry.implicit_aabb_tree as it
-from newton._src.geometry.implicit_aabb_tree import (
-    ImplicitAABBTree,
-    ImplicitAABBTreeData,
+import newton._src.geometry.implicit_bvh as it
+from newton._src.geometry.implicit_bvh import (
+    ImplicitBvh,
+    ImplicitBvhData,
     aabb_disjoint,
-    create_implicit_tree_ray_closest,
-    create_implicit_tree_ray_foreach,
-    create_implicit_tree_self_foreach,
-    implicit_tree_next_subtree,
-    implicit_tree_query_aabb,
-    implicit_tree_query_aabb_next,
+    implicit_bvh_make_query_pairs,
+    implicit_bvh_make_query_ray,
+    implicit_bvh_make_query_ray_foreach,
+    implicit_bvh_next_subtree,
+    implicit_bvh_query_aabb,
+    implicit_bvh_query_aabb_next,
 )
-from newton._src.geometry.implicit_triangle_tree import (
-    ImplicitTriangleTree,
-    ImplicitTriangleTreeData,
-    implicit_triangle_tree_query_point,
-    implicit_triangle_tree_query_ray,
+from newton._src.geometry.implicit_bvh_mesh import (
+    ImplicitBvhMesh,
+    ImplicitBvhMeshData,
+    implicit_bvh_mesh_query_point,
+    implicit_bvh_mesh_query_ray,
 )
 
 wp.config.quiet = True
@@ -81,21 +81,19 @@ def k_jitter_boxes(
 
 
 @wp.kernel
-def k_aabb_implicit(
-    tree: ImplicitAABBTreeData, qlo: wp.array[wp.vec3], qhi: wp.array[wp.vec3], counts: wp.array[wp.int32]
-):
+def k_aabb_implicit(tree: ImplicitBvhData, qlo: wp.array[wp.vec3], qhi: wp.array[wp.vec3], counts: wp.array[wp.int32]):
     i = wp.tid()
     n = int(0)
-    q = implicit_tree_query_aabb(tree, qlo[i], qhi[i])
+    q = implicit_bvh_query_aabb(tree, qlo[i], qhi[i])
     while q.item >= 0:
         n += 1
-        q = implicit_tree_query_aabb_next(tree, q)
+        q = implicit_bvh_query_aabb_next(tree, q)
     counts[i] = n
 
 
 @wp.kernel
 def k_aabb_implicit_inline(
-    tree: ImplicitAABBTreeData, qlo: wp.array[wp.vec3], qhi: wp.array[wp.vec3], counts: wp.array[wp.int32]
+    tree: ImplicitBvhData, qlo: wp.array[wp.vec3], qhi: wp.array[wp.vec3], counts: wp.array[wp.int32]
 ):
     """Hand-fused traversal (hit handling inside the loop), the upper bound for the iterator API."""
     i = wp.tid()
@@ -106,12 +104,12 @@ def k_aabb_implicit_inline(
     while node != 0:
         r = tree.nodes[node]
         if aabb_disjoint(r.lower, r.upper, lo, hi):
-            node = implicit_tree_next_subtree(node)
+            node = implicit_bvh_next_subtree(node)
         elif node < tree.leaf_base:
             node = node * 2
         else:
             n += 1  # item = tree.leaf_item[node - tree.leaf_base]
-            node = implicit_tree_next_subtree(node)
+            node = implicit_bvh_next_subtree(node)
     counts[i] = n
 
 
@@ -200,7 +198,7 @@ def count_visit(item: int, t: float, state: int, context: int) -> int:
     return state + 1
 
 
-ray_count_fused = create_implicit_tree_ray_foreach(count_visit)
+ray_count_fused = implicit_bvh_make_query_ray_foreach(count_visit)
 
 
 @wp.func
@@ -209,12 +207,12 @@ def box_hit(item: int, o: wp.vec3, d: wp.vec3, max_t: float, ctx: BoxContext) ->
     return ray_box_t(o, inv_d, ctx.lo[item], ctx.hi[item], max_t)
 
 
-ray_closest_box_fused = create_implicit_tree_ray_closest(box_hit)
+ray_closest_box_fused = implicit_bvh_make_query_ray(box_hit)
 
 
 @wp.kernel
 def k_ray_all_implicit_fused(
-    tree: ImplicitAABBTreeData,
+    tree: ImplicitBvhData,
     ro: wp.array[wp.vec3],
     rd: wp.array[wp.vec3],
     max_t: float,
@@ -226,7 +224,7 @@ def k_ray_all_implicit_fused(
 
 @wp.kernel
 def k_ray_closest_box_implicit_fused(
-    tree: ImplicitAABBTreeData, ctx: BoxContext, ro: wp.array[wp.vec3], rd: wp.array[wp.vec3], out_t: wp.array[float]
+    tree: ImplicitBvhData, ctx: BoxContext, ro: wp.array[wp.vec3], rd: wp.array[wp.vec3], out_t: wp.array[float]
 ):
     i = wp.tid()
     _item, t = ray_closest_box_fused(tree, ro[i], rd[i], 1.0e30, ctx)
@@ -272,12 +270,12 @@ def tri_hit(f: int, o: wp.vec3, d: wp.vec3, max_t: float, ctx: TriContext) -> fl
     )
 
 
-ray_closest_tri_fused = create_implicit_tree_ray_closest(tri_hit)
+ray_closest_tri_fused = implicit_bvh_make_query_ray(tri_hit)
 
 
 @wp.kernel
 def k_ray_tri_implicit_fused(
-    tree: ImplicitAABBTreeData, ctx: TriContext, ro: wp.array[wp.vec3], rd: wp.array[wp.vec3], out_t: wp.array[float]
+    tree: ImplicitBvhData, ctx: TriContext, ro: wp.array[wp.vec3], rd: wp.array[wp.vec3], out_t: wp.array[float]
 ):
     i = wp.tid()
     _item, t = ray_closest_tri_fused(tree, ro[i], rd[i], 1.0e30, ctx)
@@ -308,17 +306,17 @@ def k_ray_tri_bvh(
 
 @wp.kernel
 def k_ray_tri_implicit_mesh(
-    mesh: ImplicitTriangleTreeData, ro: wp.array[wp.vec3], rd: wp.array[wp.vec3], out_t: wp.array[float]
+    mesh: ImplicitBvhMeshData, ro: wp.array[wp.vec3], rd: wp.array[wp.vec3], out_t: wp.array[float]
 ):
     i = wp.tid()
-    _face, t, _u, _v = implicit_triangle_tree_query_ray(mesh, ro[i], rd[i], 1.0e30)
+    _face, t, _u, _v = implicit_bvh_mesh_query_ray(mesh, ro[i], rd[i], 1.0e30)
     out_t[i] = t
 
 
 @wp.kernel
-def k_point_tri_implicit_mesh(mesh: ImplicitTriangleTreeData, ps: wp.array[wp.vec3], out_d: wp.array[float]):
+def k_point_tri_implicit_mesh(mesh: ImplicitBvhMeshData, ps: wp.array[wp.vec3], out_d: wp.array[float]):
     i = wp.tid()
-    _face, d, _c = implicit_triangle_tree_query_point(mesh, ps[i], 1.0e30)
+    _face, d, _c = implicit_bvh_mesh_query_point(mesh, ps[i], 1.0e30)
     out_d[i] = d
 
 
@@ -347,11 +345,11 @@ def pair_visit(item: int, other: int, state: int, context: int) -> int:
     return state + 1
 
 
-self_count_fused = create_implicit_tree_self_foreach(pair_visit)
+self_count_fused = implicit_bvh_make_query_pairs(pair_visit)
 
 
 @wp.kernel
-def k_self_implicit_fused(tree: ImplicitAABBTreeData, counts: wp.array[wp.int32]):
+def k_self_implicit_fused(tree: ImplicitBvhData, counts: wp.array[wp.int32]):
     slot = wp.tid()
     counts[slot] = self_count_fused(tree, slot, int(0), int(0))
 
@@ -511,7 +509,7 @@ def bench_case(kind, n, rng, num_queries, constructors, results):
 
     # ---- implicit tree
     m0 = mempool_used()
-    tree = ImplicitAABBTree(n, device=DEVICE)
+    tree = ImplicitBvh(n, device=DEVICE)
     rec["memory"]["implicit"] = tree.memory_bytes
     tree.build(lo, hi)
     ms, cap = time_graph(lambda: tree.build(lo, hi))
@@ -560,7 +558,7 @@ def bench_case(kind, n, rng, num_queries, constructors, results):
             rec["memory"]["mesh_lbvh"] = m1 - m0
         rec["build"]["mesh_lbvh_ctor"] = time_eager(lambda: wp.Mesh(points=points, indices=tris))
         mesh_sah = wp.Mesh(points=points, indices=tris, bvh_constructor="sah")
-        tri_tree = ImplicitTriangleTree(points, tris)
+        tri_tree = ImplicitBvhMesh(points, tris)
         ms, _ = time_graph(tri_tree.build)
         rec["build"]["implicit_mesh"] = ms
         ms, _ = time_graph(tri_tree.refit)

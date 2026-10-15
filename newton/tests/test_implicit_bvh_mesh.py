@@ -8,17 +8,17 @@ import unittest
 import numpy as np
 import warp as wp
 
-from newton._src.geometry.implicit_triangle_tree import (
-    ImplicitTriangleTree,
-    ImplicitTriangleTreeData,
-    implicit_triangle_tree_query_point,
-    implicit_triangle_tree_query_ray,
+from newton.geometry import (
+    ImplicitBvhMesh,
+    ImplicitBvhMeshData,
+    implicit_bvh_mesh_query_point,
+    implicit_bvh_mesh_query_ray,
 )
 
 
 @wp.kernel
 def _rays(
-    mesh: ImplicitTriangleTreeData,
+    mesh: ImplicitBvhMeshData,
     ref: wp.uint64,
     ro: wp.array[wp.vec3],
     rd: wp.array[wp.vec3],
@@ -26,7 +26,7 @@ def _rays(
     out_ref: wp.array[wp.vec4],
 ):
     i = wp.tid()
-    face, t, u, v = implicit_triangle_tree_query_ray(mesh, ro[i], rd[i], 1.0e30)
+    face, t, u, v = implicit_bvh_mesh_query_ray(mesh, ro[i], rd[i], 1.0e30)
     out[i] = wp.vec4(float(face), t, u, v)
     q = wp.mesh_query_ray(ref, ro[i], rd[i], 1.0e30)
     out_ref[i] = wp.vec4(wp.where(q.result, float(q.face), -1.0), wp.where(q.result, q.t, 1.0e30), q.u, q.v)
@@ -34,14 +34,14 @@ def _rays(
 
 @wp.kernel
 def _points(
-    mesh: ImplicitTriangleTreeData,
+    mesh: ImplicitBvhMeshData,
     ref: wp.uint64,
     ps: wp.array[wp.vec3],
     out: wp.array[wp.vec2],
     out_ref: wp.array[wp.float32],
 ):
     i = wp.tid()
-    _face, dist, closest = implicit_triangle_tree_query_point(mesh, ps[i], 1.0e30)
+    _face, dist, closest = implicit_bvh_mesh_query_point(mesh, ps[i], 1.0e30)
     out[i] = wp.vec2(dist, wp.length(closest - ps[i]))
     q = wp.mesh_query_point_no_sign(ref, ps[i], 1.0e30)
     out_ref[i] = wp.length(wp.mesh_eval_position(ref, q.face, q.u, q.v) - ps[i])
@@ -57,7 +57,7 @@ def _terrain(rng, r=40):
     return pts, tris[rng.permutation(len(tris))].astype(np.int32).ravel(), r
 
 
-class TestImplicitTriangleTree(unittest.TestCase):
+class TestImplicitBvhMesh(unittest.TestCase):
     def test_matches_warp_mesh(self):
         if not wp.is_cuda_available():
             self.skipTest("requires CUDA")
@@ -66,7 +66,7 @@ class TestImplicitTriangleTree(unittest.TestCase):
         pts_np, idx_np, r = _terrain(rng)
         points = wp.array(pts_np, dtype=wp.vec3, device=device)
         indices = wp.array(idx_np, dtype=wp.int32, device=device)
-        tri = ImplicitTriangleTree(points, indices)
+        tri = ImplicitBvhMesh(points, indices)
         nq = 2000
         for _deformed in range(2):
             ref = wp.Mesh(points=points, indices=indices)
