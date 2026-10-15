@@ -650,7 +650,7 @@ class Muon:
         wp.launch(
             muon_nesterov_2d_kernel,
             dim=param.shape,
-            inputs=[grad, self.m[index], self._grad_sumsq, self.momentum_coeff, max_grad_norm],
+            inputs=[grad, self.m[index], self._grad_sumsq, self.step_condition, self.momentum_coeff, max_grad_norm],
             outputs=[update],
             device=param.device,
         )
@@ -685,6 +685,7 @@ class Muon:
                 self.lr,
                 self.lr_scale,
                 self.pbt_lr_scale,
+                self.step_condition,
                 self.weight_decay,
                 float(scale),
             ],
