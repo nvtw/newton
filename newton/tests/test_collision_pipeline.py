@@ -3346,7 +3346,7 @@ class TestDeterministicPipeline(unittest.TestCase):
     pass
 
 
-def test_static_empty_gjk_specialization_under_graph_capture(test, device):
+def test_static_empty_gjk_specialization_under_graph_capture_multi_world(test, device):
     blueprint = newton.ModelBuilder()
     body = blueprint.add_body(xform=wp.transform(p=wp.vec3(0.0, 0.0, 0.15)))
     blueprint.add_shape_box(body, hx=0.2, hy=0.2, hz=0.2)
@@ -4301,7 +4301,7 @@ def test_deterministic_pipeline_500_steps(test, device):
                         test.assertTrue(False, msg)
 
 
-def test_static_empty_gjk_specialization_under_graph_capture(test, device):
+def test_static_empty_gjk_specialization_under_graph_capture_explicit_pairs(test, device):
     """Preserve contacts when graph capture omits a provably empty GJK stage."""
     builder = newton.ModelBuilder()
     body = builder.add_body(xform=wp.transform(p=wp.vec3(0.0, 0.0, 0.15)))
@@ -4355,8 +4355,8 @@ def test_static_empty_gjk_specialization_under_graph_capture(test, device):
 
 add_function_test(
     TestDeterministicPipeline,
-    "test_static_empty_gjk_specialization_under_graph_capture",
-    test_static_empty_gjk_specialization_under_graph_capture,
+    "test_static_empty_gjk_specialization_under_graph_capture_explicit_pairs",
+    test_static_empty_gjk_specialization_under_graph_capture_explicit_pairs,
     devices=get_cuda_test_devices(),
     check_output=False,
 )
@@ -5071,8 +5071,8 @@ add_function_test(
 
 add_function_test(
     TestDeterministicPipeline,
-    "test_static_empty_gjk_specialization_under_graph_capture",
-    test_static_empty_gjk_specialization_under_graph_capture,
+    "test_static_empty_gjk_specialization_under_graph_capture_multi_world",
+    test_static_empty_gjk_specialization_under_graph_capture_multi_world,
     devices=get_cuda_test_devices(),
     check_output=False,
 )
