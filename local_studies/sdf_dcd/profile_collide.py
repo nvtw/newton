@@ -13,7 +13,11 @@ name, method = sys.argv[1], sys.argv[2]
 with sdf_method(method):
     scene = load_scene(name)
     model = scene.model
-    pipe = scene.pipeline_factory() if scene.pipeline_factory else newton.CollisionPipeline(model, contact_matching="sticky")
+    pipe = (
+        scene.pipeline_factory()
+        if scene.pipeline_factory
+        else newton.CollisionPipeline(model, contact_matching="sticky")
+    )
     solver = newton.solvers.SolverPhoenX(model, collision_pipeline=pipe, **scene.solver_options)
 c = pipe.contacts()
 s0, s1 = model.state(), model.state()

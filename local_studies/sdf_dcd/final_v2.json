@@ -1,0 +1,757 @@
+[
+ {
+  "scene": "make_box_pyramid",
+  "method": "edge",
+  "finite": true,
+  "frames": 600,
+  "fps": 442.0750537951908,
+  "collide_ms": 0.13549073999456596,
+  "collide_ms_per_frame": 0.13549073999456596,
+  "contacts_mean": 376.9,
+  "contacts_last": 349,
+  "metrics": {
+   "penetration_m": 0.000517712440341711,
+   "joint_m": 0.0,
+   "joint_rad": 0.0,
+   "drift_m": 0.01891998015344143,
+   "speed_m_s": 0.04675481840968132
+  },
+  "observables_last": {},
+  "observables_tail_mean": {},
+  "observables_trace": {}
+ },
+ {
+  "scene": "make_box_pyramid",
+  "method": "cached_sampling",
+  "finite": true,
+  "frames": 600,
+  "fps": 459.60335182826356,
+  "collide_ms": 0.19926397999370238,
+  "collide_ms_per_frame": 0.19926397999370238,
+  "contacts_mean": 204.0,
+  "contacts_last": 204,
+  "metrics": {
+   "penetration_m": 0.0004545695264823735,
+   "joint_m": 0.0,
+   "joint_rad": 0.0,
+   "drift_m": 0.00021720933727920055,
+   "speed_m_s": 0.0017919185338541865
+  },
+  "observables_last": {},
+  "observables_tail_mean": {},
+  "observables_trace": {},
+  "cs_pairs": 51
+ },
+ {
+  "scene": "make_box_tower",
+  "method": "edge",
+  "finite": true,
+  "frames": 600,
+  "fps": 790.5472494556194,
+  "collide_ms": 0.09225984000295284,
+  "collide_ms_per_frame": 0.09225984000295284,
+  "contacts_mean": 79.55,
+  "contacts_last": 82,
+  "metrics": {
+   "penetration_m": 0.00045457688975147903,
+   "joint_m": 0.0,
+   "joint_rad": 0.0,
+   "drift_m": 0.014075661078095436,
+   "speed_m_s": 0.1420459747314453
+  },
+  "observables_last": {},
+  "observables_tail_mean": {},
+  "observables_trace": {}
+ },
+ {
+  "scene": "make_box_tower",
+  "method": "cached_sampling",
+  "finite": true,
+  "frames": 600,
+  "fps": 817.2447067065033,
+  "collide_ms": 0.1573254000140878,
+  "collide_ms_per_frame": 0.1573254000140878,
+  "contacts_mean": 40.0,
+  "contacts_last": 40,
+  "metrics": {
+   "penetration_m": 0.0008502432028762996,
+   "joint_m": 0.0,
+   "joint_rad": 0.0,
+   "drift_m": 0.0108792157843709,
+   "speed_m_s": 0.06735804677009583
+  },
+  "observables_last": {},
+  "observables_tail_mean": {},
+  "observables_trace": {},
+  "cs_pairs": 10
+ },
+ {
+  "scene": "make_gear_stack",
+  "method": "edge",
+  "finite": true,
+  "frames": 600,
+  "fps": 267.7867264245888,
+  "collide_ms": 0.10482386000148836,
+  "collide_ms_per_frame": 0.10482386000148836,
+  "contacts_mean": 344.55,
+  "contacts_last": 336,
+  "metrics": {
+   "penetration_m": 0.00045454708742909133,
+   "joint_m": 0.0,
+   "joint_rad": 0.0,
+   "drift_m": 0.01800140179693699,
+   "speed_m_s": 0.061149854212999344
+  },
+  "observables_last": {},
+  "observables_tail_mean": {},
+  "observables_trace": {}
+ },
+ {
+  "scene": "make_gear_stack",
+  "method": "cached_sampling",
+  "finite": true,
+  "frames": 600,
+  "fps": 826.5952252529147,
+  "collide_ms": 0.14751468001122703,
+  "collide_ms_per_frame": 0.14751468001122703,
+  "contacts_mean": 24.0,
+  "contacts_last": 24,
+  "metrics": {
+   "penetration_m": 0.0014715223805978894,
+   "joint_m": 0.0,
+   "joint_rad": 0.0,
+   "drift_m": 0.007081240881234407,
+   "speed_m_s": 0.013614789582788944
+  },
+  "observables_last": {},
+  "observables_tail_mean": {},
+  "observables_trace": {},
+  "cs_pairs": 6
+ },
+ {
+  "scene": "make_cube_drops",
+  "method": "edge",
+  "finite": true,
+  "frames": 600,
+  "fps": 971.3254244395332,
+  "collide_ms": 0.11881643999004154,
+  "collide_ms_per_frame": 0.11881643999004154,
+  "contacts_mean": 71.8,
+  "contacts_last": 69,
+  "metrics": {
+   "penetration_m": 0.000454707391327247,
+   "joint_m": 0.0,
+   "joint_rad": 0.0
+  },
+  "observables_last": {
+   "kinetic_energy_j": 1.364243615853411e-07
+  },
+  "observables_tail_mean": {
+   "kinetic_energy_j": 0.00011834010097242498
+  },
+  "observables_trace": {
+   "kinetic_energy_j": [
+    1.3117321032041218e-05,
+    2.007749026233796e-05,
+    6.852621299913153e-05,
+    0.0001565846032463014,
+    0.00012970800162293017,
+    6.180626223795116e-05,
+    0.0005150298238731921,
+    2.3873305963206803e-06,
+    0.00029205757891759276,
+    0.00030221117776818573
+   ]
+  }
+ },
+ {
+  "scene": "make_cube_drops",
+  "method": "cached_sampling",
+  "finite": true,
+  "frames": 600,
+  "fps": 943.309326262543,
+  "collide_ms": 0.18980144001034205,
+  "collide_ms_per_frame": 0.18980144001034205,
+  "contacts_mean": 64.0,
+  "contacts_last": 64,
+  "metrics": {
+   "penetration_m": 0.0025000120513141155,
+   "joint_m": 0.0,
+   "joint_rad": 0.0
+  },
+  "observables_last": {
+   "kinetic_energy_j": 5.375824091435888e-11
+  },
+  "observables_tail_mean": {
+   "kinetic_energy_j": 5.4434092650046395e-11
+  },
+  "observables_trace": {
+   "kinetic_energy_j": [
+    0.07065367698669434,
+    7.407904151213174e-11,
+    5.7463690056325234e-11,
+    5.7049268087361327e-11,
+    6.327234569614149e-11,
+    5.826167326361542e-11,
+    5.219641732723268e-11,
+    5.21020587784804e-11,
+    5.449606738094914e-11,
+    5.395648511319351e-11
+   ]
+  },
+  "cs_pairs": 16
+ },
+ {
+  "scene": "make_bunny_drops",
+  "method": "edge",
+  "finite": true,
+  "frames": 600,
+  "fps": 706.2789676333709,
+  "collide_ms": 0.14297742000053404,
+  "collide_ms_per_frame": 0.14297742000053404,
+  "contacts_mean": 246.9,
+  "contacts_last": 238,
+  "metrics": {
+   "penetration_m": 0.0004546662967186421,
+   "joint_m": 0.0,
+   "joint_rad": 0.0
+  },
+  "observables_last": {
+   "kinetic_energy_j": 0.002221423899754882
+  },
+  "observables_tail_mean": {
+   "kinetic_energy_j": 0.0022446293442044407
+  },
+  "observables_trace": {
+   "kinetic_energy_j": [
+    2.558717966079712,
+    0.21527506411075592,
+    0.047844476997852325,
+    0.004480970557779074,
+    0.0019847070798277855,
+    0.0017400840297341347,
+    0.002036015735939145,
+    0.0016817403957247734,
+    0.0013054264709353447,
+    0.0048930589109659195
+   ]
+  }
+ },
+ {
+  "scene": "make_bunny_drops",
+  "method": "cached_sampling",
+  "finite": true,
+  "frames": 600,
+  "fps": 931.0729229085617,
+  "collide_ms": 0.2088211799855344,
+  "collide_ms_per_frame": 0.2088211799855344,
+  "contacts_mean": 63.55,
+  "contacts_last": 64,
+  "metrics": {
+   "penetration_m": 0.003863692283630371,
+   "joint_m": 0.0,
+   "joint_rad": 0.0
+  },
+  "observables_last": {
+   "kinetic_energy_j": 1.5596778035753545e-10
+  },
+  "observables_tail_mean": {
+   "kinetic_energy_j": 0.025724764276991517
+  },
+  "observables_trace": {
+   "kinetic_energy_j": [
+    2.5330429077148438,
+    0.8140881061553955,
+    0.23850072920322418,
+    0.057568833231925964,
+    0.01912388950586319,
+    0.011256423778831959,
+    0.04815104603767395,
+    0.010573159903287888,
+    0.05616325885057449,
+    0.04687729477882385
+   ]
+  },
+  "cs_pairs": 18
+ },
+ {
+  "scene": "make_bunny_pile",
+  "method": "edge",
+  "finite": true,
+  "frames": 600,
+  "fps": 315.11866863282097,
+  "collide_ms": 0.19315953999466728,
+  "collide_ms_per_frame": 0.19315953999466728,
+  "contacts_mean": 767.45,
+  "contacts_last": 862,
+  "metrics": {
+   "penetration_m": 0.005174192134290934,
+   "joint_m": 0.0,
+   "joint_rad": 0.0
+  },
+  "observables_last": {
+   "kinetic_energy_j": 0.0013438054593279958
+  },
+  "observables_tail_mean": {
+   "kinetic_energy_j": 0.0040953176212497056
+  },
+  "observables_trace": {
+   "kinetic_energy_j": [
+    24.234800338745117,
+    1.569319486618042,
+    0.19692908227443695,
+    0.04517919197678566,
+    0.031754352152347565,
+    0.002579569583758712,
+    0.004020463675260544,
+    0.0015657057520002127,
+    0.0025187600404024124,
+    0.002844687784090638
+   ]
+  }
+ },
+ {
+  "scene": "make_bunny_pile",
+  "method": "cached_sampling",
+  "finite": true,
+  "frames": 600,
+  "fps": 660.7000300496278,
+  "collide_ms": 0.2606806199946732,
+  "collide_ms_per_frame": 0.2606806199946732,
+  "contacts_mean": 170.85,
+  "contacts_last": 176,
+  "metrics": {
+   "penetration_m": 0.01409093476831913,
+   "joint_m": 0.0,
+   "joint_rad": 0.0
+  },
+  "observables_last": {
+   "kinetic_energy_j": 0.004864294081926346
+  },
+  "observables_tail_mean": {
+   "kinetic_energy_j": 0.005408011896344286
+  },
+  "observables_trace": {
+   "kinetic_energy_j": [
+    21.300846099853516,
+    0.22178050875663757,
+    0.018059058114886284,
+    0.016378553584218025,
+    0.03589643910527229,
+    0.015278107486665249,
+    0.02892603911459446,
+    1.623930856453626e-08,
+    2.340325155891776e-10,
+    4.471916725812264e-10
+   ]
+  },
+  "cs_pairs": 82
+ },
+ {
+  "scene": "make_gear_stacks_large",
+  "method": "edge",
+  "finite": true,
+  "frames": 600,
+  "fps": 86.47773976326745,
+  "collide_ms": 0.2425881599992863,
+  "collide_ms_per_frame": 0.2425881599992863,
+  "contacts_mean": 33509.0,
+  "contacts_last": 33131,
+  "metrics": {
+   "penetration_m": 0.007570807822048664,
+   "joint_m": 0.0,
+   "joint_rad": 0.0,
+   "drift_m": 0.47296515107154846,
+   "speed_m_s": 0.9418085217475891
+  },
+  "observables_last": {},
+  "observables_tail_mean": {},
+  "observables_trace": {}
+ },
+ {
+  "scene": "make_gear_stacks_large",
+  "method": "cached_sampling",
+  "finite": true,
+  "frames": 600,
+  "fps": 322.5804682628318,
+  "collide_ms": 0.4019513000093866,
+  "collide_ms_per_frame": 0.4019513000093866,
+  "contacts_mean": 2400.0,
+  "contacts_last": 2400,
+  "metrics": {
+   "penetration_m": 0.003932532854378223,
+   "joint_m": 0.0,
+   "joint_rad": 0.0,
+   "drift_m": 0.006317849736660719,
+   "speed_m_s": 0.10614203661680222
+  },
+  "observables_last": {},
+  "observables_tail_mean": {},
+  "observables_trace": {},
+  "cs_pairs": 600
+ },
+ {
+  "scene": "make_bunny_pile_large",
+  "method": "edge",
+  "finite": true,
+  "frames": 600,
+  "fps": 78.15921071397197,
+  "collide_ms": 1.1051678400144738,
+  "collide_ms_per_frame": 1.1051678400144738,
+  "contacts_mean": 15779.25,
+  "contacts_last": 16663,
+  "metrics": {
+   "penetration_m": 0.0444544218480587,
+   "joint_m": 0.0,
+   "joint_rad": 0.0
+  },
+  "observables_last": {
+   "kinetic_energy_j": 606369.9375
+  },
+  "observables_tail_mean": {
+   "kinetic_energy_j": 353563.9390625
+  },
+  "observables_trace": {
+   "kinetic_energy_j": [
+    2946.26513671875,
+    2329.699462890625,
+    16235.146484375,
+    44955.34765625,
+    88750.078125,
+    147705.640625,
+    222246.046875,
+    312432.0625,
+    418270.65625,
+    539758.125
+   ]
+  }
+ },
+ {
+  "scene": "make_bunny_pile_large",
+  "method": "cached_sampling",
+  "finite": true,
+  "frames": 600,
+  "fps": 270.6228992221801,
+  "collide_ms": 0.37420117998408386,
+  "collide_ms_per_frame": 0.37420117998408386,
+  "contacts_mean": 3060.95,
+  "contacts_last": 3187,
+  "metrics": {
+   "penetration_m": 0.05074896290898323,
+   "joint_m": 0.0,
+   "joint_rad": 0.0
+  },
+  "observables_last": {
+   "kinetic_energy_j": 601312.5625
+  },
+  "observables_tail_mean": {
+   "kinetic_energy_j": 352434.2609375
+  },
+  "observables_trace": {
+   "kinetic_energy_j": [
+    3420.669921875,
+    2429.78564453125,
+    16714.685546875,
+    45685.3046875,
+    89703.15625,
+    148796.875,
+    222966.53125,
+    312212.71875,
+    416543.03125,
+    535953.125
+   ]
+  },
+  "cs_pairs": 2882
+ },
+ {
+  "scene": "make_analog_clock_scene",
+  "method": "edge",
+  "finite": true,
+  "frames": 600,
+  "fps": 98.49529505996846,
+  "collide_ms": 0.20631030000004102,
+  "collide_ms_per_frame": 0.41262060000008205,
+  "contacts_mean": 314.75,
+  "contacts_last": 267,
+  "metrics": {
+   "penetration_m": 5.238015000941232e-05,
+   "joint_m": 0.0006369617185555398,
+   "joint_rad": 0.0007489234361599643
+  },
+  "observables_last": {},
+  "observables_tail_mean": {},
+  "observables_trace": {}
+ },
+ {
+  "scene": "make_analog_clock_scene",
+  "method": "cached_sampling",
+  "finite": true,
+  "frames": 600,
+  "fps": 105.29837853978852,
+  "collide_ms": 0.29546291998485685,
+  "collide_ms_per_frame": 0.5909258399697137,
+  "contacts_mean": 173.25,
+  "contacts_last": 178,
+  "metrics": {
+   "penetration_m": 0.002300134627148509,
+   "joint_m": 0.007415009196847677,
+   "joint_rad": 0.0060618056612273125
+  },
+  "observables_last": {},
+  "observables_tail_mean": {},
+  "observables_trace": {},
+  "cs_pairs": 193
+ },
+ {
+  "scene": "make_tourbillon_scene",
+  "method": "edge",
+  "finite": true,
+  "frames": 600,
+  "fps": 95.559022662016,
+  "collide_ms": 0.5615663000025961,
+  "collide_ms_per_frame": 1.1231326000051922,
+  "contacts_mean": 655.8,
+  "contacts_last": 666,
+  "metrics": {
+   "penetration_m": 0.0013624898856505752,
+   "joint_m": 6.19882939645322e-06,
+   "joint_rad": 8.545681027524308e-05
+  },
+  "observables_last": {
+   "drive_abs_speed_rad_s": 0.03591074422001839
+  },
+  "observables_tail_mean": {
+   "drive_abs_speed_rad_s": 0.10864177597686649
+  },
+  "observables_trace": {
+   "drive_abs_speed_rad_s": [
+    0.00464370334520936,
+    0.00021133152768015862,
+    0.0005259272875264287,
+    0.00011442461982369423,
+    0.04312886297702789,
+    0.12293906509876251,
+    0.002014894038438797,
+    0.009287897497415543,
+    0.05558104068040848,
+    0.01000531017780304
+   ]
+  }
+ },
+ {
+  "scene": "make_tourbillon_scene",
+  "method": "cached_sampling",
+  "finite": true,
+  "frames": 600,
+  "fps": 106.14605327980019,
+  "collide_ms": 0.6285661800029629,
+  "collide_ms_per_frame": 1.2571323600059259,
+  "contacts_mean": 94.25,
+  "contacts_last": 94,
+  "metrics": {
+   "penetration_m": 0.0013406602665781975,
+   "joint_m": 6.920027772139292e-06,
+   "joint_rad": 0.00010451989681486092
+  },
+  "observables_last": {
+   "drive_abs_speed_rad_s": 0.007891759276390076
+  },
+  "observables_tail_mean": {
+   "drive_abs_speed_rad_s": 0.01753855447313981
+  },
+  "observables_trace": {
+   "drive_abs_speed_rad_s": [
+    0.33078891038894653,
+    0.005407096818089485,
+    0.5434522032737732,
+    0.02963891811668873,
+    3.607547841966152e-05,
+    0.00011676020221784711,
+    0.010255984030663967,
+    0.08999057114124298,
+    0.04858119785785675,
+    0.0007359962910413742
+   ]
+  },
+  "cs_pairs": 59
+ },
+ {
+  "scene": "make_bike_scene",
+  "method": "edge",
+  "finite": true,
+  "frames": 600,
+  "fps": 84.57206716686886,
+  "collide_ms": 0.26534879998507677,
+  "collide_ms_per_frame": 0.5306975999701535,
+  "contacts_mean": 2657.95,
+  "contacts_last": 2791,
+  "metrics": {
+   "penetration_m": 0.0009969386737793684,
+   "joint_m": 8.841633098199964e-05,
+   "joint_rad": 0.00010189160058171352
+  },
+  "observables_last": {},
+  "observables_tail_mean": {},
+  "observables_trace": {}
+ },
+ {
+  "scene": "make_bike_scene",
+  "method": "cached_sampling",
+  "finite": true,
+  "frames": 600,
+  "fps": 86.93092655314163,
+  "collide_ms": 0.5168173399943043,
+  "collide_ms_per_frame": 1.0336346799886087,
+  "contacts_mean": 520.7,
+  "contacts_last": 510,
+  "metrics": {
+   "penetration_m": 0.000843568064738065,
+   "joint_m": 4.631627962226048e-05,
+   "joint_rad": 4.2697993902445095e-05
+  },
+  "observables_last": {},
+  "observables_tail_mean": {},
+  "observables_trace": {},
+  "cs_pairs": 963
+ },
+ {
+  "scene": "make_caterpillar_scene",
+  "method": "edge",
+  "finite": true,
+  "frames": 600,
+  "fps": 78.1068205155081,
+  "collide_ms": 0.341943759995047,
+  "collide_ms_per_frame": 0.683887519990094,
+  "contacts_mean": 4246.1,
+  "contacts_last": 4225,
+  "metrics": {
+   "penetration_m": 0.04972027242183685,
+   "joint_m": 2.2954212909098715e-05,
+   "joint_rad": 2.9641465508079786e-05
+  },
+  "observables_last": {},
+  "observables_tail_mean": {},
+  "observables_trace": {}
+ },
+ {
+  "scene": "make_caterpillar_scene",
+  "method": "cached_sampling",
+  "finite": true,
+  "frames": 600,
+  "fps": 83.13203382426836,
+  "collide_ms": 0.3343284000038693,
+  "collide_ms_per_frame": 0.6686568000077386,
+  "contacts_mean": 1810.75,
+  "contacts_last": 1813,
+  "metrics": {
+   "penetration_m": 0.047300249338150024,
+   "joint_m": 2.595671139715705e-05,
+   "joint_rad": 2.9676193754042567e-05
+  },
+  "observables_last": {},
+  "observables_tail_mean": {},
+  "observables_trace": {},
+  "cs_pairs": 916
+ },
+ {
+  "scene": "make_nut_bolt",
+  "method": "edge",
+  "finite": true,
+  "frames": 600,
+  "fps": 406.6954896633604,
+  "collide_ms": 0.09465675999308587,
+  "collide_ms_per_frame": 0.09465675999308587,
+  "contacts_mean": 108.5,
+  "contacts_last": 122,
+  "metrics": {
+   "penetration_m": 2.4865132672857726e-06,
+   "joint_m": 0.0,
+   "joint_rad": 0.0
+  },
+  "observables_last": {
+   "nut_z_m": 0.05441407486796379,
+   "nut_spin_rad_s": -4.687422752380371
+  },
+  "observables_tail_mean": {
+   "nut_z_m": 0.058530008792877196,
+   "nut_spin_rad_s": -4.283441829681396
+  },
+  "observables_trace": {
+   "nut_z_m": [
+    0.06895822286605835,
+    0.06818535923957825,
+    0.06676077842712402,
+    0.06512229889631271,
+    0.06384366005659103,
+    0.06239880993962288,
+    0.060747113078832626,
+    0.05910741910338402,
+    0.05727938190102577,
+    0.055238645523786545
+   ],
+   "nut_spin_rad_s": [
+    -2.424299478530884,
+    -2.8098347187042236,
+    -3.482884407043457,
+    -3.8207168579101562,
+    -3.3384313583374023,
+    -3.572037696838379,
+    -4.451295852661133,
+    -3.637479543685913,
+    -4.84114933013916,
+    -4.095345973968506
+   ]
+  }
+ },
+ {
+  "scene": "make_nut_bolt",
+  "method": "cached_sampling",
+  "finite": true,
+  "frames": 600,
+  "fps": 2139.344125851348,
+  "collide_ms": 0.05948758000158705,
+  "collide_ms_per_frame": 0.05948758000158705,
+  "contacts_mean": 0.0,
+  "contacts_last": 0,
+  "metrics": {
+   "penetration_m": 0.0,
+   "joint_m": 0.0,
+   "joint_rad": 0.0
+  },
+  "observables_last": {
+   "nut_z_m": -470.4674072265625,
+   "nut_spin_rad_s": 42.42319107055664
+  },
+  "observables_tail_mean": {
+   "nut_z_m": -289.2377990722656,
+   "nut_spin_rad_s": 45.086613464355466
+  },
+  "observables_trace": {
+   "nut_z_m": [
+    -0.38971585035324097,
+    -8.179580688476562,
+    -25.779340744018555,
+    -53.18898391723633,
+    -90.40849304199219,
+    -137.43788146972656,
+    -194.2771453857422,
+    -260.9263000488281,
+    -337.38525390625,
+    -423.6542053222656
+   ],
+   "nut_spin_rad_s": [
+    52.260284423828125,
+    52.47368240356445,
+    52.14396667480469,
+    51.30571365356445,
+    50.04661560058594,
+    48.49892807006836,
+    46.8250732421875,
+    45.20116424560547,
+    43.79893493652344,
+    42.765525817871094
+   ]
+  },
+  "cs_pairs": 0
+ }
+]
