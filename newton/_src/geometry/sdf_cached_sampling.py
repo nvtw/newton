@@ -65,7 +65,7 @@ import warp as wp
 
 from ..core.types import Devicelike
 from .contact_data import SHAPE_PAIR_HFIELD_BIT, ContactData
-from .sdf_texture import TextureSDFData, texture_sample_sdf_grad, texture_sample_sdf_hw
+from .sdf_texture import TextureSDFData, texture_sample_sdf, texture_sample_sdf_grad, texture_sample_sdf_hw
 from .types import GeoType
 
 # Candidate flags.
@@ -73,6 +73,7 @@ _FLAG_VALID = wp.constant(1)
 _FLAG_ACTIVE = wp.constant(2)
 _FLAG_CACHED = wp.constant(4)
 _FLAG_FROZEN = wp.constant(8)  # cached point kept without re-optimization
+_FLAG_SETTLED = wp.constant(16)  # the last optimization left the point in place
 
 # Fraction of the search box used as the initial Nelder-Mead simplex (Sec. 3.7).
 _SIMPLEX_FRACTION = wp.constant(0.1)
@@ -553,7 +554,8 @@ class _PairCache:
     pa: wp.array[wp.vec3]  # point in shape A's local frame
     pb: wp.array[wp.vec3]  # point in shape B's local frame
     x: wp.array[wp.vec3]  # world point when cached
-    normal: wp.array[wp.vec3]  # world normal A -> B when cached
+    normal_a: wp.array[wp.vec3]  # normal A -> B in shape A's local frame
+    sep: wp.array[wp.float32]  # separation when cached [m]
     ids: wp.array[wp.int32]
     flags: wp.array[wp.int32]
 
@@ -565,7 +567,8 @@ def _alloc_cache(cap: int, K: int) -> _PairCache:
     c.pa = wp.zeros(cap * K, dtype=wp.vec3)
     c.pb = wp.zeros(cap * K, dtype=wp.vec3)
     c.x = wp.zeros(cap * K, dtype=wp.vec3)
-    c.normal = wp.zeros(cap * K, dtype=wp.vec3)
+    c.normal_a = wp.zeros(cap * K, dtype=wp.vec3)
+    c.sep = wp.zeros(cap * K, dtype=wp.float32)
     c.ids = wp.zeros(cap * K, dtype=wp.int32)
     c.flags = wp.zeros(cap * K, dtype=wp.int32)
     return c
@@ -608,6 +611,13 @@ def _phi(sdf: TextureSDFData, X_inv: wp.transform, inv_scale: wp.vec3, min_scale
 
 
 @wp.func
+def _phi_exact(sdf: TextureSDFData, X_inv: wp.transform, inv_scale: wp.vec3, min_scale: float, x: wp.vec3) -> float:
+    """World-space signed distance from exact trilinear sampling."""
+    p = wp.cw_mul(wp.transform_point(X_inv, x), inv_scale)
+    return texture_sample_sdf(sdf, p) * min_scale
+
+
+@wp.func
 def _phi_grad(
     sdf: TextureSDFData, X: wp.transform, X_inv: wp.transform, inv_scale: wp.vec3, min_scale: float, x: wp.vec3
 ) -> tuple[float, wp.vec3]:
@@ -638,30 +648,61 @@ def _laplacian(
     return (s - 6.0 * phi) / (h * h)
 
 
+@wp.struct
+class _PairQuery:
+    """Both SDFs of a pair with their world frames and scales."""
+
+    sdf_a: TextureSDFData
+    sdf_b: TextureSDFData
+    xa: wp.transform
+    xb: wp.transform
+    xa_inv: wp.transform
+    xb_inv: wp.transform
+    scale_a: wp.vec3
+    scale_b: wp.vec3
+    inv_a: wp.vec3
+    inv_b: wp.vec3
+    min_a: float
+    min_b: float
+    eps: float
+
+
 @wp.func
-def _objective(
-    sdf_a: TextureSDFData,
-    sdf_b: TextureSDFData,
-    XA_inv: wp.transform,
-    XB_inv: wp.transform,
-    inv_a: wp.vec3,
-    inv_b: wp.vec3,
-    min_a: float,
-    min_b: float,
+def _make_query(
+    a: int,
+    b: int,
+    shape_data: wp.array[wp.vec4],
+    shape_transform: wp.array[wp.transform],
+    shape_sdf_index: wp.array[wp.int32],
+    texture_sdf_data: wp.array[TextureSDFData],
     eps: float,
-    alpha: float,
-    anchors: wp.array[wp.vec3],
-    anchor_start: int,
-    anchor_count: int,
-    x: wp.vec3,
-) -> float:
+) -> _PairQuery:
+    q = _PairQuery()
+    q.sdf_a = texture_sdf_data[shape_sdf_index[a]]
+    q.sdf_b = texture_sdf_data[shape_sdf_index[b]]
+    q.xa = shape_transform[a]
+    q.xb = shape_transform[b]
+    q.xa_inv = wp.transform_inverse(q.xa)
+    q.xb_inv = wp.transform_inverse(q.xb)
+    q.scale_a = _sdf_scale(shape_data, a, q.sdf_a)
+    q.scale_b = _sdf_scale(shape_data, b, q.sdf_b)
+    q.inv_a = _safe_inverse(q.scale_a)
+    q.inv_b = _safe_inverse(q.scale_b)
+    q.min_a = _min_abs(q.scale_a)
+    q.min_b = _min_abs(q.scale_b)
+    q.eps = eps
+    return q
+
+
+@wp.func
+def _objective(q: _PairQuery, alpha: float, anchors: wp.array[wp.vec3], start: int, count: int, x: wp.vec3) -> float:
     """Soft maximum of both SDFs (Eq. 2) minus the repulsion from anchors (Eq. 3)."""
-    phi_a = _phi(sdf_a, XA_inv, inv_a, min_a, x)
-    phi_b = _phi(sdf_b, XB_inv, inv_b, min_b, x)
+    phi_a = _phi(q.sdf_a, q.xa_inv, q.inv_a, q.min_a, x)
+    phi_b = _phi(q.sdf_b, q.xb_inv, q.inv_b, q.min_b, x)
     d = phi_a - phi_b
-    g = 0.5 * (phi_a + phi_b + wp.sqrt(d * d + eps))
-    for j in range(anchor_count):
-        g -= alpha * wp.length(x - anchors[anchor_start + j])
+    g = 0.5 * (phi_a + phi_b + wp.sqrt(d * d + q.eps))
+    for j in range(count):
+        g -= alpha * wp.length(x - anchors[start + j])
     return g
 
 
@@ -714,6 +755,16 @@ def _rng_seed(key: wp.int64, frame: int, lane: int) -> int:
         ^ (frame * 19349663)
         ^ (lane * 83492791)
     )
+
+
+@wp.func
+def _stays_apart(flags: int, sep: float, threshold: float, drift: float) -> bool:
+    """Whether a cached point that was apart cannot have reached the contact skin.
+
+    Its gap can shrink at most by the relative motion at the point since it was
+    last optimized; twice that is kept as margin for rotation.
+    """
+    return (flags & _FLAG_ACTIVE) == 0 and sep - threshold > 2.0 * drift
 
 
 @wp.func
@@ -862,11 +913,15 @@ def _create_kernels(
             static_a = shape_body[a] < 0
         if b < shape_body.shape[0]:
             static_b = shape_body[b] < 0
+        threshold = 2.0 * r
         all_active = bool(True)
+        all_far = bool(True)
         for k in range(n_cached):
             e = slot * K + k
             xa = wp.transform_point(XA, prev.pa[e])
             xb = wp.transform_point(XB, prev.pb[e])
+            if not _stays_apart(prev.flags[e], prev.sep[e], threshold, wp.length(xa - xb)):
+                all_far = False
             x = 0.5 * (xa + xb)
             if static_a and not static_b:
                 x = xb
@@ -878,12 +933,10 @@ def _create_kernels(
 
         # Lanes [n_cached, T) take stochastic samples, except for a convex pair
         # whose full cache is in contact (one convex overlap region).
-        if (
-            skip_convex_samples != 0
-            and n_cached == K
-            and all_active
-            and _is_convex(shape_types[a])
-            and _is_convex(shape_types[b])
+        # Nor for a pair whose full cache is still too far apart to touch.
+        if n_cached == K and (
+            all_far
+            or (skip_convex_samples != 0 and all_active and _is_convex(shape_types[a]) and _is_convex(shape_types[b]))
         ):
             n_cached = -K
         pair_cached[p] = n_cached
@@ -935,20 +988,9 @@ def _create_kernels(
         upper = pair_upper[p]
         if lower[0] > upper[0] or lower[1] > upper[1] or lower[2] > upper[2]:
             return
-        sdf_a = texture_sdf_data[shape_sdf_index[a]]
-        sdf_b = texture_sdf_data[shape_sdf_index[b]]
-        XA = shape_transform[a]
-        XB = shape_transform[b]
-        XA_inv = wp.transform_inverse(XA)
-        XB_inv = wp.transform_inverse(XB)
-        scale_a = _sdf_scale(shape_data, a, sdf_a)
-        scale_b = _sdf_scale(shape_data, b, sdf_b)
-        inv_a = _safe_inverse(scale_a)
-        inv_b = _safe_inverse(scale_b)
-        min_a = _min_abs(scale_a)
-        min_b = _min_abs(scale_b)
         L = pair_length[p]
         eps = (softmax_smoothing * L) * (softmax_smoothing * L)
+        q = _make_query(a, b, shape_data, shape_transform, shape_sdf_index, texture_sdf_data, eps)
         temperature = depth_temperature_rel * L
         explore = exploration_radius_rel * L
         resolution = _SCORE_RESOLUTION * L
@@ -977,20 +1019,20 @@ def _create_kernels(
                 side = 1
                 idx = rb[2] + j - na0 - na1 - nb0
             if side == 0:
-                q = wp.transform_point(XA, wp.cw_mul(seed_points[idx], scale_a))
+                pt = wp.transform_point(q.xa, wp.cw_mul(seed_points[idx], q.scale_a))
             else:
-                q = wp.transform_point(XB, wp.cw_mul(seed_points[idx], scale_b))
-            if not _inside(q, lower, upper):
+                pt = wp.transform_point(q.xb, wp.cw_mul(seed_points[idx], q.scale_b))
+            if not _inside(pt, lower, upper):
                 continue
             g = float(0.0)
             if depth_selection != 0:
                 covered = bool(False)
                 for k in range(n_cached):
-                    if wp.length_sq(q - anchors[p * K + k]) < explore * explore:
+                    if wp.length_sq(pt - anchors[p * K + k]) < explore * explore:
                         covered = True
                 if covered:
                     continue
-                g = _objective(sdf_a, sdf_b, XA_inv, XB_inv, inv_a, inv_b, min_a, min_b, eps, 0.0, anchors, 0, 0, q)
+                g = _objective(q, 0.0, anchors, 0, 0, pt)
             rng = wp.rand_init(rng_base, j)
             for lane in range(n_cached, T):
                 u = wp.clamp(wp.randf(rng), 1.0e-7, 1.0 - 1.0e-7)
@@ -1065,27 +1107,19 @@ def _create_kernels(
 
         a = pairs[p][0]
         b = pairs[p][1]
-        sdf_a = texture_sdf_data[shape_sdf_index[a]]
-        sdf_b = texture_sdf_data[shape_sdf_index[b]]
-        XA = shape_transform[a]
-        XB = shape_transform[b]
-        XA_inv = wp.transform_inverse(XA)
-        XB_inv = wp.transform_inverse(XB)
-        scale_a = _sdf_scale(shape_data, a, sdf_a)
-        scale_b = _sdf_scale(shape_data, b, sdf_b)
-        inv_a = _safe_inverse(scale_a)
-        inv_b = _safe_inverse(scale_b)
-        min_a = _min_abs(scale_a)
-        min_b = _min_abs(scale_b)
-
         L = pair_length[p]
         tol = tolerance_rel * L
-        eps = (softmax_smoothing * L) * (softmax_smoothing * L)
         alpha = repulsion_weight
+        q = _make_query(
+            a, b, shape_data, shape_transform, shape_sdf_index, texture_sdf_data, (softmax_smoothing * L) ** 2.0
+        )
+
+        threshold = shape_gap[a] + shape_gap[b] + shape_data[a][3] + shape_data[b][3] + speculative_extension
 
         # Seed: a carried cached point, a selected seed point, or uniform in V.
         prev_x = wp.vec3(0.0)
         prev_n = wp.vec3(0.0)
+        prev_active = bool(False)
         prev_id = int(-1)
         n_anchor = n_cached
         frozen = bool(False)
@@ -1093,22 +1127,27 @@ def _create_kernels(
             e = pair_prev_slot[p] * K + lane
             seed = anchors[p * K + lane]
             prev_x = prev.x[e]
-            prev_n = prev.normal[e]
+            prev_n = wp.quat_rotate(wp.transform_get_rotation(q.xa), prev.normal_a[e])
+            prev_active = (prev.flags[e] & _FLAG_ACTIVE) != 0
             prev_id = prev.ids[e]
             # A cached point is repelled by the cached points before it.
             n_anchor = lane
             # Without relative motion of the shapes at the point since it was last
-            # optimized, its optimum is unchanged: skip the optimizer.
-            drift = wp.length(wp.transform_point(XA, prev.pa[e]) - wp.transform_point(XB, prev.pb[e]))
-            frozen = drift < reoptimize_rel * L
+            # optimized its optimum is unchanged, and a point that was apart by more
+            # than the motion since cannot touch yet: skip the optimizer.
+            drift = wp.length(wp.transform_point(q.xa, prev.pa[e]) - wp.transform_point(q.xb, prev.pb[e]))
+            settled = (prev.flags[e] & _FLAG_SETTLED) != 0
+            frozen = (settled and drift < reoptimize_rel * L) or _stays_apart(
+                prev.flags[e], prev.sep[e], threshold, drift
+            )
         else:
             packed = lane_seed[c]
             if packed != _NO_SEED:
                 idx = int(packed & wp.int64(0x7FFFFFFF))
                 if ((packed >> wp.int64(31)) & wp.int64(1)) == wp.int64(0):
-                    seed = wp.transform_point(XA, wp.cw_mul(seed_points[idx], scale_a))
+                    seed = wp.transform_point(q.xa, wp.cw_mul(seed_points[idx], q.scale_a))
                 else:
-                    seed = wp.transform_point(XB, wp.cw_mul(seed_points[idx], scale_b))
+                    seed = wp.transform_point(q.xb, wp.cw_mul(seed_points[idx], q.scale_b))
             else:
                 rng = wp.rand_init(_rng_seed(pair_key[p], frame[0], 1), lane)
                 seed = lower + wp.cw_mul(wp.vec3(wp.randf(rng), wp.randf(rng), wp.randf(rng)), upper - lower)
@@ -1135,18 +1174,15 @@ def _create_kernels(
         v2 = _clamp3(x0 + wp.vec3(0.0, wp.where(x0[1] + h[1] <= upper[1], h[1], -h[1]), 0.0), lower, upper)
         v3 = _clamp3(x0 + wp.vec3(0.0, 0.0, wp.where(x0[2] + h[2] <= upper[2], h[2], -h[2])), lower, upper)
         anchor_start = p * K
-        f0 = _objective(
-            sdf_a, sdf_b, XA_inv, XB_inv, inv_a, inv_b, min_a, min_b, eps, alpha, anchors, anchor_start, n_anchor, v0
-        )
-        f1 = _objective(
-            sdf_a, sdf_b, XA_inv, XB_inv, inv_a, inv_b, min_a, min_b, eps, alpha, anchors, anchor_start, n_anchor, v1
-        )
-        f2 = _objective(
-            sdf_a, sdf_b, XA_inv, XB_inv, inv_a, inv_b, min_a, min_b, eps, alpha, anchors, anchor_start, n_anchor, v2
-        )
-        f3 = _objective(
-            sdf_a, sdf_b, XA_inv, XB_inv, inv_a, inv_b, min_a, min_b, eps, alpha, anchors, anchor_start, n_anchor, v3
-        )
+        f0 = float(0.0)
+        f1 = float(0.0)
+        f2 = float(0.0)
+        f3 = float(0.0)
+        if not frozen:
+            f0 = _objective(q, alpha, anchors, anchor_start, n_anchor, v0)
+            f1 = _objective(q, alpha, anchors, anchor_start, n_anchor, v1)
+            f2 = _objective(q, alpha, anchors, anchor_start, n_anchor, v2)
+            f3 = _objective(q, alpha, anchors, anchor_start, n_anchor, v3)
         f_seed = f0
 
         it = int(0)
@@ -1164,40 +1200,10 @@ def _create_kernels(
                 break
             centroid = (v0 + v1 + v2) / 3.0
             reflected = _clamp3(centroid + (centroid - v3), lower, upper)
-            fr = _objective(
-                sdf_a,
-                sdf_b,
-                XA_inv,
-                XB_inv,
-                inv_a,
-                inv_b,
-                min_a,
-                min_b,
-                eps,
-                alpha,
-                anchors,
-                anchor_start,
-                n_anchor,
-                reflected,
-            )
+            fr = _objective(q, alpha, anchors, anchor_start, n_anchor, reflected)
             if fr < f0:
                 expanded = _clamp3(centroid + 2.0 * (centroid - v3), lower, upper)
-                fe = _objective(
-                    sdf_a,
-                    sdf_b,
-                    XA_inv,
-                    XB_inv,
-                    inv_a,
-                    inv_b,
-                    min_a,
-                    min_b,
-                    eps,
-                    alpha,
-                    anchors,
-                    anchor_start,
-                    n_anchor,
-                    expanded,
-                )
+                fe = _objective(q, alpha, anchors, anchor_start, n_anchor, expanded)
                 if fe < fr:
                     v3 = expanded
                     f3 = fe
@@ -1212,22 +1218,7 @@ def _create_kernels(
                 # shrink towards the best vertex if that fails.
                 target = wp.where(fr < f3, reflected, v3)
                 contracted = centroid + 0.5 * (target - centroid)
-                fc = _objective(
-                    sdf_a,
-                    sdf_b,
-                    XA_inv,
-                    XB_inv,
-                    inv_a,
-                    inv_b,
-                    min_a,
-                    min_b,
-                    eps,
-                    alpha,
-                    anchors,
-                    anchor_start,
-                    n_anchor,
-                    contracted,
-                )
+                fc = _objective(q, alpha, anchors, anchor_start, n_anchor, contracted)
                 if fc < wp.min(fr, f3):
                     v3 = contracted
                     f3 = fc
@@ -1235,54 +1226,9 @@ def _create_kernels(
                     v1 = v0 + 0.5 * (v1 - v0)
                     v2 = v0 + 0.5 * (v2 - v0)
                     v3 = v0 + 0.5 * (v3 - v0)
-                    f1 = _objective(
-                        sdf_a,
-                        sdf_b,
-                        XA_inv,
-                        XB_inv,
-                        inv_a,
-                        inv_b,
-                        min_a,
-                        min_b,
-                        eps,
-                        alpha,
-                        anchors,
-                        anchor_start,
-                        n_anchor,
-                        v1,
-                    )
-                    f2 = _objective(
-                        sdf_a,
-                        sdf_b,
-                        XA_inv,
-                        XB_inv,
-                        inv_a,
-                        inv_b,
-                        min_a,
-                        min_b,
-                        eps,
-                        alpha,
-                        anchors,
-                        anchor_start,
-                        n_anchor,
-                        v2,
-                    )
-                    f3 = _objective(
-                        sdf_a,
-                        sdf_b,
-                        XA_inv,
-                        XB_inv,
-                        inv_a,
-                        inv_b,
-                        min_a,
-                        min_b,
-                        eps,
-                        alpha,
-                        anchors,
-                        anchor_start,
-                        n_anchor,
-                        v3,
-                    )
+                    f1 = _objective(q, alpha, anchors, anchor_start, n_anchor, v1)
+                    f2 = _objective(q, alpha, anchors, anchor_start, n_anchor, v2)
+                    f3 = _objective(q, alpha, anchors, anchor_start, n_anchor, v3)
             it += 1
 
         x = v0
@@ -1300,70 +1246,93 @@ def _create_kernels(
         # improves the objective by more than the tolerance. On flat or resting
         # contacts the optimizer would otherwise shift it every call, which moves
         # the contact and disturbs the solver's friction anchors and warm start.
+        settled_now = bool(False)
         if cached and f_seed - fx < hysteresis_rel * L:
             x = x0
+            settled_now = True
         if frozen:
             x = x0
+            settled_now = True
         else:
             wp.atomic_add(iteration_count, 0, it)
 
-        # Contact data at x* (Sec. 3.4, Eq. 5).
-        phi_a, g_a = _phi_grad(sdf_a, XA, XA_inv, inv_a, min_a, x)
-        phi_b, g_b = _phi_grad(sdf_b, XB, XB_inv, inv_b, min_b, x)
-        n_a = g_a
-        n_b = -g_b
-        normal = wp.where(phi_a < phi_b, n_a, n_b)
-        if cached:
-            # Keep the normal of a cached point coherent: x* balances phi_a and
-            # phi_b, so either field can be the deeper one from step to step.
-            normal = wp.where(wp.dot(n_a, prev_n) > wp.dot(n_b, prev_n), n_a, n_b)
-        if normal_mode != 0 and wp.dot(n_a, n_b) > 0.0:
-            # At an exact minimizer the gradients are antiparallel (n_a == n_b).
-            # Away from it, e.g. at the rim of a shallow overlap where the surfaces
-            # cross at an angle, the curved surface's normal tilts. Weighting each
-            # normal by inverse squared curvature picks the flatter surface's normal
-            # (the face of a feature-on-face contact) and gives the bisector for
-            # equal curvature. Opposing normals (a thin feature inside the other
-            # shape) keep the coherent choice.
-            w_a = float(1.0)
-            w_b = float(1.0)
-            if normal_mode == 2:
-                k0 = 0.01 / L
-                k_a = k0 + wp.abs(_laplacian(sdf_a, XA_inv, inv_a, min_a, x, phi_a))
-                k_b = k0 + wp.abs(_laplacian(sdf_b, XB_inv, inv_b, min_b, x, phi_b))
-                w_a = 1.0 / (k_a * k_a)
-                w_b = 1.0 / (k_b * k_b)
-            blend = w_a * n_a + w_b * n_b
-            blend_len = wp.length(blend)
-            if blend_len > 1.0e-6:
-                normal = blend / blend_len
-        # Witness points: one Newton step onto each surface.
-        pa = x - g_a * phi_a
-        pb = x - g_b * phi_b
-        if phi_a > 0.0 and phi_b > 0.0:
-            # Outside both shapes the gap between the witness points gives the normal,
-            # unless that reverses a cached point's normal.
-            gap = pb - pa
-            gap_len = wp.length(gap)
-            if gap_len > 1.0e-9:
-                if not (cached and wp.dot(gap, prev_n) < 0.0):
-                    normal = gap / gap_len
-        sep = wp.dot(pb - pa, normal)
+        # Contact data at x* (Sec. 3.4, Eq. 5). A frozen point keeps its normal
+        # (carried with shape A) and needs only both distances; a point whose
+        # optimum is outside the contact skin of either shape is apart and needs
+        # no normal. Both take one hardware fetch per shape.
+        phi_a = _phi(q.sdf_a, q.xa_inv, q.inv_a, q.min_a, x)
+        phi_b = _phi(q.sdf_b, q.xb_inv, q.inv_b, q.min_b, x)
+        normal = prev_n
+        pa = x - normal * phi_a
+        pb = x + normal * phi_b
+        sep = phi_a + phi_b
+        apart = wp.max(phi_a, phi_b) > threshold
+        if frozen and not apart:
+            # Exact distances: hardware-filtered ones jitter by a few percent of a
+            # voxel, which disturbs resting contact.
+            phi_a = _phi_exact(q.sdf_a, q.xa_inv, q.inv_a, q.min_a, x)
+            phi_b = _phi_exact(q.sdf_b, q.xb_inv, q.inv_b, q.min_b, x)
+            pa = x - normal * phi_a
+            pb = x + normal * phi_b
+            sep = phi_a + phi_b
+        if not frozen and not apart:
+            phi_a, g_a = _phi_grad(q.sdf_a, q.xa, q.xa_inv, q.inv_a, q.min_a, x)
+            phi_b, g_b = _phi_grad(q.sdf_b, q.xb, q.xb_inv, q.inv_b, q.min_b, x)
+            n_a = g_a
+            n_b = -g_b
+            normal = wp.where(phi_a < phi_b, n_a, n_b)
+            if prev_active:
+                # Keep the normal of a cached contact coherent: x* balances phi_a
+                # and phi_b, so either field can be the deeper one from call to call.
+                normal = wp.where(wp.dot(n_a, prev_n) > wp.dot(n_b, prev_n), n_a, n_b)
+            if normal_mode != 0 and wp.dot(n_a, n_b) > 0.0:
+                # At an exact minimizer the gradients are antiparallel (n_a == n_b).
+                # Away from it, e.g. at the rim of a shallow overlap where the
+                # surfaces cross at an angle, the curved surface's normal tilts.
+                # Weighting each normal by inverse squared curvature picks the
+                # flatter surface's normal (the face of a feature-on-face contact)
+                # and gives the bisector for equal curvature. Opposing normals (a
+                # thin feature inside the other shape) keep the coherent choice.
+                w_a = float(1.0)
+                w_b = float(1.0)
+                if normal_mode == 2:
+                    k0 = 0.01 / L
+                    k_a = k0 + wp.abs(_laplacian(q.sdf_a, q.xa_inv, q.inv_a, q.min_a, x, phi_a))
+                    k_b = k0 + wp.abs(_laplacian(q.sdf_b, q.xb_inv, q.inv_b, q.min_b, x, phi_b))
+                    w_a = 1.0 / (k_a * k_a)
+                    w_b = 1.0 / (k_b * k_b)
+                blend = w_a * n_a + w_b * n_b
+                blend_len = wp.length(blend)
+                if blend_len > 1.0e-6:
+                    normal = blend / blend_len
+            # Witness points: one Newton step onto each surface.
+            pa = x - g_a * phi_a
+            pb = x - g_b * phi_b
+            if phi_a > 0.0 and phi_b > 0.0:
+                # Outside both shapes the gap between the witness points gives the
+                # normal, unless that reverses a cached contact's normal.
+                gap = pb - pa
+                gap_len = wp.length(gap)
+                if gap_len > 1.0e-9:
+                    if not (prev_active and wp.dot(gap, prev_n) < 0.0):
+                        normal = gap / gap_len
+            sep = wp.dot(pb - pa, normal)
 
-        threshold = shape_gap[a] + shape_gap[b] + shape_data[a][3] + shape_data[b][3] + speculative_extension
         flags = _FLAG_VALID
-        if sep < threshold:
+        if sep < threshold and not apart:
             flags = flags | _FLAG_ACTIVE
         if cached:
             flags = flags | _FLAG_CACHED
         if frozen:
             flags = flags | _FLAG_FROZEN
+        if settled_now:
+            flags = flags | _FLAG_SETTLED
         cand_x[c] = x
         cand_pa[c] = pa
         cand_pb[c] = pb
         cand_n[c] = normal
         cand_sep[c] = sep
-        cand_soft[c] = 0.5 * (phi_a + phi_b + wp.sqrt((phi_a - phi_b) * (phi_a - phi_b) + eps))
+        cand_soft[c] = 0.5 * (phi_a + phi_b + wp.sqrt((phi_a - phi_b) * (phi_a - phi_b) + q.eps))
         cand_flags[c] = flags
         cand_id[c] = prev_id
 
@@ -1521,7 +1490,8 @@ def _create_kernels(
             else:
                 next.pa[e] = wp.transform_point(XA_inv, x)
                 next.pb[e] = wp.transform_point(XB_inv, x)
-            next.normal[e] = cand_n[ci]
+            next.normal_a[e] = wp.quat_rotate_inv(wp.transform_get_rotation(shape_transform[a]), cand_n[ci])
+            next.sep[e] = cand_sep[ci]
             next.ids[e] = cand_id[ci]
             next.flags[e] = cand_flags[ci]
             # Only kept points become contacts, so every contact persists into the
@@ -1570,7 +1540,8 @@ def _create_kernels(
             prev.pa[d] = next.pa[s]
             prev.pb[d] = next.pb[s]
             prev.x[d] = next.x[s]
-            prev.normal[d] = next.normal[s]
+            prev.normal_a[d] = next.normal_a[s]
+            prev.sep[d] = next.sep[s]
             prev.ids[d] = next.ids[s]
             prev.flags[d] = next.flags[s]
 

@@ -1077,6 +1077,36 @@ Two approaches available:
    for every query point, which dominates collision cost in most scenes. Attaching even a
    coarse SDF eliminates this bottleneck.
 
+**SDF contact methods**
+
+SDF pairs (mesh-mesh, and convex or box shapes that carry an SDF and edges) use one of
+two methods, selected for the whole pipeline with ``sdf_contact_method``:
+
+- ``"edge"`` (default): samples every edge of each shape against the other shape's SDF
+  and reduces the resulting contacts. Dense and robust, including for tight-clearance
+  mechanisms such as threads.
+- ``"cached_sampling"`` (experimental): for pairs in which both shapes have a texture
+  SDF, minimizes a smooth intersection objective from a few points per pair that are
+  cached across collide calls and topped up with importance-sampled seed points
+  (Giles and Andrews, *Real-Time Collision Handling for Signed Distance Fields via
+  Caching and Importance Sampling*, 2026). It emits at most
+  :attr:`SDFCachedSampling.Config.cache_size <newton.geometry.SDFCachedSampling.Config.cache_size>`
+  persistent contacts per pair, which favors stacking, piles and scenes with many
+  bodies. Shapes in contact in many separate regions at once, such as a nut on a
+  bolt, need the edge method.
+
+.. code-block:: python
+
+    from newton.geometry import SDFCachedSampling
+
+    pipeline = newton.CollisionPipeline(
+        model,
+        sdf_contact_method="cached_sampling",
+        sdf_cached_sampling_config=SDFCachedSampling.Config(cache_size=4),
+    )
+
+Hydroelastic pairs are not affected by ``sdf_contact_method``.
+
 :meth:`~Mesh.build_sdf` accepts several optional keyword arguments
 (defaults shown in parentheses):
 
