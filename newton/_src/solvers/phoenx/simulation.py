@@ -1400,7 +1400,7 @@ class PhoenXWorld:
         # Allocated last: eligibility depends on flags set throughout construction.
         if self._colored_contact_rows and self._gathered_warm_start_supported():
             self._contact_body_entries = ContactBodyEntries(
-                self._constraint_capacity, self.bodies.velocity.shape[0], self.device
+                self._constraint_capacity, self.rigid_contact_max, self.bodies.velocity.shape[0], self.device
             )
 
     def _fast_tail_fixed_tpw(self) -> int:
@@ -4839,7 +4839,7 @@ class PhoenXWorld:
 
     def _use_gathered_warm_start(self) -> bool:
         """Whether this step's prepare pass uses the per-body warm start."""
-        return self._contact_body_entries is not None and self._skip_all_joint_pgs()
+        return self._contact_body_entries is not None and (self.num_joints == 0 or self._skip_all_joint_pgs())
 
     def _prepare_contacts_gathered(self, idt: wp.float32) -> None:
         """Prepare contact rows in parallel, then apply warm starts per body."""
@@ -4862,12 +4862,13 @@ class PhoenXWorld:
                     self._contact_container_solve,
                     self._active_contact_views(),
                     self._copy_state,
+                    self._contact_body_entries.row_linear,
+                    self._contact_body_entries.row_angular0,
+                    self._contact_body_entries.row_angular1,
                 ],
                 device=self.device,
             )
-            self._contact_body_entries.apply_warm_start(
-                self._contact_cols_packed, self._contact_container_solve, self.bodies
-            )
+            self._contact_body_entries.apply_warm_start(self._contact_cols_packed, self.bodies)
 
     def _gather_colored_contact_rows(self) -> None:
         if not self._colored_contact_rows:

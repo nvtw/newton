@@ -40,6 +40,7 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import warp_aggregated_increment
 from newton._src.solvers.phoenx.helpers.math_helpers import apply_body_spatial_impulse
 from newton._src.solvers.phoenx.helpers.scan_and_sort import active_prefix_sort_levels, radix_sort_active_prefix
+from newton._src.solvers.phoenx.mass_splitting.kernels import subgroup_accumulate8_vec3
 
 #: Sorts after every body id; its low bits are all ones for any key width.
 _NO_BODY = wp.constant(wp.int32(2147483647))
@@ -89,47 +90,74 @@ def _contact_body_entry_counts_kernel(
         warp_aggregated_increment(counts, body)
 
 
+@wp.func
+def store_row_warm_start(
+    cc: ContactContainer,
+    k: wp.int32,
+    linear: wp.array[wp.vec3f],
+    angular0: wp.array[wp.vec3f],
+    angular1: wp.array[wp.vec3f],
+):
+    """Store prepared row ``k``'s cached impulse and its torques on both bodies.
+
+    The row-parallel prepare writes these contiguously, so the per-body
+    gather reads two vectors per row instead of the scattered contact frame.
+    """
+    n = cc_get_normal(cc, k)
+    t1 = cc_get_tangent1(cc, k)
+    imp = (
+        cc_get_normal_lambda(cc, k) * n
+        + cc_get_tangent1_lambda(cc, k) * t1
+        + cc_get_tangent2_lambda(cc, k) * wp.cross(n, t1)
+    )
+    linear[k] = imp
+    angular0[k] = wp.cross(cc_get_r0(cc, k), imp)
+    angular1[k] = wp.cross(cc_get_r1(cc, k), imp)
+
+
 @wp.kernel(enable_backward=False)
 def _gathered_contact_warm_start_kernel(
     columns: ContactColumnContainer,
-    cc: ContactContainer,
     bodies: BodyContainer,
     body_entry_start: wp.array[wp.int32],
     entries: wp.array[wp.int32],
+    row_linear: wp.array[wp.vec3f],
+    row_angular0: wp.array[wp.vec3f],
+    row_angular1: wp.array[wp.vec3f],
 ):
     """Apply every cached contact impulse acting on one body.
 
-    Entries are sorted by body and, within a body, by column slot, so the
-    summation order is fixed. Signs follow the pair update: the column
-    impulse acts from body 1 onto body 2.
+    Eight lanes share a body: lane ``j`` sums entries ``j, j + 8, ...`` and
+    the lanes are then reduced in lane order. Entries are sorted by body and
+    column slot, so the summation order is fixed. Signs follow the pair
+    update: the column impulse acts from body 1 onto body 2.
     """
-    body = wp.tid()
+    tid = wp.tid()
+    body = tid >> wp.int32(3)
+    lane = tid & wp.int32(7)
     inverse_mass = bodies.inverse_mass[body]
     if inverse_mass <= wp.float32(0.0):
         return
     linear = wp.vec3f(0.0)
     angular = wp.vec3f(0.0)
-    for entry in range(body_entry_start[body], body_entry_start[body + 1]):
+    for entry in range(body_entry_start[body] + lane, body_entry_start[body + 1], 8):
         code = entries[entry]
         slot = code >> wp.int32(1)
         first = contact_get_contact_first(columns, slot)
-        count = contact_get_contact_count(columns, slot)
-        for i in range(count):
-            k = first + i
-            n = cc_get_normal(cc, k)
-            t1 = cc_get_tangent1(cc, k)
-            t2 = wp.cross(n, t1)
-            imp = (
-                cc_get_normal_lambda(cc, k) * n
-                + cc_get_tangent1_lambda(cc, k) * t1
-                + cc_get_tangent2_lambda(cc, k) * t2
-            )
-            if (code & wp.int32(1)) == wp.int32(0):
-                linear -= imp
-                angular -= wp.cross(cc_get_r0(cc, k), imp)
-            else:
-                linear += imp
-                angular += wp.cross(cc_get_r1(cc, k), imp)
+        end = first + contact_get_contact_count(columns, slot)
+        if (code & wp.int32(1)) == wp.int32(0):
+            for k in range(first, end):
+                linear -= row_linear[k]
+                angular -= row_angular0[k]
+        else:
+            for k in range(first, end):
+                linear += row_linear[k]
+                angular += row_angular1[k]
+    mask = wp.uint32(255) << wp.uint32(tid & wp.int32(24))
+    linear = subgroup_accumulate8_vec3(wp.vec3f(0.0), linear, mask)
+    angular = subgroup_accumulate8_vec3(wp.vec3f(0.0), angular, mask)
+    if lane != wp.int32(0):
+        return
     v, w = body_load_vw(bodies, body)
     v, w = apply_body_spatial_impulse(
         v, w, inverse_mass, mat33_from_sym6(body_load_inv_inertia_sym6(bodies, body)), linear, angular
@@ -140,7 +168,7 @@ def _gathered_contact_warm_start_kernel(
 class ContactBodyEntries:
     """Per-frame list of live contact columns sorted by endpoint body."""
 
-    def __init__(self, constraint_capacity: int, num_nodes: int, device: wp.DeviceLike) -> None:
+    def __init__(self, constraint_capacity: int, row_capacity: int, num_nodes: int, device: wp.DeviceLike) -> None:
         entry_capacity = 2 * max(1, int(constraint_capacity))
         self.num_nodes = int(num_nodes)
         self.node_bits = max(1, self.num_nodes.bit_length())
@@ -150,6 +178,11 @@ class ContactBodyEntries:
         self.prefix_flags = wp.zeros(active_prefix_sort_levels(entry_capacity), dtype=wp.int32, device=device)
         self.counts = wp.zeros(self.num_nodes + 1, dtype=wp.int32, device=device)
         self.starts = wp.zeros(self.num_nodes + 1, dtype=wp.int32, device=device)
+        # Per-row warm-start impulse and torques, written by the row prepare.
+        row_capacity = max(1, int(row_capacity))
+        self.row_linear = wp.zeros(row_capacity, dtype=wp.vec3f, device=device)
+        self.row_angular0 = wp.zeros(row_capacity, dtype=wp.vec3f, device=device)
+        self.row_angular1 = wp.zeros(row_capacity, dtype=wp.vec3f, device=device)
         self.device = device
 
     def build(
@@ -186,14 +219,14 @@ class ContactBodyEntries:
         )
         wp.utils.array_scan(self.counts, self.starts, inclusive=False)
 
-    def apply_warm_start(self, columns: ContactColumnContainer, cc: ContactContainer, bodies: BodyContainer) -> None:
-        """Add the cached impulses of every live column to body velocities."""
+    def apply_warm_start(self, columns: ContactColumnContainer, bodies: BodyContainer) -> None:
+        """Add the stored row impulses of every live column to body velocities."""
         wp.launch(
             _gathered_contact_warm_start_kernel,
-            dim=self.num_nodes,
-            inputs=[columns, cc, bodies, self.starts, self.values],
+            dim=8 * self.num_nodes,
+            inputs=[columns, bodies, self.starts, self.values, self.row_linear, self.row_angular0, self.row_angular1],
             device=self.device,
         )
 
 
-__all__ = ["ContactBodyEntries"]
+__all__ = ["ContactBodyEntries", "store_row_warm_start"]

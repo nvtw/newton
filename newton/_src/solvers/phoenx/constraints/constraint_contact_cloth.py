@@ -135,6 +135,7 @@ from newton._src.solvers.phoenx.constraints.contact_projection import (
     contact_project_velocity_update_no_soft_pd,
 )
 from newton._src.solvers.phoenx.constraints.contact_tgs_cooperative import shuffle_vec
+from newton._src.solvers.phoenx.constraints.contact_warm_start import store_row_warm_start
 from newton._src.solvers.phoenx.contact_endpoints import (
     SHAPE_ENDPOINT_KIND_CLOTH_TRIANGLE,
     SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON,
@@ -1239,7 +1240,8 @@ def _contact_cached_warmstart_split(
 def get_colored_point_prepare_kernel(has_soft_pd: bool):
     """One thread per color-ordered contact row: geometry only, no velocity writes.
 
-    The warm start is applied separately per body, so rows need no coloring.
+    Each row stores its warm-start impulse, which is applied separately per
+    body, so rows need no coloring.
     Rows of the mass-splitting overflow color scale body responses by their
     copy counts like the overflow sweep; regular colors use physical bodies.
     """
@@ -1274,6 +1276,9 @@ def get_colored_point_prepare_kernel(has_soft_pd: bool):
         cc: ContactContainer,
         contacts: ContactViews,
         copy_state: CopyStateContainer,
+        warm_linear: wp.array[wp.vec3f],
+        warm_angular0: wp.array[wp.vec3f],
+        warm_angular1: wp.array[wp.vec3f],
     ):
         k = wp.tid()
         if k >= row_total[0]:
@@ -1300,6 +1305,7 @@ def get_colored_point_prepare_kernel(has_soft_pd: bool):
             prepare_lean(
                 columns, slot, k, bodies, particles, num_bodies, pair, idt, cc, contacts, copy_state, wp.int32(0)
             )
+        store_row_warm_start(cc, k, warm_linear, warm_angular0, warm_angular1)
 
     return kernel
 

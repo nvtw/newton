@@ -12,6 +12,7 @@ import numpy as np
 import warp as wp
 
 from newton._src.solvers.phoenx.simulation import PhoenXWorld
+from newton._src.solvers.phoenx.tests.test_stacking import _PhoenXScene
 from newton.examples.phoenx import example_phoenx_ragdoll_pile as scene
 from newton.viewer import ViewerNull
 
@@ -29,7 +30,59 @@ def _make_example(gathered: bool):
         PhoenXWorld._gathered_warm_start_supported = original
 
 
+def _make_box_stack(gathered: bool) -> _PhoenXScene:
+    """Joint-free 3x3x4 box stack with Kapla's overflow-only mass splitting."""
+    original = PhoenXWorld._gathered_warm_start_supported
+    if not gathered:
+        PhoenXWorld._gathered_warm_start_supported = lambda self: False
+    try:
+        stack = _PhoenXScene(
+            fps=120,
+            substeps=4,
+            solver_iterations=6,
+            step_layout="single_world",
+            mass_splitting=True,
+            mass_splitting_overflow_only=True,
+            mass_splitting_batch_size=1,
+            max_colored_partitions=2,
+            colored_contact_headers=True,
+            colored_contact_rows=True,
+        )
+        stack.add_ground_plane()
+        for level in range(4):
+            for i in range(3):
+                for j in range(3):
+                    stack.add_box((0.21 * i, 0.21 * j, 0.1 + 0.2 * level), (0.1, 0.1, 0.1))
+        stack.finalize()
+        return stack
+    finally:
+        PhoenXWorld._gathered_warm_start_supported = original
+
+
 class TestGatheredContactWarmStart(unittest.TestCase):
+    @unittest.skipUnless(wp.is_cuda_available(), "CUDA required")
+    def test_joint_free_scene_uses_gathered_prepare(self):
+        """Without joints the gathered prepare is used and matches the colored sweep."""
+        colored = _make_box_stack(False)
+        gathered = _make_box_stack(True)
+        self.assertIsNone(colored.world._contact_body_entries)
+        self.assertEqual(gathered.world.num_joints, 0)
+        self.assertTrue(gathered.world._use_gathered_warm_start())
+        # Rounding differences grow about tenfold every two frames in this
+        # bouncing stack; a missing warm start differs by ~g * dt = 0.02 m/s.
+        for frame in range(1, 5):
+            colored.step()
+            gathered.step()
+            wp.synchronize()
+            for name in ("velocity", "angular_velocity"):
+                np.testing.assert_allclose(
+                    getattr(gathered.bodies, name).numpy(),
+                    getattr(colored.bodies, name).numpy(),
+                    rtol=0.0,
+                    atol=5.0e-5,
+                    err_msg=f"{name} at frame {frame}",
+                )
+
     @unittest.skipUnless(wp.is_cuda_available(), "CUDA required")
     def test_captured_trajectory_matches_colored_prepare(self):
         """Overflow headers, copies and warm starts compose into the same captured steps."""
