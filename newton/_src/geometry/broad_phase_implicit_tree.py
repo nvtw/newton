@@ -1,11 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Experimental implicit binary BVH with stackless per-leaf traversal.
+"""Experimental broad phase on an implicit binary BVH with stackless traversal.
 
-This module is intentionally separate from the production broad phases. Its
-complete binary topology isolates the cost of BVH pair-tree traversal; it is
-not an implementation of the compact Chitalu et al. node-index mapping.
+The tree itself is :class:`~newton._src.geometry.implicit_aabb_tree.ImplicitAABBTree`;
+this module only adds the broad-phase leaf bounds (gap, swept displacement and
+float rounding slack) and the pair filter. Its complete binary topology
+isolates the cost of BVH pair-tree traversal; it is not an implementation of
+the compact Chitalu et al. node-index mapping.
 """
 
 from __future__ import annotations
@@ -17,18 +19,15 @@ import warp as wp
 
 from .broad_phase_common import EmptyFilterData, keep_all_filter, precompute_world_map
 from .broad_phase_sap import _make_sap_process_pair_func
+from .implicit_aabb_tree import (
+    ImplicitAABBTree,
+    ImplicitAABBTreeData,
+    ImplicitTreeNode,
+    _aabb_disjoint,
+    implicit_tree_next_subtree,
+)
 
 wp.set_module_options({"enable_backward": False})
-
-
-@wp.struct
-class _TreeNode:
-    """One 32-byte traversal record: a visit touches a single memory sector."""
-
-    lower: wp.vec3
-    max_span: wp.float32
-    upper: wp.vec3
-    last_leaf: wp.int32
 
 
 @wp.func
@@ -71,24 +70,24 @@ def _tree_leaves(
     upper: wp.array[wp.vec3],
     gap: wp.array[float],
     displacement: wp.array[wp.vec3],
-    nodes: wp.array[_TreeNode],
-    node_shape: wp.array[int],
+    nodes: wp.array[ImplicitTreeNode],
+    leaf_item: wp.array[wp.int32],
     leaf_base: int,
     shape_count: int,
 ):
     slot = wp.tid()
     node = leaf_base + slot
-    record = _TreeNode()
+    record = ImplicitTreeNode()
     record.lower = wp.vec3(1.0e30, 1.0e30, 1.0e30)
     record.upper = wp.vec3(-1.0e30, -1.0e30, -1.0e30)
     record.max_span = wp.float32(-1.0)
     record.last_leaf = -1
-    node_shape[node] = -1
+    leaf_item[slot] = -1
     if slot >= shape_count:
         nodes[node] = record
         return
     shape = shape_index[sorted_values[slot]]
-    node_shape[node] = shape
+    leaf_item[slot] = shape
     record.last_leaf = slot
     margin = wp.float32(0.0)
     if gap.shape[0] > 0:
@@ -115,39 +114,13 @@ def _tree_leaves(
     nodes[node] = record
 
 
-@wp.kernel(enable_backward=False)
-def _tree_build_level(nodes: wp.array[_TreeNode], start: int):
-    node = start + wp.tid()
-    left = nodes[node * 2]
-    right = nodes[node * 2 + 1]
-    record = _TreeNode()
-    record.lower = wp.min(left.lower, right.lower)
-    record.upper = wp.max(left.upper, right.upper)
-    record.last_leaf = wp.max(left.last_leaf, right.last_leaf)
-    record.max_span = wp.max(left.max_span, right.max_span)
-    nodes[node] = record
-
-
-@wp.func
-def _tree_next_dfs(node: wp.int32) -> wp.int32:
-    """Advance past a visited/pruned subtree in the complete binary tree."""
-    while node > wp.int32(1):
-        if (node & wp.int32(1)) == wp.int32(0):
-            return node + wp.int32(1)
-        node = node / wp.int32(2)
-    return wp.int32(0)
-
-
 def _make_pair_kernels(filter_func: Any, filter_data_type: Any):
     process_pair = _make_sap_process_pair_func(filter_func)
     module = f"implicit_tree_{filter_func.__name__}_{filter_data_type.__name__}"
 
     @wp.kernel(enable_backward=False, module=module)
     def query(
-        nodes: wp.array[_TreeNode],
-        node_shape: wp.array[int],
-        leaf_base: int,
-        shape_count: int,
+        tree: ImplicitAABBTreeData,
         shape_lower: wp.array[wp.vec3],
         shape_upper: wp.array[wp.vec3],
         shape_gap: wp.array[float],
@@ -165,72 +138,64 @@ def _make_pair_kernels(filter_func: Any, filter_data_type: Any):
         max_candidate_pair: int,
     ):
         leaf = wp.tid()
-        if leaf >= shape_count:
+        if leaf >= tree.leaf_count:
             return
-        query_node = leaf_base + leaf
-        query = nodes[query_node]
+        query_node = tree.leaf_base + leaf
+        query = tree.nodes[query_node]
         query_lower = query.lower
         query_upper = query.upper
         query_span = query.max_span
-        shape1 = node_shape[query_node]
+        shape1 = tree.leaf_item[leaf]
         # An ancestor always contains the query leaf, so its bound cannot
         # reject it. Visit only the sibling subtrees along the leaf-to-root
         # path. These disjoint subtrees contain every other leaf exactly once.
         ancestor = query_node
+        node = ancestor ^ wp.int32(1)
+        stop = implicit_tree_next_subtree(node)
         while ancestor > wp.int32(1):
-            sibling = ancestor ^ wp.int32(1)
-            stop = _tree_next_dfs(sibling)
-            node = sibling
-            while node != stop:
-                record = nodes[node]
-                max_span = record.max_span
-                if max_span < query_span or (max_span == query_span and record.last_leaf <= leaf):
-                    node = _tree_next_dfs(node)
-                    continue
-                if (
-                    record.lower[0] > query_upper[0]
-                    or query_lower[0] > record.upper[0]
-                    or record.lower[1] > query_upper[1]
-                    or query_lower[1] > record.upper[1]
-                    or record.lower[2] > query_upper[2]
-                    or query_lower[2] > record.upper[2]
-                ):
-                    node = _tree_next_dfs(node)
-                    continue
-                if node < leaf_base:
-                    node = node * wp.int32(2)
-                    continue
-                other_leaf = node - leaf_base
-                if other_leaf < shape_count and (
-                    max_span > query_span or (max_span == query_span and other_leaf > leaf)
-                ):
-                    shape2 = node_shape[node]
-                    pair_world_id = wp.int32(0)
-                    if shape_world[shape1] == wp.int32(-1) and shape_world[shape2] == wp.int32(-1):
-                        pair_world_id = wp.int32(1)
-                    process_pair(
-                        shape1,
-                        shape2,
-                        pair_world_id,
-                        wp.int32(1),
-                        shape_lower,
-                        shape_upper,
-                        shape_gap,
-                        shape_displacement,
-                        collision_group,
-                        shape_world,
-                        filter_pairs,
-                        num_filter_pairs,
-                        shape_body,
-                        body_flags,
-                        include_static_kinematic_pairs,
-                        filter_data,
-                        candidate_pair,
-                        candidate_pair_count,
-                        max_candidate_pair,
-                    )
-                node = _tree_next_dfs(node)
-            ancestor = ancestor / wp.int32(2)
+            if node == stop:
+                ancestor = ancestor >> wp.int32(1)
+                node = ancestor ^ wp.int32(1)
+                stop = implicit_tree_next_subtree(node)
+                continue
+            record = tree.nodes[node]
+            max_span = record.max_span
+            # The leaf with the smaller span (ties: smaller slot) reports a pair.
+            if (
+                max_span < query_span
+                or (max_span == query_span and record.last_leaf <= leaf)
+                or _aabb_disjoint(record.lower, record.upper, query_lower, query_upper)
+            ):
+                node = implicit_tree_next_subtree(node)
+            elif node < tree.leaf_base:
+                node = node * wp.int32(2)
+            else:
+                shape2 = tree.leaf_item[node - tree.leaf_base]
+                pair_world_id = wp.int32(0)
+                if shape_world[shape1] == wp.int32(-1) and shape_world[shape2] == wp.int32(-1):
+                    pair_world_id = wp.int32(1)
+                process_pair(
+                    shape1,
+                    shape2,
+                    pair_world_id,
+                    wp.int32(1),
+                    shape_lower,
+                    shape_upper,
+                    shape_gap,
+                    shape_displacement,
+                    collision_group,
+                    shape_world,
+                    filter_pairs,
+                    num_filter_pairs,
+                    shape_body,
+                    body_flags,
+                    include_static_kinematic_pairs,
+                    filter_data,
+                    candidate_pair,
+                    candidate_pair_count,
+                    max_candidate_pair,
+                )
+                node = implicit_tree_next_subtree(node)
 
     return query
 
@@ -266,15 +231,17 @@ class BroadPhaseImplicitTree:
         valid = np.unique(index_map).astype(np.int32)
         self.shape_index = wp.array(valid, dtype=wp.int32, device=device)
         self.shape_count = len(valid)
-        self.leaf_base = 1 << max(1, (self.shape_count - 1).bit_length())
-        self.depth = self.leaf_base.bit_length() - 1
         # Retain the constructor argument for API compatibility. Stackless
         # traversal allocates no per-level pair queues or overflow fallback.
         self.capacity = max(1, queue_capacity_factor * self.shape_count)
+        self.tree = ImplicitAABBTree(max(1, self.shape_count), device=device)
+        self.tree.leaf_count = self.shape_count
+        self.tree.data.leaf_count = self.shape_count
+        # 60-bit Morton keys on a fixed 1 cm grid; the tree's sort order buffer
+        # holds the sorted leaf -> shape_index permutation.
         self.keys = wp.empty(2 * self.shape_count, dtype=wp.uint64, device=device)
-        self.values = wp.empty(2 * self.shape_count, dtype=wp.int32, device=device)
-        self.nodes = wp.empty(2 * self.leaf_base, dtype=_TreeNode, device=device)
-        self.node_shape = wp.empty(2 * self.leaf_base, dtype=wp.int32, device=device)
+        self.values = self.tree.order
+        self.leaf_base = self.tree.leaf_base
         self._has_custom_filter = filter_func is not None
         self._empty_filter_data = EmptyFilterData()
         self._kernels = (
@@ -338,23 +305,15 @@ class BroadPhaseImplicitTree:
                 shape_upper,
                 shape_gap,
                 shape_displacement,
-                self.nodes,
-                self.node_shape,
+                self.tree.nodes,
+                self.tree.leaf_item,
                 self.leaf_base,
                 self.shape_count,
             ],
             device=device,
             record_tape=False,
         )
-        for level in range(self.depth - 1, -1, -1):
-            start = 1 << level
-            wp.launch(
-                _tree_build_level,
-                dim=start,
-                inputs=[self.nodes, start],
-                device=device,
-                record_tape=False,
-            )
+        self.tree.update_internal_nodes()
         query = self._kernels
         pair_inputs = [
             shape_lower,
@@ -376,13 +335,7 @@ class BroadPhaseImplicitTree:
         wp.launch(
             query,
             dim=self.shape_count,
-            inputs=[
-                self.nodes,
-                self.node_shape,
-                self.leaf_base,
-                self.shape_count,
-                *pair_inputs,
-            ],
+            inputs=[self.tree.data, *pair_inputs],
             device=device,
             record_tape=False,
         )
