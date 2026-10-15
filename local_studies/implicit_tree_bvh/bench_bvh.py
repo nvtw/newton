@@ -32,14 +32,19 @@ import newton._src.geometry.implicit_aabb_tree as it
 from newton._src.geometry.implicit_aabb_tree import (
     ImplicitAABBTree,
     ImplicitAABBTreeData,
-    _aabb_disjoint,
+    aabb_disjoint,
+    create_implicit_tree_ray_closest,
+    create_implicit_tree_ray_foreach,
+    create_implicit_tree_self_foreach,
     implicit_tree_next_subtree,
     implicit_tree_query_aabb,
     implicit_tree_query_aabb_next,
-    implicit_tree_query_ray,
-    implicit_tree_query_ray_next,
-    implicit_tree_query_self,
-    implicit_tree_query_self_next,
+)
+from newton._src.geometry.implicit_triangle_tree import (
+    ImplicitTriangleTree,
+    ImplicitTriangleTreeData,
+    implicit_triangle_tree_query_point,
+    implicit_triangle_tree_query_ray,
 )
 
 wp.config.quiet = True
@@ -100,7 +105,7 @@ def k_aabb_implicit_inline(
     node = wp.int32(1)
     while node != 0:
         r = tree.nodes[node]
-        if _aabb_disjoint(r.lower, r.upper, lo, hi):
+        if aabb_disjoint(r.lower, r.upper, lo, hi):
             node = implicit_tree_next_subtree(node)
         elif node < tree.leaf_base:
             node = node * 2
@@ -149,23 +154,6 @@ def ray_box_t(o: wp.vec3, inv_d: wp.vec3, lo: wp.vec3, hi: wp.vec3, max_t: float
 
 
 @wp.kernel
-def k_ray_all_implicit(
-    tree: ImplicitAABBTreeData,
-    ro: wp.array[wp.vec3],
-    rd: wp.array[wp.vec3],
-    max_t: float,
-    counts: wp.array[wp.int32],
-):
-    i = wp.tid()
-    n = int(0)
-    q = implicit_tree_query_ray(tree, ro[i], rd[i], max_t)
-    while q.item >= 0:
-        n += 1
-        q = implicit_tree_query_ray_next(tree, q)
-    counts[i] = n
-
-
-@wp.kernel
 def k_ray_all_bvh(
     bvh: wp.uint64, ro: wp.array[wp.vec3], rd: wp.array[wp.vec3], max_t: float, counts: wp.array[wp.int32]
 ):
@@ -176,18 +164,6 @@ def k_ray_all_bvh(
     while wp.bvh_query_next(q, item, max_t):
         n += 1
     counts[i] = n
-
-
-@wp.kernel
-def k_ray_closest_box_implicit(
-    tree: ImplicitAABBTreeData, ro: wp.array[wp.vec3], rd: wp.array[wp.vec3], out_t: wp.array[float]
-):
-    i = wp.tid()
-    q = implicit_tree_query_ray(tree, ro[i], rd[i], 1.0e30)
-    while q.item >= 0:
-        q.max_t = q.t  # every reported box is closer than max_t
-        q = implicit_tree_query_ray_next(tree, q)
-    out_t[i] = q.max_t
 
 
 @wp.kernel
@@ -211,6 +187,50 @@ def k_ray_closest_box_bvh(
         if t >= 0.0:
             best = t
     out_t[i] = best
+
+
+@wp.struct
+class BoxContext:
+    lo: wp.array[wp.vec3]
+    hi: wp.array[wp.vec3]
+
+
+@wp.func
+def count_visit(item: int, t: float, state: int, context: int) -> int:
+    return state + 1
+
+
+ray_count_fused = create_implicit_tree_ray_foreach(count_visit)
+
+
+@wp.func
+def box_hit(item: int, o: wp.vec3, d: wp.vec3, max_t: float, ctx: BoxContext) -> float:
+    inv_d = wp.vec3(1.0 / d[0], 1.0 / d[1], 1.0 / d[2])
+    return ray_box_t(o, inv_d, ctx.lo[item], ctx.hi[item], max_t)
+
+
+ray_closest_box_fused = create_implicit_tree_ray_closest(box_hit)
+
+
+@wp.kernel
+def k_ray_all_implicit_fused(
+    tree: ImplicitAABBTreeData,
+    ro: wp.array[wp.vec3],
+    rd: wp.array[wp.vec3],
+    max_t: float,
+    counts: wp.array[wp.int32],
+):
+    i = wp.tid()
+    counts[i] = ray_count_fused(tree, ro[i], rd[i], max_t, int(0), int(0))
+
+
+@wp.kernel
+def k_ray_closest_box_implicit_fused(
+    tree: ImplicitAABBTreeData, ctx: BoxContext, ro: wp.array[wp.vec3], rd: wp.array[wp.vec3], out_t: wp.array[float]
+):
+    i = wp.tid()
+    _item, t = ray_closest_box_fused(tree, ro[i], rd[i], 1.0e30, ctx)
+    out_t[i] = t
 
 
 # --- Rays against triangles (closest hit) -------------------------------------
@@ -239,26 +259,29 @@ def ray_tri_t(o: wp.vec3, d: wp.vec3, a: wp.vec3, b: wp.vec3, c: wp.vec3, max_t:
     return t
 
 
+@wp.struct
+class TriContext:
+    points: wp.array[wp.vec3]
+    tris: wp.array[wp.int32]
+
+
+@wp.func
+def tri_hit(f: int, o: wp.vec3, d: wp.vec3, max_t: float, ctx: TriContext) -> float:
+    return ray_tri_t(
+        o, d, ctx.points[ctx.tris[3 * f]], ctx.points[ctx.tris[3 * f + 1]], ctx.points[ctx.tris[3 * f + 2]], max_t
+    )
+
+
+ray_closest_tri_fused = create_implicit_tree_ray_closest(tri_hit)
+
+
 @wp.kernel
-def k_ray_tri_implicit(
-    tree: ImplicitAABBTreeData,
-    points: wp.array[wp.vec3],
-    tris: wp.array[wp.int32],
-    ro: wp.array[wp.vec3],
-    rd: wp.array[wp.vec3],
-    out_t: wp.array[float],
+def k_ray_tri_implicit_fused(
+    tree: ImplicitAABBTreeData, ctx: TriContext, ro: wp.array[wp.vec3], rd: wp.array[wp.vec3], out_t: wp.array[float]
 ):
     i = wp.tid()
-    o = ro[i]
-    d = rd[i]
-    q = implicit_tree_query_ray(tree, o, d, 1.0e30)
-    while q.item >= 0:
-        f = q.item
-        t = ray_tri_t(o, d, points[tris[3 * f]], points[tris[3 * f + 1]], points[tris[3 * f + 2]], q.max_t)
-        if t >= 0.0:
-            q.max_t = t
-        q = implicit_tree_query_ray_next(tree, q)
-    out_t[i] = q.max_t
+    _item, t = ray_closest_tri_fused(tree, ro[i], rd[i], 1.0e30, ctx)
+    out_t[i] = t
 
 
 @wp.kernel
@@ -284,6 +307,29 @@ def k_ray_tri_bvh(
 
 
 @wp.kernel
+def k_ray_tri_implicit_mesh(
+    mesh: ImplicitTriangleTreeData, ro: wp.array[wp.vec3], rd: wp.array[wp.vec3], out_t: wp.array[float]
+):
+    i = wp.tid()
+    _face, t, _u, _v = implicit_triangle_tree_query_ray(mesh, ro[i], rd[i], 1.0e30)
+    out_t[i] = t
+
+
+@wp.kernel
+def k_point_tri_implicit_mesh(mesh: ImplicitTriangleTreeData, ps: wp.array[wp.vec3], out_d: wp.array[float]):
+    i = wp.tid()
+    _face, d, _c = implicit_triangle_tree_query_point(mesh, ps[i], 1.0e30)
+    out_d[i] = d
+
+
+@wp.kernel
+def k_point_tri_mesh(mesh: wp.uint64, ps: wp.array[wp.vec3], out_d: wp.array[float]):
+    i = wp.tid()
+    q = wp.mesh_query_point_no_sign(mesh, ps[i], 1.0e30)
+    out_d[i] = wp.length(wp.mesh_eval_position(mesh, q.face, q.u, q.v) - ps[i])
+
+
+@wp.kernel
 def k_ray_tri_mesh(mesh: wp.uint64, ro: wp.array[wp.vec3], rd: wp.array[wp.vec3], out_t: wp.array[float]):
     i = wp.tid()
     q = wp.mesh_query_ray(mesh, ro[i], rd[i], 1.0e30)
@@ -296,49 +342,18 @@ def k_ray_tri_mesh(mesh: wp.uint64, ro: wp.array[wp.vec3], rd: wp.array[wp.vec3]
 # --- Self overlap: all overlapping pairs -------------------------------------
 
 
+@wp.func
+def pair_visit(item: int, other: int, state: int, context: int) -> int:
+    return state + 1
+
+
+self_count_fused = create_implicit_tree_self_foreach(pair_visit)
+
+
 @wp.kernel
-def k_self_implicit(tree: ImplicitAABBTreeData, counts: wp.array[wp.int32]):
+def k_self_implicit_fused(tree: ImplicitAABBTreeData, counts: wp.array[wp.int32]):
     slot = wp.tid()
-    n = int(0)
-    q = implicit_tree_query_self(tree, slot)
-    while q.item >= 0:
-        n += 1
-        q = implicit_tree_query_self_next(tree, q)
-    counts[slot] = n
-
-
-@wp.kernel
-def k_self_implicit_inline(tree: ImplicitAABBTreeData, counts: wp.array[wp.int32]):
-    """Hand-fused self traversal, same loop as BroadPhaseImplicitTree."""
-    leaf = wp.tid()
-    query_node = tree.leaf_base + leaf
-    query = tree.nodes[query_node]
-    lo = query.lower
-    hi = query.upper
-    span = query.max_span
-    n = int(0)
-    ancestor = query_node
-    node = ancestor ^ 1
-    stop = implicit_tree_next_subtree(node)
-    while ancestor > 1:
-        if node == stop:
-            ancestor = ancestor >> 1
-            node = ancestor ^ 1
-            stop = implicit_tree_next_subtree(node)
-            continue
-        r = tree.nodes[node]
-        if (
-            r.max_span < span
-            or (r.max_span == span and r.last_leaf <= leaf)
-            or _aabb_disjoint(r.lower, r.upper, lo, hi)
-        ):
-            node = implicit_tree_next_subtree(node)
-        elif node < tree.leaf_base:
-            node = node * 2
-        else:
-            n += 1
-            node = implicit_tree_next_subtree(node)
-    counts[leaf] = n
+    counts[slot] = self_count_fused(tree, slot, int(0), int(0))
 
 
 @wp.kernel
@@ -544,6 +559,12 @@ def bench_case(kind, n, rng, num_queries, constructors, results):
         if m0 is not None and m1 is not None and m1 > m0:
             rec["memory"]["mesh_lbvh"] = m1 - m0
         rec["build"]["mesh_lbvh_ctor"] = time_eager(lambda: wp.Mesh(points=points, indices=tris))
+        mesh_sah = wp.Mesh(points=points, indices=tris, bvh_constructor="sah")
+        tri_tree = ImplicitTriangleTree(points, tris)
+        ms, _ = time_graph(tri_tree.build)
+        rec["build"]["implicit_mesh"] = ms
+        ms, _ = time_graph(tri_tree.refit)
+        rec["refit"]["implicit_mesh"] = ms
         if n <= 1_000_000:
             rec["build"]["mesh_sah_ctor"] = time_eager(
                 lambda: wp.Mesh(points=points, indices=tris, bvh_constructor="sah"), trials=2
@@ -597,7 +618,7 @@ def bench_case(kind, n, rng, num_queries, constructors, results):
         for rname, max_t in (("ray_all_hits", 1.0e30), ("ray_short_all_hits", 2.0)):
             res = {}
             ref = None
-            variants = [("implicit", k_ray_all_implicit, [tree.data, ro, rd, max_t])]
+            variants = [("implicit", k_ray_all_implicit_fused, [tree.data, ro, rd, max_t])]
             variants += [(f"bvh_{c}", k_ray_all_bvh, [b.id, ro, rd, max_t]) for c, b in bvhs.items()]
             for vname, kern, inputs in variants:
                 counts, fn = run_counts(kern, num_queries, inputs)
@@ -618,7 +639,10 @@ def bench_case(kind, n, rng, num_queries, constructors, results):
         res = {}
         ref = None
         out_t = wp.zeros(num_queries, dtype=float, device=DEVICE)
-        variants = [("implicit", k_ray_closest_box_implicit, [tree.data, ro, rd, out_t])]
+        box_ctx = BoxContext()
+        box_ctx.lo = lo
+        box_ctx.hi = hi
+        variants = [("implicit", k_ray_closest_box_implicit_fused, [tree.data, box_ctx, ro, rd, out_t])]
         variants += [(f"bvh_{c}", k_ray_closest_box_bvh, [b.id, lo, hi, ro, rd, out_t]) for c, b in bvhs.items()]
         for vname, kern, inputs in variants:
 
@@ -641,9 +665,14 @@ def bench_case(kind, n, rng, num_queries, constructors, results):
         res = {}
         ref = None
         out_t = wp.zeros(num_queries, dtype=float, device=DEVICE)
-        variants = [("implicit", k_ray_tri_implicit, [tree.data, points, tris, ro, rd, out_t])]
+        tri_ctx = TriContext()
+        tri_ctx.points = points
+        tri_ctx.tris = tris
+        variants = [("implicit", k_ray_tri_implicit_fused, [tree.data, tri_ctx, ro, rd, out_t])]
         variants += [(f"bvh_{c}", k_ray_tri_bvh, [b.id, points, tris, ro, rd, out_t]) for c, b in bvhs.items()]
         variants.append(("mesh_lbvh", k_ray_tri_mesh, [mesh.id, ro, rd, out_t]))
+        variants.append(("mesh_sah", k_ray_tri_mesh, [mesh_sah.id, ro, rd, out_t]))
+        variants.append(("implicit_mesh", k_ray_tri_implicit_mesh, [tri_tree.data, ro, rd, out_t]))
         for vname, kern, inputs in variants:
 
             def fn(kern=kern, inputs=inputs):
@@ -664,11 +693,41 @@ def bench_case(kind, n, rng, num_queries, constructors, results):
         rec["query"]["ray_closest_tri"] = res
         print(f"  ray_closest_tri: {res}", flush=True)
 
+        # Closest point on the triangles from points around the terrain.
+        ps_np = np.column_stack(
+            [rng.uniform(0, side, num_queries), rng.uniform(0, side, num_queries), rng.uniform(-6.0, 6.0, num_queries)]
+        ).astype(np.float32)
+        ps = arr(ps_np)
+        res = {}
+        ref = None
+        variants = [
+            ("implicit_mesh", k_point_tri_implicit_mesh, [tri_tree.data, ps, out_t]),
+            ("mesh_lbvh", k_point_tri_mesh, [mesh.id, ps, out_t]),
+            ("mesh_sah", k_point_tri_mesh, [mesh_sah.id, ps, out_t]),
+        ]
+        for vname, kern, inputs in variants:
+
+            def fn(kern=kern, inputs=inputs):
+                wp.launch(kern, dim=num_queries, inputs=inputs, device=DEVICE)
+
+            fn()
+            d_np = out_t.numpy().copy()
+            if ref is None:
+                ref = d_np
+            else:
+                bad = int((~np.isclose(ref, d_np, rtol=1e-4, atol=1e-4)).sum())
+                res[f"{vname}_mismatch"] = bad
+                if bad > num_queries * 1e-3:
+                    raise RuntimeError(f"closest point {vname}: {bad} queries differ")
+            ms, _ = time_graph(fn)
+            res[vname] = ms
+        rec["query"]["closest_point_tri"] = res
+        print(f"  closest_point_tri: {res}", flush=True)
+
     # ---- Self-overlap pairs
     res = {}
     variants = [
-        ("implicit", k_self_implicit, [tree.data]),
-        ("implicit_inline", k_self_implicit_inline, [tree.data]),
+        ("implicit", k_self_implicit_fused, [tree.data]),
     ]
     if "lbvh" in bvhs:
         variants.append(("bvh_lbvh", k_self_bvh, [bvhs["lbvh"].id, lo, hi]))
@@ -676,7 +735,7 @@ def bench_case(kind, n, rng, num_queries, constructors, results):
         variants.append(("bvh_sah", k_self_bvh, [bvhs["sah"].id, lo, hi]))
     ref = None
     for vname, kern, inputs in variants:
-        dim = tree.leaf_count if vname.startswith("implicit") else n
+        dim = tree.leaf_base if vname.startswith("implicit") else n
         counts, fn = run_counts(kern, dim, inputs)
         total = int(counts.numpy().sum())
         if ref is None:

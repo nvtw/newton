@@ -11,14 +11,12 @@ import warp as wp
 from newton._src.geometry.implicit_aabb_tree import (
     ImplicitAABBTree,
     ImplicitAABBTreeData,
+    create_implicit_tree_point_closest,
+    create_implicit_tree_ray_closest,
+    create_implicit_tree_ray_foreach,
+    create_implicit_tree_self_foreach,
     implicit_tree_query_aabb,
     implicit_tree_query_aabb_next,
-    implicit_tree_query_point,
-    implicit_tree_query_point_next,
-    implicit_tree_query_ray,
-    implicit_tree_query_ray_next,
-    implicit_tree_query_self,
-    implicit_tree_query_self_next,
 )
 
 _MAX_HITS = 64
@@ -43,54 +41,82 @@ def _aabb_hits(
     counts[i] = n
 
 
+@wp.struct
+class _Boxes:
+    lo: wp.array[wp.vec3]
+    hi: wp.array[wp.vec3]
+
+
+@wp.func
+def _box_hit(item: int, o: wp.vec3, d: wp.vec3, max_t: float, boxes: _Boxes) -> float:
+    inv = wp.vec3(1.0 / d[0], 1.0 / d[1], 1.0 / d[2])
+    t1 = wp.cw_mul(boxes.lo[item] - o, inv)
+    t2 = wp.cw_mul(boxes.hi[item] - o, inv)
+    t_in = wp.max(wp.max(wp.min(t1[0], t2[0]), wp.min(t1[1], t2[1])), wp.max(wp.min(t1[2], t2[2]), 0.0))
+    t_out = wp.min(wp.min(wp.max(t1[0], t2[0]), wp.max(t1[1], t2[1])), wp.min(wp.max(t1[2], t2[2]), max_t))
+    if t_in <= t_out:
+        return t_in
+    return -1.0
+
+
+@wp.func
+def _box_distance(item: int, p: wp.vec3, max_dist: float, boxes: _Boxes) -> float:
+    d = wp.max(wp.max(boxes.lo[item] - p, p - boxes.hi[item]), wp.vec3(0.0))
+    return wp.length(d)
+
+
+@wp.func
+def _count_visit(item: int, t: float, state: int, context: int) -> int:
+    return state + 1
+
+
+@wp.struct
+class _PairOut:
+    pairs: wp.array[wp.vec2i]
+    count: wp.array[wp.int32]
+
+
+@wp.func
+def _record_pair(item: int, other: int, state: int, out: _PairOut) -> int:
+    k = wp.atomic_add(out.count, 0, 1)
+    if k < out.pairs.shape[0]:
+        out.pairs[k] = wp.vec2i(wp.min(item, other), wp.max(item, other))
+    return state
+
+
+_ray_closest = create_implicit_tree_ray_closest(_box_hit)
+_ray_count = create_implicit_tree_ray_foreach(_count_visit)
+_nearest = create_implicit_tree_point_closest(_box_distance)
+_self_pairs = create_implicit_tree_self_foreach(_record_pair)
+
+
 @wp.kernel
-def _closest_box_along_ray(
+def _nearest_box(tree: ImplicitAABBTreeData, boxes: _Boxes, points: wp.array[wp.vec3], out_dist: wp.array[wp.float32]):
+    i = wp.tid()
+    _item, d = _nearest(tree, points[i], 1.0e30, boxes)
+    out_dist[i] = d
+
+
+@wp.kernel
+def _all_pairs(tree: ImplicitAABBTreeData, out: _PairOut):
+    _self_pairs(tree, wp.tid(), int(0), out)
+
+
+@wp.kernel
+def _fused_rays(
     tree: ImplicitAABBTreeData,
+    boxes: _Boxes,
     ro: wp.array[wp.vec3],
     rd: wp.array[wp.vec3],
     out_t: wp.array[wp.float32],
     out_item: wp.array[wp.int32],
+    out_count: wp.array[wp.int32],
 ):
     i = wp.tid()
-    best = int(-1)
-    q = implicit_tree_query_ray(tree, ro[i], rd[i], 1.0e30)
-    while q.item >= 0:
-        # Every reported box is entered before max_t; shrinking prunes the rest.
-        q.max_t = q.t
-        best = q.item
-        q = implicit_tree_query_ray_next(tree, q)
-    out_t[i] = q.max_t
-    out_item[i] = best
-
-
-@wp.kernel
-def _nearest_box(
-    tree: ImplicitAABBTreeData,
-    lo: wp.array[wp.vec3],
-    hi: wp.array[wp.vec3],
-    points: wp.array[wp.vec3],
-    out_dist: wp.array[wp.float32],
-):
-    i = wp.tid()
-    p = points[i]
-    q = implicit_tree_query_point(tree, p, 1.0e30)
-    while q.item >= 0:
-        d = wp.max(wp.max(lo[q.item] - p, p - hi[q.item]), wp.vec3(0.0))
-        q.max_dist = wp.min(q.max_dist, wp.length(d))
-        q = implicit_tree_query_point_next(tree, q)
-    out_dist[i] = q.max_dist
-
-
-@wp.kernel
-def _self_pairs(tree: ImplicitAABBTreeData, pairs: wp.array[wp.vec2i], count: wp.array[wp.int32]):
-    slot = wp.tid()
-    a = tree.leaf_item[slot]
-    q = implicit_tree_query_self(tree, slot)
-    while q.item >= 0:
-        k = wp.atomic_add(count, 0, 1)
-        if k < pairs.shape[0]:
-            pairs[k] = wp.vec2i(wp.min(a, q.item), wp.max(a, q.item))
-        q = implicit_tree_query_self_next(tree, q)
+    item, t = _ray_closest(tree, ro[i], rd[i], 1.0e30, boxes)
+    out_t[i] = t
+    out_item[i] = item
+    out_count[i] = _ray_count(tree, ro[i], rd[i], 1.0e30, int(0), int(0))
 
 
 def _random_boxes(rng, n):
@@ -123,23 +149,10 @@ class TestImplicitAABBTree(unittest.TestCase):
             got = sorted(h for h in hits_np[i] if h >= 0)
             self.assertEqual(got, sorted(np.flatnonzero(overlap[i]).tolist()))
 
-        # Closest box hit along random rays.
+        # Closest box hit and every box entered along random rays.
         ro_np = rng.uniform(-4.0, 4.0, (nq, 3)).astype(np.float32)
         rd_np = rng.standard_normal((nq, 3)).astype(np.float32)
         rd_np /= np.linalg.norm(rd_np, axis=1, keepdims=True)
-        out_t = wp.zeros(nq, dtype=wp.float32, device=device)
-        out_item = wp.zeros(nq, dtype=wp.int32, device=device)
-        wp.launch(
-            _closest_box_along_ray,
-            dim=nq,
-            inputs=[
-                tree.data,
-                wp.array(ro_np, dtype=wp.vec3, device=device),
-                wp.array(rd_np, dtype=wp.vec3, device=device),
-            ],
-            outputs=[out_t, out_item],
-            device=device,
-        )
         with np.errstate(divide="ignore", invalid="ignore"):
             inv = 1.0 / rd_np[:, None]
             t1 = (lo_np[None, :n] - ro_np[:, None]) * inv
@@ -147,7 +160,26 @@ class TestImplicitAABBTree(unittest.TestCase):
         t_in = np.maximum(np.minimum(t1, t2).max(-1), 0.0)
         t_out = np.maximum(t1, t2).min(-1)
         t_ref = np.where(t_in <= t_out, t_in, 1.0e30).min(1, initial=1.0e30)
+        boxes = _Boxes()
+        boxes.lo = lo
+        boxes.hi = hi
+        out_t = wp.zeros(nq, dtype=wp.float32, device=device)
+        out_item = wp.zeros(nq, dtype=wp.int32, device=device)
+        out_count = wp.zeros(nq, dtype=wp.int32, device=device)
+        wp.launch(
+            _fused_rays,
+            dim=nq,
+            inputs=[
+                tree.data,
+                boxes,
+                wp.array(ro_np, dtype=wp.vec3, device=device),
+                wp.array(rd_np, dtype=wp.vec3, device=device),
+            ],
+            outputs=[out_t, out_item, out_count],
+            device=device,
+        )
         np.testing.assert_allclose(out_t.numpy(), t_ref, rtol=1e-5, atol=1e-5)
+        np.testing.assert_array_equal(out_count.numpy(), (t_in <= t_out).sum(1))
 
         # Nearest box distance from random points.
         p_np = rng.uniform(-6.0, 6.0, (nq, 3)).astype(np.float32)
@@ -155,7 +187,7 @@ class TestImplicitAABBTree(unittest.TestCase):
         wp.launch(
             _nearest_box,
             dim=nq,
-            inputs=[tree.data, lo, hi, wp.array(p_np, dtype=wp.vec3, device=device)],
+            inputs=[tree.data, boxes, wp.array(p_np, dtype=wp.vec3, device=device)],
             outputs=[out_d],
             device=device,
         )
@@ -165,11 +197,12 @@ class TestImplicitAABBTree(unittest.TestCase):
         )
 
         # Self overlap reports every overlapping pair exactly once.
-        pairs = wp.empty(n * n, dtype=wp.vec2i, device=device)
-        count = wp.zeros(1, dtype=wp.int32, device=device)
-        wp.launch(_self_pairs, dim=tree.leaf_count, inputs=[tree.data, pairs, count], device=device)
-        k = int(count.numpy()[0])
-        got = [tuple(p) for p in pairs.numpy()[:k]]
+        out = _PairOut()
+        out.pairs = wp.empty(max(n * n, 1), dtype=wp.vec2i, device=device)
+        out.count = wp.zeros(1, dtype=wp.int32, device=device)
+        wp.launch(_all_pairs, dim=tree.leaf_base, inputs=[tree.data, out], device=device)
+        k = int(out.count.numpy()[0])
+        got = [tuple(p) for p in out.pairs.numpy()[:k]]
         self.assertEqual(len(got), len(set(got)))
         ov = (lo_np[:n, None] <= hi_np[None, :n]).all(-1) & (lo_np[None, :n] <= hi_np[:n, None]).all(-1)
         a, b = np.nonzero(np.triu(ov, 1))
@@ -208,8 +241,35 @@ class TestImplicitAABBTree(unittest.TestCase):
 
         # Unsorted build keeps the input order and remains exact.
         tree.build(lo, hi, sort=False)
-        np.testing.assert_array_equal(tree.leaf_item.numpy()[:n], np.arange(n))
+        # Left-to-right leaf positions map to heap slots across two depths.
+        deep = 2 * tree.leaf_base - tree.deep_start
+        positions = np.arange(tree.leaf_base)
+        slots = (
+            np.where(positions < deep, tree.deep_start + positions, tree.leaf_base + positions - deep) - tree.leaf_base
+        )
+        np.testing.assert_array_equal(tree.leaf_item.numpy()[slots[:n]], np.arange(n))
         self._check_all(tree, lo2_np, hi2_np, n, rng)
+
+    def test_slack_unaligned_and_clustered(self):
+        """Spare leaf slots, count splits and clustered boxes stay exact."""
+        device = self.device
+        rng = np.random.default_rng(11)
+        n = 2000
+        centers = rng.normal(0.0, 0.4, (n, 3)) + rng.choice([-2.5, 0.0, 2.5], size=(n, 3))
+        half = rng.uniform(0.01, 0.2, (n, 3))
+        lo_np = (centers - half).astype(np.float32)
+        hi_np = (centers + half).astype(np.float32)
+        lo = wp.array(lo_np, dtype=wp.vec3, device=device)
+        hi = wp.array(hi_np, dtype=wp.vec3, device=device)
+        for kwargs in ({}, {"slack": 2.0}, {"aligned": False}):
+            with self.subTest(**kwargs):
+                tree = ImplicitAABBTree(n, device=device, **kwargs)
+                tree.build(lo, hi)
+                self.assertEqual(int((tree.leaf_item.numpy() >= 0).sum()), n)
+                self._check_all(tree, lo_np, hi_np, n, rng)
+                for _ in range(3):
+                    tree.refit(lo, hi)
+                self._check_all(tree, lo_np, hi_np, n, rng)
 
     def test_tiny_and_empty_trees(self):
         device = self.device
