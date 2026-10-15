@@ -13,6 +13,7 @@ edges and non-manifold edges are always kept. The filter is applied from
 import itertools
 import math
 import unittest
+from collections import Counter
 from unittest import mock
 
 import numpy as np
@@ -213,22 +214,43 @@ class TestMeshEdgeAngleFilter(unittest.TestCase):
 
 class TestModelBuilderEdgeAngleThreshold(unittest.TestCase):
     def test_finalize_packs_collision_edge_geometry(self):
-        """Pack exact centers and half-vectors for collision edges."""
+        """Pack unscaled geometry once per mesh and unique corner ownership for collision edges."""
         mesh = _near_antiparallel_pair_mesh()
         builder = newton.ModelBuilder()
-        body = builder.add_body()
-        builder.add_shape_mesh(body=body, mesh=mesh)
+        scales = np.asarray(((1.0, 1.0, 1.0), (2.0, 3.0, 4.0)), dtype=np.float32)
+        for scale in scales:
+            body = builder.add_body()
+            builder.add_shape_mesh(body=body, mesh=mesh, scale=scale)
         model = builder.finalize()
 
+        edge_ranges = model.shape_edge_range.numpy()
+        np.testing.assert_array_equal(edge_ranges[0], edge_ranges[1])
         edges = model.mesh_edge_indices.numpy()
+        packed_centers = model.mesh_edge_centers.numpy()
+        packed_halves = model.mesh_edge_halves.numpy()
+        self.assertEqual(len(edges), edge_ranges[0, 1])
         vertices = np.asarray(mesh.vertices, dtype=np.float32)
         edge_v0 = vertices[edges[:, 0]]
         edge_v1 = vertices[edges[:, 1]]
         expected_centers = np.ascontiguousarray((edge_v0 + edge_v1) * 0.5, dtype=np.float32)
         expected_halves = np.ascontiguousarray((edge_v1 - edge_v0) * 0.5, dtype=np.float32)
+        expected_radii = np.linalg.norm(expected_halves, axis=1)
 
-        np.testing.assert_array_equal(model.mesh_edge_centers.numpy(), expected_centers)
-        np.testing.assert_array_equal(model.mesh_edge_halves.numpy(), expected_halves)
+        np.testing.assert_array_equal(packed_centers[:, :3], expected_centers)
+        np.testing.assert_allclose(packed_centers[:, 3], expected_radii)
+        np.testing.assert_array_equal(packed_halves[:, :3], expected_halves)
+
+        ownership = packed_halves[:, 3].astype(np.int32)
+        self.assertTrue(np.all((ownership >= 4) & (ownership <= 7)))
+        canonical_edges = mesh._canonical_vertex_ids()[edges]
+        owned_counts = Counter()
+        for edge, code in zip(canonical_edges, ownership, strict=True):
+            if code & 1:
+                owned_counts[int(edge[0])] += 1
+            if code & 2:
+                owned_counts[int(edge[1])] += 1
+        for vertex_idx in np.unique(canonical_edges):
+            self.assertEqual(owned_counts[int(vertex_idx)], 1)
 
     def test_finalize_uses_full_edges_without_build_sdf(self):
         mesh = newton.Mesh.create_box(0.5, compute_inertia=False)

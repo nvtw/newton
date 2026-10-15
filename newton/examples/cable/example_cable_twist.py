@@ -185,7 +185,6 @@ class Example:
                 bend_damping=1.0e-2 * angular_stiffness,
                 twist_damping=1.0e-2 * angular_stiffness,
                 label=f"cable_{i}",
-                body_frame_origin="com",
             )
 
             # Fix the first body to make it kinematic
@@ -212,7 +211,6 @@ class Example:
         # Finalize model
         self.model = builder.finalize()
 
-        # Use full hard-contact correction (contact alpha 0.0) for stronger repulsion with low iterations.
         self.solver = self.create_solver()
 
         self.state_0 = self.model.state()
@@ -235,8 +233,6 @@ class Example:
         return newton.solvers.SolverVBD(
             self.model,
             iterations=self.sim_iterations,
-            rigid_compliant_alm=True,
-            rigid_avbd_contact_alpha=0.0,
         )
 
     def create_collision_pipeline(self):

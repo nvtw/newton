@@ -28,7 +28,11 @@ class TestTemporalContactForce(unittest.TestCase):
         """A moving global support couples worlds and must retain ordered sweeps."""
         self._check_wrenches(True, world_count=3, shared_support=True)
 
-    def _check_wrenches(self, dynamic_support, world_count=1, shared_support=False):
+    def test_contact_force_observable_matches_momentum_change(self):
+        """Report the same wrenches through solver observables without ``Contacts.force``."""
+        self._check_wrenches(True, use_observables=True)
+
+    def _check_wrenches(self, dynamic_support, world_count=1, shared_support=False, use_observables=False):
         builder = newton.ModelBuilder()
         if not dynamic_support:
             builder.add_ground_plane()
@@ -59,7 +63,8 @@ class TestTemporalContactForce(unittest.TestCase):
         if shared_support:
             add_support(builder)
         model = builder.finalize(device="cuda:0")
-        model.request_contact_attributes("force")
+        if not use_observables:
+            model.request_contact_attributes("force")
         pipeline = newton.CollisionPipeline(model, contact_matching="sticky")
         contacts = pipeline.contacts()
         solver = newton.solvers.SolverPhoenX(
@@ -75,6 +80,10 @@ class TestTemporalContactForce(unittest.TestCase):
             prepare_refresh_stride=1,
             sor_boost=1.0,
         )
+        observables = (
+            solver.observables(contacts=contacts, kinds={solver.ObservableKind.CONTACT_F}) if use_observables else None
+        )
+        forces = observables.contact_f if use_observables else contacts.force
         state = model.state()
         initial = np.zeros((model.body_count, 6), dtype=np.float32)
         moving_bodies = (
@@ -95,8 +104,9 @@ class TestTemporalContactForce(unittest.TestCase):
 
         def advance():
             pipeline.collide(state, contacts)
-            solver.step(state, state, None, contacts, dt)
-            solver.update_contacts(contacts, state)
+            solver.step(state, state, None, contacts, dt, observables=observables)
+            if observables is None:
+                solver.update_contacts(contacts, state)
 
         for frame in range(6):
             q0 = state.body_q.numpy()[:, :3].astype(float)
@@ -117,7 +127,7 @@ class TestTemporalContactForce(unittest.TestCase):
             self.assertGreater(count, 0)
             shapes0 = contacts.rigid_contact_shape0.numpy()
             shapes1 = contacts.rigid_contact_shape1.numpy()
-            for k, wrench in enumerate(contacts.force.numpy()[:count].astype(float) * dt):
+            for k, wrench in enumerate(forces.numpy()[:count].astype(float) * dt):
                 b0, b1 = shape_body[shapes0[k]], shape_body[shapes1[k]]
                 w0, w1 = shape_world[shapes0[k]], shape_world[shapes1[k]]
                 self.assertTrue(w0 == w1 or w0 < 0 or w1 < 0)
@@ -141,7 +151,7 @@ class TestTemporalContactForce(unittest.TestCase):
         lifted[moving_bodies, 2] = 1.0
         state.body_q.assign(lifted)
         wp.capture_launch(graph)
-        np.testing.assert_array_equal(contacts.force.numpy(), 0.0)
+        np.testing.assert_array_equal(forces.numpy(), 0.0)
 
 
 if __name__ == "__main__":

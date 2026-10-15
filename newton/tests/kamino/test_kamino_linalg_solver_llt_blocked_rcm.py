@@ -260,35 +260,42 @@ class TestLinAlgLLTBlockedRCMSolver(unittest.TestCase):
         np.testing.assert_allclose(result_wp.numpy(), expected, rtol=1.0e-4, atol=1.0e-5)
 
     def test_parallel_factorization_with_partial_tile(self):
-        """Factorize and solve a system whose final tile is partial."""
-        n = 33
-        matrix = np.eye(n, dtype=np.float32) * 2.0
-        indices = np.arange(n - 1)
-        matrix[indices, indices + 1] = -0.25
-        matrix[indices + 1, indices] = -0.25
-        rhs = np.ones(n, dtype=np.float32)
+        """Handle partial tiles and clear panels removed between factorizations."""
+        for n, batch_size in ((33, 1), (65, 1), (33, 18), (65, 18)):
+            with self.subTest(n=n, batch_size=batch_size):
+                matrix = np.eye(n, dtype=np.float32) * 2.0
+                indices = np.arange(n - 1)
+                matrix[indices, indices + 1] = -0.25
+                matrix[indices + 1, indices] = -0.25
+                rhs = np.ones(n, dtype=np.float32)
 
-        info = DenseSquareMultiLinearInfo()
-        info.finalize(dimensions=[n], dtype=wp.float32, device=self.default_device)
-        matrix_wp = wp.array(matrix.reshape(-1), dtype=wp.float32, device=self.default_device)
-        rhs_wp = wp.array(rhs, dtype=wp.float32, device=self.default_device)
-        result_wp = wp.zeros(n, dtype=wp.float32, device=self.default_device)
-        solver = LLTBlockedRCMSolver(
-            operator=DenseLinearOperatorData(info=info, mat=matrix_wp),
-            block_size=32,
-            reuse_permutation=True,
-            parallel_factorization=True,
-            device=self.default_device,
-        )
+                info = DenseSquareMultiLinearInfo()
+                info.finalize(dimensions=[n] * batch_size, dtype=wp.float32, device=self.default_device)
+                matrix_wp = wp.array(
+                    np.tile(matrix.reshape(-1), batch_size), dtype=wp.float32, device=self.default_device
+                )
+                rhs_wp = wp.array(np.tile(rhs, batch_size), dtype=wp.float32, device=self.default_device)
+                result_wp = wp.zeros(n * batch_size, dtype=wp.float32, device=self.default_device)
+                solver = LLTBlockedRCMSolver(
+                    operator=DenseLinearOperatorData(info=info, mat=matrix_wp),
+                    block_size=32,
+                    reuse_permutation=True,
+                    parallel_factorization=True,
+                    device=self.default_device,
+                )
 
-        solver.compute(matrix_wp)
-        solver.solve(rhs_wp, result_wp)
+                for candidate in (matrix, np.eye(n, dtype=np.float32) * 2.0):
+                    matrix_wp.assign(np.tile(candidate.reshape(-1), batch_size))
+                    solver.compute(matrix_wp)
+                    solver.solve(rhs_wp, result_wp)
+                    expected = np.tile(np.linalg.solve(candidate, rhs), batch_size)
+                    np.testing.assert_allclose(result_wp.numpy(), expected, rtol=1.0e-4, atol=1.0e-5)
+                # Disappearing panels must not retain values from the previous factor.
+                for factor in solver.L.numpy().reshape(batch_size, n, n):
+                    np.testing.assert_allclose(np.tril(factor), np.eye(n) * np.sqrt(2.0), rtol=1.0e-6, atol=0.0)
 
-        expected = np.linalg.solve(matrix, rhs)
-        np.testing.assert_allclose(result_wp.numpy(), expected, rtol=1.0e-4, atol=1.0e-5)
-
-    def test_parallel_factorization_compacts_heterogeneous_panels(self):
-        """Solve heterogeneous systems with one task per valid panel tile."""
+    def test_parallel_factorization_heterogeneous_dimensions(self):
+        """Solve systems of different sizes with parallel panel factorization."""
         dimensions = [8, 17, 33, 65]
         matrices = []
         right_hand_sides = []
@@ -319,11 +326,6 @@ class TestLinAlgLLTBlockedRCMSolver(unittest.TestCase):
         solver.compute(matrix_wp)
         solver.solve(rhs_wp, result_wp)
 
-        self.assertEqual(solver._diagonal_task_bids[0].size, 4)
-        self.assertEqual(solver._diagonal_task_bids[2].size, 2)
-        self.assertEqual(solver._panel_task_bids[0].size, 7)
-        np.testing.assert_array_equal(solver._panel_task_bids[2].numpy(), [3, 3])
-        np.testing.assert_array_equal(solver._panel_task_tiles[2].numpy(), [3, 4])
         np.testing.assert_allclose(
             result_wp.numpy(),
             np.concatenate(expected),

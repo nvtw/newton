@@ -5,11 +5,11 @@ import importlib
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from . import style3d
+    from . import mujoco, style3d
     from .featherstone import SolverFeatherstone
     from .implicit_mpm import SolverImplicitMPM
     from .kamino import SolverKamino
-    from .mujoco import SolverMuJoCo
+    from .mujoco.solver_mujoco import SolverMuJoCo
     from .phoenx import SolverPhoenX
     from .phoenx.fluid import (
         KPMFR2D,
@@ -43,6 +43,7 @@ __all__ = [
     "SolverXPBD",
     "VolumeBrickGrid",
     "export_state_3d",
+    "mujoco",
     "rasterize_obstacles",
     "style3d",
 ]
@@ -61,7 +62,7 @@ _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
     "SolverFeatherstone": (".featherstone", "SolverFeatherstone"),
     "SolverImplicitMPM": (".implicit_mpm", "SolverImplicitMPM"),
     "SolverKamino": (".kamino", "SolverKamino"),
-    "SolverMuJoCo": (".mujoco", "SolverMuJoCo"),
+    "SolverMuJoCo": (".mujoco.solver_mujoco", "SolverMuJoCo"),
     "SolverPhoenX": (".phoenx", "SolverPhoenX"),
     "SolverSemiImplicit": (".semi_implicit", "SolverSemiImplicit"),
     "SolverStyle3D": (".style3d.solver_style3d", "SolverStyle3D"),
@@ -69,6 +70,7 @@ _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
     "SolverXPBD": (".xpbd", "SolverXPBD"),
     "export_state_3d": (".phoenx.fluid", "export_state_3d"),
     "rasterize_obstacles": (".phoenx.fluid", "rasterize_obstacles"),
+    "mujoco": (".mujoco", None),
     "style3d": (".style3d", None),
 }
 
