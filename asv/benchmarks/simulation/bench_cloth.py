@@ -309,6 +309,8 @@ class FastDeformableRigidCoarseClothVBD(DeformableRigidCollision):
     params = (COARSE_CLOTH_VBD_CASES,)
     repeat = pr_gate_repeat(5)
     launch_count = 5
+    # This graph includes the solve; expose it only through time_simulate.
+    time_collide = None
 
     def setup(self, case):
         device = wp.get_device()

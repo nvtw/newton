@@ -4,4 +4,4 @@ Preserve body reactions and coupling feedback when the per-body soft-contact lis
 
 Coupled particle solvers now reject unsupported full-surface input consistently with standalone solvers, instead of silently reducing it to particle contacts. Coupling copies contact ownership and metadata; consuming solvers determine force eligibility.
 
-Remove the experimental ``Contacts.soft_contact_force_mask`` field. Mesh force selection is evaluated from current geometry rather than a stored mask. Preserve source soft-contact overflow status through coupling and clear stale mesh tags when a buffer is reused for particle-only detection.
+Preserve source soft-contact overflow status through coupling and clear stale mesh tags when a buffer is reused for particle-only detection.

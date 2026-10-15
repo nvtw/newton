@@ -1,1 +1,0 @@
-Add experimental `Contacts.soft_contact_force_mask` to select mesh force contributions without removing detected contact rows or changing geometry. Preserve geometry gradients and contact row indices, copy the mask through full-surface coupled entries, and report zero force for rejected rows.

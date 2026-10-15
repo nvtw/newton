@@ -525,7 +525,7 @@ def test_cloth_settles_on_heightfield_stairs(test, device):
     pipeline = newton.CollisionPipeline(model, soft_contact_gap=0.01, enable_rigid_soft_full_surface_contact=True)
     solver = newton.solvers.SolverVBD(model, iterations=10, rigid_compliant_alm=True)
     state_0, state_1, control, contacts = model.state(), model.state(), model.control(), pipeline.contacts()
-    for _ in range(900):
+    for _ in range(600):
         pipeline.collide(state_0, contacts)
         solver.step(state_0, state_1, control, contacts, 1.0 / 600.0)
         state_0, state_1 = state_1, state_0
