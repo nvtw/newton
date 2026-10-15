@@ -23,6 +23,7 @@ from .implicit_bvh import (
     ImplicitBvh,
     ImplicitBvhData,
     ImplicitBvhNode,
+    _node_load,
     aabb_disjoint,
     implicit_bvh_next_subtree,
 )
@@ -141,10 +142,7 @@ def _make_pair_kernels(filter_func: Any, filter_data_type: Any):
         if leaf >= tree.item_count:
             return
         query_node = tree.leaf_base + leaf
-        query = tree.nodes[query_node]
-        query_lower = query.lower
-        query_upper = query.upper
-        query_span = query.max_span
+        query_lower, query_upper, query_span, _query_last = _node_load(tree, query_node)
         shape1 = tree.leaf_item[leaf]
         # An ancestor always contains the query leaf, so its bound cannot
         # reject it. Visit only the sibling subtrees along the leaf-to-root
@@ -158,13 +156,12 @@ def _make_pair_kernels(filter_func: Any, filter_data_type: Any):
                 node = ancestor ^ wp.int32(1)
                 stop = implicit_bvh_next_subtree(node)
                 continue
-            record = tree.nodes[node]
-            max_span = record.max_span
+            lower, upper, max_span, last_leaf = _node_load(tree, node)
             # The leaf with the smaller span (ties: smaller slot) reports a pair.
             if (
                 max_span < query_span
-                or (max_span == query_span and record.last_leaf <= leaf)
-                or aabb_disjoint(record.lower, record.upper, query_lower, query_upper)
+                or (max_span == query_span and last_leaf <= leaf)
+                or aabb_disjoint(lower, upper, query_lower, query_upper)
             ):
                 node = implicit_bvh_next_subtree(node)
             elif node < tree.leaf_base:

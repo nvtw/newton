@@ -55,34 +55,6 @@ _WARP_LEVELS = 5  # log2 of the warp size
 
 @wp.func_native("""
 #if defined(__CUDA_ARCH__)
-const float4 v = __ldg(reinterpret_cast<const float4*>(ptr) + index);
-return wp::vec4(v.x, v.y, v.z, v.w);
-#else
-const float* f = reinterpret_cast<const float*>(ptr) + 4 * index;
-return wp::vec4(f[0], f[1], f[2], f[3]);
-#endif
-""")
-def _load_float4(ptr: wp.uint64, index: wp.int32) -> wp.vec4:
-    """One 16-byte read-only load (a node is two of them)."""
-    ...
-
-
-@wp.func_native("""
-#if defined(__CUDA_ARCH__)
-const float4 v = __ldcg(reinterpret_cast<const float4*>(ptr) + index);
-return wp::vec4(v.x, v.y, v.z, v.w);
-#else
-const float* f = reinterpret_cast<const float*>(ptr) + 4 * index;
-return wp::vec4(f[0], f[1], f[2], f[3]);
-#endif
-""")
-def _load_float4_coherent(ptr: wp.uint64, index: wp.int32) -> wp.vec4:
-    """16-byte load past L1, to read nodes other blocks wrote in the same launch."""
-    ...
-
-
-@wp.func_native("""
-#if defined(__CUDA_ARCH__)
 __threadfence();
 #endif
 """)
@@ -175,6 +147,37 @@ class ImplicitBvhNode:
     last_leaf: wp.int32
 
 
+# Typed 16-byte loads of one half of a node record. Warp reads ``wp.array`` elements
+# with scalar loads (its vector types are 4-byte aligned), while node arrays are
+# allocated by the tree, so their records are 16-byte aligned and contiguous.
+@wp.func_native("""
+const float4* p = reinterpret_cast<const float4*>(reinterpret_cast<const char*>(nodes.data) + (size_t)node * sizeof(*nodes.data));
+#if defined(__CUDA_ARCH__)
+const float4 v = __ldg(p + half);
+#else
+const float4 v = p[half];
+#endif
+return wp::vec4(v.x, v.y, v.z, v.w);
+""")
+def _node_half(nodes: wp.array[ImplicitBvhNode], node: wp.int32, half: wp.int32) -> wp.vec4:
+    """Half ``half`` of record ``node``: ``(lower, max_span)`` or ``(upper, last_leaf bits)``."""
+    ...
+
+
+@wp.func_native("""
+const float4* p = reinterpret_cast<const float4*>(reinterpret_cast<const char*>(nodes.data) + (size_t)node * sizeof(*nodes.data));
+#if defined(__CUDA_ARCH__)
+const float4 v = __ldcg(p + half);
+#else
+const float4 v = p[half];
+#endif
+return wp::vec4(v.x, v.y, v.z, v.w);
+""")
+def _node_half_coherent(nodes: wp.array[ImplicitBvhNode], node: wp.int32, half: wp.int32) -> wp.vec4:
+    """:func:`_node_half` past L1, to read records other blocks wrote in the same launch."""
+    ...
+
+
 @wp.struct
 class ImplicitBvhData:
     """Kernel-side view of an :class:`ImplicitBvh`.
@@ -183,7 +186,6 @@ class ImplicitBvhData:
     """
 
     nodes: wp.array[ImplicitBvhNode]
-    nodes_ptr: wp.uint64  # address of ``nodes`` for vectorized read-only loads
     leaf_item: wp.array[wp.int32]
     leaf_base: wp.int32
     item_count: wp.int32
@@ -192,8 +194,8 @@ class ImplicitBvhData:
 @wp.func
 def _node_load(tree: ImplicitBvhData, node: wp.int32) -> tuple[wp.vec3, wp.vec3, wp.float32, wp.int32]:
     """Return ``(lower, upper, max_span, last_leaf)`` of ``node``."""
-    a = _load_float4(tree.nodes_ptr, node * wp.int32(2))
-    b = _load_float4(tree.nodes_ptr, node * wp.int32(2) + wp.int32(1))
+    a = _node_half(tree.nodes, node, wp.int32(0))
+    b = _node_half(tree.nodes, node, wp.int32(1))
     return wp.vec3(a[0], a[1], a[2]), wp.vec3(b[0], b[1], b[2]), a[3], _float_bits(b[3])
 
 
@@ -458,7 +460,7 @@ _ARRIVED = wp.constant(wp.int32(-(1 << 31)))
 
 
 @wp.func
-def _climb(nodes: wp.array[ImplicitBvhNode], nodes_ptr: wp.uint64, node_ints: wp.array[wp.int32], node: int):
+def _climb(nodes: wp.array[ImplicitBvhNode], node_ints: wp.array[wp.int32], node: int):
     """Propagate bounds from a written ``node`` towards the root.
 
     Of a node's two children, the first to arrive marks the parent (an atomic
@@ -472,10 +474,10 @@ def _climb(nodes: wp.array[ImplicitBvhNode], nodes_ptr: wp.uint64, node_ints: wp
     while node >= 1:
         if wp.atomic_exch(node_ints, node * 8 + 7, _ARRIVED) != _ARRIVED:
             return
-        l0 = _load_float4_coherent(nodes_ptr, node * 4)
-        l1 = _load_float4_coherent(nodes_ptr, node * 4 + 1)
-        r0 = _load_float4_coherent(nodes_ptr, node * 4 + 2)
-        r1 = _load_float4_coherent(nodes_ptr, node * 4 + 3)
+        l0 = _node_half_coherent(nodes, 2 * node, 0)
+        l1 = _node_half_coherent(nodes, 2 * node, 1)
+        r0 = _node_half_coherent(nodes, 2 * node + 1, 0)
+        r1 = _node_half_coherent(nodes, 2 * node + 1, 1)
         record = ImplicitBvhNode()
         record.lower = wp.min(wp.vec3(l0[0], l0[1], l0[2]), wp.vec3(r0[0], r0[1], r0[2]))
         record.max_span = wp.max(l0[3], r0[3])
@@ -510,7 +512,6 @@ def _refit(
     leaf_base: int,
     deep_start: int,
     nodes: wp.array[ImplicitBvhNode],
-    nodes_ptr: wp.uint64,
     node_ints: wp.array[wp.int32],
 ):
     """Write the leaves and update all internal nodes in one launch.
@@ -551,16 +552,14 @@ def _refit(
             if (lane & ((m << 1) - 1)) == 0:
                 nodes[node] = record
         if lane == 0:
-            _climb(nodes, nodes_ptr, node_ints, node)
+            _climb(nodes, node_ints, node)
     elif active:
-        _climb(nodes, nodes_ptr, node_ints, node)
+        _climb(nodes, node_ints, node)
 
 
 @wp.kernel(enable_backward=False)
-def _update_internal(
-    leaf_base: int, nodes: wp.array[ImplicitBvhNode], nodes_ptr: wp.uint64, node_ints: wp.array[wp.int32]
-):
-    _climb(nodes, nodes_ptr, node_ints, leaf_base + wp.tid())
+def _update_internal(leaf_base: int, nodes: wp.array[ImplicitBvhNode], node_ints: wp.array[wp.int32]):
+    _climb(nodes, node_ints, leaf_base + wp.tid())
 
 
 # ---------------------------------------------------------------------------
@@ -639,7 +638,6 @@ class ImplicitBvh:
         self.data = ImplicitBvhData()
         """Kernel-side view to pass to kernels using the tree's query functions."""
         self.data.nodes = self.nodes
-        self.data.nodes_ptr = self.nodes.ptr
         self.data.leaf_item = self.leaf_item
         self.data.leaf_base = self.leaf_base
         self.data.item_count = 0
@@ -731,7 +729,6 @@ class ImplicitBvh:
                 self.leaf_base,
                 self.deep_start,
                 self.nodes,
-                self.nodes.ptr,
                 self._node_ints,
             ],
             device=self.device,
@@ -743,7 +740,7 @@ class ImplicitBvh:
         wp.launch(
             _update_internal,
             dim=self.leaf_base,
-            inputs=[self.leaf_base, self.nodes, self.nodes.ptr, self._node_ints],
+            inputs=[self.leaf_base, self.nodes, self._node_ints],
             device=self.device,
             record_tape=False,
         )
@@ -980,8 +977,8 @@ def _node_dist_sq(tree: ImplicitBvhData, node: wp.int32, point: wp.vec3) -> wp.f
     Empty subtrees store inverted ``+-1e30`` bounds, whose squared distance
     overflows, so a strict ``< r2`` test rejects them without a sentinel check.
     """
-    a = _load_float4(tree.nodes_ptr, node * wp.int32(2))
-    b = _load_float4(tree.nodes_ptr, node * wp.int32(2) + wp.int32(1))
+    a = _node_half(tree.nodes, node, wp.int32(0))
+    b = _node_half(tree.nodes, node, wp.int32(1))
     dx = wp.max(wp.max(a[0] - point[0], point[0] - b[0]), wp.float32(0.0))
     dy = wp.max(wp.max(a[1] - point[1], point[1] - b[1]), wp.float32(0.0))
     dz = wp.max(wp.max(a[2] - point[2], point[2] - b[2]), wp.float32(0.0))
