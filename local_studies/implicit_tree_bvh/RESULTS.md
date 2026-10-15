@@ -62,6 +62,13 @@ sets, 3-4% faster than before the tree was factored out.
   PTX that Warp 1.17 compiled from the same source into Warp 1.18 restores the old speed (box rays
   0.541 -> 0.340 ms at 10k), so the cause is NVRTC 13.4 code generation. The scoreboard above is on
   1.18.
+* Node loads: kernels read nodes through typed `func_native` helpers (two 16-byte `__ldg` loads
+  from the `wp.array`, no raw pointer in `ImplicitBvhData`). A plain `wp.array` element read of a
+  vec4/struct is split into 4-byte loads (Warp's vector types are 4-byte aligned) plus a
+  negative-index wrap; the broad phase used such reads and got 7-13% faster with the helper.
+  Plain (non-`.nc`) loads win dense box rays by up to 15% on NVRTC 13.4 but lose pairs and
+  triangle rays by 6-13%. The NVRTC 13.4 gap is unchanged by any load variant (box rays
+  1.14-1.41x), so it is in the traversal code generation, not the loads.
 
 ## Verdict
 
