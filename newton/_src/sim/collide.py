@@ -30,6 +30,7 @@ from ..geometry.differentiable_contacts import launch_differentiable_contact_aug
 from ..geometry.flags import MeshProperties, ShapeFlags
 from ..geometry.kernels import create_soft_contacts
 from ..geometry.narrow_phase import NarrowPhase
+from ..geometry.sdf_cached_sampling import SDFCachedSampling
 from ..geometry.sdf_hydroelastic import HydroelasticSDF
 from ..geometry.soft_contacts_heightfield import _HEIGHTFIELD_CELLS_PER_TASK, launch_soft_heightfield_contacts
 from ..geometry.soft_contacts_mesh import MeshContactData, launch_soft_mesh_contacts
@@ -1401,6 +1402,8 @@ class CollisionPipeline:
         | None = None,
         narrow_phase: NarrowPhase | None = None,
         sdf_hydroelastic_config: HydroelasticSDF.Config | None = None,
+        sdf_contact_method: Literal["edge", "cached_sampling"] = "edge",
+        sdf_cached_sampling_config: SDFCachedSampling.Config | None = None,
         shape_pairs_max: int | None = None,
         deterministic: bool = False,
         _deterministic_world_major: bool = False,
@@ -1491,6 +1494,15 @@ class CollisionPipeline:
                 compatibility.
             sdf_hydroelastic_config: Configuration for hydroelastic collision
                 handling. Defaults to None.
+            sdf_contact_method: Contact method for non-hydroelastic shape pairs
+                on the SDF path. ``"edge"`` (default) samples each shape's edges
+                against the other's SDF. ``"cached_sampling"`` minimizes a smooth
+                intersection objective from temporally cached and curvature-sampled
+                points (:class:`~newton.geometry.SDFCachedSampling`); it applies to
+                pairs whose shapes both have a texture SDF, other pairs keep edge
+                sampling. Hydroelastic pairs are unaffected.
+            sdf_cached_sampling_config: Parameters of ``"cached_sampling"``.
+                Defaults to :class:`SDFCachedSampling.Config() <newton.geometry.SDFCachedSampling.Config>`.
             shape_pairs_max: Override for the broad-phase candidate-pair
                 buffer capacity used by the ``"nxn"`` and ``"sap"`` modes.
                 Defaults to the worst-case ``N*(N-1)/2`` per-world bound,
@@ -1654,6 +1666,14 @@ class CollisionPipeline:
         )
         self._contact_sort_shape_index_bits = contact_sort_shape_index_bits(shape_count)
         device = model.device
+        if sdf_contact_method not in ("edge", "cached_sampling"):
+            raise ValueError(f"sdf_contact_method must be 'edge' or 'cached_sampling', got {sdf_contact_method!r}")
+        if sdf_contact_method == "edge" and sdf_cached_sampling_config is not None:
+            raise ValueError("sdf_cached_sampling_config requires sdf_contact_method='cached_sampling'")
+        if sdf_contact_method == "cached_sampling" and sdf_cached_sampling_config is None:
+            sdf_cached_sampling_config = SDFCachedSampling.Config()
+        self.sdf_contact_method = sdf_contact_method
+
         using_expert_components = broad_phase_instance is not None or narrow_phase is not None
 
         # Resolve rigid contact capacity with explicit > model > estimated precedence.
@@ -1760,6 +1780,8 @@ class CollisionPipeline:
                 raise ValueError("Provide both broad_phase and narrow_phase for expert component construction")
             if sdf_hydroelastic_config is not None:
                 raise ValueError("sdf_hydroelastic_config cannot be used when narrow_phase is provided")
+            if sdf_contact_method != "edge" or sdf_cached_sampling_config is not None:
+                raise ValueError("sdf_contact_method cannot be selected when narrow_phase is provided")
             if broad_phase_filter is not None:
                 raise ValueError(
                     "broad_phase_filter is ignored when broad_phase is a pre-built instance; "
@@ -2098,6 +2120,9 @@ class CollisionPipeline:
                 speculative=self._speculative_enabled,
                 speculative_contact_velocity_filter=speculative_contact_velocity_filter,
                 contact_writer_supports_speculative=self._speculative_enabled,
+                sdf_cached_sampling_config=sdf_cached_sampling_config,
+                shape_body=model.shape_body,
+                texture_sdf_data=model._texture_sdf_data if sdf_cached_sampling_config is not None else None,
             )
             self.hydroelastic_sdf = self.narrow_phase.hydroelastic_sdf
 
@@ -2708,6 +2733,10 @@ class CollisionPipeline:
         )
         if self._contact_matcher is not None:
             self._contact_matcher.reset(world_mask)
+        # Cached SDF points are not tracked per world; any reset drops them all.
+        cached_sampling = getattr(self.narrow_phase, "sdf_cached_sampling", None)
+        if cached_sampling is not None:
+            cached_sampling.reset()
 
     @staticmethod
     def _build_excluded_pairs(model: Model) -> wp.array[wp.vec2i] | None:

@@ -61,6 +61,7 @@ from ..geometry.contact_reduction_global import (
 from ..geometry.contact_sort import ContactSorter
 from ..geometry.flags import ShapeFlags
 from ..geometry.mpr import create_solve_mpr, create_support_map_function
+from ..geometry.sdf_cached_sampling import SDFCachedSampling
 from ..geometry.sdf_contact import (
     MESH_SDF_BLOCK_DIM,
     compute_block_counts_from_weights,
@@ -2351,6 +2352,9 @@ class NarrowPhase:
         speculative: bool = False,
         contact_writer_supports_speculative: bool = False,
         speculative_contact_velocity_filter: bool = True,
+        sdf_cached_sampling_config: SDFCachedSampling.Config | None = None,
+        shape_body: wp.array[wp.int32] | None = None,
+        texture_sdf_data: wp.array[TextureSDFData] | None = None,
     ) -> None:
         """
         Initialize NarrowPhase with pre-allocated buffers.
@@ -2441,6 +2445,12 @@ class NarrowPhase:
                 Physical separation remains unchanged.
             contact_writer_supports_speculative: Whether a custom contact writer performs the selected candidate
                 admission. Required when ``speculative`` and ``contact_writer_warp_func`` are both provided.
+            sdf_cached_sampling_config: When set, shape pairs on the SDF path whose shapes both have a
+                texture SDF use :class:`~newton.geometry.SDFCachedSampling` instead of edge sampling.
+            shape_body: Body index per shape, used by cached SDF sampling to keep cached points fixed
+                on static shapes. ``None`` treats every shape as moving.
+            texture_sdf_data: Texture SDF table used to precompute curvature seeds for cached SDF
+                sampling. ``None`` disables curvature seeds.
         """
         self.max_candidate_pairs = max_candidate_pairs
         self.max_triangle_pairs = max_triangle_pairs
@@ -2517,6 +2527,23 @@ class NarrowPhase:
             writer_func = _write_contact_simple_speculative if filter_speculative else write_contact_simple
         else:
             writer_func = contact_writer_warp_func
+
+        self.sdf_cached_sampling = None
+        if sdf_cached_sampling_config is not None and has_meshes:
+            self.sdf_cached_sampling = SDFCachedSampling(
+                config=sdf_cached_sampling_config,
+                max_pairs=self.max_mesh_mesh_pairs,
+                shape_count=(
+                    self.shape_aabb_lower.shape[0]
+                    if self.external_aabb
+                    else (shape_body.shape[0] if shape_body is not None else 1 << CONTACT_SORT_MAX_SHAPE_INDEX_BITS)
+                ),
+                writer_func=writer_func,
+                texture_sdf_data=texture_sdf_data,
+                shape_body=shape_body,
+                speculative=filter_speculative,
+                device=device,
+            )
 
         # CPU kernels currently observe ``wp.block_dim() == 1`` regardless
         # of the plain ``wp.launch(..., block_dim=N)`` parameter (Warp
@@ -3388,6 +3415,32 @@ class NarrowPhase:
             if shape_edge_range is None:
                 shape_edge_range = self._empty_edge_range
 
+            mesh_mesh_pairs = self.shape_pairs_mesh_mesh
+            mesh_mesh_pair_count = self.shape_pairs_mesh_mesh_count
+            if self.sdf_cached_sampling is not None and self.max_mesh_mesh_pairs > 0:
+                # Pairs with two texture SDFs go to cached sampling; the rest keep edge sampling.
+                mesh_mesh_pairs, mesh_mesh_pair_count = self.sdf_cached_sampling.split_pairs(
+                    self.shape_pairs_mesh_mesh,
+                    self.shape_pairs_mesh_mesh_count,
+                    shape_sdf_index,
+                    texture_sdf_data,
+                    device=device,
+                )
+                self.sdf_cached_sampling.launch(
+                    shape_types=shape_types,
+                    shape_data=shape_data,
+                    shape_transform=shape_transform,
+                    shape_sdf_index=shape_sdf_index,
+                    texture_sdf_data=texture_sdf_data,
+                    shape_gap=shape_gap,
+                    shape_base_gap=shape_base_gap,
+                    shape_collision_aabb_lower=shape_collision_aabb_lower,
+                    shape_collision_aabb_upper=shape_collision_aabb_upper,
+                    max_speculative_extension=max_speculative_extension,
+                    writer_data=writer_data,
+                    device=device,
+                )
+
             if self.mesh_mesh_contacts_kernel is not None and self.max_mesh_mesh_pairs > 0:
                 mesh_mesh_contacts_kernel = (
                     self.mesh_mesh_contacts_kernel_precomputed
@@ -3397,8 +3450,8 @@ class NarrowPhase:
                 if self.reduce_contacts and self.mesh_mesh_block_offsets is not None:
                     # Mesh-mesh contacts → buffer + inline hashtable registration
                     compute_mesh_mesh_block_offsets_scan(
-                        shape_pairs_mesh_mesh=self.shape_pairs_mesh_mesh,
-                        shape_pairs_mesh_mesh_count=self.shape_pairs_mesh_mesh_count,
+                        shape_pairs_mesh_mesh=mesh_mesh_pairs,
+                        shape_pairs_mesh_mesh_count=mesh_mesh_pair_count,
                         shape_edge_range=shape_edge_range,
                         shape_heightfield_index=shape_heightfield_index,
                         heightfield_data=heightfield_data,
@@ -3430,8 +3483,8 @@ class NarrowPhase:
                             shape_collision_aabb_lower,
                             shape_collision_aabb_upper,
                             shape_voxel_resolution,
-                            self.shape_pairs_mesh_mesh,
-                            self.shape_pairs_mesh_mesh_count,
+                            mesh_mesh_pairs,
+                            mesh_mesh_pair_count,
                             shape_heightfield_index,
                             heightfield_data,
                             heightfield_elevations,
@@ -3468,8 +3521,8 @@ class NarrowPhase:
                             shape_collision_aabb_lower,
                             shape_collision_aabb_upper,
                             shape_voxel_resolution,
-                            self.shape_pairs_mesh_mesh,
-                            self.shape_pairs_mesh_mesh_count,
+                            mesh_mesh_pairs,
+                            mesh_mesh_pair_count,
                             shape_heightfield_index,
                             heightfield_data,
                             heightfield_elevations,
