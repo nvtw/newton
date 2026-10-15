@@ -13,17 +13,19 @@ Run the same file against both versions::
     uv run --no-project --with warp-lang==1.17.0 --with numpy python nvrtc_regression_repro.py
     uv run --no-project --with warp-lang==1.18.0 --with numpy python nvrtc_regression_repro.py
 
-Each run prints the Warp and toolkit versions and, for two variants of the node
-load (plain array reads, and ``__ldg`` float4 reads through ``wp.func_native``),
-the best time per launch and a checksum of the hit counts (identical across
+Each run prints the Warp and toolkit versions and, for three variants of the
+node load (``wp.array[wp.vec4]`` reads, which compile to four scalar loads; plain
+float4 pointer reads, ``ld.global.v4``; ``__ldg`` float4 reads,
+``ld.global.nc.v4``; the last two through ``wp.func_native``), the best time per launch and a checksum of the hit counts (identical across
 versions). Measured on an RTX PRO 6000 Blackwell (sm_120), driver 13.4:
 
 ==========================  ===================  ===================
 node loads                  Warp 1.17            Warp 1.18
                             (NVRTC 12.9)         (NVRTC 13.4)
 ==========================  ===================  ===================
-plain array loads           0.889 ms             1.034 ms (1.16x)
-``__ldg`` float4 loads      0.535 ms             0.874 ms (1.63x)
+array loads                 0.886 ms             1.032 ms (1.16x)
+plain float4 loads          0.568 ms             0.766 ms (1.35x)
+``__ldg`` float4 loads      0.535 ms             0.875 ms (1.64x)
 ==========================  ===================  ===================
 
 In the application this was reduced from (Newton's implicit BVH), loading the
@@ -85,8 +87,15 @@ return wp::vec4(v.x, v.y, v.z, v.w);
 def load_float4(ptr: wp.uint64, index: wp.int32) -> wp.vec4: ...
 
 
-def make_kernel(use_ldg: bool):
-    """Build the traversal kernel; node loads use ``__ldg`` (func_native) or plain array reads."""
+@wp.func_native("""
+const float4 v = *(reinterpret_cast<const float4*>(ptr) + index);
+return wp::vec4(v.x, v.y, v.z, v.w);
+""")
+def load_float4_plain(ptr: wp.uint64, index: wp.int32) -> wp.vec4: ...
+
+
+def make_kernel(load: str):
+    """Build the traversal kernel with ``load`` in ``("array", "float4", "ldg")``."""
 
     @wp.func
     def node_entry(
@@ -100,9 +109,12 @@ def make_kernel(use_ldg: bool):
         """Ray entry parameter into ``node``'s box within ``max_t``, or -1."""
         a = wp.vec4()
         b = wp.vec4()
-        if wp.static(use_ldg):
+        if wp.static(load == "ldg"):
             a = load_float4(nodes_ptr, 2 * node)
             b = load_float4(nodes_ptr, 2 * node + 1)
+        elif wp.static(load == "float4"):
+            a = load_float4_plain(nodes_ptr, 2 * node)
+            b = load_float4_plain(nodes_ptr, 2 * node + 1)
         else:
             a = nodes[2 * node]
             b = nodes[2 * node + 1]
@@ -215,8 +227,8 @@ def main():
     inputs = [nodes, nodes.ptr, leaf_base, origins, directions, counts]
     toolkit = getattr(wp._src.context.runtime, "toolkit_version", None)
     print(f"warp {wp.__version__}  toolkit {toolkit}  device {device.name}")
-    for name, use_ldg in (("plain array loads", False), ("__ldg float4 loads", True)):
-        kernel = make_kernel(use_ldg)
+    for name, load in (("array loads", "array"), ("plain float4 loads", "float4"), ("__ldg float4 loads", "ldg")):
+        kernel = make_kernel(load)
         wp.launch(kernel, dim=NUM_RAYS, inputs=inputs, device=device)
         with wp.ScopedCapture(device=device) as capture:
             for _ in range(REPLAYS):
