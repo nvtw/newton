@@ -159,7 +159,6 @@ class Example:
             self.solver = newton.solvers.SolverVBD(
                 self.model,
                 iterations=5,
-                rigid_compliant_alm=True,
             )
         elif self.solver_type == "phoenx":
             # PhoenX handles its substep loop internally, so the outer
@@ -206,6 +205,11 @@ class Example:
             contact_matching = "sticky" if self.solver_type == "phoenx" else "disabled"
             self.collision_pipeline = newton.CollisionPipeline(self.model, contact_matching=contact_matching)
             self.contacts = self.collision_pipeline.contacts()
+        self.solver_observables = (
+            self.solver.observables(contacts=self.contacts, kinds={self.solver.ObservableKind.CONTACT_F})
+            if self.solver_type == "kamino"
+            else None
+        )
 
         self.viewer.set_model(self.model)
 
@@ -239,21 +243,26 @@ class Example:
                         self.contacts,
                         dt=self.collision_interval * self.sim_dt,
                     )
-                self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
+                self.solver.step(
+                    self.state_0,
+                    self.state_1,
+                    self.control,
+                    self.contacts,
+                    self.sim_dt,
+                    observables=self.solver_observables if substep == self.sim_substeps - 1 else None,
+                )
 
                 # swap states
                 self.state_0, self.state_1 = self.state_1, self.state_0
             return
 
-        # Run collision once per frame and reuse the contact set
-        # across all substeps. ``model.collide()`` is by far the most
-        # expensive op in this example (broadphase + narrowphase over
-        # 7 shapes + ground), and the contact geometry barely shifts
-        # within a single frame, so re-running it per substep is wasted
-        # work for all three solver backends.
+        # Run collision once per frame and reuse the contact set across all
+        # substeps: collision is by far the most expensive op in this example
+        # (broadphase + narrowphase over 7 shapes + ground), and the contact
+        # geometry barely shifts within a single frame.
         self.state_0.clear_forces()
         self.viewer.apply_forces(self.state_0)
-        self.model.collide(self.state_0, self.contacts)
+        self.collision_pipeline.collide(self.state_0, self.contacts)
 
         for _ in range(self.sim_substeps):
             self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
@@ -349,7 +358,6 @@ class Example:
                 [7 + i],
             )
         if self.solver_type == "kamino":
-            self.solver.update_contacts(self.contacts, self.state_0)
             if int(self.contacts.rigid_contact_count.numpy()[0]) == 0:
                 raise ValueError("Kamino did not export contacts for visualization")
 
@@ -357,9 +365,7 @@ class Example:
         self.viewer.begin_frame(self.sim_time)
         self.viewer.log_state(self.state_0)
         if self.contacts is not None:
-            if self.solver_type == "kamino" and self.viewer.show_contacts:
-                self.solver.update_contacts(self.contacts, self.state_0)
-            self.viewer.log_contacts(self.contacts, self.state_0)
+            self.viewer.log_contacts(self.contacts, self.state_1, observables=self.solver_observables)
         self.viewer.end_frame()
 
 

@@ -254,7 +254,14 @@ class SolverPhoenX(SolverBase):
     Newton :class:`Picking` works out of the box: pick force/torque is
     added to ``state.body_f``, which :meth:`step` imports into PhoenX's
     force accumulators before integrating.
+
+    Contact force observables:
+        Request :attr:`~newton.solvers.SolverBase.ObservableKind.CONTACT_F` with
+        :meth:`observables` and pass the container to :meth:`step` to receive the
+        rigid contact wrenches described in :meth:`update_contacts`.
     """
+
+    SUPPORTED_OBSERVABLES = frozenset({SolverBase.ObservableKind.CONTACT_F})
 
     def __init__(
         self,
@@ -1599,6 +1606,7 @@ class SolverPhoenX(SolverBase):
         contacts: Contacts | None,
         dt: float,
         *,
+        observables: SolverBase.Observables | None = None,
         state_is_continuation: bool = False,
         state_kinematics_valid: bool = False,
     ) -> None:
@@ -1610,6 +1618,7 @@ class SolverPhoenX(SolverBase):
             control: Joint controls, or ``None`` to use model controls.
             contacts: Active contacts, or ``None``.
             dt: Step duration [s].
+            observables: Optional solver observables allocated by :meth:`observables`.
             state_is_continuation: Whether the pose, velocity, and generalized
                 arrays in ``state_in`` are the unmodified ``state_out`` from
                 the immediately preceding PhoenX step. Reduced-coordinate
@@ -1620,8 +1629,14 @@ class SolverPhoenX(SolverBase):
                 ``state_in.body_qd`` already match its generalized state.
                 Defaults to ``False``.
         """
+        self.validate_observables(observables, contacts)
         if self.solver_scheme == "tgs" and bool(getattr(self, "reuse_partition", False)):
             raise ValueError("solver_scheme='tgs' requires contact ingestion on every outer step")
+        contact_f = (
+            observables.contact_f
+            if observables is not None and observables.is_requested(SolverBase.ObservableKind.CONTACT_F)
+            else None
+        )
         if control is None:
             # Alias Model per-DOF arrays (no clone). Matches XPBD/Featherstone.
             control = self.model.control(clone_variables=False)
@@ -1686,7 +1701,7 @@ class SolverPhoenX(SolverBase):
 
         if self.solver_scheme == "tgs":
             self.world._temporal_contact_state.record_wrenches = int(
-                contacts is not None and contacts.force is not None
+                contacts is not None and (contacts.force is not None or contact_f is not None)
             )
         self.world.step(
             dt=float(dt),
@@ -1709,6 +1724,8 @@ class SolverPhoenX(SolverBase):
         self._particle_state_imported = None
         if want_body_qdd:
             self._export_body_qdd(state_out, dt=float(dt))
+        if contact_f is not None:
+            self._write_contact_forces(contacts, contact_f)
         # Reduced coordinates are authoritative; maximal mode reconstructs them by IK.
         if self._reduced_articulation is not None:
             self._reduced_articulation.export_step(state_out)
@@ -1864,15 +1881,19 @@ class SolverPhoenX(SolverBase):
                 "contacts.force is not allocated. Call model.request_contact_attributes('force') "
                 "before creating the Contacts object."
             )
-        if self._last_dt <= 0.0 or self._shape_body is None or contacts.rigid_contact_max == 0:
-            contacts.force.zero_()
+        self._write_contact_forces(contacts, contacts.force)
+
+    def _write_contact_forces(self, contacts: Contacts | None, force: wp.array) -> None:
+        """Write the last step's contact wrenches into ``force`` (see :meth:`update_contacts`)."""
+        if contacts is None or self._last_dt <= 0.0 or self._shape_body is None or contacts.rigid_contact_max == 0:
+            force.zero_()
             return
 
         if self.solver_scheme == "tgs":
             temporal = self.world._temporal_contact_state
             if not temporal.record_wrenches:
                 raise ValueError("Request contact force before stepping so temporal impulse wrenches are recorded")
-            contacts.force.zero_()
+            force.zero_()
             wp.launch(
                 export_contact_wrenches,
                 dim=int(contacts.rigid_contact_max),
@@ -1887,7 +1908,7 @@ class SolverPhoenX(SolverBase):
                     self.world._ingest_scratch.sort_perm,
                     1.0 / self._last_dt,
                 ],
-                outputs=[contacts.force],
+                outputs=[force],
                 device=self.device,
             )
             return
@@ -1903,7 +1924,7 @@ class SolverPhoenX(SolverBase):
             sort_perm = self._sort_perm_placeholder
             sorted_shape0 = contacts.rigid_contact_shape0
             has_perm = wp.int32(0)
-        contacts.force.zero_()
+        force.zero_()
         wp.launch(
             _contact_impulse_to_force_wrapper_kernel,
             dim=int(contacts.rigid_contact_max),
@@ -1917,7 +1938,7 @@ class SolverPhoenX(SolverBase):
                 contacts.rigid_contact_shape0,
                 sorted_shape0,
             ],
-            outputs=[contacts.force],
+            outputs=[force],
             device=self.device,
         )
 

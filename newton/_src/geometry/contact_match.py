@@ -11,6 +11,8 @@ gather, avoiding separate replay history and copy passes.
 
 from __future__ import annotations
 
+import weakref
+
 import warp as wp
 
 from ..core.reset import reset_world_selected
@@ -23,6 +25,9 @@ MATCH_NOT_FOUND = wp.constant(wp.int32(-1))
 
 MATCH_BROKEN = wp.constant(wp.int32(-2))
 """Sentinel: key found but position or normal threshold exceeded."""
+
+_GENERATION_SENTINEL = wp.constant(wp.int32(-1))
+"""Impossible contact generation, equal to ``newton._src.sim.contacts.GENERATION_SENTINEL``."""
 
 
 # ------------------------------------------------------------------
@@ -120,13 +125,15 @@ def _pack_claim(dist_sq: float, key_low32: wp.int64) -> wp.int64:
 class _MatchData:
     """Bundled arrays for the contact match kernel."""
 
-    # Previous frame (sorted) — pos/normal reuse ContactSorter scratch buffers.
+    # Previous frame (sorted); all previous-frame arrays are matcher-owned.
     # ``prev_pos_world`` holds the world-space *midpoint* between shape 0's and
     # shape 1's contact points, saved by the previous frame's save kernel.
     prev_keys: wp.array[wp.int64]
     prev_pos_world: wp.array[wp.vec3]
     prev_normal: wp.array[wp.vec3]
     prev_count: wp.array[wp.int32]
+    # ``[buffer id, contact generation]`` of the previous frame.
+    prev_frame: wp.array[wp.int32]
     reset_world_mask: wp.array[wp.bool]
     shape_world: wp.array[wp.int32]
     world_count: int
@@ -158,6 +165,10 @@ class _MatchData:
 
     # Per-new candidate prev index (final value resolved in pass 2).
     match_index: wp.array[wp.int32]
+    # Id of the buffer being written, and the generation of that buffer that
+    # ``match_index`` refers to (single element).
+    buffer_id: int
+    match_generation: wp.array[wp.int32]
 
     # Thresholds and packed-key layout
     pos_threshold_sq: float
@@ -172,6 +183,12 @@ def _match_contacts_kernel(data: _MatchData):
     a packed claim on it via ``wp.atomic_min``.
     """
     tid = wp.tid()
+    if tid == 0:
+        # Previous-frame indices name rows of this buffer only if it wrote that frame.
+        if data.prev_frame[0] == data.buffer_id:
+            data.match_generation[0] = data.prev_frame[1]
+        else:
+            data.match_generation[0] = _GENERATION_SENTINEL
     n_new = data.new_count[0]
     if tid >= n_new:
         data.match_index[tid] = MATCH_NOT_FOUND
@@ -462,6 +479,8 @@ class _SaveStateData:
     src_shape1: wp.array[wp.int32]
     src_normal: wp.array[wp.vec3]
     src_count: wp.array[wp.int32]
+    src_generation: wp.array[wp.int32]
+    buffer_id: int
 
     body_q: wp.array[wp.transform]
     shape_body: wp.array[wp.int32]
@@ -475,6 +494,7 @@ class _SaveStateData:
     dst_offset1: wp.array[wp.vec2]
     save_sticky: int
     dst_count: wp.array[wp.int32]
+    dst_frame: wp.array[wp.int32]
     dst_claim: wp.array[wp.int64]
     dst_prev_was_matched: wp.array[wp.int32]
     has_report: int
@@ -504,6 +524,8 @@ def _save_sorted_state_kernel(data: _SaveStateData):
         if saved > cap:
             saved = cap
         data.dst_count[0] = saved
+        data.dst_frame[0] = data.buffer_id
+        data.dst_frame[1] = data.src_generation[0]
     if i < data.src_count[0]:
         data.dst_keys[i] = data.src_keys[i]
         data.dst_claim[i] = _CLAIM_SENTINEL
@@ -652,6 +674,10 @@ class ContactMatcher:
             # for shape_a=0, shape_b=0, sub_key=0.
             self._prev_sorted_keys = wp.full(capacity, SORT_KEY_SENTINEL, dtype=wp.int64)
             self._prev_count = wp.zeros(1, dtype=wp.int32)
+            # ``[buffer id, contact generation]`` of the saved frame; buffer id 0 is no buffer.
+            self._prev_frame = wp.zeros(2, dtype=wp.int32)
+            self._buffer_ids: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+            self._last_buffer_id = 0
 
             # Per-prev claim word for the atomic_min race that keeps the
             # new→prev mapping injective (see module docstring).  Reset
@@ -728,6 +754,7 @@ class ContactMatcher:
         """
         if world_mask is None:
             self._prev_count.zero_()
+            self._prev_frame.zero_()
             self._reset_world_mask.zero_()
             return
 
@@ -737,6 +764,18 @@ class ContactMatcher:
             inputs=[world_mask, self._reset_world_mask],
             device=self._reset_world_mask.device,
         )
+
+    def buffer_id(self, contacts: object) -> int:
+        """Return the positive id this matcher uses for a contact buffer.
+
+        Ids are never reused, so a replaced buffer cannot alias the saved frame.
+        """
+        buffer_id = self._buffer_ids.get(contacts)
+        if buffer_id is None:
+            self._last_buffer_id += 1
+            buffer_id = self._last_buffer_id
+            self._buffer_ids[contacts] = buffer_id
+        return buffer_id
 
     # ------------------------------------------------------------------
     # Public methods
@@ -757,6 +796,8 @@ class ContactMatcher:
         shape_body: wp.array[wp.int32],
         match_index_out: wp.array[wp.int32],
         *,
+        buffer_id: int,
+        match_generation_out: wp.array[wp.int32],
         canonical_to_source: wp.array[wp.int32] | None = None,
         device: Devicelike = None,
     ) -> None:
@@ -774,15 +815,20 @@ class ContactMatcher:
         Args:
             sort_keys: Current-frame int64 sort keys.
             contact_count: Single-element int array with active contact count.
-            point0: Body-frame contact points on shape 0 (current frame).
-            point1: Body-frame contact points on shape 1 (current frame).
-            shape0: Shape indices for shape 0 (current frame).
-            shape1: Shape indices for shape 1 (current frame).
-            normal: Contact normals (current frame).
+            point0: Sorted body-frame contact points on shape 0 (current frame).
+            point1: Sorted body-frame contact points on shape 1 (current frame).
+            shape0: Sorted shape indices for shape 0 (current frame).
+            shape1: Sorted shape indices for shape 1 (current frame).
+            normal: Sorted contact normals (current frame).
             body_q: Body transforms for the current frame.
             shape_body: Shape-to-body index map.
             match_index_out: Output int32 array to receive match results.
                 Written directly (no intermediate copy).
+            buffer_id: :meth:`buffer_id` of the buffer being written.
+            match_generation_out: Single-element int32 array receiving the
+                contact generation of this buffer that ``match_index_out``
+                refers to, or ``-1`` when the previous frame was saved from
+                another buffer or never saved.
             device: Device to launch on.
         """
         data = _MatchData()
@@ -790,6 +836,7 @@ class ContactMatcher:
         data.prev_pos_world = self._prev_pos_world
         data.prev_normal = self._prev_normal
         data.prev_count = self._prev_count
+        data.prev_frame = self._prev_frame
         data.reset_world_mask = self._reset_world_mask
         data.shape_world = self._shape_world
         data.world_count = self._world_count
@@ -808,6 +855,8 @@ class ContactMatcher:
         data.body_q = body_q
         data.shape_body = shape_body
         data.match_index = match_index_out
+        data.buffer_id = int(buffer_id)
+        data.match_generation = match_generation_out
         data.prev_claim = self._prev_claim
         data.pos_threshold_sq = self._pos_threshold_sq
         data.normal_dot_threshold = self._normal_dot_threshold
@@ -872,6 +921,8 @@ class ContactMatcher:
         body_q: wp.array[wp.transform],
         shape_body: wp.array[wp.int32],
         *,
+        buffer_id: int,
+        contact_generation: wp.array[wp.int32],
         sorted_offset0: wp.array[wp.vec3] | None = None,
         sorted_offset1: wp.array[wp.vec3] | None = None,
         device: Devicelike = None,
@@ -889,6 +940,8 @@ class ContactMatcher:
         data.src_shape1 = sorted_shape1
         data.src_normal = sorted_normal
         data.src_count = contact_count
+        data.src_generation = contact_generation
+        data.buffer_id = int(buffer_id)
         data.body_q = body_q
         data.shape_body = shape_body
         data.dst_keys = self._prev_sorted_keys
@@ -900,6 +953,7 @@ class ContactMatcher:
         data.dst_offset1 = self._prev_offset1 if self._sticky else self._oct_offset_dummy
         data.save_sticky = 1 if self._sticky else 0
         data.dst_count = self._prev_count
+        data.dst_frame = self._prev_frame
         data.dst_claim = self._prev_claim
         data.dst_prev_was_matched = self._prev_was_matched
         data.has_report = 1 if self._has_report else 0

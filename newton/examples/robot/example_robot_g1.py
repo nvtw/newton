@@ -157,11 +157,17 @@ class Example:
 
         self.use_mujoco_contacts = use_mujoco_contacts and solver_name == "mujoco"
         if self.use_mujoco_contacts:
-            self.contacts = newton.Contacts(self.solver.get_max_contact_count(), 0)
+            self.collision_pipeline = newton.CollisionPipeline(
+                self.model, rigid_contact_max=self.solver.get_max_contact_count(), soft_contact_max=0
+            )
+            self.contacts = self.collision_pipeline.contacts()
         else:
             contact_matching = "sticky" if solver_name == "phoenx" else "disabled"
             self.collision_pipeline = newton.CollisionPipeline(self.model, contact_matching=contact_matching)
             self.contacts = self.collision_pipeline.contacts()
+        self.solver_observables = self.solver.observables(
+            contacts=self.contacts, kinds={self.solver.ObservableKind.CONTACT_F}
+        )
 
         self.viewer.set_model(self.model)
 
@@ -183,15 +189,19 @@ class Example:
             # apply forces to the model for picking, wind, etc
             self.viewer.apply_forces(self.state_0)
 
-            self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
+            self.solver.step(
+                self.state_0,
+                self.state_1,
+                self.control,
+                self.contacts,
+                self.sim_dt,
+                observables=self.solver_observables if substep == self.sim_substeps - 1 else None,
+            )
 
             if self.sim_substeps % 2 == 1 and substep == self.sim_substeps - 1:
                 self.state_0.assign(self.state_1)
             else:
                 self.state_0, self.state_1 = self.state_1, self.state_0
-
-        if self.use_mujoco_contacts:
-            self.solver.update_contacts(self.contacts, self.state_0)
 
     def step(self):
         if self.graph:
@@ -204,7 +214,7 @@ class Example:
     def render(self):
         self.viewer.begin_frame(self.sim_time)
         self.viewer.log_state(self.state_0)
-        self.viewer.log_contacts(self.contacts, self.state_0)
+        self.viewer.log_contacts(self.contacts, self.state_0, observables=self.solver_observables)
         self.viewer.end_frame()
 
     def test_final(self):

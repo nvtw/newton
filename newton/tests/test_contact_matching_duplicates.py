@@ -48,6 +48,8 @@ def fixture(old_x, new_x, new_keys=None, permutation=None, device="cpu"):
         "body_q": array([[0, 0, 0, 0, 0, 0, 1]], wp.transform),
         "shape_body": array([-1, -1], wp.int32),
         "match_index_out": wp.zeros(n, dtype=wp.int32, device=device),
+        "buffer_id": 1,
+        "match_generation_out": wp.zeros(1, dtype=wp.int32, device=device),
         "device": device,
     }
     if permutation is not None:

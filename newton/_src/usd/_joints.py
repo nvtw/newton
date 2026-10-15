@@ -120,7 +120,11 @@ def parse_joint(
     joint_custom_attrs = usd.get_custom_attribute_values(
         joint_prim,
         builder_custom_attr_joint,
-        context={"builder": builder, "physics_scene_prim": physics_scene_prim},
+        context={
+            "builder": builder,
+            "physics_scene_prim": physics_scene_prim,
+            "legacy_springref_units": joint_properties.legacy_springref_units,
+        },
     )
     joint_params = {
         "parent": parent_id,
@@ -488,7 +492,9 @@ def parse_joint(
                     print(f"Set D6 joint {joint_index} {axis_name} position to {pos} ({'deg' if is_rot else 'm'})")
 
             if vel is not None and qd_start + dof_idx < qd_end:
-                vel_val = vel * DegreesToRadian if is_rot else vel
+                vel_val = (
+                    vel * DegreesToRadian if is_rot and not joint_properties.legacy_angular_velocity_units else vel
+                )
                 builder.joint_qd[qd_start + dof_idx] = vel_val
                 if verbose:
                     print(f"Set D6 joint {joint_index} {axis_name} velocity to {vel} ({'deg/s' if is_rot else 'm/s'})")
@@ -609,7 +615,11 @@ def parse_merged_joints(
     joint_custom_attrs = usd.get_custom_attribute_values(
         first_prim,
         joint_freq_attrs,
-        context={"builder": builder, "physics_scene_prim": physics_scene_prim},
+        context={
+            "builder": builder,
+            "physics_scene_prim": physics_scene_prim,
+            "legacy_springref_units": joint_properties.legacy_springref_units,
+        },
     )
     # Per-DOF custom attributes accumulated separately for linear / angular
     # so we can reorder to D6 DOF order (linear first, then angular).
@@ -651,7 +661,11 @@ def parse_merged_joints(
         sibling_dof_attrs = usd.get_custom_attribute_values(
             jp_prim,
             dof_freq_attrs,
-            context={"builder": builder, "physics_scene_prim": physics_scene_prim},
+            context={
+                "builder": builder,
+                "physics_scene_prim": physics_scene_prim,
+                "legacy_springref_units": joint_properties.legacy_springref_units,
+            },
         )
         _shift_joint_limits_for_reference(dof, sibling_dof_attrs)
         if _should_write_solreflimit_mode():

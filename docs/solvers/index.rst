@@ -206,7 +206,7 @@ The maximal-coordinate solvers (:class:`~newton.solvers.SolverSemiImplicit`,
 :class:`~newton.solvers.SolverXPBD`, and :class:`~newton.solvers.SolverKamino`)
 enforce joints as pairwise body constraints but do not use the articulation kinematic-tree structure.
 :class:`~newton.solvers.SolverVBD` supports a subset of joint types through maximal-coordinate
-constraints, with opt-in unified compliant ALM and a deprecated legacy AVBD path.
+constraints, with unified compliant ALM by default and a deprecated legacy AVBD path.
 :class:`~newton.solvers.SolverStyle3D` and :class:`~newton.solvers.SolverImplicitMPM` do not support joints.
 
 **Joint types**
@@ -436,6 +436,14 @@ constraints, with opt-in unified compliant ALM and a deprecated legacy AVBD path
      - |no|
      - |yes| :sup:`5`
      - |no|
+   * - Particle-body attachments
+     - |no|
+     - |no|
+     - |no|
+     - |no|
+     - |no|
+     - |yes| :sup:`15`
+     - |no|
 
 | :sup:`3` Featherstone eliminates follower degrees of freedom from its reduced dynamics and transfers follower forces and inertia to the reference joint.
 | :sup:`4` SemiImplicit enforces joint-owned mimic relationships with penalty springs configured by ``joint_mimic_ke`` and ``joint_mimic_kd``.
@@ -449,8 +457,39 @@ constraints, with opt-in unified compliant ALM and a deprecated legacy AVBD path
 | :sup:`12` PhoenX joint friction and authored limit gains are currently limited to axial revolute/prismatic rows.
 | :sup:`13` PhoenX supports axial revolute/prismatic limits, maximal DISTANCE bounds, and angular limits on supported D6 reductions; finite Cartesian linear limits are unsupported.
 | :sup:`14` PhoenX supports axial velocity limits on revolute and prismatic joints.
+| :sup:`15` See :ref:`Particle-body attachments` for authoring and semantics. Attachments spanning two
+  solvers are coupled by :class:`~newton.solvers.experimental.coupled.SolverCoupledADMM` instead.
 
+.. _Particle-body attachments:
 
+Particle-Body Attachments
+-------------------------
+
+A particle-body attachment ties one cloth or solid particle to a point in a
+rigid body's local frame. Author attachments with
+:meth:`newton.ModelBuilder.add_attachment_particle_body`. They are stored on the
+:class:`~newton.Model` and do not require a coupled solver.
+
+:class:`~newton.solvers.SolverVBD` applies an attachment whenever it integrates
+both endpoints. The attachment is compliant rather than rigid: it contributes a
+quadratic penalty with ``stiffness`` [N/m] and ``damping`` [N·s/m], so a heavily
+loaded attachment keeps a small offset instead of holding the particle exactly.
+The constraint is translational, similar to the positional part of a ball joint;
+a single particle has no orientation, so there is no angular counterpart. Forces
+are equal and opposite, including the torque about the body's center of mass, and
+the path is independent of contact, so it stays active without penetration.
+
+Both endpoints must be integrated by the same solver, so
+:class:`~newton.solvers.SolverVBD` rejects attachments when it is constructed
+with ``integrate_with_external_rigid_solver=True``.
+
+When the endpoints belong to two different solvers in a coupled simulation,
+:class:`~newton.solvers.experimental.coupled.SolverCoupledADMM` turns the same
+model rows into cross-solver interface constraints; see :ref:`ADMM coupling`.
+The two cases are mutually exclusive, so no attachment is applied twice, and a
+row whose body or particle is owned by no solver applies no force at all. The
+coupler also warns when both endpoints belong to one entry whose solver does not
+support attachments.
 
 .. _Differentiability:
 
