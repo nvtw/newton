@@ -1,0 +1,120 @@
+Warp 1.17.0 initialized:
+   CUDA Toolkit 12.9, Driver 13.4
+   Devices:
+     "cpu"      : "x86_64"
+     "cuda:0"   : "NVIDIA RTX PRO 6000 Blackwell Workstation Edition" (95 GiB, sm_120, mempool enabled)
+   Kernel cache:
+     /home/twidmer/.cache/warp/1.17.0
+Module newton._src.geometry.inertia e7876e6 load on device 'cuda:0' took 0.67 ms  (cached)
+Module newton._src.geometry.sdf_texture 9746f33 load on device 'cuda:0' took 1.12 ms  (cached)
+Module validate_and_correct_inertia_kernel_1ff2ac62 1ff2ac6 load on device 'cuda:0' took 0.25 ms  (cached)
+Module newton._src.geometry.bvh 58a3a49 load on device 'cuda:0' took 0.30 ms  (cached)
+Module newton._src.solvers.phoenx.adapter_kernels 9ab23bd load on device 'cuda:0' took 0.52 ms  (cached)
+Module create_eval_articulation_fk_tile__locals__eval_articulation_fk_tile_b34ba77f ef8e4d4 load on device 'cuda:0' took 0.39 ms  (cached)
+Module newton._src.sim.collide ce3f6ea load on device 'cuda:0' took 0.47 ms  (cached)
+Module nxn_broadphase_explicit_keep_all_filter_EmptyFilterData 6b932c4 load on device 'cuda:0' took 0.25 ms  (cached)
+Module narrow_phase_primitive_write_contact_False_False_False 6b2fd5c load on device 'cuda:0' took 0.32 ms  (cached)
+Module newton._src.geometry.narrow_phase 2220085 load on device 'cuda:0' took 1.77 ms  (cached)
+Module newton._src.geometry.contact_reduction_global 1be84be load on device 'cuda:0' took 0.37 ms  (cached)
+Module mesh_triangle_contacts_to_reducer_kernel_84141a15 415b78c load on device 'cuda:0' took 1.40 ms  (cached)
+Module newton._src.geometry.contact_reduction_global d793e9a load on device 'cuda:0' took 0.30 ms  (cached)
+Module newton._src.geometry.sdf_contact da89deb load on device 'cuda:0' took 0.20 ms  (cached)
+Module sdf_contact_write_contact_to_reducer_False_True_False_True_True_True_True b677ad5 load on device 'cuda:0' took 0.30 ms  (cached)
+Module export_reduced_contacts_write_contact 69a2645 load on device 'cuda:0' took 0.27 ms  (cached)
+Module newton._src.geometry.contact_sort 623915e load on device 'cuda:0' took 0.27 ms  (cached)
+Module newton._src.geometry.contact_match 49cd63f load on device 'cuda:0' took 0.29 ms  (cached)
+Module newton._src.solvers.phoenx.simulation e566ac5 load on device 'cuda:0' took 0.18 ms  (cached)
+Module newton._src.solvers.phoenx.constraints.contact_container a9e7b42 load on device 'cuda:0' took 0.23 ms  (cached)
+Module newton._src.solvers.phoenx.constraints.contact_ingest 052a9b1 load on device 'cuda:0' took 0.58 ms  (cached)
+Module _constraints_to_elements_kernel_7da18d32 7da18d3 load on device 'cuda:0' took 0.27 ms  (cached)
+Module newton._src.solvers.phoenx.graph_coloring.graph_coloring_common e2d0b68 load on device 'cuda:0' took 0.91 ms  (cached)
+Module newton._src.solvers.phoenx.graph_coloring.warm_start 7816280 load on device 'cuda:0' took 0.30 ms  (cached)
+Module newton._src.solvers.phoenx.graph_coloring.graph_coloring_incremental 3e6df72 load on device 'cuda:0' took 0.27 ms  (cached)
+Module newton._src.solvers.phoenx.graph_coloring.graph_coloring_common 175b1f4 load on device 'cuda:0' took 0.54 ms  (cached)
+Module newton._src.solvers.phoenx.simulation_kernels 8debd79 load on device 'cuda:0' took 0.49 ms  (cached)
+Module _make_singleworld_fused_kernel__locals__kernel_d17a6f4c d17a6f4 load on device 'cuda:0' took 0.34 ms  (cached)
+Module phoenx_singleworld_prepare_a4da4866 caac84b load on device 'cuda:0' took 0.32 ms  (cached)
+Module _make_singleworld_fused_kernel__locals__kernel_363f8b60 363f8b6 load on device 'cuda:0' took 0.34 ms  (cached)
+Module phoenx_singleworld_iterate_272ba753 1b9c937 load on device 'cuda:0' took 0.37 ms  (cached)
+Module newton._src.solvers.phoenx.constraints.constraint_contact_cloth cfc87ca load on device 'cuda:0' took 0.28 ms  (cached)
+Module _make_singleworld_fused_kernel__locals__kernel_0b7a4cd5 0b7a4cd load on device 'cuda:0' took 0.32 ms  (cached)
+Module phoenx_singleworld_relax_3bb99cc1 1f73a7d load on device 'cuda:0' took 0.39 ms  (cached)
+Module newton._src.sim.articulation 50e32ce load on device 'cuda:0' took 2.88 ms  (cached)
+Module sdf_contact_write_contact_to_reducer_False_True_False_True_True_True_False 9f9935b load on device 'cuda:0' took 0.43 ms  (cached)
+Module newton.examples.phoenx.tune_phoenx 55c2030 load on device 'cuda:0' took 0.23 ms  (cached)
+make_box_pyramid         edge             fin=True  fps=   442.1 collide/frame=  0.135ms contacts=  376.9 pen=  0.52mm joint=  0.00mm/ 0.00deg drift_m=18.92mm speed_m_s=0.0468  trace 
+Module newton._src.geometry.sdf_cached_sampling 875bad9 load on device 'cuda:0' took 0.36 ms  (cached)
+Module sdf_cached_sampling_4_1_50_0_write_contact 602b14d load on device 'cuda:0' took 0.56 ms  (cached)
+Module sdf_cached_sampling_4_1_50_0_write_contact f54bfce load on device 'cuda:0' took 0.58 ms  (cached)
+make_box_pyramid         cached_sampling  fin=True  fps=   459.6 collide/frame=  0.199ms contacts=  204.0 pen=  0.45mm joint=  0.00mm/ 0.00deg drift_m=0.22mm speed_m_s=0.00179  trace 
+make_box_tower           edge             fin=True  fps=   790.5 collide/frame=  0.092ms contacts=   79.5 pen=  0.45mm joint=  0.00mm/ 0.00deg drift_m=14.08mm speed_m_s=0.142  trace 
+make_box_tower           cached_sampling  fin=True  fps=   817.2 collide/frame=  0.157ms contacts=   40.0 pen=  0.85mm joint=  0.00mm/ 0.00deg drift_m=10.88mm speed_m_s=0.0674  trace 
+make_gear_stack          edge             fin=True  fps=   267.8 collide/frame=  0.105ms contacts=  344.6 pen=  0.45mm joint=  0.00mm/ 0.00deg drift_m=18.00mm speed_m_s=0.0611  trace 
+make_gear_stack          cached_sampling  fin=True  fps=   826.6 collide/frame=  0.148ms contacts=   24.0 pen=  1.47mm joint=  0.00mm/ 0.00deg drift_m=7.08mm speed_m_s=0.0136  trace 
+make_cube_drops          edge             fin=True  fps=   971.3 collide/frame=  0.119ms contacts=   71.8 pen=  0.45mm joint=  0.00mm/ 0.00deg  kinetic_energy_j=0.0001183 trace kinetic_energy_j:[1.3e-05,2.0e-05,6.9e-05,1.6e-04,1.3e-04,6.2e-05,5.2e-04,2.4e-06,2.9e-04,3.0e-04]
+make_cube_drops          cached_sampling  fin=True  fps=   943.3 collide/frame=  0.190ms contacts=   64.0 pen=  2.50mm joint=  0.00mm/ 0.00deg  kinetic_energy_j=5.443e-11 trace kinetic_energy_j:[7.1e-02,7.4e-11,5.7e-11,5.7e-11,6.3e-11,5.8e-11,5.2e-11,5.2e-11,5.4e-11,5.4e-11]
+Module sdf_contact_write_contact_to_reducer_False_True_False_True_True_False_True d90bbb5 load on device 'cuda:0' took 0.45 ms  (cached)
+Module sdf_contact_write_contact_to_reducer_False_True_False_True_True_False_False ad585e0 load on device 'cuda:0' took 0.40 ms  (cached)
+make_bunny_drops         edge             fin=True  fps=   706.3 collide/frame=  0.143ms contacts=  246.9 pen=  0.45mm joint=  0.00mm/ 0.00deg  kinetic_energy_j=0.002245 trace kinetic_energy_j:[2.6e+00,2.2e-01,4.8e-02,4.5e-03,2.0e-03,1.7e-03,2.0e-03,1.7e-03,1.3e-03,4.9e-03]
+make_bunny_drops         cached_sampling  fin=True  fps=   931.1 collide/frame=  0.209ms contacts=   63.5 pen=  3.86mm joint=  0.00mm/ 0.00deg  kinetic_energy_j=0.02572 trace kinetic_energy_j:[2.5e+00,8.1e-01,2.4e-01,5.8e-02,1.9e-02,1.1e-02,4.8e-02,1.1e-02,5.6e-02,4.7e-02]
+make_bunny_pile          edge             fin=True  fps=   315.1 collide/frame=  0.193ms contacts=  767.5 pen=  5.17mm joint=  0.00mm/ 0.00deg  kinetic_energy_j=0.004095 trace kinetic_energy_j:[2.4e+01,1.6e+00,2.0e-01,4.5e-02,3.2e-02,2.6e-03,4.0e-03,1.6e-03,2.5e-03,2.8e-03]
+make_bunny_pile          cached_sampling  fin=True  fps=   660.7 collide/frame=  0.261ms contacts=  170.8 pen= 14.09mm joint=  0.00mm/ 0.00deg  kinetic_energy_j=0.005408 trace kinetic_energy_j:[2.1e+01,2.2e-01,1.8e-02,1.6e-02,3.6e-02,1.5e-02,2.9e-02,1.6e-08,2.3e-10,4.5e-10]
+Module newton._src.solvers.phoenx.helpers.scan_and_sort 866fe00 load on device 'cuda:0' took 0.40 ms  (cached)
+make_gear_stacks_large   edge             fin=True  fps=    86.5 collide/frame=  0.243ms contacts=33509.0 pen=  7.57mm joint=  0.00mm/ 0.00deg drift_m=472.97mm speed_m_s=0.942  trace 
+make_gear_stacks_large   cached_sampling  fin=True  fps=   322.6 collide/frame=  0.402ms contacts= 2400.0 pen=  3.93mm joint=  0.00mm/ 0.00deg drift_m=6.32mm speed_m_s=0.106  trace 
+make_bunny_pile_large    edge             fin=True  fps=    78.2 collide/frame=  1.105ms contacts=15779.2 pen= 44.45mm joint=  0.00mm/ 0.00deg  kinetic_energy_j=3.536e+05 trace kinetic_energy_j:[2.9e+03,2.3e+03,1.6e+04,4.5e+04,8.9e+04,1.5e+05,2.2e+05,3.1e+05,4.2e+05,5.4e+05]
+make_bunny_pile_large    cached_sampling  fin=True  fps=   270.6 collide/frame=  0.374ms contacts= 3060.9 pen= 50.75mm joint=  0.00mm/ 0.00deg  kinetic_energy_j=3.524e+05 trace kinetic_energy_j:[3.4e+03,2.4e+03,1.7e+04,4.6e+04,9.0e+04,1.5e+05,2.2e+05,3.1e+05,4.2e+05,5.4e+05]
+Module joint_constraint_initialize_kernel_cde40902 cde4090 load on device 'cuda:0' took 0.29 ms  (cached)
+Module newton.examples.phoenx.example_phoenx_analog_digital_clock e96e77c load on device 'cuda:0' took 0.29 ms  (cached)
+Module narrow_phase_primitive_write_contact_geometric_False_False_False 0d37069 load on device 'cuda:0' took 0.36 ms  (cached)
+Module narrow_phase_gjk_mpr_True_True_write_contact_geometric_support_map_lean_post_process_minkowski_only 7fd67d5 load on device 'cuda:0' took 0.68 ms  (cached)
+Module narrow_phase_mesh_plane_write_contact_to_reducer_True 5829c5d load on device 'cuda:0' took 0.25 ms  (cached)
+Module sdf_contact_write_contact_to_reducer_False_True_False_True_False_False_True 33759cf load on device 'cuda:0' took 0.51 ms  (cached)
+Module export_reduced_contacts_write_contact_geometric 10ad5e0 load on device 'cuda:0' took 0.27 ms  (cached)
+Module newton._src.solvers.phoenx.constraints.contact_chunks 71dd467 load on device 'cuda:0' took 0.29 ms  (cached)
+Module newton._src.solvers.phoenx.mass_splitting.color_groups 5ed0a97 load on device 'cuda:0' took 0.25 ms  (cached)
+Module newton._src.solvers.phoenx.mass_splitting.interaction_graph 9713f3f load on device 'cuda:0' took 0.26 ms  (cached)
+Module newton._src.solvers.phoenx.mass_splitting.slot_cache 2f7ae80 load on device 'cuda:0' took 0.28 ms  (cached)
+Module newton._src.solvers.phoenx.articulations.direct_equality 433f04b load on device 'cuda:0' took 0.50 ms  (cached)
+Module newton._src.solvers.phoenx.mass_splitting.kernels fddd73a load on device 'cuda:0' took 0.29 ms  (cached)
+Module newton._src.solvers.phoenx.constraints.bilateral_joint d4e4b0c load on device 'cuda:0' took 0.33 ms  (cached)
+Module _get_parallel_contact_prepare_kernel__locals__kernel_eb64c438 eb64c43 load on device 'cuda:0' took 0.32 ms  (cached)
+Module get_sweep_kernel__locals__sweep_12a70d3b 0ddc3c0 load on device 'cuda:0' took 0.44 ms  (cached)
+Module newton._src.solvers.phoenx.mass_splitting.kernels bc3a604 load on device 'cuda:0' took 0.29 ms  (cached)
+Module get_sweep_kernel__locals__sweep_c9e8e3cd c9e8e3c load on device 'cuda:0' took 0.41 ms  (cached)
+Module get_sweep_kernel__locals__sweep_f0a61e5e f0a61e5 load on device 'cuda:0' took 0.38 ms  (cached)
+Module get_sweep_kernel__locals__sweep_44e368bb 44e368b load on device 'cuda:0' took 0.32 ms  (cached)
+Module get_sweep_kernel__locals__sweep_b5b1ff05 b5b1ff0 load on device 'cuda:0' took 0.37 ms  (cached)
+Module narrow_phase_gjk_mpr_True_False_write_contact_support_map_lean_post_process_minkowski_only 89028ac load on device 'cuda:0' took 0.64 ms  (cached)
+Module sdf_contact_write_contact_to_reducer_False_True_False_True_False_False_False 3809dab load on device 'cuda:0' took 0.47 ms  (cached)
+make_analog_clock_scene  edge             fin=True  fps=    98.5 collide/frame=  0.413ms contacts=  314.8 pen=  0.05mm joint=  0.64mm/ 0.04deg   trace 
+Module sdf_cached_sampling_4_1_50_0_write_contact_geometric 602b14d load on device 'cuda:0' took 0.55 ms  (cached)
+Module sdf_cached_sampling_4_1_50_0_write_contact_geometric 2bc6b2f load on device 'cuda:0' took 0.56 ms  (cached)
+make_analog_clock_scene  cached_sampling  fin=True  fps=   105.3 collide/frame=  0.591ms contacts=  173.2 pen=  2.30mm joint=  7.42mm/ 0.35deg   trace 
+Module newton.examples.phoenx.example_phoenx_tourbillon_clock e96e77c load on device 'cuda:0' took 0.30 ms  (cached)
+Module newton._src.solvers.phoenx.articulations.fixed_pattern_llt_queue 8494b61 load on device 'cuda:0' took 77.72 ms  (cached)
+Module newton._src.solvers.phoenx.articulations.fixed_pattern_llt_queue 8702bfa load on device 'cuda:0' took 97.11 ms  (cached)
+Module get_sweep_kernel__locals__sweep_e4417867 d7a9eef load on device 'cuda:0' took 0.51 ms  (cached)
+Module get_sweep_kernel__locals__sweep_142be071 0e3be4d load on device 'cuda:0' took 0.41 ms  (cached)
+Module get_sweep_kernel__locals__sweep_5e0511a1 a1b0e77 load on device 'cuda:0' took 0.43 ms  (cached)
+Module get_sweep_kernel__locals__sweep_613a151e c8a31a9 load on device 'cuda:0' took 0.41 ms  (cached)
+make_tourbillon_scene    edge             fin=True  fps=    95.6 collide/frame=  1.123ms contacts=  655.8 pen=  1.36mm joint=  0.01mm/ 0.00deg  drive_abs_speed_rad_s=0.1086 trace drive_abs_speed_rad_s:[4.6e-03,2.1e-04,5.3e-04,1.1e-04,4.3e-02,1.2e-01,2.0e-03,9.3e-03,5.6e-02,1.0e-02]
+make_tourbillon_scene    cached_sampling  fin=True  fps=   106.1 collide/frame=  1.257ms contacts=   94.2 pen=  1.34mm joint=  0.01mm/ 0.01deg  drive_abs_speed_rad_s=0.01754 trace drive_abs_speed_rad_s:[3.3e-01,5.4e-03,5.4e-01,3.0e-02,3.6e-05,1.2e-04,1.0e-02,9.0e-02,4.9e-02,7.4e-04]
+Module newton.examples.phoenx.example_phoenx_bike_transmission 0c936ce load on device 'cuda:0' took 0.30 ms  (cached)
+Module narrow_phase_primitive_write_contact_speculative_True_False_False 6b68cae load on device 'cuda:0' took 0.38 ms  (cached)
+Module sdf_contact_write_contact_to_reducer_False_True_True_True_True_True_True cd90ff7 load on device 'cuda:0' took 0.44 ms  (cached)
+Module export_reduced_contacts_write_contact_speculative c03e11a load on device 'cuda:0' took 0.33 ms  (cached)
+Module newton._src.solvers.phoenx.articulations.fixed_pattern_pcr fba74da load on device 'cuda:0' took 71.75 ms  (cached)
+Module _make_subgroup_factor_kernel__locals__factor_subgroup_b075dc73 5d2fef8 load on device 'cuda:0' took 0.36 ms  (cached)
+Module newton._src.solvers.phoenx.articulations.fixed_pattern_llt c225286 load on device 'cuda:0' took 96.04 ms  (cached)
+Module newton._src.solvers.phoenx.articulations.fixed_pattern_pcr bda3a04 load on device 'cuda:0' took 74.52 ms  (cached)
+Module _make_subgroup_solve_kernel__locals__solve_8ed02a72 e18c141 load on device 'cuda:0' took 0.33 ms  (cached)
+Module newton._src.solvers.phoenx.articulations.fixed_pattern_llt 3936d59 load on device 'cuda:0' took 101.64 ms  (cached)
+make_bike_scene          edge             fin=True  fps=    84.6 collide/frame=  0.531ms contacts= 2657.9 pen=  1.00mm joint=  0.09mm/ 0.01deg   trace 
+Module sdf_cached_sampling_4_1_50_1_write_contact_speculative 602b14d load on device 'cuda:0' took 1946.67 ms  (compiled)
+Module sdf_cached_sampling_4_1_50_1_write_contact_speculative 15a3fe7 load on device 'cuda:0' took 1821.54 ms  (compiled)
+make_bike_scene          cached_sampling  fin=True  fps=    86.9 collide/frame=  1.034ms contacts=  520.7 pen=  0.84mm joint=  0.05mm/ 0.00deg   trace 
+make_caterpillar_scene   edge             fin=True  fps=    78.1 collide/frame=  0.684ms contacts= 4246.1 pen= 49.72mm joint=  0.02mm/ 0.00deg   trace 
+make_caterpillar_scene   cached_sampling  fin=True  fps=    83.1 collide/frame=  0.669ms contacts= 1810.8 pen= 47.30mm joint=  0.03mm/ 0.00deg   trace 
+make_nut_bolt            edge             fin=True  fps=   406.7 collide/frame=  0.095ms contacts=  108.5 pen=  0.00mm joint=  0.00mm/ 0.00deg  nut_z_m=0.05853 nut_spin_rad_s=-4.283 trace nut_z_m:[6.9e-02,6.8e-02,6.7e-02,6.5e-02,6.4e-02,6.2e-02,6.1e-02,5.9e-02,5.7e-02,5.5e-02] nut_spin_rad_s:[-2.4e+00,-2.8e+00,-3.5e+00,-3.8e+00,-3.3e+00,-3.6e+00,-4.5e+00,-3.6e+00,-4.8e+00,-4.1e+00]
+make_nut_bolt            cached_sampling  fin=True  fps=  2139.3 collide/frame=  0.059ms contacts=    0.0 pen=  0.00mm joint=  0.00mm/ 0.00deg  nut_z_m=-289.2 nut_spin_rad_s=45.09 trace nut_z_m:[-3.9e-01,-8.2e+00,-2.6e+01,-5.3e+01,-9.0e+01,-1.4e+02,-1.9e+02,-2.6e+02,-3.4e+02,-4.2e+02] nut_spin_rad_s:[5.2e+01,5.2e+01,5.2e+01,5.1e+01,5.0e+01,4.8e+01,4.7e+01,4.5e+01,4.4e+01,4.3e+01]
