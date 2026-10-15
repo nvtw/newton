@@ -200,11 +200,25 @@ def _node_load(tree: ImplicitBvhData, node: wp.int32) -> tuple[wp.vec3, wp.vec3,
 @wp.func
 def implicit_bvh_next_subtree(node: wp.int32) -> wp.int32:
     """Return the depth-first successor of ``node``'s subtree (``0`` when done)."""
-    while node > wp.int32(1):
-        if (node & wp.int32(1)) == wp.int32(0):
-            return node + wp.int32(1)
-        node = node >> wp.int32(1)
-    return wp.int32(0)
+    # Climb past the trailing right children (trailing one bits) in one step.
+    lowest_zero = wp.uint32(node + wp.int32(1)) & ~wp.uint32(node)
+    parent = node >> (wp.int32(31) - _clz(lowest_zero))
+    return wp.where(parent > wp.int32(0), parent + wp.int32(1), wp.int32(0))
+
+
+@wp.func
+def _next_pending(node: wp.int32, level: wp.int32, trail: wp.uint32) -> tuple[wp.int32, wp.int32, wp.uint32]:
+    """Jump from a finished subtree to the deepest pending sibling of a trail walk.
+
+    A walk at ``level`` below the root records in bit ``l`` of ``trail`` whether
+    the sibling at level ``l`` is done; returns ``(node, level, trail)`` of the
+    deepest pending sibling, now marked done, or ``level == -1`` when none is left.
+    """
+    pending = ~trail & ((wp.uint32(2) << wp.uint32(level)) - wp.uint32(2))
+    if pending == wp.uint32(0):
+        return node, wp.int32(-1), trail
+    target = wp.int32(31) - _clz(pending)
+    return (node >> (level - target)) ^ wp.int32(1), target, trail | (wp.uint32(1) << wp.uint32(target))
 
 
 @wp.func
@@ -232,12 +246,6 @@ def _ray_box_entry(origin: wp.vec3, inv_dir: wp.vec3, lower: wp.vec3, upper: wp.
     if t_enter <= t_exit:
         return t_enter
     return wp.float32(-1.0)
-
-
-@wp.func
-def _point_box_dist_sq(p: wp.vec3, lower: wp.vec3, upper: wp.vec3) -> wp.float32:
-    d = wp.max(wp.max(lower - p, p - upper), wp.vec3(0.0))
-    return wp.dot(d, d)
 
 
 # ---------------------------------------------------------------------------
@@ -828,7 +836,8 @@ def _make_ray_traversal(leaf_func: Any, closest: bool) -> Any:
 
     Of two children the one the ray enters first is visited first; a trail with
     one bit per level records whether the other is pending, so the walk needs no
-    stack. With ``closest``, ``leaf_func`` returns a hit distance that shrinks
+    stack, and a finished subtree jumps straight to the deepest pending sibling.
+    With ``closest``, ``leaf_func`` returns a hit distance that shrinks
     ``max_t``; a pending sibling is then tested again, otherwise it is entered
     directly (a pending leaf with the entry it was tested with).
     """
@@ -886,23 +895,18 @@ def _make_ray_traversal(leaf_func: Any, closest: bool) -> Any:
                             pending_t = t_left
                     else:
                         expand = False
-            elif level == wp.int32(0):
-                level = wp.int32(-1)
             else:
-                bit = wp.uint32(1) << wp.uint32(level)
-                if (trail & bit) == wp.uint32(0):
-                    trail = trail | bit
-                    node = node ^ wp.int32(1)
-                    if max_t < start_max_t:
+                from_level = level
+                node, level, trail = _next_pending(node, level, trail)
+                if level >= wp.int32(0):
+                    # ``pending_t`` belongs to the sibling of the latest descent only.
+                    if max_t < start_max_t or (node >= tree.leaf_base and level != from_level):
                         t = _ray_node_entry(tree, node, origin, inv_dir, max_t)
                     elif node >= tree.leaf_base:
                         t = pending_t
                     else:
                         t = wp.float32(0.0)
                     expand = t >= wp.float32(0.0)
-                else:
-                    node = node >> wp.int32(1)
-                    level -= wp.int32(1)
         return best, max_t, state
 
     return traverse
@@ -971,11 +975,17 @@ def implicit_bvh_make_query_ray_foreach(visit_func: Any) -> Any:
 
 @wp.func
 def _node_dist_sq(tree: ImplicitBvhData, node: wp.int32, point: wp.vec3) -> wp.float32:
-    """Squared distance from ``point`` to ``node``'s box, or ``-1`` for an empty subtree."""
-    lower, upper, _span, last_leaf = _node_load(tree, node)
-    if last_leaf < wp.int32(0):
-        return wp.float32(-1.0)
-    return _point_box_dist_sq(point, lower, upper)
+    """Squared distance from ``point`` to ``node``'s box; ``inf`` for an empty subtree.
+
+    Empty subtrees store inverted ``+-1e30`` bounds, whose squared distance
+    overflows, so a strict ``< r2`` test rejects them without a sentinel check.
+    """
+    a = _load_float4(tree.nodes_ptr, node * wp.int32(2))
+    b = _load_float4(tree.nodes_ptr, node * wp.int32(2) + wp.int32(1))
+    dx = wp.max(wp.max(a[0] - point[0], point[0] - b[0]), wp.float32(0.0))
+    dy = wp.max(wp.max(a[1] - point[1], point[1] - b[1]), wp.float32(0.0))
+    dz = wp.max(wp.max(a[2] - point[2], point[2] - b[2]), wp.float32(0.0))
+    return dx * dx + dy * dy + dz * dz
 
 
 def implicit_bvh_make_query_point(dist_func: Any) -> Any:
@@ -985,12 +995,21 @@ def implicit_bvh_make_query_point(dist_func: Any) -> Any:
     returns the distance from ``point`` to item ``item`` (any value ``>= max_dist``
     when it is not closer). The returned function
     ``query(tree, point, max_dist, context) -> (item, dist)`` visits subtrees
-    nearest first, prunes those farther than the best distance so far, and
+    nearest first, prunes those not closer than the best distance so far, and
     returns the nearest item (``-1`` if none lies within ``max_dist``) and its
     distance.
 
     .. experimental::
     """
+
+    @wp.func
+    def leaf_distance(tree: ImplicitBvhData, node: wp.int32, point: wp.vec3, max_dist: wp.float32, context: Any):
+        dist = wp.float32(0.0)
+        if wp.static(dist_func is None):
+            dist = wp.sqrt(_node_dist_sq(tree, node, point))
+        else:
+            dist = dist_func(tree.leaf_item[node - tree.leaf_base], point, max_dist, context)
+        return dist
 
     @wp.func
     def point_closest(tree: ImplicitBvhData, point: wp.vec3, max_dist: wp.float32, context: Any):
@@ -1000,55 +1019,53 @@ def implicit_bvh_make_query_point(dist_func: Any) -> Any:
         level = wp.int32(-1)
         trail = wp.uint32(0)
         expand = bool(False)
-        if tree.item_count > wp.int32(0):
-            d = _node_dist_sq(tree, wp.int32(1), point)
-            if d >= wp.float32(0.0) and d <= r2:
-                level = wp.int32(0)
-                expand = True
+        if tree.item_count > wp.int32(0) and _node_dist_sq(tree, wp.int32(1), point) < r2:
+            level = wp.int32(0)
+            expand = True
         while level >= wp.int32(0):
             if expand:
+                expand = False
+                left = node * wp.int32(2)
                 if node >= tree.leaf_base:
-                    item = tree.leaf_item[node - tree.leaf_base]
-                    if wp.static(dist_func is None):
-                        dist = wp.sqrt(_node_dist_sq(tree, node, point))
-                    else:
-                        dist = dist_func(item, point, max_dist, context)
+                    dist = leaf_distance(tree, node, point, max_dist, context)
                     if dist < max_dist:
                         max_dist = dist
                         r2 = dist * dist
-                        best = item
-                    expand = False
+                        best = tree.leaf_item[node - tree.leaf_base]
                 else:
-                    left = node * wp.int32(2)
                     d_left = _node_dist_sq(tree, left, point)
                     d_right = _node_dist_sq(tree, left + wp.int32(1), point)
-                    in_left = d_left >= wp.float32(0.0) and d_left <= r2
-                    in_right = d_right >= wp.float32(0.0) and d_right <= r2
-                    if in_left or in_right:
+                    near = wp.where(d_right < d_left, left + wp.int32(1), left)
+                    d_near = wp.min(d_left, d_right)
+                    d_far = wp.max(d_left, d_right)
+                    if left >= tree.leaf_base:
+                        # Two leaf children: measure them here, nearer first.
+                        if d_near < r2:
+                            dist = leaf_distance(tree, near, point, max_dist, context)
+                            if dist < max_dist:
+                                max_dist = dist
+                                r2 = dist * dist
+                                best = tree.leaf_item[near - tree.leaf_base]
+                            if d_far < r2:
+                                far = near ^ wp.int32(1)
+                                dist = leaf_distance(tree, far, point, max_dist, context)
+                                if dist < max_dist:
+                                    max_dist = dist
+                                    r2 = dist * dist
+                                    best = tree.leaf_item[far - tree.leaf_base]
+                    elif d_near < r2:
                         level += wp.int32(1)
                         bit = wp.uint32(1) << wp.uint32(level)
                         trail = trail | bit
-                        if in_left and in_right:
+                        if d_far < r2:
                             trail = trail & ~bit
-                        if in_left and (not in_right or d_left <= d_right):
-                            node = left
-                        else:
-                            node = left + wp.int32(1)
-                    else:
-                        expand = False
-            elif level == wp.int32(0):
-                level = wp.int32(-1)
+                        node = near
+                        expand = True
             else:
-                bit = wp.uint32(1) << wp.uint32(level)
-                if (trail & bit) == wp.uint32(0):
-                    # The pending sibling may be out of reach after the radius shrank.
-                    trail = trail | bit
-                    node = node ^ wp.int32(1)
-                    d = _node_dist_sq(tree, node, point)
-                    expand = d >= wp.float32(0.0) and d <= r2
-                else:
-                    node = node >> wp.int32(1)
-                    level -= wp.int32(1)
+                # The pending sibling may be out of reach after the radius shrank.
+                node, level, trail = _next_pending(node, level, trail)
+                if level >= wp.int32(0):
+                    expand = _node_dist_sq(tree, node, point) < r2
         return best, max_dist
 
     return point_closest
