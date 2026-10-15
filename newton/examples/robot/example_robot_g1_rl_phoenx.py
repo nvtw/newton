@@ -214,14 +214,14 @@ class Example:
             checkpoint_config = None if self.mode == "replay" else ppo_config
             self.trainer = rl.load_ppo_checkpoint(args.resume_checkpoint, config=checkpoint_config, device=self.device)
             ppo_config = self.trainer.config
-            if self.trainer.obs_dim != self.env.obs_dim or self.trainer.action_dim != self.env.action_dim:
+            if self.trainer.obs_dim != self.env.obs_dim or self.trainer.action_dim != self.env.policy_action_dim:
                 raise ValueError("Checkpoint dimensions do not match the G1 environment")
             if self.trainer.config.mirror_loss_coeff > 0.0:
-                self.trainer.set_mirror_map(rl.g1_mirror_map_ppo())
+                self.trainer.set_mirror_map(self._mirror_map())
         elif self.mode != "sim":
             self.trainer = rl.TrainerPPO(
                 obs_dim=self.env.obs_dim,
-                action_dim=self.env.action_dim,
+                action_dim=self.env.policy_action_dim,
                 hidden_layers=args.hidden_layers,
                 config=ppo_config,
                 device=self.device,
@@ -229,7 +229,7 @@ class Example:
                 squash_actions=bool(args.squash_actions),
                 activation=str(args.activation),
                 log_std_init=float(args.log_std_init),
-                mirror_map=rl.g1_mirror_map_ppo() if ppo_config.mirror_loss_coeff > 0.0 else None,
+                mirror_map=self._mirror_map() if ppo_config.mirror_loss_coeff > 0.0 else None,
             )
 
         self._configure_command_curriculum()
@@ -242,7 +242,7 @@ class Example:
                 num_steps=self.rollout_steps,
                 num_envs=self.env.world_count,
                 obs_dim=self.env.obs_dim,
-                action_dim=self.env.action_dim,
+                action_dim=self.env.policy_action_dim,
                 device=self.device,
             )
             self.trainer.reserve_update_buffers(self.buffer)
@@ -316,8 +316,11 @@ class Example:
         abs_values = np.abs(values)
         return float(np.mean(abs_values)), float(np.max(abs_values))
 
+    def _mirror_map(self) -> rl.MirrorMapPPO:
+        return rl.g1_mirror_map_ppo(self.env.policy_action_dim, self.env.config.observation_mode)
+
     def _joint_action_diagnostics(self, raw_actions: np.ndarray | None = None) -> tuple[str, tuple[float, ...]]:
-        active_count = min(int(self.env.config.controlled_action_count), self.env.action_dim)
+        active_count = self.env.policy_action_dim
         action_slice = slice(0, active_count)
 
         current_actions = self.env.current_actions.numpy()
@@ -331,7 +334,7 @@ class Example:
         raw_clip_frac = 0.0
         raw_text = "raw_abs=na raw_clip=na"
         if raw_actions is not None:
-            raw = np.asarray(raw_actions, dtype=np.float32).reshape(-1, self.env.action_dim)[:, action_slice]
+            raw = np.asarray(raw_actions, dtype=np.float32).reshape(-1, active_count)
             raw_abs_mean, raw_abs_max = self._abs_mean_max(raw)
             raw_clip_frac = 0.0 if raw.size == 0 else float(np.mean(np.abs(raw) > 1.0))
             raw_text = f"raw_abs={raw_abs_mean:.3f}/{raw_abs_max:.3f} raw_clip={raw_clip_frac:.3f}"

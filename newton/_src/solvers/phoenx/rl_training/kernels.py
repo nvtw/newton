@@ -3123,11 +3123,15 @@ def muon_step_1d_kernel(
     lr: wp.float32,
     lr_scale: wp.array[wp.float32],
     pbt_lr_scale: wp.array[wp.float32],
+    condition: wp.array[wp.int32],
     momentum: wp.float32,
     weight_decay: wp.float32,
     max_grad_norm: wp.float32,
 ):
     i = wp.tid()
+    if condition[0] == wp.int32(0):
+        grad[i] = wp.float32(0.0)
+        return
     g = _grad_clip_scale(grad_sumsq, max_grad_norm) * grad[i]
     m = momentum * momentum_buffer[i] + g
     momentum_buffer[i] = m
@@ -3142,11 +3146,16 @@ def muon_nesterov_2d_kernel(
     grad: wp.array2d[wp.float32],
     momentum_buffer: wp.array2d[wp.float32],
     grad_sumsq: wp.array[wp.float32],
+    condition: wp.array[wp.int32],
     momentum: wp.float32,
     max_grad_norm: wp.float32,
     update: wp.array2d[wp.float32],
 ):
     i, j = wp.tid()
+    if condition[0] == wp.int32(0):
+        # Skipped (overflowed) steps keep the momentum; the parameter update is skipped too.
+        update[i, j] = wp.float32(0.0)
+        return
     g = _grad_clip_scale(grad_sumsq, max_grad_norm) * grad[i, j]
     m = momentum * momentum_buffer[i, j] + g
     momentum_buffer[i, j] = m
@@ -3435,10 +3444,14 @@ def muon_step_2d_kernel(
     lr: wp.float32,
     lr_scale: wp.array[wp.float32],
     pbt_lr_scale: wp.array[wp.float32],
+    condition: wp.array[wp.int32],
     weight_decay: wp.float32,
     scale: wp.float32,
 ):
     i, j = wp.tid()
+    if condition[0] == wp.int32(0):
+        grad[i, j] = wp.float32(0.0)
+        return
     step_lr = lr * lr_scale[0] * pbt_lr_scale[0]
     param[i, j] = param[i, j] * (wp.float32(1.0) - step_lr * weight_decay) - step_lr * scale * update[i, j]
     grad[i, j] = wp.float32(0.0)

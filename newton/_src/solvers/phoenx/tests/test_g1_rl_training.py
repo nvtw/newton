@@ -1254,6 +1254,32 @@ class TestG1PhoenXRL(unittest.TestCase):
         self.assertFalse(optimizer.matrix_transpose)
         self.assertEqual(optimizer.step_count, 1)
 
+    def test_muon_skips_step_when_condition_is_false(self) -> None:
+        """A skipped (overflowed) mixed-precision step leaves parameters and momentum unchanged."""
+        device = require_cuda_graph_capture("PhoenX Muon step-condition tests")
+        param_np = [
+            np.asarray([[0.2, -0.4], [0.7, 0.1], [-0.3, 0.5]], dtype=np.float32),
+            np.asarray([0.1, -0.2, 0.3], dtype=np.float32),
+        ]
+        params = [wp.array(value, dtype=wp.float32, device=device, requires_grad=True) for value in param_np]
+        optimizer = rl.Muon(params, lr=0.02, momentum=0.9, max_grad_norm=1.2)
+        momentum_np = [np.full_like(value, 0.25) for value in param_np]
+        for momentum, value in zip(optimizer.m, momentum_np, strict=True):
+            momentum.assign(value)
+        with wp.ScopedCapture(device=device) as capture:
+            optimizer.step()
+
+        optimizer.step_condition.fill_(0)
+        for param in params:
+            param.grad.fill_(1.0e30)
+        wp.capture_launch(capture.graph)
+
+        for param, expected in zip(params, param_np, strict=True):
+            np.testing.assert_array_equal(param.numpy(), expected)
+            np.testing.assert_array_equal(param.grad.numpy(), np.zeros_like(expected))
+        for momentum, expected in zip(optimizer.m, momentum_np, strict=True):
+            np.testing.assert_array_equal(momentum.numpy(), expected)
+
     def test_optimizer_grad_norm_matches_numpy_in_graph(self) -> None:
         device = require_cuda_graph_capture("PhoenX optimizer gradient-norm tests")
         rng = np.random.default_rng(20260724)
