@@ -16,7 +16,6 @@ import warp as wp
 
 from ...core.reset import reset_world_selected as _reset_world_selected
 from ...geometry import ParticleFlags, ShapeFlags
-from ...geometry.soft_contacts_mesh import filter_soft_mesh_contacts
 from ...sim import JointType, Model, ModelFlags, StateFlags
 from ..observables import SolverObservableFlags, SolverObservables
 from ..solver import SolverBase
@@ -2345,10 +2344,6 @@ class SolverCoupled(SolverBase, CouplingInterface):
         """
         self.validate_observables(observables, contacts)
         self._distribute_state(state_in, dt=dt)
-        if contacts is not None:
-            # Entry buffers do not carry mesh feature records. Compute force selection here
-            # and propagate it separately from geometry to full-surface entry solvers.
-            filter_soft_mesh_contacts(self.model, state_in, contacts)
         self._active_observables = observables
         try:
             self._step_coupled(state_in, state_out, control, contacts, dt)
@@ -2884,7 +2879,6 @@ class SolverCoupled(SolverBase, CouplingInterface):
             return contacts
 
         filtered = self._ensure_entry_contact_buffer(entry, contacts)
-        keep_full_surface_contacts = filtered._enable_rigid_soft_full_surface_contact
         force_contact_update = int(self._entry_contact_sources.get(entry.name) is not contacts)
         if force_contact_update:
             self._entry_contact_sources[entry.name] = contacts
@@ -3022,7 +3016,6 @@ class SolverCoupled(SolverBase, CouplingInterface):
                 inputs=[
                     self._entry_soft_contact_update[entry.name],
                     contacts.soft_contact_count,
-                    contacts.soft_contact_force_mask,
                     contacts.soft_contact_particle,
                     contacts.soft_contact_shape,
                     contacts.soft_contact_body_pos,
@@ -3031,13 +3024,12 @@ class SolverCoupled(SolverBase, CouplingInterface):
                     contacts.soft_contact_tids,
                     contacts.soft_contact_indices,
                     contacts.soft_contact_barycentric,
+                    contacts._soft_contact_mesh_features,
                     entry.view.shape_flags,
                     entry.view.particle_flags,
                     int(ShapeFlags.COLLIDE_PARTICLES),
                     int(ParticleFlags.ACTIVE),
-                    int(keep_full_surface_contacts),
                     filtered.soft_contact_count,
-                    filtered.soft_contact_force_mask,
                     filtered.soft_contact_particle,
                     filtered.soft_contact_shape,
                     filtered.soft_contact_body_pos,
@@ -3046,6 +3038,7 @@ class SolverCoupled(SolverBase, CouplingInterface):
                     filtered.soft_contact_tids,
                     filtered.soft_contact_indices,
                     filtered.soft_contact_barycentric,
+                    filtered._soft_contact_mesh_features,
                     soft_src_to_dst,
                 ],
                 device=self.model.device,
@@ -3054,6 +3047,12 @@ class SolverCoupled(SolverBase, CouplingInterface):
         return filtered
 
     def _ensure_entry_contact_buffer(self, entry: SolverEntry, contacts: Contacts) -> Contacts:
+        # A non-compacted rigid-only view can retain the parent's particle allocation.
+        has_particles = entry.particle_indices.size > 0 or entry.proxy_particle_local_indices.size > 0
+        if has_particles and not entry.solver.coupling_supports_full_surface_soft_contacts():
+            contacts._assert_particle_only_soft_contacts(
+                f"SolverCoupled entry {entry.name!r} ({type(entry.solver).__name__})"
+            )
         filtered = self._entry_contact_buffers.get(entry.name)
         if filtered is None or not self._entry_contact_buffer_matches(filtered, contacts):
             from ...sim import Contacts  # noqa: PLC0415
@@ -3069,7 +3068,6 @@ class SolverCoupled(SolverBase, CouplingInterface):
                 contact_matching=contacts.rigid_contact_match_index is not None,
                 rigid_contact_surface_velocity=contacts.rigid_contact_surface_velocity is not None,
             )
-            filtered.soft_contact_force_mask = wp.ones(contacts.soft_contact_max, dtype=bool, device=contacts.device)
             self._entry_contact_buffers[entry.name] = filtered
             self._entry_contact_sources[entry.name] = contacts
             self._entry_rigid_contact_generation[entry.name] = wp.full(
@@ -3108,9 +3106,22 @@ class SolverCoupled(SolverBase, CouplingInterface):
             )
         filtered._contact_matching_mode = contacts.contact_matching_mode
         filtered._enable_rigid_soft_full_surface_contact = bool(
-            contacts._enable_rigid_soft_full_surface_contact
-            and entry.solver.coupling_supports_full_surface_soft_contacts()
+            contacts._enable_rigid_soft_full_surface_contact and has_particles
         )
+        if filtered._enable_rigid_soft_full_surface_contact and contacts._soft_contact_mesh_features is not None:
+            if filtered._soft_contact_mesh_features is None:
+                # Entry copies only consume features; detection scratch stays in the source buffer.
+                filtered._soft_contact_mesh_features = wp.full(
+                    contacts.soft_contact_max, wp.vec3i(-1), dtype=wp.vec3i, device=contacts.device
+                )
+            # Shape IDs and deformable feature IDs retain the parent numbering.
+            # Force evaluation supplies the entry view's remapped shape_body and poses.
+            filtered._soft_contact_mesh_data = contacts._soft_contact_mesh_data
+        else:
+            filtered._soft_contact_mesh_features = None
+            filtered._soft_contact_mesh_params = None
+            filtered._soft_contact_mesh_state = None
+            filtered._soft_contact_mesh_data = None
         return filtered
 
     @staticmethod
@@ -3760,6 +3771,10 @@ def _prepare_filtered_contact_update_kernel(
         # entry lost contacts, so every filtered buffer mirrors the source flag, refreshed or cached.
         if counter_count > 2:
             dst_counters[2] = src_counters[2]
+        # Packing truncates the source count to its stored prefix. Preserve overflow
+        # provenance (including an upstream coupled copy) for the force consumer.
+        if soft_update != 0 and counter_count > 3:
+            dst_counters[3] = wp.int32(src_counters[1] > soft_contact_max or src_counters[3] != 0)
     if rigid_update != 0 and tid < rigid_contact_max:
         rigid_src_to_dst[tid] = -1
     if soft_update != 0 and tid < soft_contact_max:
@@ -3919,7 +3934,6 @@ def _copy_filtered_rigid_contact_diff_kernel(
 def _filter_soft_contacts_global_shape_ids_kernel(
     update_filter: wp.array[wp.int32],
     src_count: wp.array[wp.int32],
-    src_force_mask: wp.array[bool],
     src_particle: wp.array[int],
     src_shape: wp.array[int],
     src_body_pos: wp.array[wp.vec3],
@@ -3928,13 +3942,12 @@ def _filter_soft_contacts_global_shape_ids_kernel(
     src_tids: wp.array[int],
     src_indices: wp.array[wp.vec3i],
     src_barycentric: wp.array[wp.vec3],
+    src_mesh_features: wp.array[wp.vec3i],
     shape_flags: wp.array[wp.int32],
     particle_flags: wp.array[wp.int32],
     collide_particles_mask: int,
     active_particle_mask: int,
-    keep_full_surface_contacts: int,
     dst_count: wp.array[wp.int32],
-    dst_force_mask: wp.array[bool],
     dst_particle: wp.array[int],
     dst_shape: wp.array[int],
     dst_body_pos: wp.array[wp.vec3],
@@ -3943,6 +3956,7 @@ def _filter_soft_contacts_global_shape_ids_kernel(
     dst_tids: wp.array[int],
     dst_indices: wp.array[wp.vec3i],
     dst_barycentric: wp.array[wp.vec3],
+    dst_mesh_features: wp.array[wp.vec3i],
     src_to_dst: wp.array[wp.int32],
 ):
     if update_filter[0] == 0:
@@ -3952,15 +3966,8 @@ def _filter_soft_contacts_global_shape_ids_kernel(
     if contact_id >= src_count[0]:
         return
 
-    # Full-surface solvers consume the force mask separately from geometry.
-    # Particle-only solvers do not support this mask, so retain their filtered view.
-    if keep_full_surface_contacts == 0 and src_force_mask and not src_force_mask[contact_id]:
-        return
-
     particle = src_particle[contact_id]
     shape = src_shape[contact_id]
-    if particle < 0 and keep_full_surface_contacts == 0:
-        return
     if shape < 0 or shape >= shape_flags.shape[0]:
         return
     if (shape_flags[shape] & collide_particles_mask) == 0:
@@ -3980,7 +3987,6 @@ def _filter_soft_contacts_global_shape_ids_kernel(
 
     dst_id = wp.atomic_add(dst_count, 0, wp.int32(1))
     src_to_dst[contact_id] = dst_id
-    dst_force_mask[dst_id] = not src_force_mask or src_force_mask[contact_id]
 
     dst_particle[dst_id] = particle
     dst_shape[dst_id] = shape
@@ -3999,3 +4005,7 @@ def _filter_soft_contacts_global_shape_ids_kernel(
     # VBD even with full-surface contact off (E7).
     dst_indices[dst_id] = src_indices[contact_id]
     dst_barycentric[dst_id] = src_barycentric[contact_id]
+    if dst_mesh_features:
+        dst_mesh_features[dst_id] = wp.vec3i(-1, -1, -1)
+        if src_mesh_features:
+            dst_mesh_features[dst_id] = src_mesh_features[contact_id]

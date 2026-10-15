@@ -22,6 +22,7 @@ from newton._src.geometry.soft_contacts_sdf import (
     optimize_face_sdf,
 )
 from newton.solvers.experimental.coupled import SolverCoupled
+from newton.tests._soft_contact_test_utils import evaluate_soft_contact_force_mask
 from newton.tests.unittest_utils import (
     StdOutCapture,
     add_function_test,
@@ -196,8 +197,8 @@ def test_disconnected_mesh_contact_capacity(test, device):
     test.assertGreater(raw_count, len(centers))
     test.assertLessEqual(raw_count, contacts.soft_contact_max)
     # The feature filter keeps one contact per patch.
-    soft_contacts_mesh.filter_soft_mesh_contacts(model, state, contacts)
-    test.assertEqual(len(_force_contact_rows(contacts)), len(centers))
+    mask = evaluate_soft_contact_force_mask(model, state, contacts)
+    test.assertEqual(len(_force_contact_rows(contacts, mask)), len(centers))
     test.assertEqual(int(contacts.soft_contact_count.numpy()[0]), raw_count)
 
 
@@ -664,8 +665,8 @@ def _pinched_pad_contact_normals(device, depth, offset=(0.0, 0.0, 0.0), yaw=0.0)
     state = model.state()
     pipeline.collide(state, contacts)
     # Keep the pairs the solver applies forces to.
-    soft_contacts_mesh.filter_soft_mesh_contacts(model, state, contacts)
-    normals = contacts.soft_contact_normal.numpy()[_force_contact_rows(contacts)]
+    mask = evaluate_soft_contact_force_mask(model, state, contacts)
+    normals = contacts.soft_contact_normal.numpy()[_force_contact_rows(contacts, mask)]
     inverse = wp.quat_inverse(rotation)
     return np.array([wp.quat_rotate(inverse, wp.vec3(*n)) for n in normals]).reshape(-1, 3)
 
@@ -823,16 +824,15 @@ def _cloth_over_mesh_contacts(device, gap=0.02):
     return model, state, pipeline, contacts
 
 
-def _force_contact_rows(contacts):
+def _force_contact_rows(contacts, mask=None):
     count = min(int(contacts.soft_contact_count.numpy()[0]), contacts.soft_contact_max)
-    if contacts.soft_contact_force_mask is None:
+    if mask is None:
         return np.arange(count)
-    return np.flatnonzero(contacts.soft_contact_force_mask.numpy()[:count])
+    return np.flatnonzero(mask.numpy()[:count])
 
 
-def _soft_contact_records(contacts, *, force_only=False):
-    count = int(contacts.soft_contact_count.numpy()[0])
-    indices = _force_contact_rows(contacts) if force_only else np.arange(min(count, contacts.soft_contact_max))
+def _soft_contact_records(contacts, *, mask=None):
+    indices = _force_contact_rows(contacts, mask)
     rows = np.concatenate(
         (
             contacts._soft_contact_mesh_features.numpy()[indices],
@@ -847,29 +847,33 @@ def test_mesh_detection_reports_every_feature_pair(test, device):
     """Detection keeps redundant feature pairs; the solver-side filter selects a subset of them."""
     model, state, _pipeline, contacts = _cloth_over_mesh_contacts(device)
     raw, raw_count = _soft_contact_records(contacts)
-    soft_contacts_mesh.filter_soft_mesh_contacts(model, state, contacts)
-    kept, kept_count = _soft_contact_records(contacts, force_only=True)
+    mask = evaluate_soft_contact_force_mask(model, state, contacts)
+    kept, kept_count = _soft_contact_records(contacts, mask=mask)
     test.assertEqual(len(raw), raw_count)
     test.assertGreater(kept_count, 0)
     test.assertLess(kept_count, raw_count)
     test.assertTrue(kept <= raw)
     # Filtered records carry geometry evaluated for their own features.
-    indices = contacts.soft_contact_indices.numpy()[_force_contact_rows(contacts)]
+    indices = contacts.soft_contact_indices.numpy()[_force_contact_rows(contacts, mask)]
     test.assertTrue(np.all(indices[:, 0] >= 0))
-    normals = contacts.soft_contact_normal.numpy()[_force_contact_rows(contacts)]
+    normals = contacts.soft_contact_normal.numpy()[_force_contact_rows(contacts, mask)]
     np.testing.assert_allclose(np.linalg.norm(normals, axis=1), 1.0, atol=1.0e-5)
 
 
-def test_mesh_contact_filter_runs_once_per_detection(test, device):
-    """Contacts reused across substeps are not filtered again at other positions."""
+def test_mesh_contact_filter_tracks_current_positions(test, device):
+    """Reconsider rejected and accepted candidates after motion without re-detection."""
     model, state, pipeline, contacts = _cloth_over_mesh_contacts(device)
     raw_count = int(contacts.soft_contact_count.numpy()[0])
-    soft_contacts_mesh.filter_soft_mesh_contacts(model, state, contacts)
-    kept, kept_count = _soft_contact_records(contacts, force_only=True)
+    mask = evaluate_soft_contact_force_mask(model, state, contacts)
+    initial = mask.numpy().copy()
     moved = model.state()
     moved.particle_q.assign(state.particle_q.numpy() + np.float32(0.01))
-    soft_contacts_mesh.filter_soft_mesh_contacts(model, moved, contacts)
-    test.assertEqual(_soft_contact_records(contacts, force_only=True), (kept, kept_count))
+    mask = evaluate_soft_contact_force_mask(model, moved, contacts)
+    current = mask.numpy()
+    test.assertTrue(np.any(current & ~initial))
+    test.assertTrue(np.any(initial & ~current))
+    mask = evaluate_soft_contact_force_mask(model, state, contacts)
+    np.testing.assert_array_equal(mask.numpy(), initial)
     # A new detection reports every pair again.
     pipeline.collide(state, contacts)
     test.assertEqual(int(contacts.soft_contact_count.numpy()[0]), raw_count)
@@ -892,23 +896,42 @@ def test_mesh_force_mask_preserves_detection(test, device):
     )
     count = int(contacts.soft_contact_count.numpy()[0])
     original = {name: getattr(contacts, name).numpy().copy() for name in fields}
-    soft_contacts_mesh.filter_soft_mesh_contacts(model, state, contacts)
-    kept = _force_contact_rows(contacts)
+    mask = evaluate_soft_contact_force_mask(model, state, contacts)
+    kept = _force_contact_rows(contacts, mask)
     test.assertGreater(len(kept), 0)
     test.assertLess(len(kept), count)
     for name in fields:
         np.testing.assert_array_equal(getattr(contacts, name).numpy(), original[name])
 
-    # Reuse must not re-filter at a state different from the detection state.
+    # Replay the filter against changed positions, keeping the same detection rows.
     moved = model.state()
-    moved.particle_q.assign(state.particle_q.numpy() + np.float32(0.1))
-    expected = _soft_contact_records(contacts, force_only=True)
-    soft_contacts_mesh.filter_soft_mesh_contacts(model, moved, contacts)
-    np.testing.assert_array_equal(_force_contact_rows(contacts), kept)
+    moved.particle_q.assign(state.particle_q.numpy() + np.float32(0.01))
+    expected = _soft_contact_records(contacts, mask=mask)
+    mask = evaluate_soft_contact_force_mask(model, moved, contacts)
+    moved_expected = _soft_contact_records(contacts, mask=mask)
+    test.assertNotEqual(moved_expected, expected)
+
+    def filter_only():
+        evaluate_soft_contact_force_mask(model, moved, contacts, out=mask)
+
+    if device.is_cuda:
+        with wp.ScopedCapture(device=device) as capture:
+            filter_only()
+    for shift, records in ((0.0, expected), (0.01, moved_expected), (0.0, expected)):
+        moved.particle_q.assign(state.particle_q.numpy() + np.float32(shift))
+        if device.is_cuda:
+            wp.capture_launch(capture.graph)
+        else:
+            filter_only()
+        test.assertEqual(_soft_contact_records(contacts, mask=mask), records)
+        for name in fields:
+            np.testing.assert_array_equal(getattr(contacts, name).numpy(), original[name])
+
+    mask = wp.empty(contacts.soft_contact_max, dtype=bool, device=device)
 
     def detect_and_filter():
         pipeline.collide(state, contacts)
-        soft_contacts_mesh.filter_soft_mesh_contacts(model, state, contacts)
+        evaluate_soft_contact_force_mask(model, state, contacts, out=mask)
 
     detect_and_filter()
     if device.is_cuda:
@@ -923,11 +946,10 @@ def test_mesh_force_mask_preserves_detection(test, device):
             detect_and_filter()
         if dz:
             test.assertEqual(int(contacts.soft_contact_count.numpy()[0]), 0)
-            test.assertFalse(np.any(contacts.soft_contact_force_mask.numpy()))
+            test.assertFalse(np.any(mask.numpy()))
         else:
             test.assertEqual(int(contacts.soft_contact_count.numpy()[0]), count)
-            test.assertEqual(_soft_contact_records(contacts, force_only=True), expected)
-        test.assertEqual(int(contacts._soft_contact_mesh_state.numpy()[1]), 1)
+            test.assertEqual(_soft_contact_records(contacts, mask=mask), expected)
 
 
 def test_mesh_force_mask_preserves_geometry_gradients(test, device):
@@ -945,7 +967,7 @@ def test_mesh_force_mask_preserves_geometry_gradients(test, device):
         with wp.Tape() as tape:
             pipeline.collide(state, contacts)
         if filtered:
-            soft_contacts_mesh.filter_soft_mesh_contacts(model, state, contacts)
+            evaluate_soft_contact_force_mask(model, state, contacts)
         # All raw geometry remains differentiable, including rows rejected for OGC forces.
         seed = wp.ones(contacts.soft_contact_max, dtype=wp.vec3, device=device)
         tape.backward(grads={contacts.soft_contact_body_pos: seed})
@@ -981,8 +1003,8 @@ def test_mesh_force_mask_keeps_non_mesh_contacts(test, device):
         "rigid_contact_point0",
     )
     original = {name: getattr(contacts, name).numpy().copy() for name in fields}
-    soft_contacts_mesh.filter_soft_mesh_contacts(model, state, contacts)
-    test.assertTrue(np.all(contacts.soft_contact_force_mask.numpy()[:begin]))
+    mask = evaluate_soft_contact_force_mask(model, state, contacts)
+    test.assertTrue(np.all(mask.numpy()[:begin]))
     for name in fields:
         np.testing.assert_array_equal(getattr(contacts, name).numpy(), original[name])
 
@@ -1129,8 +1151,8 @@ def test_mesh_endpoint_pairs_filter_only_in_solver(test, device):
     weights = contacts.soft_contact_barycentric.numpy()[rows]
     test.assertTrue(np.any((families == 1) & (weights.max(axis=1) == 1.0)))
     test.assertTrue(np.any((families == 2) & (weights.max(axis=1) == 1.0)))
-    soft_contacts_mesh.filter_soft_mesh_contacts(model, state, contacts)
-    rows = _force_contact_rows(contacts)
+    mask = evaluate_soft_contact_force_mask(model, state, contacts)
+    rows = _force_contact_rows(contacts, mask)
     count = len(rows)
     families = contacts._soft_contact_mesh_features.numpy()[rows, 0] & 7
     test.assertEqual(count, 2)
@@ -1153,9 +1175,11 @@ def test_mesh_tv_filter_replay(test, device):
     )
     contacts = pipeline.contacts()
 
+    mask = wp.empty(contacts.soft_contact_max, dtype=bool, device=device)
+
     def detect_and_filter():
         pipeline.collide(state, contacts)
-        soft_contacts_mesh.filter_soft_mesh_contacts(model, state, contacts)
+        evaluate_soft_contact_force_mask(model, state, contacts, out=mask)
 
     detect_and_filter()
     if device.is_cuda:
@@ -1168,7 +1192,7 @@ def test_mesh_tv_filter_replay(test, device):
             wp.capture_launch(capture.graph)
         else:
             detect_and_filter()
-        rows = _force_contact_rows(contacts)
+        rows = _force_contact_rows(contacts, mask)
 
         families = contacts._soft_contact_mesh_features.numpy()[rows, 0] & 7
         np.testing.assert_array_equal(np.sort(families), expected_families)
@@ -1183,8 +1207,8 @@ def test_mesh_tv_shared_soft_vertex_has_one_owner(test, device):
             with test.subTest(triangles=triangles, copies=copies):
                 faces = [tuple(v + 4 * copy for v in tri) for copy in range(copies) for tri in triangles]
                 model, state, contacts = _box_patch_contacts(device, points * copies, faces)
-                soft_contacts_mesh.filter_soft_mesh_contacts(model, state, contacts)
-                rows = _force_contact_rows(contacts)
+                mask = evaluate_soft_contact_force_mask(model, state, contacts)
+                rows = _force_contact_rows(contacts, mask)
 
                 features = contacts._soft_contact_mesh_features.numpy()[rows]
                 tv = rows[np.flatnonzero((features[:, 0] & 7) == 1)]
@@ -1204,8 +1228,8 @@ def test_mesh_tv_checks_soft_target_block(test, device):
     u = np.array((0.002, -0.002, 0.0))
     v = np.array((0.002, 0.002, 0.001))
     model, state, contacts = _box_patch_contacts(device, [c + u, c - u + v, c - u - v], [(0, 1, 2)])
-    soft_contacts_mesh.filter_soft_mesh_contacts(model, state, contacts)
-    rows = _force_contact_rows(contacts)
+    mask = evaluate_soft_contact_force_mask(model, state, contacts)
+    rows = _force_contact_rows(contacts, mask)
 
     features = contacts._soft_contact_mesh_features.numpy()[rows]
     tv = rows[np.flatnonzero((features[:, 0] & 7) == 1)]
@@ -1231,8 +1255,8 @@ def test_mesh_tv_checks_soft_target_block(test, device):
 
         features = contacts._soft_contact_mesh_features.numpy()[rows]
         test.assertTrue(np.any(((features[:, 0] & 7) == 1) & (features[:, 1] == 0)))
-        soft_contacts_mesh.filter_soft_mesh_contacts(model, state, contacts)
-        rows = _force_contact_rows(contacts)
+        mask = evaluate_soft_contact_force_mask(model, state, contacts)
+        rows = _force_contact_rows(contacts, mask)
 
         features = contacts._soft_contact_mesh_features.numpy()[rows]
         test.assertFalse(np.any(((features[:, 0] & 7) == 1) & (features[:, 1] == 0)))
@@ -1245,8 +1269,8 @@ def test_mesh_tv_shared_soft_edge_has_one_owner(test, device):
     points = [(0.095, 0.095, 0.055), (0.105, 0.095, 0.055), (0.105, 0.105, 0.055), (0.095, 0.105, 0.055)]
     for triangles in ([(0, 1, 2), (0, 2, 3)], [(0, 2, 3), (0, 1, 2)]):
         model, state, contacts = _box_patch_contacts(device, points, triangles)
-        soft_contacts_mesh.filter_soft_mesh_contacts(model, state, contacts)
-        rows = _force_contact_rows(contacts)
+        mask = evaluate_soft_contact_force_mask(model, state, contacts)
+        rows = _force_contact_rows(contacts, mask)
 
         families = contacts._soft_contact_mesh_features.numpy()[rows, 0] & 7
         tv = rows[np.flatnonzero(families == 1)]
@@ -1269,8 +1293,8 @@ def test_mesh_tv_owner_requires_active_triangle(test, device):
         model, state, contacts = _box_patch_contacts(
             device, points, [(0, 1, 2), (0, 2, 3)], inactive_particles=(0, 1, 2)
         )
-        soft_contacts_mesh.filter_soft_mesh_contacts(model, state, contacts)
-        rows = _force_contact_rows(contacts)
+        mask = evaluate_soft_contact_force_mask(model, state, contacts)
+        rows = _force_contact_rows(contacts, mask)
 
         features = contacts._soft_contact_mesh_features.numpy()[rows]
         tv = features[(features[:, 0] & 7) == 1]
@@ -1333,10 +1357,10 @@ def test_vbd_preserves_unfiltered_mesh_contacts(test, device):
                 wp.capture_launch(capture.graph)
             raw, raw_count = _soft_contact_records(contacts)
             test.assertGreater(raw_count, 2)
-            test.assertEqual(int(contacts._soft_contact_mesh_state.numpy()[1]), 1)
             if mode is None:
                 test.assertEqual((raw, raw_count), before)
-            mapping = _force_contact_rows(contacts)
+            mask = evaluate_soft_contact_force_mask(model, state_out, contacts)
+            mapping = _force_contact_rows(contacts, mask)
             test.assertEqual(len(mapping), 2)
             forces = observations.contact_f.numpy()[contacts.rigid_contact_max :]
             test.assertTrue(np.all(np.linalg.norm(forces[mapping], axis=1) > 0.0))
@@ -1357,8 +1381,8 @@ def test_mesh_force_mask_matches_compacted_solve(test, device):
                     color=True,
                     dynamic=dynamic,
                 )
-                soft_contacts_mesh.filter_soft_mesh_contacts(model, initial, contacts)
-                rows = _force_contact_rows(contacts)
+                mask = evaluate_soft_contact_force_mask(model, initial, contacts)
+                rows = _force_contact_rows(contacts, mask)
                 test.assertEqual(len(rows), 2)
                 test.assertLess(len(rows), int(contacts.soft_contact_count.numpy()[0]))
 
@@ -1398,7 +1422,7 @@ def test_mesh_force_mask_matches_compacted_solve(test, device):
                 np.testing.assert_allclose(results[0][1], results[1][1], atol=1.0e-7, rtol=1.0e-6)
                 np.testing.assert_allclose(results[0][2][rows], results[1][2][: len(rows)], atol=1.0e-6, rtol=1.0e-5)
                 np.testing.assert_allclose(results[0][3][rows], results[1][3][: len(rows)], atol=1.0e-6)
-                rejected = ~contacts.soft_contact_force_mask.numpy()
+                rejected = ~mask.numpy()
                 np.testing.assert_array_equal(results[0][2][rejected], 0.0)
                 test.assertGreater(np.linalg.norm(results[0][0] - initial.particle_q.numpy()), 0.0)
                 if dynamic:
@@ -1406,7 +1430,7 @@ def test_mesh_force_mask_matches_compacted_solve(test, device):
 
 
 def test_coupled_vbd_mesh_force_mask_replay(test, device):
-    """Copy raw geometry and force selection through coupled VBD after re-detection."""
+    """Copy raw geometry and mesh provenance through coupled VBD after re-detection."""
     model, state, _ = _box_patch_contacts(
         device,
         [(0.103, 0.104, 0.055), (0.15, 0.104, 0.055), (0.103, 0.15, 0.055)],
@@ -1450,17 +1474,19 @@ def test_coupled_vbd_mesh_force_mask_replay(test, device):
         mapping = coupled._entry_soft_contact_src_to_dst["vbd"].numpy()[:count]
         test.assertTrue(np.all(mapping >= 0))
         np.testing.assert_array_equal(
-            entry.soft_contact_force_mask.numpy()[mapping], contacts.soft_contact_force_mask.numpy()[:count]
-        )
-        np.testing.assert_array_equal(
             entry.soft_contact_indices.numpy()[mapping], contacts.soft_contact_indices.numpy()[:count]
         )
+        np.testing.assert_array_equal(
+            entry._soft_contact_mesh_features.numpy()[mapping], contacts._soft_contact_mesh_features.numpy()[:count]
+        )
+        test.assertIs(entry._soft_contact_mesh_data, contacts._soft_contact_mesh_data)
         test.assertTrue(np.isfinite(output.particle_q.numpy()).all())
         if shift:
             test.assertEqual(count, 0)
         else:
             test.assertGreater(count, 2)
-            test.assertEqual(len(_force_contact_rows(contacts)), 2)
+            mask = evaluate_soft_contact_force_mask(model, state, contacts)
+            test.assertEqual(len(_force_contact_rows(contacts, mask)), 2)
 
 
 def test_mesh_edge_recovery_shared_triangle_boundary(test, device):
@@ -1494,8 +1520,8 @@ def test_mesh_edge_recovery_shared_triangle_boundary(test, device):
                     reverse_faces=permutation >= 3,
                     corner_shift=permutation % 3,
                 )
-                soft_contacts_mesh.filter_soft_mesh_contacts(model, state, contacts)
-                rows = _force_contact_rows(contacts)
+                mask = evaluate_soft_contact_force_mask(model, state, contacts)
+                rows = _force_contact_rows(contacts, mask)
 
                 families = contacts._soft_contact_mesh_features.numpy()[rows, 0] & 7
                 indices = contacts.soft_contact_indices.numpy()[rows]
@@ -1527,11 +1553,11 @@ def test_mesh_filter_preserves_overflow(test, device):
     features = contacts._soft_contact_mesh_features.numpy().copy()
     positions = contacts.soft_contact_body_pos.numpy().copy()
     for _ in range(2):
-        soft_contacts_mesh.filter_soft_mesh_contacts(model, state, contacts)
+        mask = evaluate_soft_contact_force_mask(model, state, contacts)
         test.assertGreater(int(contacts.soft_contact_count.numpy()[0]), contacts.soft_contact_max)
         np.testing.assert_array_equal(contacts._soft_contact_mesh_features.numpy(), features)
         np.testing.assert_array_equal(contacts.soft_contact_body_pos.numpy(), positions)
-    test.assertTrue(np.all(contacts.soft_contact_force_mask.numpy()))
+    test.assertTrue(np.all(mask.numpy()))
 
 
 for device in get_test_devices():
@@ -1552,7 +1578,7 @@ for device in get_test_devices():
         test_finite_plane_feature_geometry,
         test_large_heightfield_task_contacts,
         test_mesh_detection_reports_every_feature_pair,
-        test_mesh_contact_filter_runs_once_per_detection,
+        test_mesh_contact_filter_tracks_current_positions,
         test_mesh_force_mask_preserves_detection,
         test_mesh_force_mask_preserves_geometry_gradients,
         test_mesh_force_mask_keeps_non_mesh_contacts,

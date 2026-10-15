@@ -11,7 +11,6 @@ prevention. Detection records immutable feature IDs; a separate differentiable
 pass evaluates the final contacts. No intermediate contact pool is required.
 
 Incident-feature cones identify redundant representations of one surface patch.
-:func:`filter_soft_mesh_contacts` applies them as a solver-side utility, and
 :func:`mesh_contact_valid` exposes the per-record test to solver kernels.
 """
 
@@ -550,9 +549,8 @@ def _append_mesh_contact(
 @wp.kernel(enable_backward=False)
 def _begin_mesh_contacts(source: wp.array[int], destination: wp.array[wp.int64], mesh_state: wp.array[wp.int32]):
     destination[0] = wp.int64(source[0])
-    # Mesh records occupy [begin, soft_contact_count); none have been filtered yet.
+    # Geometry evaluation only visits the appended mesh records.
     mesh_state[0] = source[0]
-    mesh_state[1] = 0
 
 
 @wp.kernel(enable_backward=False)
@@ -1266,6 +1264,9 @@ def launch_soft_mesh_contacts(*, model: Model, state: State, contacts: Contacts,
     if contacts._soft_contact_mesh_features is None:
         allocate_soft_mesh_contact_buffers(contacts)
     contacts._soft_contact_mesh_data = data
+    # A previous mesh row may now contain an analytic contact. Explicit tags also
+    # survive the row reordering performed by coupled contact buffers.
+    contacts._soft_contact_mesh_features.fill_(wp.vec3i(-1, -1, -1))
     wp.launch(
         _begin_mesh_contacts,
         dim=1,
@@ -1463,14 +1464,13 @@ def _launch_evaluate_mesh_contacts(model: Model, state: State, contacts: Contact
 
 
 def allocate_soft_mesh_contact_buffers(contacts: Contacts) -> None:
-    """Allocate mesh feature records and their solver-side force selection mask."""
+    """Allocate mesh feature records and detection-time geometry workspace."""
     capacity = contacts.soft_contact_max
     device = contacts.device
-    contacts._soft_contact_mesh_features = wp.empty(capacity, dtype=wp.vec3i, device=device)
+    contacts._soft_contact_mesh_features = wp.full(capacity, wp.vec3i(-1, -1, -1), dtype=wp.vec3i, device=device)
     contacts._soft_contact_mesh_params = wp.empty(capacity, dtype=float, device=device)
-    # [first mesh record, force mask computed for this detection]
-    contacts._soft_contact_mesh_state = wp.zeros(2, dtype=wp.int32, device=device)
-    contacts.soft_contact_force_mask = wp.ones(capacity, dtype=bool, device=device)
+    # First mesh record, used only by detection-time geometry evaluation.
+    contacts._soft_contact_mesh_state = wp.zeros(1, dtype=wp.int32, device=device)
 
 
 @wp.func
@@ -1575,128 +1575,112 @@ def mesh_contact_valid(
     return True
 
 
-@wp.kernel(enable_backward=False)
-def _filter_mesh_contacts(
-    mesh_state: wp.array[wp.int32],
-    contact_count: wp.array[wp.int32],
-    contact_max: wp.int32,
-    features: wp.array[wp.vec3i],
-    contact_shapes: wp.array[wp.int32],
+@wp.struct
+class _SoftContactFilterData:
+    """References used to select forces at the consumer's current configuration."""
+
+    features: wp.array[wp.vec3i]
+    contact_count: wp.array[wp.int32]
+    contact_max: int
+    contact_shapes: wp.array[wp.int32]
+    source_overflow: wp.array[wp.int32]
+    particle_q: wp.array[wp.vec3]
+    particle_flags: wp.array[wp.int32]
+    tri_indices: wp.array2d[wp.int32]
+    edge_indices: wp.array2d[wp.int32]
+    body_q: wp.array[wp.transform]
+    shape_transform: wp.array[wp.transform]
+    shape_body: wp.array[wp.int32]
+    shape_scale: wp.array[wp.vec3]
+    shape_source_ptr: wp.array[wp.uint64]
+    rigid_vertex_table: wp.array[wp.vec2i]
+    rigid_edge_table: wp.array[wp.vec3i]
+    face_offsets: wp.array[int]
+    vertex_spans: wp.array[wp.vec3i]
+    edge_spans: wp.array[wp.vec3i]
+    rigid_edge_slots: wp.array[int]
+    neighbors: wp.array[int]
+    soft_adjacency: MeshAdjacencyData
+    edge_edge_parallel_epsilon: float
+
+
+def _make_soft_contact_filter_data(
+    model: Model,
+    contacts: Contacts,
     particle_q: wp.array[wp.vec3],
-    particle_flags: wp.array[wp.int32],
-    tri_indices: wp.array2d[wp.int32],
-    edge_indices: wp.array2d[wp.int32],
-    body_q: wp.array[wp.transform],
-    shape_transform: wp.array[wp.transform],
-    shape_body: wp.array[wp.int32],
-    shape_scale: wp.array[wp.vec3],
-    shape_source_ptr: wp.array[wp.uint64],
-    rigid_vertex_table: wp.array[wp.vec2i],
-    rigid_edge_table: wp.array[wp.vec3i],
-    face_offsets: wp.array[int],
-    vertex_spans: wp.array[wp.vec3i],
-    edge_spans: wp.array[wp.vec3i],
-    rigid_edge_slots: wp.array[int],
-    neighbors: wp.array[int],
-    soft_adjacency: MeshAdjacencyData,
-    edge_edge_parallel_epsilon: float,
-    force_mask: wp.array[bool],
-):
-    tid = wp.tid()
-    if mesh_state[1] != 0:
-        return
-    # Clear stale slots too. Preserve the old filter's overflow policy: accept
-    # stored rows without hiding the overflowing count.
-    force_mask[tid] = tid < wp.min(contact_count[0], contact_max)
-    if tid < mesh_state[0] or tid >= wp.min(contact_count[0], contact_max) or contact_count[0] > contact_max:
-        return
-    feature = features[tid]
-    shape_index = contact_shapes[tid]
-    force_mask[tid] = feature[0] >= 0 and mesh_contact_valid(
+    body_q: wp.array[wp.transform] | None,
+) -> _SoftContactFilterData:
+    """Bind existing arrays to an evaluation; allocate no device storage or position snapshots."""
+    result = _SoftContactFilterData()
+    data = contacts._soft_contact_mesh_data
+    if data is None:
+        if contacts._soft_contact_mesh_features is not None:
+            raise ValueError("Mesh contact features require their topology data for force evaluation")
+        return result
+    if contacts._soft_contact_mesh_features is None:
+        raise ValueError("Mesh contact topology requires per-contact feature records")
+    result.features = contacts._soft_contact_mesh_features
+    result.contact_count = contacts.soft_contact_count
+    result.contact_max = contacts.soft_contact_max
+    result.source_overflow = contacts._soft_contact_source_overflow
+    result.contact_shapes = contacts.soft_contact_shape
+    result.particle_q = particle_q
+    result.particle_flags = model.particle_flags
+    result.tri_indices = model.tri_indices
+    result.edge_indices = model.edge_indices
+    result.body_q = body_q
+    result.shape_transform = model.shape_transform
+    # Coupled views retain shape IDs but may compact body IDs.
+    result.shape_body = model.shape_body
+    result.shape_scale = model.shape_scale
+    result.shape_source_ptr = model.shape_source_ptr
+    result.rigid_vertex_table, _vertex_normals, result.rigid_edge_table, _edge_normals = data.rigid_features
+    (
+        result.face_offsets,
+        result.vertex_spans,
+        result.edge_spans,
+        result.rigid_edge_slots,
+        result.neighbors,
+    ) = data.adjacency[:5]
+    result.soft_adjacency = model.soft_mesh_adjacency_device
+    result.edge_edge_parallel_epsilon = data.edge_edge_parallel_epsilon
+    return result
+
+
+@wp.func
+def _soft_contact_force_enabled(contact_index: int, data: _SoftContactFilterData) -> bool:
+    """Select a force from the consumer's current geometry."""
+    if not data.features:
+        return True
+    count = wp.min(data.contact_count[0], data.contact_max)
+    if contact_index >= count:
+        return False
+    feature = data.features[contact_index]
+    # Analytic rows have no mesh feature. Keep the existing overflow policy:
+    # accept stored rows if this buffer or its coupled source overflowed.
+    if feature[0] < 0 or data.contact_count[0] > data.contact_max or data.source_overflow[0] != 0:
+        return True
+    return mesh_contact_valid(
         feature,
-        shape_index,
-        particle_q,
-        particle_flags,
-        tri_indices,
-        edge_indices,
-        body_q,
-        shape_transform,
-        shape_body,
-        shape_scale,
-        shape_source_ptr,
-        rigid_vertex_table,
-        rigid_edge_table,
-        face_offsets,
-        vertex_spans,
-        edge_spans,
-        rigid_edge_slots,
-        neighbors,
-        soft_adjacency,
-        edge_edge_parallel_epsilon,
-    )
-
-
-@wp.kernel(enable_backward=False)
-def _finish_mesh_filter(mesh_state: wp.array[wp.int32]):
-    mesh_state[1] = 1
-
-
-def filter_soft_mesh_contacts(model: Model, state: State, contacts: Contacts) -> None:
-    """Populate the OGC force mask without modifying detection rows or their count.
-
-    Pass the state used for detection. The mask is computed once per detection,
-    including during CUDA graph replay. Non-mesh rows remain enabled. DAT/ESP
-    can consume the original geometry independently of this force selection.
-
-    Overflow remains visible in the original count; as before, an overflowing
-    buffer is not filtered. This does not repair missing collision records.
-    """
-    data = getattr(contacts, "_soft_contact_mesh_data", None)
-    if data is None or contacts.soft_contact_max == 0:
-        return
-    features = contacts._soft_contact_mesh_features
-    rigid_vertex_table, _vertex_normals, rigid_edge_table, _edge_normals = data.rigid_features
-    face_offsets, vertex_spans, edge_spans, rigid_edge_slots, neighbors = data.adjacency[:5]
-    device = model.device
-    contact_max = features.shape[0]
-    wp.launch(
-        _filter_mesh_contacts,
-        dim=contact_max,
-        inputs=[
-            contacts._soft_contact_mesh_state,
-            contacts.soft_contact_count,
-            contact_max,
-            features,
-            contacts.soft_contact_shape,
-            state.particle_q,
-            model.particle_flags,
-            model.tri_indices,
-            model.edge_indices,
-            state.body_q,
-            model.shape_transform,
-            model.shape_body,
-            model.shape_scale,
-            model.shape_source_ptr,
-            rigid_vertex_table,
-            rigid_edge_table,
-            face_offsets,
-            vertex_spans,
-            edge_spans,
-            rigid_edge_slots,
-            neighbors,
-            model.soft_mesh_adjacency_device,
-            data.edge_edge_parallel_epsilon,
-        ],
-        outputs=[contacts.soft_contact_force_mask],
-        device=device,
-        record_tape=False,
-    )
-    wp.launch(
-        _finish_mesh_filter,
-        dim=1,
-        inputs=[contacts._soft_contact_mesh_state],
-        device=device,
-        record_tape=False,
+        data.contact_shapes[contact_index],
+        data.particle_q,
+        data.particle_flags,
+        data.tri_indices,
+        data.edge_indices,
+        data.body_q,
+        data.shape_transform,
+        data.shape_body,
+        data.shape_scale,
+        data.shape_source_ptr,
+        data.rigid_vertex_table,
+        data.rigid_edge_table,
+        data.face_offsets,
+        data.vertex_spans,
+        data.edge_spans,
+        data.rigid_edge_slots,
+        data.neighbors,
+        data.soft_adjacency,
+        data.edge_edge_parallel_epsilon,
     )
 
 

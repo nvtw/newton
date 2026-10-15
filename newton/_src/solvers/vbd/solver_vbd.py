@@ -13,7 +13,7 @@ import warp as wp
 
 from ...core.types import override
 from ...geometry import ParticleFlags
-from ...geometry.soft_contacts_mesh import filter_soft_mesh_contacts
+from ...geometry.soft_contacts_mesh import _make_soft_contact_filter_data
 from ...geometry.tri_mesh_collision import (
     TriMeshCollisionDetector,
     TriMeshCollisionInfo,
@@ -581,8 +581,10 @@ class SolverVBD(SolverBase, CouplingInterface):
                     continue to honor this control during migration; keep the effective beta
                     at ``0`` (the default behavior) and author fixed contact stiffness instead.
             rigid_body_contact_buffer_size: Max body-body contacts per rigid body for per-body contact lists.
-            rigid_body_particle_contact_buffer_size: Max body-particle soft contacts tracked per rigid
-                body, covering both particle-vs-surface and full-surface edge/face contacts.
+            rigid_body_particle_contact_buffer_size: Capacity of the per-body soft-contact adjacency
+                list, including currently ineligible mesh candidates. If a body's list overflows, force
+                evaluation and coupling feedback scan all stored soft contacts for that body instead.
+                This preserves reactions but can increase evaluation cost.
             rigid_soft_contact_use_log_barrier: Whether body-particle normal contacts use the same C2
                 log-barrier law as particle self-contact. When ``False`` (default), they use the legacy quadratic
                 penalty law.
@@ -679,7 +681,8 @@ class SolverVBD(SolverBase, CouplingInterface):
             - `particle_vertex_contact_buffer_size`, `particle_edge_contact_buffer_size`, `rigid_body_contact_buffer_size`,
               and `rigid_body_particle_contact_buffer_size` are fixed and will not be dynamically resized during runtime.
               Setting them too small may result in undetected collisions (particles) or contact overflow (rigid body
-              contacts).
+              contacts). Body-particle list overflow uses the complete stored soft-contact buffer as
+              a fallback; it cannot recover records lost to overflow of that collision buffer itself.
               Setting them excessively large may increase memory usage and degrade performance.
             - Dahl hysteresis friction for rod angular response is controlled by custom model attributes
               ``model.vbd.dahl_eps_max`` and ``model.vbd.dahl_tau``. Register them with
@@ -1597,9 +1600,8 @@ class SolverVBD(SolverBase, CouplingInterface):
             )
 
         if contacts.soft_contact_max > 0 and self.body_particle_contact_penalty_k.shape[0] >= contacts.soft_contact_max:
-            # Per-body, mirroring accumulate_body_particle_contacts_per_body: the harvest reads the
-            # same truncated adjacency list the destination solve consumed, so the reaction reported
-            # to the source is by construction the one the solve applied.
+            # Use the solve's candidate list and force law, evaluating eligibility at
+            # the feedback state. Retain the same per-body capacity limit as the solve.
             wp.launch(
                 _harvest_vbd_body_particle_contact_forces_on_proxy_bodies_kernel,
                 dim=self.model.body_count * _NUM_CONTACT_THREADS_PER_BODY,
@@ -1630,6 +1632,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                     self.body_particle_contact_buffer_pre_alloc,
                     self.body_particle_contact_counts,
                     self.body_particle_contact_indices,
+                    _make_soft_contact_filter_data(self.model, contacts, state_out.particle_q, state_out.body_q),
                     out_body_f,
                 ],
                 device=self.device,
@@ -1695,7 +1698,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                     self.rigid_soft_contact_use_log_barrier,
                     self.model.particle_radius,
                     contacts.soft_contact_count,
-                    contacts.soft_contact_force_mask,
+                    _make_soft_contact_filter_data(self.model, contacts, state.particle_q, body_q_for_particles),
                     contacts.soft_contact_particle,
                     self.body_particle_contact_penalty_k,
                     self.body_particle_contact_material_kd,
@@ -2595,10 +2598,6 @@ class SolverVBD(SolverBase, CouplingInterface):
 
         if self._pre_initialization_detection(state_in, dt):
             update_rigid = True
-        if contacts is not None:
-            # Select force rows without removing geometry needed for penetration prevention.
-            # No-op once this detection's force mask has been computed.
-            filter_soft_mesh_contacts(self.model, state_in, contacts)
 
         if control is None:
             control = self.model.control(clone_variables=False)
@@ -3009,7 +3008,6 @@ class SolverVBD(SolverBase, CouplingInterface):
         """Run selected collision detectors, then reset their DAT references."""
         if run_rigid_collision:
             self._run_rigid_collision(state, dt)
-            filter_soft_mesh_contacts(self.model, state, self._pipeline_contacts)
         if run_soft_self_collision:
             self._collision_detection_penetration_free(state, reset_reference=False)
 
@@ -3428,7 +3426,6 @@ class SolverVBD(SolverBase, CouplingInterface):
                 dim=contacts.soft_contact_max,
                 inputs=[
                     contacts.soft_contact_count,
-                    contacts.soft_contact_force_mask,
                     contacts.soft_contact_shape,
                     model.shape_body,
                     self.body_inv_mass_effective,
@@ -3489,7 +3486,6 @@ class SolverVBD(SolverBase, CouplingInterface):
                         inputs=[
                             contacts.soft_contact_indices,
                             contacts.soft_contact_count,
-                            contacts.soft_contact_force_mask,
                             contacts.soft_contact_max,
                             self._particle_contact_head,
                             self._particle_contact_next,
@@ -3795,6 +3791,12 @@ class SolverVBD(SolverBase, CouplingInterface):
         if model.particle_count == 0:
             return
 
+        contact_filter = (
+            _make_soft_contact_filter_data(model, contacts, state_in.particle_q, body_q_for_particles)
+            if contacts is not None
+            else None
+        )
+
         # Zero out forces and hessians
         self.particle_forces.zero_()
         self.particle_hessians.zero_()
@@ -3859,6 +3861,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                             self._particle_contact_head,
                             self._particle_contact_next,
                             *contact_material_and_body_inputs,
+                            contact_filter,
                         ],
                         outputs=[
                             self.particle_forces,
@@ -3883,7 +3886,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                             model.particle_radius,
                             contacts.soft_contact_indices,
                             contacts.soft_contact_count,
-                            contacts.soft_contact_force_mask,
+                            contact_filter,
                             contacts.soft_contact_max,
                             self._particle_contact_worker_count,
                             *contact_material_and_body_inputs,
@@ -4026,6 +4029,16 @@ class SolverVBD(SolverBase, CouplingInterface):
         and updates AVBD penalty parameters (dual update).
         """
         model = self.model
+        contact_filter = (
+            _make_soft_contact_filter_data(
+                model,
+                contacts,
+                state_in.particle_q,
+                state_out.body_q if self.integrate_with_external_rigid_solver else state_in.body_q,
+            )
+            if contacts is not None
+            else None
+        )
         # Body-particle soft contacts still need penalty updates when VBD skips rigid solves:
         # external rigid mode uses state_out.body_q, while static-shape contacts use _empty_body_q.
         skip_rigid_solve = not self._integrates_rigid_bodies
@@ -4040,7 +4053,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                     dim=contacts.soft_contact_max,
                     inputs=[
                         contacts.soft_contact_count,
-                        contacts.soft_contact_force_mask,
+                        contact_filter,
                         contacts.soft_contact_indices,
                         contacts.soft_contact_shape,
                         contacts.soft_contact_body_pos,
@@ -4138,6 +4151,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                         self.body_particle_contact_buffer_pre_alloc,
                         self.body_particle_contact_counts,
                         self.body_particle_contact_indices,
+                        contact_filter,
                     ],
                     outputs=[
                         self.body_forces,
@@ -4319,7 +4333,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                 dim=contacts.soft_contact_max,
                 inputs=[
                     contacts.soft_contact_count,
-                    contacts.soft_contact_force_mask,
+                    contact_filter,
                     contacts.soft_contact_indices,
                     contacts.soft_contact_shape,
                     contacts.soft_contact_body_pos,
@@ -4493,7 +4507,7 @@ class SolverVBD(SolverBase, CouplingInterface):
                 self.body_particle_contact_material_kd,
                 self.body_particle_contact_material_mu,
                 contacts.soft_contact_count,
-                contacts.soft_contact_force_mask,
+                _make_soft_contact_filter_data(model, contacts, state_in.particle_q, body_q),
                 contacts.soft_contact_indices,
                 contacts.soft_contact_shape,
                 contacts.soft_contact_body_pos,

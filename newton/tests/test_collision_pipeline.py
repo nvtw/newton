@@ -23,7 +23,6 @@ from newton._src.geometry.kernels import (
     resolve_mesh_sign_method,
 )
 from newton._src.geometry.sdf_texture import TextureSDFData
-from newton._src.geometry.soft_contacts_mesh import filter_soft_mesh_contacts
 from newton._src.geometry.soft_contacts_sdf import (
     SDF_EDGE_ITERS,
     SDF_FACE_ITERS,
@@ -56,6 +55,7 @@ from newton._src.sim.collide import (
 from newton._src.utils.heightfield import HeightfieldData
 from newton.examples import test_body_state
 from newton.geometry import BroadPhaseAllPairs, NarrowPhase
+from newton.tests._soft_contact_test_utils import evaluate_soft_contact_force_mask
 from newton.tests.unittest_utils import (
     USD_AVAILABLE,
     add_function_test,
@@ -5937,9 +5937,9 @@ def _full_surface_mesh_contacts(vertices, faces, points, gap, device):
     state = model.state()
     pipeline.collide(state, contacts)
     # Keep the pairs the solver applies forces to.
-    filter_soft_mesh_contacts(model, state, contacts)
+    mask = evaluate_soft_contact_force_mask(model, state, contacts)
     count = int(contacts.soft_contact_count.numpy()[0])
-    rows = np.flatnonzero(contacts.soft_contact_force_mask.numpy()[:count])
+    rows = np.flatnonzero(mask.numpy()[:count])
     particles = contacts.soft_contact_particle.numpy()[rows]
     normals = contacts.soft_contact_normal.numpy()[rows]
     # Signed separation along each contact normal, as consumed by the VBD contact model.

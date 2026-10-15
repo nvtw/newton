@@ -2362,6 +2362,7 @@ class CollisionPipeline:
         contacts._contact_matching_mode = self.contact_matching
         if self._soft_mesh_contact_data is not None:
             allocate_soft_mesh_contact_buffers(contacts)
+            contacts._soft_contact_mesh_data = self._soft_mesh_contact_data
         # Keep scan scratch with the output buffers. The extra count is a zero scan sentinel.
         # Differentiable contacts retain the serial feature loop's existing replay behavior.
         contacts._soft_heightfield_work = None
@@ -2637,6 +2638,11 @@ class CollisionPipeline:
         # particle-only solvers (XPBD, semi-implicit, Style3D) would not raise and would silently
         # ignore them. Mirrors the assignment in CollisionPipeline.contacts().
         contacts._enable_rigid_soft_full_surface_contact = self.enable_rigid_soft_full_surface_contact
+
+        # A reused buffer can retain mesh tags from a full-surface pipeline. The mesh pass
+        # resets them itself; without that pass, replacement particle rows need invalid tags.
+        if self._soft_mesh_contact_data is None and contacts._soft_contact_mesh_features is not None:
+            contacts._soft_contact_mesh_features.fill_(-1)
 
         # Counter zeroing and generation bump are fused into compute_shape_aabbs.
         # Only call contacts.clear() if clear_buffers mode is enabled (debug path).
