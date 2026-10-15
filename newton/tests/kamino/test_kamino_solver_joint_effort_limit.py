@@ -121,21 +121,23 @@ class TestSolverKaminoJointEffortLimit(unittest.TestCase):
                         expected_velocity = DT * expected_effort / _EFFECTIVE_JOINT_INERTIA
                         self.assertAlmostEqual(float(velocities[world]), expected_velocity, delta=3.0e-4)
 
-    def test_unbounded_explicit_effort_with_armature(self):
-        """Preserve commands above the unbounded sentinel on the dynamic path."""
+    def test_unbounded_explicit_effort_is_preserved(self):
+        """Preserve commands above the unbounded sentinel on the body-wrench and dynamic paths."""
         requested_effort = 3.0 * JOINT_TAUMAX
-        inertia = 2.0 * JOINT_TAUMAX + _BODY_MASS * _BODY_COM_X**2
         for config_name, config_factory in KAMINO_CONFIGS:
-            for limit in (JOINT_TAUMAX, 2.0 * JOINT_TAUMAX, float("inf")):
-                model = _build_revolute(limit, armatures=(JOINT_TAUMAX,) * 2, body_inertia=JOINT_TAUMAX)
-                solver = SolverKamino(model, config_factory())
-                control = model.control()
-                control.joint_f.assign([-requested_effort, requested_effort])
-                velocities = _step(solver, model, control).joint_qd.numpy()
-                for world, direction in enumerate((-1.0, 1.0)):
-                    with self.subTest(config=config_name, limit=limit, direction=direction):
-                        expected = DT * direction * requested_effort / inertia
-                        self.assertAlmostEqual(float(velocities[world]), expected, delta=3.0e-5)
+            # Zero armature routes through body wrenches; a positive one through joint dynamics.
+            for armature in (0.0, JOINT_TAUMAX):
+                inertia = JOINT_TAUMAX + armature + _BODY_MASS * _BODY_COM_X**2
+                for limit in (JOINT_TAUMAX, 2.0 * JOINT_TAUMAX, float("inf")):
+                    model = _build_revolute(limit, armatures=(armature,) * 2, body_inertia=JOINT_TAUMAX)
+                    solver = SolverKamino(model, config_factory())
+                    control = model.control()
+                    control.joint_f.assign([-requested_effort, requested_effort])
+                    velocities = _step(solver, model, control).joint_qd.numpy()
+                    for world, direction in enumerate((-1.0, 1.0)):
+                        with self.subTest(config=config_name, armature=armature, limit=limit, direction=direction):
+                            expected = DT * direction * requested_effort / inertia
+                            self.assertAlmostEqual(float(velocities[world]), expected, delta=3.0e-5)
 
     def test_explicit_effort_with_passive_dynamics(self):
         """Limit actuator torque while retaining passive inertia and damping reactions."""
@@ -197,6 +199,26 @@ class TestSolverKaminoJointEffortLimitImplicitPd(unittest.TestCase):
                         self.assertAlmostEqual(float(reported_efforts[world]), expected_effort, delta=3.0e-4)
                         self.assertAlmostEqual(float(body_efforts[world, 4]), expected_effort, delta=3.0e-4)
                         self.assertAlmostEqual(float(velocities[world]), expected_velocity, delta=3.0e-4)
+
+    def test_schur_default_follows_bounded_pd(self):
+        """Resolve the automatic Schur default from bounded implicit-PD rows and honor overrides."""
+        cases = [
+            # (effort limit, use_schur_complement, expected resolved mode)
+            (10.0, None, True),
+            (float("inf"), None, False),
+            (10.0, False, False),
+            (float("inf"), True, True),
+        ]
+        for config_name, config_factory in KAMINO_CONFIGS:
+            if config_name in PADMM_CONFIG_NAMES:
+                continue
+            for limit, requested, expected in cases:
+                config = config_factory()
+                config.dvi.use_schur_complement = requested
+                model = _build_revolute(limit, target_ke=10.0, target_kd=2.0, armatures=(0.011,) * 2)
+                solver = SolverKamino(model, config)
+                with self.subTest(config=config_name, limit=limit, requested=requested):
+                    self.assertIs(solver._solver_kamino._solver_fd._use_schur_complement, expected)
 
     def test_bounded_pd_with_small_body_inertia(self):
         """Solve coupled drive and joint reactions for interior and saturated efforts."""

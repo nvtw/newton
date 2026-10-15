@@ -366,6 +366,14 @@ def is_bounded_effort_limit_wp(tau_max: float) -> bool:
 
 
 @wp.func
+def clamp_joint_effort_wp(tau: float, tau_max: float) -> float:
+    """Clamp an actuator command to a bounded effort limit; pass unbounded commands through."""
+    if is_bounded_effort_limit_wp(tau_max):
+        return wp.clamp(tau, -tau_max, tau_max)
+    return tau
+
+
+@wp.func
 def has_effort_cts_wp(act_type: int, k_p: float, k_d: float, tau_max: float) -> bool:
     """Returns whether one joint DoF requires a bounded implicit-PD row."""
     return has_implicit_pd_wp(act_type, k_p, k_d) and is_bounded_effort_limit_wp(tau_max)

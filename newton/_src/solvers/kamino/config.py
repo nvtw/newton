@@ -955,6 +955,11 @@ class DVISolverConfig:
     the bilateral joint rows, making alternating solves converge very slowly.
     Otherwise, ``None`` selects alternating solves. An explicit boolean
     overrides the automatic choice for the whole batch.
+
+    Elimination stores per-world response matrices of bilateral rows times
+    unilateral rows, which can multiply the solver's device memory for large
+    batches of articulated robots with many contacts. Set ``False`` to trade
+    drive accuracy for the smaller alternating workspace.
     """
 
     bilateral_solve_interval: int = 1

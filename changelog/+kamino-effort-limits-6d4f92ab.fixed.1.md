@@ -1,1 +1,0 @@
-Fix weak Kamino DVI drives with finite effort limits by automatically selecting Schur elimination for bounded implicit PD. Set `dvi.use_schur_complement=False` to explicitly retain alternating solves.
