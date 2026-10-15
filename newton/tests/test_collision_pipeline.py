@@ -61,7 +61,6 @@ from newton._src.sim.collide import (
 from newton._src.utils.heightfield import HeightfieldData
 from newton.examples import test_body_state
 from newton.geometry import BroadPhaseAllPairs, NarrowPhase
-from newton.tests._soft_contact_test_utils import evaluate_soft_contact_force_mask
 from newton.tests.unittest_utils import (
     USD_AVAILABLE,
     add_function_test,
@@ -69,6 +68,7 @@ from newton.tests.unittest_utils import (
     get_cuda_test_devices,
     get_test_devices,
 )
+from newton.tests.utils.soft_contacts import evaluate_soft_contact_force_mask
 
 
 class TestLevel(IntFlag):

@@ -22,13 +22,13 @@ from newton._src.geometry.soft_contacts_sdf import (
     optimize_face_sdf,
 )
 from newton.solvers.experimental.coupled import SolverCoupled
-from newton.tests._soft_contact_test_utils import evaluate_soft_contact_force_mask
 from newton.tests.unittest_utils import (
     StdOutCapture,
     add_function_test,
     configure_sdf_for_collision_shapes,
     get_test_devices,
 )
+from newton.tests.utils.soft_contacts import evaluate_soft_contact_force_mask
 
 
 class TestDeformableRigidRegressions(unittest.TestCase):

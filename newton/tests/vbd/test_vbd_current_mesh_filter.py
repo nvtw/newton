@@ -20,8 +20,8 @@ from newton._src.solvers.vbd.rigid_vbd_kernels import (
 )
 from newton.solvers import SolverSemiImplicit, SolverVBD
 from newton.solvers.experimental.coupled import SolverCoupled
-from newton.tests._soft_contact_test_utils import evaluate_soft_contact_force_mask
 from newton.tests.unittest_utils import NewtonTestCase, add_function_test, get_test_devices
+from newton.tests.utils.soft_contacts import evaluate_soft_contact_force_mask
 
 _RECORD_FIELDS = (
     "soft_contact_particle",
