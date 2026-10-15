@@ -1,7 +1,7 @@
-# Implicit AABB tree vs `wp.Bvh` / `wp.Mesh`
+# Implicit BVH vs `wp.Bvh` / `wp.Mesh`
 
-RTX PRO 6000 Blackwell, Warp 1.17.0. Code: `newton/_src/geometry/implicit_aabb_tree.py`
-(`ImplicitAABBTree`) and `implicit_triangle_tree.py` (`ImplicitTriangleTree`).
+RTX PRO 6000 Blackwell, Warp 1.17.0. Code: `newton/_src/geometry/implicit_bvh.py`
+(`newton.geometry.ImplicitBvh`) and `implicit_bvh_mesh.py` (`ImplicitBvhMesh`).
 Reproduce: `uv run python local_studies/implicit_tree_bvh/bench_bvh.py`, then `scoreboard.py`.
 GPU work is timed as CUDA-graph replays (best of several trials) with the GPU otherwise idle;
 `wp.Bvh` / `wp.Mesh` constructors are not capturable and are timed eagerly. Queries are 262,144
@@ -15,14 +15,14 @@ mesh (`terrain`). Warp structures: `wp.Bvh` (LBVH, SAH, cuBQL) and `wp.Mesh` (LB
   power of two). Build = Hilbert keys + radix sort + one split launch per level + one refit launch.
 * Leaves follow a Hilbert curve; every subtree is split where its keys change in the highest bit
   (a curve cell boundary, as in an LBVH), clamped to the subtree's leaf capacity. A few spare leaf
-  slots (`default_slack`: 1.75 below 2^17 items, 1.15 from 2^20) leave room for such splits.
+  slots (default: 1.75 below 2^17 items, 1.15 from 2^20) leave room for such splits.
 * Isotropic key scaling (one scale for all axes; per-axis scaling wrecks flat scenes).
 * Refit is one launch: 32-leaf warps reduce their subtree's five lowest levels with shuffles, the
   rest climbs with an arrival mark in the parent record (atomic exchange; no counter array).
 * Node loads are two 16-byte `__ldg` loads; build scratch lives in the node buffer.
-* Queries: an AABB iterator, and fused front-to-back traversals (closest ray hit, every ray hit,
+* Queries: an AABB iterator, closest box along a ray / to a point, and fused front-to-back traversals (closest ray hit, every ray hit,
   nearest item, all overlapping pairs) that call a user function inline; stackless with a one-bit
-  per level trail. `ImplicitTriangleTree` adds ready-made ray and closest-point queries on meshes
+  per level trail. `ImplicitBvhMesh` adds ready-made ray and closest-point queries on meshes
   with `wp.mesh_query_*` conventions.
 
 ## Scoreboard (best implicit vs best Warp; >1 = implicit faster or smaller)

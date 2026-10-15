@@ -1,0 +1,1 @@
+Add experimental `newton.geometry.ImplicitBvh` and `ImplicitBvhMesh`, GPU bounding volume hierarchies over boxes and triangle meshes that build and refit inside CUDA graphs, with kernel-side AABB, ray, closest-point and self-overlap queries that can fuse a user function into the traversal.

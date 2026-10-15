@@ -15,14 +15,25 @@ cell boundary as in an LBVH, as far as the subtree's leaf capacity allows; a
 few spare leaf slots give room for such splits. Spare leaves have inverted
 bounds and ``last_leaf == -1``, as do subtrees holding only them.
 
-Queries from kernels (pass :attr:`ImplicitAABBTree.data`):
+Queries from kernels take :attr:`ImplicitBvh.data` and return item indices:
 
-* :func:`implicit_tree_query_aabb` / :func:`implicit_tree_query_aabb_next`:
+* :func:`implicit_bvh_query_aabb` / :func:`implicit_bvh_query_aabb_next`:
   iterate the items whose boxes overlap a box.
-* :func:`create_implicit_tree_ray_closest`, :func:`create_implicit_tree_ray_foreach`,
-  :func:`create_implicit_tree_point_closest`, :func:`create_implicit_tree_self_foreach`:
-  build fused queries around a user function; they traverse nearest first and
-  call the user function inline, which keeps the threads of a warp in step.
+* :func:`implicit_bvh_query_ray` / :func:`implicit_bvh_query_point`: the
+  closest box along a ray / nearest box to a point.
+* Factories that fuse a user function into the traversal, for items that are
+  not plain boxes (triangles, shapes, ...). The user function is inlined, so
+  the threads of a warp stay in step; ``context`` is any value (typically a
+  :func:`warp.struct`) passed through to it:
+
+  * closest-item queries, :func:`implicit_bvh_make_query_ray` and
+    :func:`implicit_bvh_make_query_point`: the user function
+    ``(item, query..., bound, context) -> distance`` measures one item, and
+    the query returns ``(item, distance)`` of the closest one;
+  * visiting queries, :func:`implicit_bvh_make_query_ray_foreach` and
+    :func:`implicit_bvh_make_query_pairs`: the user function
+    ``(item, value, state, context) -> state`` is called for every hit and
+    threads a ``state`` value through, which the query returns.
 """
 
 from __future__ import annotations
@@ -150,7 +161,7 @@ def _warp_all(predicate: bool) -> bool:
 
 
 @wp.struct
-class ImplicitTreeNode:
+class ImplicitBvhNode:
     """One 32-byte node record, so visiting a node touches one memory sector.
 
     ``max_span`` is the largest leaf AABB edge in the subtree and ``last_leaf``
@@ -165,18 +176,21 @@ class ImplicitTreeNode:
 
 
 @wp.struct
-class ImplicitAABBTreeData:
-    """Kernel-side view of an :class:`ImplicitAABBTree`."""
+class ImplicitBvhData:
+    """Kernel-side view of an :class:`ImplicitBvh`.
 
-    nodes: wp.array[ImplicitTreeNode]
+    .. experimental::
+    """
+
+    nodes: wp.array[ImplicitBvhNode]
     nodes_ptr: wp.uint64  # address of ``nodes`` for vectorized read-only loads
     leaf_item: wp.array[wp.int32]
     leaf_base: wp.int32
-    leaf_count: wp.int32
+    item_count: wp.int32
 
 
 @wp.func
-def _node_load(tree: ImplicitAABBTreeData, node: wp.int32) -> tuple[wp.vec3, wp.vec3, wp.float32, wp.int32]:
+def _node_load(tree: ImplicitBvhData, node: wp.int32) -> tuple[wp.vec3, wp.vec3, wp.float32, wp.int32]:
     """Return ``(lower, upper, max_span, last_leaf)`` of ``node``."""
     a = _load_float4(tree.nodes_ptr, node * wp.int32(2))
     b = _load_float4(tree.nodes_ptr, node * wp.int32(2) + wp.int32(1))
@@ -184,7 +198,7 @@ def _node_load(tree: ImplicitAABBTreeData, node: wp.int32) -> tuple[wp.vec3, wp.
 
 
 @wp.func
-def implicit_tree_next_subtree(node: wp.int32) -> wp.int32:
+def implicit_bvh_next_subtree(node: wp.int32) -> wp.int32:
     """Return the depth-first successor of ``node``'s subtree (``0`` when done)."""
     while node > wp.int32(1):
         if (node & wp.int32(1)) == wp.int32(0):
@@ -436,7 +450,7 @@ _ARRIVED = wp.constant(wp.int32(-(1 << 31)))
 
 
 @wp.func
-def _climb(nodes: wp.array[ImplicitTreeNode], nodes_ptr: wp.uint64, node_ints: wp.array[wp.int32], node: int):
+def _climb(nodes: wp.array[ImplicitBvhNode], nodes_ptr: wp.uint64, node_ints: wp.array[wp.int32], node: int):
     """Propagate bounds from a written ``node`` towards the root.
 
     Of a node's two children, the first to arrive marks the parent (an atomic
@@ -454,7 +468,7 @@ def _climb(nodes: wp.array[ImplicitTreeNode], nodes_ptr: wp.uint64, node_ints: w
         l1 = _load_float4_coherent(nodes_ptr, node * 4 + 1)
         r0 = _load_float4_coherent(nodes_ptr, node * 4 + 2)
         r1 = _load_float4_coherent(nodes_ptr, node * 4 + 3)
-        record = ImplicitTreeNode()
+        record = ImplicitBvhNode()
         record.lower = wp.min(wp.vec3(l0[0], l0[1], l0[2]), wp.vec3(r0[0], r0[1], r0[2]))
         record.max_span = wp.max(l0[3], r0[3])
         record.upper = wp.max(wp.vec3(l1[0], l1[1], l1[2]), wp.vec3(r1[0], r1[1], r1[2]))
@@ -465,10 +479,8 @@ def _climb(nodes: wp.array[ImplicitTreeNode], nodes_ptr: wp.uint64, node_ints: w
 
 
 @wp.func
-def _make_leaf(
-    lowers: wp.array[wp.vec3], uppers: wp.array[wp.vec3], item: wp.int32, slot: wp.int32
-) -> ImplicitTreeNode:
-    record = ImplicitTreeNode()
+def _make_leaf(lowers: wp.array[wp.vec3], uppers: wp.array[wp.vec3], item: wp.int32, slot: wp.int32) -> ImplicitBvhNode:
+    record = ImplicitBvhNode()
     record.lower = wp.vec3(1.0e30, 1.0e30, 1.0e30)
     record.upper = wp.vec3(-1.0e30, -1.0e30, -1.0e30)
     record.max_span = wp.float32(-1.0)
@@ -489,7 +501,7 @@ def _refit(
     leaf_item: wp.array[wp.int32],
     leaf_base: int,
     deep_start: int,
-    nodes: wp.array[ImplicitTreeNode],
+    nodes: wp.array[ImplicitBvhNode],
     nodes_ptr: wp.uint64,
     node_ints: wp.array[wp.int32],
 ):
@@ -538,7 +550,7 @@ def _refit(
 
 @wp.kernel(enable_backward=False)
 def _update_internal(
-    leaf_base: int, nodes: wp.array[ImplicitTreeNode], nodes_ptr: wp.uint64, node_ints: wp.array[wp.int32]
+    leaf_base: int, nodes: wp.array[ImplicitBvhNode], nodes_ptr: wp.uint64, node_ints: wp.array[wp.int32]
 ):
     _climb(nodes, nodes_ptr, node_ints, leaf_base + wp.tid())
 
@@ -548,52 +560,54 @@ def _update_internal(
 # ---------------------------------------------------------------------------
 
 
-def default_slack(max_leaf_count: int) -> float:
-    """Leaf slots per item used when :class:`ImplicitAABBTree` is given no ``slack``.
+def _default_slack(item_capacity: int) -> float:
+    """Leaf slots per item used when :class:`ImplicitBvh` is given no ``slack``.
 
     Spare slots let subtrees split at curve cell boundaries, which matters most
     for small and medium trees (1.75 up to 2^17 items); large trees gain little
     and taper to 1.15 at 2^20 items, about the memory of a ``wp.Bvh``.
     """
     lo, hi = 1 << 17, 1 << 20
-    f = min(max(math.log(max(max_leaf_count, 1) / lo) / math.log(hi / lo), 0.0), 1.0)
+    f = min(max(math.log(max(item_capacity, 1) / lo) / math.log(hi / lo), 0.0), 1.0)
     return 1.75 + f * (1.15 - 1.75)
 
 
-class ImplicitAABBTree:
-    """Graph-capturable implicit AABB tree over the boxes ``[lowers[i], uppers[i]]``.
+class ImplicitBvh:
+    """Bounding volume hierarchy over the boxes ``[lowers[i], uppers[i]]``, built on the GPU.
 
     :meth:`build` and :meth:`refit` only launch kernels on preallocated
     buffers, so they can be recorded in a CUDA graph. Rebuilding every step is
     cheap; :meth:`refit` keeps the leaf layout of the last build and only
-    updates bounds.
+    updates bounds. Pass :attr:`data` to kernels calling the
+    ``implicit_bvh_query_*`` functions; items are box indices.
+
+    .. experimental::
 
     Args:
-        max_leaf_count: Capacity, the largest item count passed to :meth:`build`.
+        item_capacity: Largest item count passed to :meth:`build`.
         device: Device to allocate on.
-        slack: Leaf slots per item; ``None`` uses :func:`default_slack`.
-        aligned: Split subtrees at curve cell boundaries instead of by count.
+        slack: Leaf slots per item; ``None`` chooses a value that favors query
+            speed for small trees and memory for large ones.
         power_of_two: Round the leaf slots up to a power of two, which keeps all
             leaves on one level (leaf ``slot`` is then left-to-right position ``slot``).
     """
 
     def __init__(
         self,
-        max_leaf_count: int,
+        item_capacity: int,
+        *,
         device: wp.DeviceLike = None,
         slack: float | None = None,
-        aligned: bool = True,
         power_of_two: bool = False,
     ) -> None:
-        if max_leaf_count < 1:
-            raise ValueError("max_leaf_count must be positive")
-        slack = default_slack(max_leaf_count) if slack is None else slack
+        if item_capacity < 1:
+            raise ValueError("item_capacity must be positive")
+        slack = _default_slack(item_capacity) if slack is None else slack
         if slack < 1.0:
             raise ValueError("slack must be at least 1")
         self.device = wp.get_device(device)
-        self.max_leaf_count = int(max_leaf_count)
-        self.aligned = bool(aligned)
-        slots = max(2, math.ceil(self.max_leaf_count * slack))
+        self.item_capacity = int(item_capacity)
+        slots = max(2, math.ceil(self.item_capacity * slack))
         if power_of_two:
             slots = 1 << (slots - 1).bit_length()
         self.leaf_base = slots
@@ -601,9 +615,9 @@ class ImplicitAABBTree:
         self.deep_start = 1 << (self.leaf_base - 1).bit_length()
         """First node of the deepest level; leaves ``[leaf_base, deep_start)`` are one level up."""
         self._depth = self.deep_start.bit_length() - 1
-        self.leaf_count = 0
+        self.item_count = 0
         """Item count of the last :meth:`build`."""
-        self.nodes = wp.empty(2 * self.leaf_base, dtype=ImplicitTreeNode, device=self.device)
+        self.nodes = wp.empty(2 * self.leaf_base, dtype=ImplicitBvhNode, device=self.device)
         self.leaf_item = wp.empty(self.leaf_base, dtype=wp.int32, device=self.device)
         self.bounds = wp.empty(2, dtype=wp.vec3, device=self.device)
         # The build scratch (sort keys and order, twice the item count each, and
@@ -611,26 +625,31 @@ class ImplicitAABBTree:
         # ``3 leaf_base / 4`` internal records, which are only written after the
         # scratch is consumed; the leaf records start at ``leaf_base``.
         self._node_ints = wp.array(ptr=self.nodes.ptr, dtype=wp.int32, shape=(16 * self.leaf_base,), device=self.device)
-        self._keys = self._node_ints[: 2 * self.max_leaf_count]
-        self._order = self._node_ints[2 * self.max_leaf_count : 4 * self.max_leaf_count]
-        self._node_start = self._node_ints[4 * self.max_leaf_count : 4 * self.max_leaf_count + 2 * self.leaf_base]
-        self.data = ImplicitAABBTreeData()
+        self._keys = self._node_ints[: 2 * self.item_capacity]
+        self._order = self._node_ints[2 * self.item_capacity : 4 * self.item_capacity]
+        self._node_start = self._node_ints[4 * self.item_capacity : 4 * self.item_capacity + 2 * self.leaf_base]
+        self.data = ImplicitBvhData()
         """Kernel-side view to pass to kernels using the tree's query functions."""
         self.data.nodes = self.nodes
         self.data.nodes_ptr = self.nodes.ptr
         self.data.leaf_item = self.leaf_item
         self.data.leaf_base = self.leaf_base
-        self.data.leaf_count = 0
+        self.data.item_count = 0
         self._clear_marks()
 
     @classmethod
     def from_boxes(
-        cls, lowers: wp.array[wp.vec3], uppers: wp.array[wp.vec3], device: wp.DeviceLike = None
-    ) -> ImplicitAABBTree:
+        cls, lowers: wp.array[wp.vec3], uppers: wp.array[wp.vec3], *, device: wp.DeviceLike = None
+    ) -> ImplicitBvh:
         """Build a tree over the boxes ``[lowers[i], uppers[i]]`` with default settings."""
         tree = cls(max(len(lowers), 1), device=device if device is not None else lowers.device)
         tree.build(lowers, uppers)
         return tree
+
+    @property
+    def slot_count(self) -> int:
+        """Number of leaf slots; the launch size of queries made with :func:`implicit_bvh_make_query_pairs`."""
+        return self.leaf_base
 
     @property
     def memory_bytes(self) -> int:
@@ -649,15 +668,16 @@ class ImplicitAABBTree:
         Args:
             lowers: Lower box corners.
             uppers: Upper box corners.
-            count: Number of items, at most ``max_leaf_count``; defaults to ``len(lowers)``.
+            count: Number of items, at most ``item_capacity``; defaults to ``len(lowers)``.
             sort: Order the leaves along a Hilbert curve of the box centers. Without
-                sorting the leaves keep the input order and are split by count.
+                sorting the leaves keep the input order and are split by count,
+                which only suits input that is already spatially coherent.
         """
         count = len(lowers) if count is None else int(count)
-        if count > self.max_leaf_count:
-            raise ValueError(f"count {count} exceeds max_leaf_count {self.max_leaf_count}")
-        self.leaf_count = count
-        self.data.leaf_count = count
+        if count > self.item_capacity:
+            raise ValueError(f"count {count} exceeds item_capacity {self.item_capacity}")
+        self.item_count = count
+        self.data.item_count = count
         launch = {"device": self.device, "record_tape": False}
         sort = sort and count > 0
         if sort:
@@ -669,8 +689,7 @@ class ImplicitAABBTree:
             wp.utils.radix_sort_pairs(self._keys, self._order, count)
         elif count > 0:
             wp.launch(_identity_order, dim=count, inputs=[self._order], **launch)
-        split = sort and self.aligned
-        if split:
+        if sort:
             self._node_start[0:2].zero_()
             for level in range(self._depth):
                 internal = min(2 << level, self.leaf_base) - (1 << level)
@@ -684,7 +703,7 @@ class ImplicitAABBTree:
         wp.launch(
             _assign_leaves,
             dim=self.leaf_base,
-            inputs=[self._order, self._node_start, count, int(split), self.leaf_base, self.deep_start, self.leaf_item],
+            inputs=[self._order, self._node_start, count, int(sort), self.leaf_base, self.deep_start, self.leaf_item],
             **launch,
         )
         self._clear_marks()
@@ -732,8 +751,11 @@ class ImplicitAABBTree:
 
 
 @wp.struct
-class ImplicitTreeAabbQuery:
-    """State of an AABB-overlap query; ``item`` is the current hit or ``-1``."""
+class ImplicitBvhAabbQuery:
+    """State of an AABB-overlap query; ``item`` is the current hit or ``-1``.
+
+    .. experimental::
+    """
 
     lower: wp.vec3
     upper: wp.vec3
@@ -742,19 +764,22 @@ class ImplicitTreeAabbQuery:
 
 
 @wp.func
-def implicit_tree_query_aabb_next(tree: ImplicitAABBTreeData, query: ImplicitTreeAabbQuery) -> ImplicitTreeAabbQuery:
-    """Advance ``query`` to its next overlapping item (``item == -1`` when exhausted)."""
+def implicit_bvh_query_aabb_next(tree: ImplicitBvhData, query: ImplicitBvhAabbQuery) -> ImplicitBvhAabbQuery:
+    """Advance ``query`` to its next overlapping item (``item == -1`` when exhausted).
+
+    .. experimental::
+    """
     node = query.node
     item = wp.int32(-1)
     while node != wp.int32(0) and item < wp.int32(0):
         lower, upper, _span, _last = _node_load(tree, node)
         if aabb_disjoint(lower, upper, query.lower, query.upper):
-            node = implicit_tree_next_subtree(node)
+            node = implicit_bvh_next_subtree(node)
         elif node < tree.leaf_base:
             node = node * wp.int32(2)
         else:
             item = tree.leaf_item[node - tree.leaf_base]
-            node = implicit_tree_next_subtree(node)
+            node = implicit_bvh_next_subtree(node)
     result = query
     result.node = node
     result.item = item
@@ -762,22 +787,24 @@ def implicit_tree_query_aabb_next(tree: ImplicitAABBTreeData, query: ImplicitTre
 
 
 @wp.func
-def implicit_tree_query_aabb(tree: ImplicitAABBTreeData, lower: wp.vec3, upper: wp.vec3) -> ImplicitTreeAabbQuery:
+def implicit_bvh_query_aabb(tree: ImplicitBvhData, lower: wp.vec3, upper: wp.vec3) -> ImplicitBvhAabbQuery:
     """Start an AABB-overlap query positioned on the first hit (``item == -1`` if none).
 
     Iterate with::
 
-        q = implicit_tree_query_aabb(tree, lower, upper)
+        q = implicit_bvh_query_aabb(tree, lower, upper)
         while q.item >= 0:
             ...  # q.item overlaps [lower, upper]
-            q = implicit_tree_query_aabb_next(tree, q)
+            q = implicit_bvh_query_aabb_next(tree, q)
+
+    .. experimental::
     """
-    query = ImplicitTreeAabbQuery()
+    query = ImplicitBvhAabbQuery()
     query.lower = lower
     query.upper = upper
-    query.node = wp.where(tree.leaf_count > wp.int32(0), wp.int32(1), wp.int32(0))
+    query.node = wp.where(tree.item_count > wp.int32(0), wp.int32(1), wp.int32(0))
     query.item = wp.int32(-1)
-    return implicit_tree_query_aabb_next(tree, query)
+    return implicit_bvh_query_aabb_next(tree, query)
 
 
 # ---------------------------------------------------------------------------
@@ -787,7 +814,7 @@ def implicit_tree_query_aabb(tree: ImplicitAABBTreeData, lower: wp.vec3, upper: 
 
 @wp.func
 def _ray_node_entry(
-    tree: ImplicitAABBTreeData, node: wp.int32, origin: wp.vec3, inv_dir: wp.vec3, max_t: wp.float32
+    tree: ImplicitBvhData, node: wp.int32, origin: wp.vec3, inv_dir: wp.vec3, max_t: wp.float32
 ) -> wp.float32:
     """Ray entry parameter into ``node``'s box within ``max_t``, or ``-1``."""
     lower, upper, _span, last_leaf = _node_load(tree, node)
@@ -808,7 +835,7 @@ def _make_ray_traversal(leaf_func: Any, closest: bool) -> Any:
 
     @wp.func
     def traverse(
-        tree: ImplicitAABBTreeData, origin: wp.vec3, direction: wp.vec3, max_t: wp.float32, state: Any, context: Any
+        tree: ImplicitBvhData, origin: wp.vec3, direction: wp.vec3, max_t: wp.float32, state: Any, context: Any
     ):
         inv_dir = wp.vec3(1.0 / direction[0], 1.0 / direction[1], 1.0 / direction[2])
         start_max_t = max_t
@@ -819,7 +846,7 @@ def _make_ray_traversal(leaf_func: Any, closest: bool) -> Any:
         expand = bool(False)
         t = wp.float32(-1.0)
         pending_t = wp.float32(-1.0)
-        if tree.leaf_count > wp.int32(0):
+        if tree.item_count > wp.int32(0):
             t = _ray_node_entry(tree, wp.int32(1), origin, inv_dir, max_t)
             if t >= wp.float32(0.0):
                 level = wp.int32(0)
@@ -830,7 +857,9 @@ def _make_ray_traversal(leaf_func: Any, closest: bool) -> Any:
                     if t <= max_t:
                         item = tree.leaf_item[node - tree.leaf_base]
                         if wp.static(closest):
-                            t_hit = leaf_func(item, origin, direction, max_t, context)
+                            t_hit = t
+                            if wp.static(leaf_func is not None):
+                                t_hit = leaf_func(item, origin, direction, max_t, context)
                             if t_hit >= wp.float32(0.0) and t_hit < max_t:
                                 max_t = t_hit
                                 best = item
@@ -879,7 +908,7 @@ def _make_ray_traversal(leaf_func: Any, closest: bool) -> Any:
     return traverse
 
 
-def create_implicit_tree_ray_closest(hit_func: Any) -> Any:
+def implicit_bvh_make_query_ray(hit_func: Any) -> Any:
     """Create a fused closest-hit ray query.
 
     ``hit_func(item: int, origin: vec3, direction: vec3, max_t: float, context: Any) -> float``
@@ -888,30 +917,51 @@ def create_implicit_tree_ray_closest(hit_func: Any) -> Any:
     ``query(tree, origin, direction, max_t, context) -> (item, t)`` visits items
     front to back, shrinks ``max_t`` with every hit, and returns the closest
     item (``-1`` if none) and its distance.
+
+    .. experimental::
     """
     traverse = _make_ray_traversal(hit_func, True)
 
     @wp.func
-    def ray_closest(tree: ImplicitAABBTreeData, origin: wp.vec3, direction: wp.vec3, max_t: wp.float32, context: Any):
+    def ray_closest(tree: ImplicitBvhData, origin: wp.vec3, direction: wp.vec3, max_t: wp.float32, context: Any):
         item, t, _state = traverse(tree, origin, direction, max_t, wp.int32(0), context)
         return item, t
 
     return ray_closest
 
 
-def create_implicit_tree_ray_foreach(visit_func: Any) -> Any:
+_ray_closest_box = _make_ray_traversal(None, True)
+
+
+@wp.func
+def implicit_bvh_query_ray(
+    tree: ImplicitBvhData, origin: wp.vec3, direction: wp.vec3, max_t: wp.float32
+) -> tuple[wp.int32, wp.float32]:
+    """Return ``(item, t)`` of the first box a ray enters within ``max_t`` (``item == -1`` if none).
+
+    ``t`` is the entry distance in units of ``direction``; a ray starting inside a box enters it at ``0``.
+
+    .. experimental::
+    """
+    item, t, _state = _ray_closest_box(tree, origin, direction, max_t, wp.int32(0), wp.int32(0))
+    return item, t
+
+
+def implicit_bvh_make_query_ray_foreach(visit_func: Any) -> Any:
     """Create a fused query visiting every item whose box a ray enters.
 
     ``visit_func(item: int, t: float, state: Any, context: Any) -> Any`` is
     called with the box entry distance ``t`` of each item within ``max_t`` and
     returns the updated ``state``. The returned function
     ``query(tree, origin, direction, max_t, state, context)`` returns the final state.
+
+    .. experimental::
     """
     traverse = _make_ray_traversal(visit_func, False)
 
     @wp.func
     def ray_foreach(
-        tree: ImplicitAABBTreeData, origin: wp.vec3, direction: wp.vec3, max_t: wp.float32, state: Any, context: Any
+        tree: ImplicitBvhData, origin: wp.vec3, direction: wp.vec3, max_t: wp.float32, state: Any, context: Any
     ):
         _item, _t, result = traverse(tree, origin, direction, max_t, state, context)
         return result
@@ -920,7 +970,7 @@ def create_implicit_tree_ray_foreach(visit_func: Any) -> Any:
 
 
 @wp.func
-def _node_dist_sq(tree: ImplicitAABBTreeData, node: wp.int32, point: wp.vec3) -> wp.float32:
+def _node_dist_sq(tree: ImplicitBvhData, node: wp.int32, point: wp.vec3) -> wp.float32:
     """Squared distance from ``point`` to ``node``'s box, or ``-1`` for an empty subtree."""
     lower, upper, _span, last_leaf = _node_load(tree, node)
     if last_leaf < wp.int32(0):
@@ -928,7 +978,7 @@ def _node_dist_sq(tree: ImplicitAABBTreeData, node: wp.int32, point: wp.vec3) ->
     return _point_box_dist_sq(point, lower, upper)
 
 
-def create_implicit_tree_point_closest(dist_func: Any) -> Any:
+def implicit_bvh_make_query_point(dist_func: Any) -> Any:
     """Create a fused nearest-item query.
 
     ``dist_func(item: int, point: vec3, max_dist: float, context: Any) -> float``
@@ -938,17 +988,19 @@ def create_implicit_tree_point_closest(dist_func: Any) -> Any:
     nearest first, prunes those farther than the best distance so far, and
     returns the nearest item (``-1`` if none lies within ``max_dist``) and its
     distance.
+
+    .. experimental::
     """
 
     @wp.func
-    def point_closest(tree: ImplicitAABBTreeData, point: wp.vec3, max_dist: wp.float32, context: Any):
+    def point_closest(tree: ImplicitBvhData, point: wp.vec3, max_dist: wp.float32, context: Any):
         best = wp.int32(-1)
         r2 = max_dist * max_dist
         node = wp.int32(1)
         level = wp.int32(-1)
         trail = wp.uint32(0)
         expand = bool(False)
-        if tree.leaf_count > wp.int32(0):
+        if tree.item_count > wp.int32(0):
             d = _node_dist_sq(tree, wp.int32(1), point)
             if d >= wp.float32(0.0) and d <= r2:
                 level = wp.int32(0)
@@ -957,7 +1009,10 @@ def create_implicit_tree_point_closest(dist_func: Any) -> Any:
             if expand:
                 if node >= tree.leaf_base:
                     item = tree.leaf_item[node - tree.leaf_base]
-                    dist = dist_func(item, point, max_dist, context)
+                    if wp.static(dist_func is None):
+                        dist = wp.sqrt(_node_dist_sq(tree, node, point))
+                    else:
+                        dist = dist_func(item, point, max_dist, context)
                     if dist < max_dist:
                         max_dist = dist
                         r2 = dist * dist
@@ -999,32 +1054,53 @@ def create_implicit_tree_point_closest(dist_func: Any) -> Any:
     return point_closest
 
 
-def create_implicit_tree_self_foreach(visit_func: Any) -> Any:
+_point_closest_box = implicit_bvh_make_query_point(None)
+
+
+@wp.func
+def implicit_bvh_query_point(
+    tree: ImplicitBvhData, point: wp.vec3, max_dist: wp.float32
+) -> tuple[wp.int32, wp.float32]:
+    """Return ``(item, dist)`` of the box nearest to ``point`` within ``max_dist`` (``item == -1`` if none).
+
+    ``dist`` is ``0`` for a point inside a box.
+
+    .. experimental::
+    """
+    return _point_closest_box(tree, point, max_dist, wp.int32(0))
+
+
+def implicit_bvh_make_query_pairs(visit_func: Any) -> Any:
     """Create a fused query visiting every pair of overlapping items once.
 
     ``visit_func(item: int, other: int, state: Any, context: Any) -> Any`` is
     called for each item whose box overlaps that of the query slot's item and
     returns the updated ``state``. The returned function
     ``query(tree, slot, state, context)`` returns the final state. Launched
-    over all slots ``[0, leaf_base)``, the queries together visit every
+    over :attr:`ImplicitBvh.slot_count` threads (larger launches are fine,
+    surplus slots visit nothing), the queries together visit every
     overlapping pair exactly once: a pair belongs to the item with the smaller
     box span (ties: smaller slot). Each slot walks up to the root and searches
     only the sibling subtrees on its way, as its ancestors contain it.
+
+    .. experimental::
     """
 
     @wp.func
-    def self_foreach(tree: ImplicitAABBTreeData, slot: wp.int32, state: Any, context: Any):
+    def self_foreach(tree: ImplicitBvhData, slot: wp.int32, state: Any, context: Any):
+        if slot >= tree.leaf_base:
+            return state
         leaf = tree.leaf_base + slot
         lower, upper, span, last_leaf = _node_load(tree, leaf)
         item = tree.leaf_item[slot]
         ancestor = wp.where(last_leaf >= wp.int32(0), leaf, wp.int32(1))
         node = ancestor ^ wp.int32(1)
-        stop = implicit_tree_next_subtree(node)
+        stop = implicit_bvh_next_subtree(node)
         while ancestor > wp.int32(1):
             if node == stop:
                 ancestor = ancestor >> wp.int32(1)
                 node = ancestor ^ wp.int32(1)
-                stop = implicit_tree_next_subtree(node)
+                stop = implicit_bvh_next_subtree(node)
             else:
                 n_lower, n_upper, n_span, n_last = _node_load(tree, node)
                 if (
@@ -1032,12 +1108,12 @@ def create_implicit_tree_self_foreach(visit_func: Any) -> Any:
                     or (n_span == span and n_last <= slot)
                     or aabb_disjoint(n_lower, n_upper, lower, upper)
                 ):
-                    node = implicit_tree_next_subtree(node)
+                    node = implicit_bvh_next_subtree(node)
                 elif node < tree.leaf_base:
                     node = node * wp.int32(2)
                 else:
                     state = visit_func(item, tree.leaf_item[node - tree.leaf_base], state, context)
-                    node = implicit_tree_next_subtree(node)
+                    node = implicit_bvh_next_subtree(node)
         return state
 
     return self_foreach

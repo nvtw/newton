@@ -1,22 +1,24 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Implicit AABB tree queries against brute force, including refit and graph replay."""
+"""Implicit BVH queries against brute force, including refit and graph replay."""
 
 import unittest
 
 import numpy as np
 import warp as wp
 
-from newton._src.geometry.implicit_aabb_tree import (
-    ImplicitAABBTree,
-    ImplicitAABBTreeData,
-    create_implicit_tree_point_closest,
-    create_implicit_tree_ray_closest,
-    create_implicit_tree_ray_foreach,
-    create_implicit_tree_self_foreach,
-    implicit_tree_query_aabb,
-    implicit_tree_query_aabb_next,
+from newton.geometry import (
+    ImplicitBvh,
+    ImplicitBvhData,
+    implicit_bvh_make_query_pairs,
+    implicit_bvh_make_query_point,
+    implicit_bvh_make_query_ray,
+    implicit_bvh_make_query_ray_foreach,
+    implicit_bvh_query_aabb,
+    implicit_bvh_query_aabb_next,
+    implicit_bvh_query_point,
+    implicit_bvh_query_ray,
 )
 
 _MAX_HITS = 64
@@ -24,7 +26,7 @@ _MAX_HITS = 64
 
 @wp.kernel
 def _aabb_hits(
-    tree: ImplicitAABBTreeData,
+    tree: ImplicitBvhData,
     qlo: wp.array[wp.vec3],
     qhi: wp.array[wp.vec3],
     hits: wp.array2d[wp.int32],
@@ -32,12 +34,12 @@ def _aabb_hits(
 ):
     i = wp.tid()
     n = int(0)
-    q = implicit_tree_query_aabb(tree, qlo[i], qhi[i])
+    q = implicit_bvh_query_aabb(tree, qlo[i], qhi[i])
     while q.item >= 0:
         if n < _MAX_HITS:
             hits[i, n] = q.item
         n += 1
-        q = implicit_tree_query_aabb_next(tree, q)
+        q = implicit_bvh_query_aabb_next(tree, q)
     counts[i] = n
 
 
@@ -84,38 +86,49 @@ def _record_pair(item: int, other: int, state: int, out: _PairOut) -> int:
     return state
 
 
-_ray_closest = create_implicit_tree_ray_closest(_box_hit)
-_ray_count = create_implicit_tree_ray_foreach(_count_visit)
-_nearest = create_implicit_tree_point_closest(_box_distance)
-_self_pairs = create_implicit_tree_self_foreach(_record_pair)
+_ray_closest = implicit_bvh_make_query_ray(_box_hit)
+_ray_count = implicit_bvh_make_query_ray_foreach(_count_visit)
+_nearest = implicit_bvh_make_query_point(_box_distance)
+_self_pairs = implicit_bvh_make_query_pairs(_record_pair)
 
 
 @wp.kernel
-def _nearest_box(tree: ImplicitAABBTreeData, boxes: _Boxes, points: wp.array[wp.vec3], out_dist: wp.array[wp.float32]):
+def _nearest_box(
+    tree: ImplicitBvhData,
+    boxes: _Boxes,
+    points: wp.array[wp.vec3],
+    out_dist: wp.array[wp.float32],
+    out_box_dist: wp.array[wp.float32],
+):
     i = wp.tid()
     _item, d = _nearest(tree, points[i], 1.0e30, boxes)
     out_dist[i] = d
+    _item, d = implicit_bvh_query_point(tree, points[i], 1.0e30)
+    out_box_dist[i] = d
 
 
 @wp.kernel
-def _all_pairs(tree: ImplicitAABBTreeData, out: _PairOut):
+def _all_pairs(tree: ImplicitBvhData, out: _PairOut):
     _self_pairs(tree, wp.tid(), int(0), out)
 
 
 @wp.kernel
 def _fused_rays(
-    tree: ImplicitAABBTreeData,
+    tree: ImplicitBvhData,
     boxes: _Boxes,
     ro: wp.array[wp.vec3],
     rd: wp.array[wp.vec3],
     out_t: wp.array[wp.float32],
     out_item: wp.array[wp.int32],
     out_count: wp.array[wp.int32],
+    out_box_t: wp.array[wp.float32],
 ):
     i = wp.tid()
     item, t = _ray_closest(tree, ro[i], rd[i], 1.0e30, boxes)
     out_t[i] = t
     out_item[i] = item
+    _item, t = implicit_bvh_query_ray(tree, ro[i], rd[i], 1.0e30)
+    out_box_t[i] = t
     out_count[i] = _ray_count(tree, ro[i], rd[i], 1.0e30, int(0), int(0))
 
 
@@ -125,7 +138,7 @@ def _random_boxes(rng, n):
     return c - h, c + h
 
 
-class TestImplicitAABBTree(unittest.TestCase):
+class TestImplicitBvh(unittest.TestCase):
     def setUp(self):
         if not wp.is_cuda_available():
             self.skipTest("CUDA graph capture requires a CUDA device")
@@ -166,6 +179,7 @@ class TestImplicitAABBTree(unittest.TestCase):
         out_t = wp.zeros(nq, dtype=wp.float32, device=device)
         out_item = wp.zeros(nq, dtype=wp.int32, device=device)
         out_count = wp.zeros(nq, dtype=wp.int32, device=device)
+        out_box_t = wp.zeros(nq, dtype=wp.float32, device=device)
         wp.launch(
             _fused_rays,
             dim=nq,
@@ -175,32 +189,34 @@ class TestImplicitAABBTree(unittest.TestCase):
                 wp.array(ro_np, dtype=wp.vec3, device=device),
                 wp.array(rd_np, dtype=wp.vec3, device=device),
             ],
-            outputs=[out_t, out_item, out_count],
+            outputs=[out_t, out_item, out_count, out_box_t],
             device=device,
         )
         np.testing.assert_allclose(out_t.numpy(), t_ref, rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(out_box_t.numpy(), t_ref, rtol=1e-5, atol=1e-5)
         np.testing.assert_array_equal(out_count.numpy(), (t_in <= t_out).sum(1))
 
         # Nearest box distance from random points.
         p_np = rng.uniform(-6.0, 6.0, (nq, 3)).astype(np.float32)
         out_d = wp.zeros(nq, dtype=wp.float32, device=device)
+        out_box_d = wp.zeros(nq, dtype=wp.float32, device=device)
         wp.launch(
             _nearest_box,
             dim=nq,
             inputs=[tree.data, boxes, wp.array(p_np, dtype=wp.vec3, device=device)],
-            outputs=[out_d],
+            outputs=[out_d, out_box_d],
             device=device,
         )
         gap = np.maximum(np.maximum(lo_np[None, :n] - p_np[:, None], p_np[:, None] - hi_np[None, :n]), 0.0)
-        np.testing.assert_allclose(
-            out_d.numpy(), np.linalg.norm(gap, axis=-1).min(1, initial=1.0e30), rtol=1e-5, atol=1e-5
-        )
+        d_ref = np.linalg.norm(gap, axis=-1).min(1, initial=1.0e30)
+        np.testing.assert_allclose(out_d.numpy(), d_ref, rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(out_box_d.numpy(), d_ref, rtol=1e-5, atol=1e-5)
 
-        # Self overlap reports every overlapping pair exactly once.
+        # Self overlap reports every overlapping pair exactly once; surplus threads visit nothing.
         out = _PairOut()
         out.pairs = wp.empty(max(n * n, 1), dtype=wp.vec2i, device=device)
         out.count = wp.zeros(1, dtype=wp.int32, device=device)
-        wp.launch(_all_pairs, dim=tree.leaf_base, inputs=[tree.data, out], device=device)
+        wp.launch(_all_pairs, dim=tree.slot_count + 7, inputs=[tree.data, out], device=device)
         k = int(out.count.numpy()[0])
         got = [tuple(p) for p in out.pairs.numpy()[:k]]
         self.assertEqual(len(got), len(set(got)))
@@ -215,7 +231,7 @@ class TestImplicitAABBTree(unittest.TestCase):
         lo_np, hi_np = _random_boxes(rng, n)
         lo = wp.array(lo_np, dtype=wp.vec3, device=device)
         hi = wp.array(hi_np, dtype=wp.vec3, device=device)
-        tree = ImplicitAABBTree(n + 37, device=device)
+        tree = ImplicitBvh(n + 37, device=device)
         tree.build(lo, hi)
         self._check_all(tree, lo_np, hi_np, n, rng)
 
@@ -250,8 +266,8 @@ class TestImplicitAABBTree(unittest.TestCase):
         np.testing.assert_array_equal(tree.leaf_item.numpy()[slots[:n]], np.arange(n))
         self._check_all(tree, lo2_np, hi2_np, n, rng)
 
-    def test_slack_unaligned_and_clustered(self):
-        """Spare leaf slots, count splits and clustered boxes stay exact."""
+    def test_slack_and_clustered(self):
+        """Spare leaf slots and clustered boxes stay exact."""
         device = self.device
         rng = np.random.default_rng(11)
         n = 2000
@@ -261,9 +277,9 @@ class TestImplicitAABBTree(unittest.TestCase):
         hi_np = (centers + half).astype(np.float32)
         lo = wp.array(lo_np, dtype=wp.vec3, device=device)
         hi = wp.array(hi_np, dtype=wp.vec3, device=device)
-        for kwargs in ({}, {"slack": 2.0}, {"aligned": False}):
+        for kwargs in ({}, {"slack": 2.0}, {"power_of_two": True}):
             with self.subTest(**kwargs):
-                tree = ImplicitAABBTree(n, device=device, **kwargs)
+                tree = ImplicitBvh(n, device=device, **kwargs)
                 tree.build(lo, hi)
                 self.assertEqual(int((tree.leaf_item.numpy() >= 0).sum()), n)
                 self._check_all(tree, lo_np, hi_np, n, rng)
@@ -278,7 +294,7 @@ class TestImplicitAABBTree(unittest.TestCase):
             lo_np, hi_np = _random_boxes(rng, max(n, 1))
             lo = wp.array(lo_np, dtype=wp.vec3, device=device)
             hi = wp.array(hi_np, dtype=wp.vec3, device=device)
-            tree = ImplicitAABBTree(max(n, 1), device=device)
+            tree = ImplicitBvh(max(n, 1), device=device)
             tree.build(lo, hi, count=n)
             self._check_all(tree, lo_np, hi_np, n, rng)
 
