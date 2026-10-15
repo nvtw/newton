@@ -976,6 +976,7 @@ def compute_and_write_joint_implicit_dynamics(
 
             if act_type == JointActuationType.PASSIVE or act_type == JointActuationType.FORCE:
                 # Bound the actuator command, not the passive armature/damping reaction.
+                # With zero PD gains, tau_j_tot coincides with the command torque.
                 tau_j_tot = clamp_joint_effort_wp(tau_j_tot, model_joint_tau_j_max[dofs_offset_j])
 
         # Enforce minimum mass to avoid division by zero

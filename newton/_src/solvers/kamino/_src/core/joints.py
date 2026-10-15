@@ -1992,8 +1992,8 @@ class JointsData:
     h_j := a_j * dq_j^{-} + dt * tau_j_tot
     dq_b_j := inv_m_j * h_j
     ```
-    For unbounded implicit PD, the joint dynamics constraint includes
-    ``tau_j_tot`` according to the actuation type:
+    For DoFs with armature, viscous damping or unbounded implicit PD, this path
+    assembles ``tau_j_tot`` as follows according to the actuation type:
 
     - ``PASSIVE``: ``clamp(tau_j, -tau_j_max, tau_j_max)``
     - ``FORCE``: ``clamp(tau_j + tau_j_ff, -tau_j_max, tau_j_max)``
