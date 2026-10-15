@@ -276,6 +276,7 @@ class Example:
             speculative_contact_gap_max=self.speculative_contact_gap_max,
             speculative_contact_velocity_filter=True,
             contact_reduction_voxel_depth=args.sdf_voxel_depth_contacts,
+            sdf_contact_method=getattr(args, "sdf_contact_method", "edge"),
         )
         self.contacts = self.pipeline.contacts()
         self.solver = SolverPhoenX(
@@ -476,6 +477,12 @@ class Example:
     def create_parser():
         parser = newton.examples.create_parser()
         parser.set_defaults(viewer="optix")
+        parser.add_argument(
+            "--sdf-contact-method",
+            choices=("edge", "cached_sampling"),
+            default="edge",
+            help="SDF contact generation: edge sampling or cached importance sampling.",
+        )
         parser.add_argument(
             "--solver-stats", action="store_true", help="Print coloring statistics once per simulated second."
         )

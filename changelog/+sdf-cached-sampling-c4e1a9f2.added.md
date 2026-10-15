@@ -1,0 +1,1 @@
+Add `CollisionPipeline(sdf_contact_method="cached_sampling")`, an experimental SDF-SDF contact method that optimizes a few temporally cached and importance-sampled points per shape pair (`newton.geometry.SDFCachedSampling`) instead of sampling mesh edges, and a matching `--sdf-contact-method` option for the PhoenX mechanism examples.

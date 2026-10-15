@@ -211,6 +211,7 @@ class Example:
             rigid_contact_max=65536,
             speculative_contact_gap_max=0.01,
             speculative_contact_velocity_filter=False,
+            sdf_contact_method=getattr(args, "sdf_contact_method", "edge"),
         )
         self.contacts = self.pipeline.contacts()
         self.solver = SolverPhoenX(
@@ -385,6 +386,12 @@ class Example:
     def create_parser():
         parser = newton.examples.create_parser()
         parser.set_defaults(viewer="optix")
+        parser.add_argument(
+            "--sdf-contact-method",
+            choices=("edge", "cached_sampling"),
+            default="edge",
+            help="SDF contact generation: edge sampling or cached importance sampling.",
+        )
         parser.add_argument("--contact-chunk-size", type=int, default=64)
         parser.add_argument("--iterations", type=int, default=2, help="Solver iterations per physics substep.")
         parser.add_argument("--substeps", type=int, default=5, help="Physics substeps per 120 Hz contact refresh.")
