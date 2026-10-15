@@ -303,7 +303,7 @@ _SUBGROUP_ACCUMULATE8_VEC3_CODE = "\n".join(
 
 
 @wp.func_native(_SUBGROUP_ACCUMULATE8_VEC3_CODE)
-def _subgroup_accumulate8_vec3(
+def subgroup_accumulate8_vec3(
     accumulator: wp.vec3f,
     value: wp.vec3f,
     mask: wp.uint32,
@@ -338,8 +338,8 @@ def _average_and_broadcast_rigid_velocity_subgroup_kernel(copy_state: CopyStateC
             value_v = copy_state.velocity[slot]
             value_w = copy_state.angular_velocity[slot]
         # Gather in source-lane order to preserve the scalar kernel sum exactly.
-        sum_v = _subgroup_accumulate8_vec3(sum_v, value_v, mask)
-        sum_w = _subgroup_accumulate8_vec3(sum_w, value_w, mask)
+        sum_v = subgroup_accumulate8_vec3(sum_v, value_v, mask)
+        sum_w = subgroup_accumulate8_vec3(sum_w, value_w, mask)
         chunk += wp.int32(8)
 
     inv_count = wp.float32(1.0) / wp.float32(count)
@@ -387,8 +387,8 @@ def _average_rigid_velocity_into_bodies_kernel(copy_state: CopyStateContainer, b
         if slot < end:
             value_v = copy_state.velocity[slot]
             value_w = copy_state.angular_velocity[slot]
-        sum_v = _subgroup_accumulate8_vec3(sum_v, value_v, mask)
-        sum_w = _subgroup_accumulate8_vec3(sum_w, value_w, mask)
+        sum_v = subgroup_accumulate8_vec3(sum_v, value_v, mask)
+        sum_w = subgroup_accumulate8_vec3(sum_w, value_w, mask)
         chunk += wp.int32(8)
 
     if lane == wp.int32(0):

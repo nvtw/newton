@@ -91,6 +91,7 @@ class _PhoenXScene:
         max_colored_partitions: int = 12,
         mass_splitting_batch_size: int = 8,
         contact_friction_model: str = "point",
+        mass_splitting_overflow_only: bool = False,
     ) -> None:
         self.device = wp.get_device("cuda:0")
         self.fps = int(fps)
@@ -108,6 +109,7 @@ class _PhoenXScene:
         self.max_colored_partitions = int(max_colored_partitions)
         self.mass_splitting_batch_size = int(mass_splitting_batch_size)
         self.contact_friction_model = contact_friction_model
+        self.mass_splitting_overflow_only = bool(mass_splitting_overflow_only)
 
         self.mb = newton.ModelBuilder()
         # Pick up the PhoenX contact-ahead-of-impact default so every
@@ -351,6 +353,8 @@ class _PhoenXScene:
             max_colored_partitions=self.max_colored_partitions,
             mass_splitting_batch_size=self.mass_splitting_batch_size,
             contact_friction_model=self.contact_friction_model,
+            mass_splitting_unrolled=self.mass_splitting_overflow_only,
+            mass_splitting_overflow_only=self.mass_splitting_overflow_only,
             device=self.device,
         )
 
