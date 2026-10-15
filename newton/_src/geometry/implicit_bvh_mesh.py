@@ -143,10 +143,49 @@ def _face_ray_hit(
 
 
 @wp.func
+def _triangle_dist_sq(p: wp.vec3, a: wp.vec3, b: wp.vec3, c: wp.vec3) -> wp.float32:
+    """Squared distance from ``p`` to triangle ``abc``.
+
+    Same regions as :func:`_closest_point_triangle`, written with a single exit,
+    which compiles to markedly fewer instructions in the query's inner loop.
+    """
+    ab = b - a
+    ac = c - a
+    ap = p - a
+    bp = p - b
+    cp = p - c
+    d1 = wp.dot(ab, ap)
+    d2 = wp.dot(ac, ap)
+    d3 = wp.dot(ab, bp)
+    d4 = wp.dot(ac, bp)
+    d5 = wp.dot(ab, cp)
+    d6 = wp.dot(ac, cp)
+    va = d3 * d6 - d5 * d4
+    vb = d5 * d2 - d1 * d6
+    vc = d1 * d4 - d3 * d2
+    q = a
+    if d1 <= 0.0 and d2 <= 0.0:
+        q = a
+    elif d3 >= 0.0 and d4 <= d3:
+        q = b
+    elif vc <= 0.0 and d1 >= 0.0 and d3 <= 0.0:
+        q = a + (d1 / (d1 - d3)) * ab
+    elif d6 >= 0.0 and d5 <= d6:
+        q = c
+    elif vb <= 0.0 and d2 >= 0.0 and d6 <= 0.0:
+        q = a + (d2 / (d2 - d6)) * ac
+    elif va <= 0.0 and d4 - d3 >= 0.0 and d5 - d6 >= 0.0:
+        q = b + ((d4 - d3) / ((d4 - d3) + (d5 - d6))) * (c - b)
+    else:
+        den = 1.0 / (va + vb + vc)
+        q = a + (vb * den) * ab + (vc * den) * ac
+    return wp.length_sq(p - q)
+
+
+@wp.func
 def _face_distance(face: wp.int32, p: wp.vec3, max_dist: wp.float32, mesh: ImplicitBvhMeshData) -> wp.float32:
     a, b, c = _face_vertices(mesh, face)
-    w = _closest_point_triangle(p, a, b, c)
-    return wp.length(p - (w[0] * a + w[1] * b + w[2] * c))
+    return wp.sqrt(_triangle_dist_sq(p, a, b, c))
 
 
 _mesh_ray_closest = implicit_bvh_make_query_ray(_face_ray_hit)

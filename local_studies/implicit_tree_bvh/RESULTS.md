@@ -1,6 +1,6 @@
 # Implicit BVH vs `wp.Bvh` / `wp.Mesh`
 
-RTX PRO 6000 Blackwell, Warp 1.17.0. Code: `newton/_src/geometry/implicit_bvh.py`
+RTX PRO 6000 Blackwell, Warp 1.18.0 (NVRTC 13.4). Code: `newton/_src/geometry/implicit_bvh.py`
 (`newton.geometry.ImplicitBvh`) and `implicit_bvh_mesh.py` (`ImplicitBvhMesh`).
 Reproduce: `uv run python local_studies/implicit_tree_bvh/bench_bvh.py`, then `scoreboard.py`.
 GPU work is timed as CUDA-graph replays (best of several trials) with the GPU otherwise idle;
@@ -29,24 +29,43 @@ mesh (`terrain`). Warp structures: `wp.Bvh` (LBVH, SAH, cuBQL) and `wp.Mesh` (LB
 
 | category | 1k | 10k | 100k | 1M |
 |---|---|---|---|---|
-| build (vs `Bvh.rebuild("lbvh")`) | 1.06-1.17x | 1.24-1.29x | 1.14-1.20x | 1.83-1.97x |
-| refit | 1.40-1.58x | 1.50-1.75x | 1.20-1.29x | 1.04-1.22x |
-| AABB query small / medium | 4.3-5.7x | 3.9-4.7x | 4.4-4.8x | 4.3-5.1x |
-| ray, every hit (long / short) | 1.67 / 1.84x | 1.80 / 1.91x | 1.48 / 1.67x | 1.36 / 1.48x |
-| ray, closest box | 2.22x | 2.94x | 3.94x | 5.67x |
-| ray, closest triangle (vs `wp.Mesh` SAH) | 0.89x | 1.03x | 1.08x | 1.02x |
-| closest point on triangles (vs `wp.Mesh` SAH) | 0.67x | 1.06x | 1.33x | 1.33x |
-| self overlap pairs | 0.92x | 0.99-1.10x | 2.2-2.7x | 3.3-4.4x |
+| build (vs `Bvh.rebuild("lbvh")`) | 1.05-1.17x | 1.25-1.28x | 1.13-1.20x | 1.82-1.96x |
+| refit | 1.22-1.29x | 1.33-1.58x | 1.17-1.20x | 1.09-1.14x |
+| AABB query small / medium | 2.0-2.4x | 1.3-2.1x | 1.3-1.9x | 1.4-1.7x |
+| ray, every hit (long / short) | 1.93 / 1.85x | 1.69 / 1.67x | 1.37 / 1.39x | 1.19 / 1.15x |
+| ray, closest box | 2.15x | 2.44x | 3.40x | 4.70x |
+| ray, closest triangle (vs `wp.Mesh` SAH) | 0.97x | 1.24x | 1.32x | 1.24x |
+| closest point on triangles (vs `wp.Mesh` SAH) | 0.75x | 1.03x | 1.25x | 1.23x |
+| self overlap pairs | 1.09-1.23x | 1.41-1.47x | 2.7-3.8x | 4.3-6.2x |
 | memory | 0.65-0.71x | 0.65-0.71x | 0.65-0.71x | 0.97-1.06x |
 
 Raw numbers: `results.json` / `bench_bvh.log`. Broad phase (`bench_broadphase.py`): identical pair
 sets, 3-4% faster than before the tree was factored out.
 
+## Profiling (Nsight Compute, `profile_implicit_bvh_ncu.sh` + `ncu_driver.py`)
+
+* No query is memory bound (DRAM <= 6%, L1 hit 50-99%); all run ~5-10 of 32 lanes per warp.
+* Small trees are issue bound: at 1k triangles the closest-point kernel issued 1.9x the
+  instructions of `wp.Mesh` (7x the `MOV`s, 2x the branches) at equal IPC. Large trees are
+  latency bound, where `wp.Mesh` stalls twice as long on loads.
+* Ruled out by A/B: leaf size (`wp.Mesh` with 1 triangle per leaf is as fast as with 4), SAH split
+  placement along the curve, a full SAH order with SAH splits, stack traversal, a smaller node
+  footprint (less slack). An unconstrained SAH tree needs only ~20% fewer visits at 1k.
+* What helped (same toolchain, old -> new): jumping from a finished subtree to the deepest pending
+  sibling in one step (trail bits + `clz`) instead of climbing per level, the same O(1) step for the
+  AABB/pair successor, testing two leaf children in place, strict pruning that lets the inverted
+  bounds of empty slots reject themselves, and a single-exit triangle distance. Speedups:
+  closest point 1.34-1.49x, rays 1.02-1.36x, pairs 1.18-1.41x, AABB 1.02-1.25x.
+* Toolchain: the same generated CUDA runs 1.4-1.6x slower on rays and closest points with Warp
+  1.18's NVRTC 13.4 than with Warp 1.17's NVRTC 12.9 (old code: closest point 0.40 -> 0.59 ms at
+  100k). The scoreboard above is on 1.18.
+
 ## Verdict
 
 The implicit tree is the better default for GPU use: it builds 1.1-2x faster than the fastest
 `wp.Bvh` (and >1000x faster than SAH/cuBQL, which build on the CPU), refits faster, answers box
-queries 4-6x faster and rays and closest-point queries as fast or faster from 10k items up, with
-no tuning. It loses only on very small meshes (~1k triangles), where a CPU-built SAH tree is
-tighter, and spends ~1.4x the memory of `wp.Bvh` below ~100k items for its spare slots (parity at
-1M).
+queries 1.3-2.4x faster, closest-box rays 2-5x faster, and triangle rays and closest-point queries
+as fast or faster from 10k items up, with no tuning. It loses only on very small meshes (~1k
+triangles; closest point 0.75x), where a CPU-built SAH tree is tighter and query cost is
+instruction bound, and spends ~1.4x the memory of `wp.Bvh` below ~100k items for its spare slots
+(parity at 1M).

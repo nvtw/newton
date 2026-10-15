@@ -3,75 +3,85 @@
   "scene": "boxes",
   "n": 1000,
   "build": {
-   "implicit": 0.05825449300027685,
-   "bvh_lbvh_ctor": 0.2193750005972106,
-   "bvh_sah_ctor": 0.6672889994661091,
-   "bvh_cubql_ctor": 3.446750000875909,
-   "bvh_lbvh_rebuild": 0.06146010999873397
+   "implicit": 0.05867331300032674,
+   "bvh_lbvh_ctor": 0.15376200099126436,
+   "bvh_sah_ctor": 0.42442199992365204,
+   "bvh_median_ctor": 0.27685900204232894,
+   "bvh_cubql_ctor": 2.4156860017683357,
+   "bvh_lbvh_rebuild": 0.061521160998381674
   },
   "refit": {
-   "implicit": 0.010080485999424127,
-   "implicit_levels_only": 0.010155291000046418,
-   "bvh_lbvh": 0.0163982930007478,
-   "bvh_sah": 0.016393935999076348,
-   "bvh_cubql": 0.015892153000095277
+   "implicit": 0.010222616998362355,
+   "implicit_levels_only": 0.010267628000292461,
+   "bvh_lbvh": 0.01603622299808194,
+   "bvh_sah": 0.016305363998981193,
+   "bvh_median": 0.013155944001482567,
+   "bvh_cubql": 0.014387859002454206
   },
   "query": {
    "aabb_small": {
     "hits_per_query": 1.2168388366699219,
-    "implicit": 0.05205886499970802,
-    "implicit_inline": 0.05726754800161871,
-    "bvh_lbvh": 0.3131939810516901,
-    "bvh_sah": 0.26130346396921805,
-    "bvh_cubql": 0.23338925585021952,
+    "implicit": 0.04369522200067877,
+    "implicit_inline": 0.05308847600099398,
+    "bvh_lbvh": 0.12808949899772415,
+    "bvh_sah": 0.1250621590006631,
+    "bvh_median": 0.12708908900094684,
+    "bvh_cubql": 0.09302934300285415,
     "brute_force_checked": true
    },
    "aabb_medium": {
     "hits_per_query": 14.24844741821289,
-    "implicit": 0.1829861554726259,
-    "implicit_inline": 0.17515016151914975,
-    "bvh_lbvh": 1.191989853662274,
-    "bvh_sah": 1.0669747028958332,
-    "bvh_cubql": 0.9986626443038257,
+    "implicit": 0.16121212775433857,
+    "implicit_inline": 0.16539973077003167,
+    "bvh_lbvh": 0.40906977534576394,
+    "bvh_sah": 0.4894819409781151,
+    "bvh_median": 0.4497700570642042,
+    "bvh_cubql": 0.36408969879477193,
     "brute_force_checked": true
    },
    "ray_all_hits": {
     "hits_per_query": 2.5013999938964844,
-    "implicit": 0.12116028000127699,
+    "implicit": 0.1315608360018814,
     "bvh_lbvh_count_mismatch_rays": 0,
-    "bvh_lbvh": 0.22558608219270537,
+    "bvh_lbvh": 0.3113397288115713,
     "bvh_sah_count_mismatch_rays": 0,
-    "bvh_sah": 0.24571869782967906,
+    "bvh_sah": 0.3189593995775173,
+    "bvh_median_count_mismatch_rays": 0,
+    "bvh_median": 0.3210660043349813,
     "bvh_cubql_count_mismatch_rays": 0,
-    "bvh_cubql": 0.20185771409185108
+    "bvh_cubql": 0.25394109407654203
    },
    "ray_short_all_hits": {
     "hits_per_query": 1.0873336791992188,
-    "implicit": 0.05685001299934811,
+    "implicit": 0.061673832999076694,
     "bvh_lbvh_count_mismatch_rays": 0,
-    "bvh_lbvh": 0.12400450200038904,
+    "bvh_lbvh": 0.15647165026477747,
     "bvh_sah_count_mismatch_rays": 0,
-    "bvh_sah": 0.12742019500001334,
+    "bvh_sah": 0.15447003586637864,
+    "bvh_median_count_mismatch_rays": 0,
+    "bvh_median": 0.15718509743085612,
     "bvh_cubql_count_mismatch_rays": 0,
-    "bvh_cubql": 0.10484490499948151
+    "bvh_cubql": 0.1142958880009246
    },
    "ray_closest_box": {
-    "implicit": 0.07989804499993625,
-    "bvh_lbvh": 0.2013100899184346,
-    "bvh_sah": 0.22087412649051702,
-    "bvh_cubql": 0.17757577980594688
+    "implicit": 0.08701665600165143,
+    "bvh_lbvh": 0.20543269252368615,
+    "bvh_sah": 0.22695389060459267,
+    "bvh_median": 0.21273923649479817,
+    "bvh_cubql": 0.18718404193156432
    },
    "self_pairs": {
     "pairs": 785,
-    "implicit": 0.02665792799962219,
-    "bvh_lbvh": 0.028509251998912077,
-    "bvh_sah": 0.024546979999286123
+    "implicit": 0.022543841998412972,
+    "bvh_lbvh": 0.028695025001070462,
+    "bvh_sah": 0.02461474599840585
    }
   },
   "memory": {
    "implicit": 119024,
    "bvh_lbvh": 84076,
    "bvh_sah": 84076,
+   "bvh_median": 84076,
    "bvh_cubql": 84116
   },
   "capture": {
@@ -79,6 +89,7 @@
    "implicit_refit": true,
    "bvh_lbvh_refit": true,
    "bvh_sah_refit": true,
+   "bvh_median_refit": true,
    "bvh_cubql_refit": true,
    "bvh_lbvh_rebuild": true
   }
@@ -87,75 +98,85 @@
   "scene": "boxes",
   "n": 10000,
   "build": {
-   "implicit": 0.10716897600104858,
-   "bvh_lbvh_ctor": 0.2300609994563274,
-   "bvh_sah_ctor": 8.757777999562677,
-   "bvh_cubql_ctor": 6.794531000196002,
-   "bvh_lbvh_rebuild": 0.13286862099994323
+   "implicit": 0.1090671249985462,
+   "bvh_lbvh_ctor": 0.2535349995014258,
+   "bvh_sah_ctor": 4.575964001560351,
+   "bvh_median_ctor": 2.1719399992434774,
+   "bvh_cubql_ctor": 4.313261997594964,
+   "bvh_lbvh_rebuild": 0.13598333199843182
   },
   "refit": {
-   "implicit": 0.012301877999561839,
-   "implicit_levels_only": 0.011781932000303641,
-   "bvh_lbvh": 0.020181030999083305,
-   "bvh_sah": 0.018462841000655317,
-   "bvh_cubql": 0.018455655999787268
+   "implicit": 0.012310206999245565,
+   "implicit_levels_only": 0.01150435200179345,
+   "bvh_lbvh": 0.01989586199852056,
+   "bvh_sah": 0.01847914600148215,
+   "bvh_median": 0.016421618001913885,
+   "bvh_cubql": 0.018390705998172052
   },
   "query": {
    "aabb_small": {
     "hits_per_query": 1.2916946411132812,
-    "implicit": 0.09483802099930472,
-    "implicit_inline": 0.10028859799967904,
-    "bvh_lbvh": 0.5598984923610176,
-    "bvh_sah": 0.49198857142674685,
-    "bvh_cubql": 0.44086427492388697,
+    "implicit": 0.08804216600037762,
+    "implicit_inline": 0.09318800400069449,
+    "bvh_lbvh": 0.20127685298139214,
+    "bvh_sah": 0.18336767861326037,
+    "bvh_median": 0.2099628928065732,
+    "bvh_cubql": 0.20294677548013632,
     "brute_force_checked": true
    },
    "aabb_medium": {
     "hits_per_query": 16.103527069091797,
-    "implicit": 0.3529155299789021,
-    "implicit_inline": 0.3365323741521946,
-    "bvh_lbvh": 1.811690402419339,
-    "bvh_sah": 1.6783654659155383,
-    "bvh_cubql": 1.568771810535078,
+    "implicit": 0.34135984367759226,
+    "implicit_inline": 0.32076593926590574,
+    "bvh_lbvh": 0.5684912786319166,
+    "bvh_sah": 0.5369172258105206,
+    "bvh_median": 0.5829542637875993,
+    "bvh_cubql": 0.5810909921848406,
     "brute_force_checked": true
    },
    "ray_all_hits": {
     "hits_per_query": 5.378997802734375,
-    "implicit": 0.3248569284152674,
+    "implicit": 0.44446582738341284,
     "bvh_lbvh_count_mismatch_rays": 0,
-    "bvh_lbvh": 0.5960476234838507,
+    "bvh_lbvh": 0.8143956648372306,
     "bvh_sah_count_mismatch_rays": 0,
-    "bvh_sah": 0.5835272784358548,
+    "bvh_sah": 0.7525848989763575,
+    "bvh_median_count_mismatch_rays": 0,
+    "bvh_median": 0.8492375229837924,
     "bvh_cubql_count_mismatch_rays": 0,
-    "bvh_cubql": 0.8145111694064754
+    "bvh_cubql": 0.7938588563813531
    },
    "ray_short_all_hits": {
     "hits_per_query": 1.2128448486328125,
-    "implicit": 0.09960942800171324,
+    "implicit": 0.13300904099742183,
     "bvh_lbvh_count_mismatch_rays": 0,
-    "bvh_lbvh": 0.19671930942862126,
+    "bvh_lbvh": 0.238079608479626,
     "bvh_sah_count_mismatch_rays": 0,
-    "bvh_sah": 0.19048920924098256,
+    "bvh_sah": 0.22245272988962625,
+    "bvh_median_count_mismatch_rays": 0,
+    "bvh_median": 0.25588313989682665,
     "bvh_cubql_count_mismatch_rays": 0,
-    "bvh_cubql": 0.2715270680168407
+    "bvh_cubql": 0.24767211036676623
    },
    "ray_closest_box": {
-    "implicit": 0.14241515600042476,
-    "bvh_lbvh": 0.4397255987893878,
-    "bvh_sah": 0.41848472625519734,
-    "bvh_cubql": 0.5451733919445083
+    "implicit": 0.17019612647478946,
+    "bvh_lbvh": 0.45675383850907536,
+    "bvh_sah": 0.4161002683563593,
+    "bvh_median": 0.4719938721992046,
+    "bvh_cubql": 0.4735591012636005
    },
    "self_pairs": {
     "pairs": 8566,
-    "implicit": 0.0410105780010781,
-    "bvh_lbvh": 0.04828799500137393,
-    "bvh_sah": 0.044970345001274836
+    "implicit": 0.03076950600006967,
+    "bvh_lbvh": 0.049178612000105204,
+    "bvh_sah": 0.04510356099854107
    }
   },
   "memory": {
    "implicit": 1190024,
    "bvh_lbvh": 844172,
    "bvh_sah": 840076,
+   "bvh_median": 840076,
    "bvh_cubql": 840116
   },
   "capture": {
@@ -163,6 +184,7 @@
    "implicit_refit": true,
    "bvh_lbvh_refit": true,
    "bvh_sah_refit": true,
+   "bvh_median_refit": true,
    "bvh_cubql_refit": true,
    "bvh_lbvh_rebuild": true
   }
@@ -171,73 +193,83 @@
   "scene": "boxes",
   "n": 100000,
   "build": {
-   "implicit": 0.14411736400143127,
-   "bvh_lbvh_ctor": 0.28398899848980363,
-   "bvh_sah_ctor": 32.22095899945998,
-   "bvh_cubql_ctor": 10.550834998866776,
-   "bvh_lbvh_rebuild": 0.16478707536731763
+   "implicit": 0.14671258596126188,
+   "bvh_lbvh_ctor": 0.26923100085696205,
+   "bvh_sah_ctor": 33.080848999816226,
+   "bvh_median_ctor": 26.093219999893336,
+   "bvh_cubql_ctor": 8.248338002886157,
+   "bvh_lbvh_rebuild": 0.16609974494243165
   },
   "refit": {
-   "implicit": 0.020577575000061188,
-   "implicit_levels_only": 0.02050162700106739,
-   "bvh_lbvh": 0.02679615400120383,
-   "bvh_sah": 0.026638073000867735,
-   "bvh_cubql": 0.03419107899935625
+   "implicit": 0.021040348001406528,
+   "implicit_levels_only": 0.020499320002272725,
+   "bvh_lbvh": 0.026672596999560483,
+   "bvh_sah": 0.026628902000084054,
+   "bvh_median": 0.02459109399933368,
+   "bvh_cubql": 0.0348805989997345
   },
   "query": {
    "aabb_small": {
     "hits_per_query": 1.30499267578125,
-    "implicit": 0.13372945400078606,
-    "implicit_inline": 0.1335781899997528,
-    "bvh_lbvh": 0.7223238028822939,
-    "bvh_sah": 0.6579733259932575,
-    "bvh_cubql": 0.5972491479988093
+    "implicit": 0.12281584499942255,
+    "implicit_inline": 0.12646913199932897,
+    "bvh_lbvh": 0.239427026579119,
+    "bvh_sah": 0.2350948806481263,
+    "bvh_median": 0.24910686564301918,
+    "bvh_cubql": 0.28536305871041245
    },
    "aabb_medium": {
     "hits_per_query": 16.81781768798828,
-    "implicit": 0.40195027371229786,
-    "implicit_inline": 0.38897890078329256,
-    "bvh_lbvh": 2.132043100001673,
-    "bvh_sah": 1.9904417333358044,
-    "bvh_cubql": 1.8646748249921075
+    "implicit": 0.3916900105751766,
+    "implicit_inline": 0.37495327410512713,
+    "bvh_lbvh": 0.6373997792220841,
+    "bvh_sah": 0.6254842999927254,
+    "bvh_median": 0.662169611603401,
+    "bvh_cubql": 0.6864401581392591
    },
    "ray_all_hits": {
     "hits_per_query": 11.29550552368164,
-    "implicit": 0.836181217397572,
+    "implicit": 1.216172909100486,
     "bvh_lbvh_count_mismatch_rays": 0,
-    "bvh_lbvh": 1.2452614117733412,
+    "bvh_lbvh": 1.7403272470640814,
     "bvh_sah_count_mismatch_rays": 0,
-    "bvh_sah": 1.2506679499892925,
+    "bvh_sah": 1.6605403406784107,
+    "bvh_median_count_mismatch_rays": 0,
+    "bvh_median": 1.795996365860735,
     "bvh_cubql_count_mismatch_rays": 0,
-    "bvh_cubql": 1.2405722016777292
+    "bvh_cubql": 1.779713583302856
    },
    "ray_short_all_hits": {
     "hits_per_query": 1.2462959289550781,
-    "implicit": 0.14431583599980513,
+    "implicit": 0.2032251041097493,
     "bvh_lbvh_count_mismatch_rays": 0,
-    "bvh_lbvh": 0.2468113955856931,
+    "bvh_lbvh": 0.2830015694718091,
     "bvh_sah_count_mismatch_rays": 0,
-    "bvh_sah": 0.24232655555559865,
+    "bvh_sah": 0.28171533781521413,
+    "bvh_median_count_mismatch_rays": 0,
+    "bvh_median": 0.2990534317268977,
     "bvh_cubql_count_mismatch_rays": 0,
-    "bvh_cubql": 0.2410948719206241
+    "bvh_cubql": 0.3442428479263369
    },
    "ray_closest_box": {
-    "implicit": 0.20015868428313088,
-    "bvh_lbvh": 0.8226750773477891,
-    "bvh_sah": 0.7963435519080325,
-    "bvh_cubql": 0.7880673210533323
+    "implicit": 0.23783701785701,
+    "bvh_lbvh": 0.8219712111086765,
+    "bvh_sah": 0.8078039351440148,
+    "bvh_median": 0.8568313333263066,
+    "bvh_cubql": 0.9186888780344061
    },
    "self_pairs": {
     "pairs": 84594,
-    "implicit": 0.059328888999516494,
-    "bvh_lbvh": 0.13282459800029756,
-    "bvh_sah": 0.1279447019987856
+    "implicit": 0.04701849100092659,
+    "bvh_lbvh": 0.13197434299945598,
+    "bvh_sah": 0.1277992199975415
    }
   },
   "memory": {
    "implicit": 11900024,
    "bvh_lbvh": 8410316,
    "bvh_sah": 8400076,
+   "bvh_median": 8400076,
    "bvh_cubql": 8400116
   },
   "capture": {
@@ -245,6 +277,7 @@
    "implicit_refit": true,
    "bvh_lbvh_refit": true,
    "bvh_sah_refit": true,
+   "bvh_median_refit": true,
    "bvh_cubql_refit": true,
    "bvh_lbvh_rebuild": true
   }
@@ -253,73 +286,83 @@
   "scene": "boxes",
   "n": 1000000,
   "build": {
-   "implicit": 0.2814803705102619,
-   "bvh_lbvh_ctor": 0.5916899990552338,
-   "bvh_sah_ctor": 411.5769720010576,
-   "bvh_cubql_ctor": 55.27887900097994,
-   "bvh_lbvh_rebuild": 0.5151060451440672
+   "implicit": 0.2831168285740118,
+   "bvh_lbvh_ctor": 0.6054209989088122,
+   "bvh_sah_ctor": 415.9444420001819,
+   "bvh_median_ctor": 339.3078510016494,
+   "bvh_cubql_ctor": 51.71346100178198,
+   "bvh_lbvh_rebuild": 0.516243593753845
   },
   "refit": {
-   "implicit": 0.08582641600150964,
-   "implicit_levels_only": 0.07157725300021411,
-   "bvh_lbvh": 0.10768869900130085,
-   "bvh_sah": 0.10500378899996576,
-   "bvh_cubql": 0.12883904600130336
+   "implicit": 0.08544053399964469,
+   "implicit_levels_only": 0.07180061899998691,
+   "bvh_lbvh": 0.11031915499916067,
+   "bvh_sah": 0.10664190700117615,
+   "bvh_median": 0.0977495099978114,
+   "bvh_cubql": 0.132504326000344
   },
   "query": {
    "aabb_small": {
     "hits_per_query": 1.3215293884277344,
-    "implicit": 0.16985847866133116,
-    "implicit_inline": 0.1780360121345933,
-    "bvh_lbvh": 0.8786989702305922,
-    "bvh_sah": 0.8002260591374286,
-    "bvh_cubql": 0.7321867029747976
+    "implicit": 0.15869812906832498,
+    "implicit_inline": 0.1724720376030844,
+    "bvh_lbvh": 0.2769183784731165,
+    "bvh_sah": 0.2742303352168956,
+    "bvh_median": 0.2904773502980943,
+    "bvh_cubql": 0.28824507543059225
    },
    "aabb_medium": {
     "hits_per_query": 17.245132446289062,
-    "implicit": 0.4569232515326345,
-    "implicit_inline": 0.4226629031300787,
-    "bvh_lbvh": 2.361148857138081,
-    "bvh_sah": 2.2108307910375924,
-    "bvh_cubql": 2.0837261388856456
+    "implicit": 0.4433366686580077,
+    "implicit_inline": 0.4121941855980904,
+    "bvh_lbvh": 0.7073718743984517,
+    "bvh_sah": 0.6862796267278896,
+    "bvh_median": 0.7228803676530244,
+    "bvh_cubql": 0.68720950691935
    },
    "ray_all_hits": {
     "hits_per_query": 24.273521423339844,
-    "implicit": 1.9016069750023235,
+    "implicit": 2.9029875097644524,
     "bvh_lbvh_count_mismatch_rays": 0,
-    "bvh_lbvh": 2.589902912293103,
+    "bvh_lbvh": 3.7576464499579743,
     "bvh_sah_count_mismatch_rays": 0,
-    "bvh_sah": 2.579689070172894,
+    "bvh_sah": 3.5368380475639634,
+    "bvh_median_count_mismatch_rays": 0,
+    "bvh_median": 3.8482460256953996,
     "bvh_cubql_count_mismatch_rays": 0,
-    "bvh_cubql": 2.745050407409306
+    "bvh_cubql": 3.443706162723301
    },
    "ray_short_all_hits": {
     "hits_per_query": 1.2746810913085938,
-    "implicit": 0.19057045383649085,
+    "implicit": 0.2815752537032865,
     "bvh_lbvh_count_mismatch_rays": 0,
-    "bvh_lbvh": 0.2822398563331384,
+    "bvh_lbvh": 0.32555640219860443,
     "bvh_sah_count_mismatch_rays": 0,
-    "bvh_sah": 0.291322411419425,
+    "bvh_sah": 0.32520252838819774,
+    "bvh_median_count_mismatch_rays": 0,
+    "bvh_median": 0.343313531036189,
     "bvh_cubql_count_mismatch_rays": 0,
-    "bvh_cubql": 0.32719670549280694
+    "bvh_cubql": 0.3405274818181748
    },
    "ray_closest_box": {
-    "implicit": 0.2688553752279291,
-    "bvh_lbvh": 1.583194659573603,
-    "bvh_sah": 1.5235909999950197,
-    "bvh_cubql": 1.572666778941455
+    "implicit": 0.32594592257174126,
+    "bvh_lbvh": 1.5907729032351785,
+    "bvh_sah": 1.533814494714055,
+    "bvh_median": 1.620946164821162,
+    "bvh_cubql": 1.5308292604080027
    },
    "self_pairs": {
     "pairs": 857929,
-    "implicit": 0.27667417254130783,
-    "bvh_lbvh": 0.9168381666650357,
-    "bvh_sah": 0.9740226973678402
+    "implicit": 0.20924785285647626,
+    "bvh_lbvh": 0.8961000787993808,
+    "bvh_sah": 0.9406243566937884
    }
   },
   "memory": {
    "implicit": 79130740,
    "bvh_lbvh": 84065612,
    "bvh_sah": 84000076,
+   "bvh_median": 84000076,
    "bvh_cubql": 84000116
   },
   "capture": {
@@ -327,6 +370,7 @@
    "implicit_refit": true,
    "bvh_lbvh_refit": true,
    "bvh_sah_refit": true,
+   "bvh_median_refit": true,
    "bvh_cubql_refit": true,
    "bvh_lbvh_rebuild": true
   }
@@ -335,80 +379,87 @@
   "scene": "terrain",
   "n": 968,
   "build": {
-   "tri_bounds_kernel": 0.0020744140001625055,
-   "implicit": 0.05784474900065106,
-   "bvh_lbvh_ctor": 0.18246799845655914,
-   "bvh_sah_ctor": 0.6655500001215842,
-   "bvh_cubql_ctor": 2.973513001052197,
-   "bvh_lbvh_rebuild": 0.06757290600035049,
-   "mesh_lbvh_ctor": 0.19468600112304557,
-   "implicit_mesh": 0.05933390700010932,
-   "mesh_sah_ctor": 0.5372960004024208
+   "tri_bounds_kernel": 0.002074763000564417,
+   "implicit": 0.058056113000930054,
+   "bvh_lbvh_ctor": 0.2203619987994898,
+   "bvh_sah_ctor": 0.3431090008234605,
+   "bvh_median_ctor": 0.25275000007241033,
+   "bvh_cubql_ctor": 2.1661840000888333,
+   "bvh_lbvh_rebuild": 0.06772102399918367,
+   "mesh_lbvh_ctor": 0.18204199659521692,
+   "implicit_mesh": 0.059925645000475924,
+   "mesh_sah_ctor": 0.7252729992615059
   },
   "refit": {
-   "implicit": 0.010263322999890079,
-   "implicit_levels_only": 0.010267434001434594,
-   "bvh_lbvh": 0.018459967001035693,
-   "bvh_sah": 0.01436746299987135,
-   "bvh_cubql": 0.014375712999026291,
-   "implicit_mesh": 0.01026992699917173,
-   "mesh_lbvh": 0.028666389000136405
+   "implicit": 0.010260910999932094,
+   "implicit_levels_only": 0.010219962998235133,
+   "bvh_lbvh": 0.018453025000781054,
+   "bvh_sah": 0.014356372001202544,
+   "bvh_median": 0.012557336998725077,
+   "bvh_cubql": 0.014357805001054658,
+   "implicit_mesh": 0.010283956999046495,
+   "mesh_lbvh": 0.028690631002973532
   },
   "query": {
    "aabb_small": {
     "hits_per_query": 3.6485862731933594,
-    "implicit": 0.04917154800023127,
-    "implicit_inline": 0.0588492810002208,
-    "bvh_lbvh": 0.4113877242372107,
-    "bvh_sah": 0.2088675653989215,
-    "bvh_cubql": 0.24877480133419128,
-    "mesh_lbvh": 0.22069083482143642,
+    "implicit": 0.042296127998270094,
+    "implicit_inline": 0.05388435200075037,
+    "bvh_lbvh": 0.15558739935892338,
+    "bvh_sah": 0.08394700099961483,
+    "bvh_median": 0.13440026399985072,
+    "bvh_cubql": 0.12056357099936577,
+    "mesh_lbvh": 0.2665529567575258,
     "brute_force_checked": true
    },
    "aabb_medium": {
     "hits_per_query": 15.86886215209961,
-    "implicit": 0.09021570100048848,
-    "implicit_inline": 0.12943905500105757,
-    "bvh_lbvh": 0.9383060377268355,
-    "bvh_sah": 0.5759121206267316,
-    "bvh_cubql": 0.7160829223297679,
-    "mesh_lbvh": 0.49129769867918277,
+    "implicit": 0.08217828399938298,
+    "implicit_inline": 0.12117821399806417,
+    "bvh_lbvh": 0.3109019305281292,
+    "bvh_sah": 0.19556532279047312,
+    "bvh_median": 0.28527537524601987,
+    "bvh_cubql": 0.28867520272859315,
+    "mesh_lbvh": 0.5659108371329432,
     "brute_force_checked": true
    },
    "ray_closest_tri": {
     "hit_fraction": 0.4198951721191406,
-    "implicit": 0.051048864999756915,
+    "implicit": 0.048774015998787945,
     "bvh_lbvh_mismatch_rays": 0,
-    "bvh_lbvh": 0.09588325699951383,
+    "bvh_lbvh": 0.10386744199786335,
     "bvh_sah_mismatch_rays": 0,
-    "bvh_sah": 0.0727775470004417,
+    "bvh_sah": 0.059406446998764295,
+    "bvh_median_mismatch_rays": 0,
+    "bvh_median": 0.08445139899777132,
     "bvh_cubql_mismatch_rays": 0,
-    "bvh_cubql": 0.07582201500008523,
+    "bvh_cubql": 0.0708601219994307,
     "mesh_lbvh_mismatch_rays": 0,
-    "mesh_lbvh": 0.08707002899973304,
+    "mesh_lbvh": 0.0890874190008617,
     "mesh_sah_mismatch_rays": 0,
-    "mesh_sah": 0.04547714000000269,
+    "mesh_sah": 0.04707365899957949,
     "implicit_mesh_mismatch_rays": 0,
-    "implicit_mesh": 0.051587223999376874
+    "implicit_mesh": 0.048551480002061
    },
    "closest_point_tri": {
-    "implicit_mesh": 0.2564362581737795,
+    "implicit_mesh": 0.22992938658264025,
     "mesh_lbvh_mismatch": 0,
-    "mesh_lbvh": 0.2741575357841951,
+    "mesh_lbvh": 0.26696445320924067,
     "mesh_sah_mismatch": 0,
-    "mesh_sah": 0.17143122016276954
+    "mesh_sah": 0.17250909669835995
    },
    "self_pairs": {
     "pairs": 7349,
-    "implicit": 0.038924970000152825,
-    "bvh_lbvh": 0.048801678000018,
-    "bvh_sah": 0.03587318799873174
+    "implicit": 0.02867913500085706,
+    "bvh_lbvh": 0.04816334399947664,
+    "bvh_sah": 0.03518294700188562
    }
   },
   "memory": {
    "implicit": 115216,
    "bvh_lbvh": 81388,
    "bvh_sah": 81388,
+   "bvh_median": 81388,
    "bvh_cubql": 75428,
    "mesh_lbvh": 104836
   },
@@ -417,6 +468,7 @@
    "implicit_refit": true,
    "bvh_lbvh_refit": true,
    "bvh_sah_refit": true,
+   "bvh_median_refit": true,
    "bvh_cubql_refit": true,
    "bvh_lbvh_rebuild": true,
    "mesh_refit": true
@@ -426,80 +478,87 @@
   "scene": "terrain",
   "n": 9800,
   "build": {
-   "tri_bounds_kernel": 0.0020748089991684537,
-   "implicit": 0.1068777639993641,
-   "bvh_lbvh_ctor": 0.2442740005790256,
-   "bvh_sah_ctor": 6.962657998883515,
-   "bvh_cubql_ctor": 5.973712000923115,
-   "bvh_lbvh_rebuild": 0.13744760000008682,
-   "mesh_lbvh_ctor": 0.3238500012230361,
-   "implicit_mesh": 0.10885570599930361,
-   "mesh_sah_ctor": 4.3631960015773075
+   "tri_bounds_kernel": 0.002070377999189077,
+   "implicit": 0.10875811200094176,
+   "bvh_lbvh_ctor": 0.2419929987809155,
+   "bvh_sah_ctor": 3.6719639974762686,
+   "bvh_median_ctor": 4.092879000381799,
+   "bvh_cubql_ctor": 3.9792069983377587,
+   "bvh_lbvh_rebuild": 0.13956145600241143,
+   "mesh_lbvh_ctor": 0.25381999876117334,
+   "implicit_mesh": 0.11049777599691879,
+   "mesh_sah_ctor": 4.889902997092577
   },
   "refit": {
-   "implicit": 0.010369109999373904,
-   "implicit_levels_only": 0.010326069999791798,
-   "bvh_lbvh": 0.022544059000210837,
-   "bvh_sah": 0.018445405999955256,
-   "bvh_cubql": 0.018175392000557622,
-   "implicit_mesh": 0.012332235000940273,
-   "mesh_lbvh": 0.033010047000061604
+   "implicit": 0.010393541000667028,
+   "implicit_levels_only": 0.010514252000575652,
+   "bvh_lbvh": 0.02253993299746071,
+   "bvh_sah": 0.018456546000379603,
+   "bvh_median": 0.016729358001612127,
+   "bvh_cubql": 0.016420913001638837,
+   "implicit_mesh": 0.012331797999650007,
+   "mesh_lbvh": 0.032821670996781904
   },
   "query": {
    "aabb_small": {
     "hits_per_query": 3.902698516845703,
-    "implicit": 0.0814776429997437,
-    "implicit_inline": 0.08793020000121032,
-    "bvh_lbvh": 0.82321151099817,
-    "bvh_sah": 0.3445062307662416,
-    "bvh_cubql": 0.3771841407001946,
-    "mesh_lbvh": 0.3451140263151549,
+    "implicit": 0.0757382490010059,
+    "implicit_inline": 0.08331486300085089,
+    "bvh_lbvh": 0.2612043725534794,
+    "bvh_sah": 0.11879776299974765,
+    "bvh_median": 0.176244821983648,
+    "bvh_cubql": 0.14742058477255748,
+    "mesh_lbvh": 0.3748647353669502,
     "brute_force_checked": true
    },
    "aabb_medium": {
     "hits_per_query": 17.190292358398438,
-    "implicit": 0.1901982513009178,
-    "implicit_inline": 0.2077248297861475,
-    "bvh_lbvh": 1.5930817021302226,
-    "bvh_sah": 0.8485590056827939,
-    "bvh_cubql": 0.9946550066645917,
-    "mesh_lbvh": 0.7367050845790057,
+    "implicit": 0.1878610476206834,
+    "implicit_inline": 0.1984845349466258,
+    "bvh_lbvh": 0.42315835898186205,
+    "bvh_sah": 0.2369468892500349,
+    "bvh_median": 0.309616738400397,
+    "bvh_cubql": 0.2900900233492567,
+    "mesh_lbvh": 0.662165500005228,
     "brute_force_checked": true
    },
    "ray_closest_tri": {
     "hit_fraction": 0.7808074951171875,
-    "implicit": 0.09903338900039671,
+    "implicit": 0.08326184099860257,
     "bvh_lbvh_mismatch_rays": 0,
-    "bvh_lbvh": 0.21523953284592415,
+    "bvh_lbvh": 0.21737976041571355,
     "bvh_sah_mismatch_rays": 0,
-    "bvh_sah": 0.11610962300073879,
+    "bvh_sah": 0.11296862200106261,
+    "bvh_median_mismatch_rays": 0,
+    "bvh_median": 0.15769289332026878,
     "bvh_cubql_mismatch_rays": 0,
-    "bvh_cubql": 0.14005892099885386,
+    "bvh_cubql": 0.12507894200098235,
     "mesh_lbvh_mismatch_rays": 1,
-    "mesh_lbvh": 0.24550181818288494,
+    "mesh_lbvh": 0.25320799143516265,
     "mesh_sah_mismatch_rays": 1,
-    "mesh_sah": 0.10157942099976935,
+    "mesh_sah": 0.10347532100058743,
     "implicit_mesh_mismatch_rays": 0,
-    "implicit_mesh": 0.10013101100048516
+    "implicit_mesh": 0.08375148499908391
    },
    "closest_point_tri": {
-    "implicit_mesh": 0.38572105744031565,
+    "implicit_mesh": 0.39623430423070827,
     "mesh_lbvh_mismatch": 0,
-    "mesh_lbvh": 0.8256689943458706,
+    "mesh_lbvh": 0.8292789152516894,
     "mesh_sah_mismatch": 0,
-    "mesh_sah": 0.4070838661197636
+    "mesh_sah": 0.40773011878326093
    },
    "self_pairs": {
     "pairs": 78719,
-    "implicit": 0.049197454000022844,
-    "bvh_lbvh": 0.07990280200101552,
-    "bvh_sah": 0.04893089799952577
+    "implicit": 0.0348267310000665,
+    "bvh_lbvh": 0.08008165600040229,
+    "bvh_sah": 0.04916902900004061
    }
   },
   "memory": {
    "implicit": 1166224,
    "bvh_lbvh": 823276,
    "bvh_sah": 823276,
+   "bvh_median": 823276,
    "bvh_cubql": 754276,
    "mesh_lbvh": 1058692
   },
@@ -508,6 +567,7 @@
    "implicit_refit": true,
    "bvh_lbvh_refit": true,
    "bvh_sah_refit": true,
+   "bvh_median_refit": true,
    "bvh_cubql_refit": true,
    "bvh_lbvh_rebuild": true,
    "mesh_refit": true
@@ -517,78 +577,85 @@
   "scene": "terrain",
   "n": 99458,
   "build": {
-   "tri_bounds_kernel": 0.006164636999528739,
-   "implicit": 0.1438871289992676,
-   "bvh_lbvh_ctor": 0.28173600003356114,
-   "bvh_sah_ctor": 28.39939900150057,
-   "bvh_cubql_ctor": 10.12026600074023,
-   "bvh_lbvh_rebuild": 0.17319185680471438,
-   "mesh_lbvh_ctor": 0.37300300027709454,
-   "implicit_mesh": 0.14766386552088828,
-   "mesh_sah_ctor": 28.118063000874827
+   "tri_bounds_kernel": 0.006165595001220936,
+   "implicit": 0.14601491185602483,
+   "bvh_lbvh_ctor": 0.3131949997623451,
+   "bvh_sah_ctor": 28.25605899852235,
+   "bvh_median_ctor": 22.769209997932194,
+   "bvh_cubql_ctor": 6.794959001126699,
+   "bvh_lbvh_rebuild": 0.17467512056698262,
+   "mesh_lbvh_ctor": 0.2850439996109344,
+   "implicit_mesh": 0.14983509503673872,
+   "mesh_sah_ctor": 22.1417120010301
   },
   "refit": {
-   "implicit": 0.020556270999804838,
-   "implicit_levels_only": 0.020507623001321917,
-   "bvh_lbvh": 0.030044964998523938,
-   "bvh_sah": 0.024596483001005254,
-   "bvh_cubql": 0.024619910000183154,
-   "implicit_mesh": 0.02493230899926857,
-   "mesh_lbvh": 0.04302279399962572
+   "implicit": 0.020563730999128893,
+   "implicit_levels_only": 0.020510488000581972,
+   "bvh_lbvh": 0.029954904999613063,
+   "bvh_sah": 0.0245944669986784,
+   "bvh_median": 0.02459529300176655,
+   "bvh_cubql": 0.02460999300092226,
+   "implicit_mesh": 0.02486765700086835,
+   "mesh_lbvh": 0.0430364109997754
   },
   "query": {
    "aabb_small": {
     "hits_per_query": 3.976337432861328,
-    "implicit": 0.10038926500055823,
-    "implicit_inline": 0.11711588099933579,
-    "bvh_lbvh": 1.5267985306253444,
-    "bvh_sah": 0.44768403939528845,
-    "bvh_cubql": 0.4791951153796011,
-    "mesh_lbvh": 0.5025178259393059
+    "implicit": 0.0984967799995502,
+    "implicit_inline": 0.11046035600156756,
+    "bvh_lbvh": 0.4497467981934048,
+    "bvh_sah": 0.15749838197258573,
+    "bvh_median": 0.21994929377227787,
+    "bvh_cubql": 0.19786357624636486,
+    "mesh_lbvh": 0.6195150082961113
    },
    "aabb_medium": {
     "hits_per_query": 17.649593353271484,
-    "implicit": 0.21523224411740718,
-    "implicit_inline": 0.24208483690383198,
-    "bvh_lbvh": 2.7241548888788976,
-    "bvh_sah": 0.9954127229787912,
-    "bvh_cubql": 1.1391290230676532,
-    "mesh_lbvh": 0.9492202531724109
+    "implicit": 0.21567258111787252,
+    "implicit_inline": 0.23542925280053167,
+    "bvh_lbvh": 0.680204509172579,
+    "bvh_sah": 0.27549913619310895,
+    "bvh_median": 0.35286344762079397,
+    "bvh_cubql": 0.32670807047802974,
+    "mesh_lbvh": 1.0049837651086702
    },
    "ray_closest_tri": {
     "hit_fraction": 0.925140380859375,
-    "implicit": 0.14681157587970964,
+    "implicit": 0.12014972600081819,
     "bvh_lbvh_mismatch_rays": 0,
-    "bvh_lbvh": 0.3912468740166659,
+    "bvh_lbvh": 0.42675523918686686,
     "bvh_sah_mismatch_rays": 0,
-    "bvh_sah": 0.1578832871058091,
+    "bvh_sah": 0.1655473632263083,
+    "bvh_median_mismatch_rays": 0,
+    "bvh_median": 0.2192462514878051,
     "bvh_cubql_mismatch_rays": 0,
-    "bvh_cubql": 0.16611759199960424,
+    "bvh_cubql": 0.19435045502543397,
     "mesh_lbvh_mismatch_rays": 1,
-    "mesh_lbvh": 0.5551481610539017,
+    "mesh_lbvh": 0.5495864379620792,
     "mesh_sah_mismatch_rays": 1,
-    "mesh_sah": 0.15993160893324235,
+    "mesh_sah": 0.15779553161526502,
     "implicit_mesh_mismatch_rays": 0,
-    "implicit_mesh": 0.14761130272347198
+    "implicit_mesh": 0.11989653300042846
    },
    "closest_point_tri": {
-    "implicit_mesh": 0.40197998652307787,
+    "implicit_mesh": 0.43828416519827873,
     "mesh_lbvh_mismatch": 0,
-    "mesh_lbvh": 1.852568437516311,
+    "mesh_lbvh": 1.858573654317297,
     "mesh_sah_mismatch": 0,
-    "mesh_sah": 0.53477539636581
+    "mesh_sah": 0.5481823905128739
    },
    "self_pairs": {
     "pairs": 808718,
-    "implicit": 0.06515972699889971,
-    "bvh_lbvh": 0.3578779951589434,
-    "bvh_sah": 0.17554236352817293
+    "implicit": 0.046825309000269044,
+    "bvh_lbvh": 0.36302635293859387,
+    "bvh_sah": 0.17654106355028235
    }
   },
   "memory": {
    "implicit": 11835560,
    "bvh_lbvh": 8354548,
    "bvh_sah": 8354548,
+   "bvh_median": 8354548,
    "bvh_cubql": 7667788,
    "mesh_lbvh": 10741756
   },
@@ -597,6 +664,7 @@
    "implicit_refit": true,
    "bvh_lbvh_refit": true,
    "bvh_sah_refit": true,
+   "bvh_median_refit": true,
    "bvh_cubql_refit": true,
    "bvh_lbvh_rebuild": true,
    "mesh_refit": true
@@ -606,78 +674,85 @@
   "scene": "terrain",
   "n": 999698,
   "build": {
-   "tri_bounds_kernel": 0.02665014599915594,
-   "implicit": 0.2798700652996857,
-   "bvh_lbvh_ctor": 0.634384001386934,
-   "bvh_sah_ctor": 432.4157910014037,
-   "bvh_cubql_ctor": 50.736377999783144,
-   "bvh_lbvh_rebuild": 0.5511007777790332,
-   "mesh_lbvh_ctor": 0.7019370004854864,
-   "implicit_mesh": 0.3059808677677241,
-   "mesh_sah_ctor": 317.98931999946944
+   "tri_bounds_kernel": 0.028219470001204172,
+   "implicit": 0.2804487485749026,
+   "bvh_lbvh_ctor": 0.6440300021495204,
+   "bvh_sah_ctor": 395.806722000998,
+   "bvh_median_ctor": 330.07174100202974,
+   "bvh_cubql_ctor": 46.420298000157345,
+   "bvh_lbvh_rebuild": 0.5507540929413159,
+   "mesh_lbvh_ctor": 0.7100219991116319,
+   "implicit_mesh": 0.3070454250562059,
+   "mesh_sah_ctor": 310.1291980019596
   },
   "refit": {
-   "implicit": 0.08769200399910915,
-   "implicit_levels_only": 0.07166203599990695,
-   "bvh_lbvh": 0.1154511309996451,
-   "bvh_sah": 0.09819181199964078,
-   "bvh_cubql": 0.09137552100037283,
-   "implicit_mesh": 0.11344503400141548,
-   "mesh_lbvh": 0.16225820982234446
+   "implicit": 0.0863449069984199,
+   "implicit_levels_only": 0.07186710499809124,
+   "bvh_lbvh": 0.11741239999901154,
+   "bvh_sah": 0.09958723800082225,
+   "bvh_median": 0.09773795699948096,
+   "bvh_cubql": 0.09400460299730184,
+   "implicit_mesh": 0.11238519600010477,
+   "mesh_lbvh": 0.163706983109912
   },
   "query": {
    "aabb_small": {
     "hits_per_query": 4.002311706542969,
-    "implicit": 0.12700736499937193,
-    "implicit_inline": 0.13346062699929462,
-    "bvh_lbvh": 2.8524478269061477,
-    "bvh_sah": 0.5569742164160703,
-    "bvh_cubql": 0.5811153085915066,
-    "mesh_lbvh": 0.8274980444487786
+    "implicit": 0.12018695900042076,
+    "implicit_inline": 0.13107460099854507,
+    "bvh_lbvh": 0.7771967724904975,
+    "bvh_sah": 0.1834681250011272,
+    "bvh_median": 0.2437822804616695,
+    "bvh_cubql": 0.20609982287370945,
+    "mesh_lbvh": 1.0416735034837743
    },
    "aabb_medium": {
     "hits_per_query": 17.794532775878906,
-    "implicit": 0.22310771993910267,
-    "implicit_inline": 0.2424450098520278,
-    "bvh_lbvh": 4.851924066679203,
-    "bvh_sah": 1.1290336183230312,
-    "bvh_cubql": 1.2569142033915002,
-    "mesh_lbvh": 1.4870059399981983
+    "implicit": 0.21532845014669214,
+    "implicit_inline": 0.23675617977455826,
+    "bvh_lbvh": 1.1383662713060332,
+    "bvh_sah": 0.3023392192044564,
+    "bvh_median": 0.3764699974590373,
+    "bvh_cubql": 0.3301187471986146,
+    "mesh_lbvh": 1.5783670425391507
    },
    "ray_closest_tri": {
     "hit_fraction": 0.9758071899414062,
-    "implicit": 0.1886000606464222,
+    "implicit": 0.15738178178052895,
     "bvh_lbvh_mismatch_rays": 0,
-    "bvh_lbvh": 0.8285768268129615,
+    "bvh_lbvh": 0.8905796826429161,
     "bvh_sah_mismatch_rays": 0,
-    "bvh_sah": 0.18734492554690013,
+    "bvh_sah": 0.19559134168977024,
+    "bvh_median_mismatch_rays": 0,
+    "bvh_median": 0.25658561101999006,
     "bvh_cubql_mismatch_rays": 0,
-    "bvh_cubql": 0.20461760522750705,
+    "bvh_cubql": 0.20759332073284692,
     "mesh_lbvh_mismatch_rays": 1,
-    "mesh_lbvh": 1.180756293655981,
+    "mesh_lbvh": 1.2093599756095441,
     "mesh_sah_mismatch_rays": 1,
-    "mesh_sah": 0.19562664285841172,
+    "mesh_sah": 0.1959620697028066,
     "implicit_mesh_mismatch_rays": 0,
-    "implicit_mesh": 0.18358264868386126
+    "implicit_mesh": 0.15771090637962457
    },
    "closest_point_tri": {
-    "implicit_mesh": 0.4620708566966573,
+    "implicit_mesh": 0.49670639473812406,
     "mesh_lbvh_mismatch": 0,
-    "mesh_lbvh": 4.030187108140593,
+    "mesh_lbvh": 4.05095686486724,
     "mesh_sah_mismatch": 0,
-    "mesh_sah": 0.6165222291656391
+    "mesh_sah": 0.6099996584295841
    },
    "self_pairs": {
     "pairs": 8164217,
-    "implicit": 0.28119776628209436,
-    "bvh_lbvh": 3.4496716046326816,
-    "bvh_sah": 1.2289458181915183
+    "implicit": 0.19370815251948958,
+    "bvh_lbvh": 3.4844903571606016,
+    "bvh_sah": 1.207571585364053
    }
   },
   "memory": {
    "implicit": 79112720,
    "bvh_lbvh": 83974708,
    "bvh_sah": 83974708,
+   "bvh_median": 83974708,
    "bvh_cubql": 77066668,
    "mesh_lbvh": 107967676
   },
@@ -686,6 +761,7 @@
    "implicit_refit": true,
    "bvh_lbvh_refit": true,
    "bvh_sah_refit": true,
+   "bvh_median_refit": true,
    "bvh_cubql_refit": true,
    "bvh_lbvh_rebuild": true,
    "mesh_refit": true
