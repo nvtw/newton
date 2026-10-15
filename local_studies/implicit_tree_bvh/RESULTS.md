@@ -58,7 +58,10 @@ sets, 3-4% faster than before the tree was factored out.
   closest point 1.34-1.49x, rays 1.02-1.36x, pairs 1.18-1.41x, AABB 1.02-1.25x.
 * Toolchain: the same generated CUDA runs 1.4-1.6x slower on rays and closest points with Warp
   1.18's NVRTC 13.4 than with Warp 1.17's NVRTC 12.9 (old code: closest point 0.40 -> 0.59 ms at
-  100k). The scoreboard above is on 1.18.
+  100k). Compile flags, module options and the relevant native headers are identical; loading the
+  PTX that Warp 1.17 compiled from the same source into Warp 1.18 restores the old speed (box rays
+  0.541 -> 0.340 ms at 10k), so the cause is NVRTC 13.4 code generation. The scoreboard above is on
+  1.18.
 
 ## Verdict
 
