@@ -1774,6 +1774,13 @@ class TestKaminoExamples(unittest.TestCase):
 
 add_example_test(
     TestKaminoExamples,
+    name="kamino.example_kamino_stewart_platform",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 120},
+    use_viewer=True,
+)
+add_example_test(
+    TestKaminoExamples,
     name="kamino.example_kamino_basic_fourbar",
     devices=cuda_test_devices,
     test_options={"num-frames": 120},
