@@ -251,7 +251,8 @@ def _buffers(model, contacts):
 
 def test_current_mesh_filter_consumers(test, device):
     """Match fresh row removal after particle/body motion, including captured force and coupling replay."""
-    test.expectOutputRegex(
+    # Warp CPU printf capture is unreliable on Windows; verify overflow through its counter.
+    test.allowOutputRegex(
         r"^Warning: Per-body particle contact buffer overflowed \d+ > 256; scanning all stored contacts\.$",
         stream="stdout",
     )
@@ -266,6 +267,7 @@ def test_current_mesh_filter_consumers(test, device):
     test.assertFalse(hasattr(contacts, "soft_contact_force_mask"))
     solver = _solver(model, contacts)
     test.assertEqual(int(solver.body_particle_contact_counts.numpy()[1]), count)
+    test.assertGreater(int(solver.body_particle_contact_overflow_max.numpy()[0]), 256)
     full_buffers = _buffers(model, contacts)
     compact = newton.Contacts(contacts.rigid_contact_max, contacts.soft_contact_max, device=device)
     reference = _solver(model, compact)
@@ -372,7 +374,8 @@ def test_coupled_mesh_filter_compact_body_mapping(test, device):
 
 def test_body_candidate_overflow_preserves_reactions(test, device):
     """Retain each body's reactions and feedback when candidate lists overflow."""
-    test.expectOutputRegex(
+    # The counter assertions below verify overflow even when native printf is not captured.
+    test.allowOutputRegex(
         r"^Warning: Per-body particle contact buffer overflowed \d+ > 4; scanning all stored contacts\.$",
         stream="stdout",
     )

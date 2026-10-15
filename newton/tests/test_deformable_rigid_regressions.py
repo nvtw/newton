@@ -35,6 +35,14 @@ class TestDeformableRigidRegressions(unittest.TestCase):
     pass
 
 
+def _contact_force_observables(solver, contacts):
+    """Allocate force output on both the branch and CI's merge with main."""
+    # Main renamed observable kinds and requires the contact buffer at allocation.
+    if hasattr(solver, "ObservableKind"):
+        return solver.observables({solver.ObservableKind.CONTACT_F}, contacts=contacts)
+    return solver.observables({newton.solvers.SolverObservableFlags.CONTACT_F})
+
+
 @wp.kernel
 def _sample_flat_sdf_features(sdfs: wp.array[TextureSDFData], scale: wp.vec3, distances: wp.array[float]):
     a = wp.vec3(0.2, 0.2, 0.5)
@@ -1331,7 +1339,7 @@ def test_vbd_preserves_unfiltered_mesh_contacts(test, device):
             )
             contacts = solver.contacts if mode is not None else external_contacts
             before = _soft_contact_records(external_contacts)
-            observations = solver.observables({newton.solvers.SolverObservableFlags.CONTACT_F})
+            observations = _contact_force_observables(solver, contacts)
             state_out = model.state()
 
             solver.step(
@@ -1408,7 +1416,7 @@ def test_mesh_force_mask_matches_compacted_solve(test, device):
                     solver = newton.solvers.SolverVBD(model, iterations=3)
                     solver._particle_contact_use_gather = gather
                     state, state_out = model.state(), model.state()
-                    observations = solver.observables({newton.solvers.SolverObservableFlags.CONTACT_F})
+                    observations = _contact_force_observables(solver, selected)
                     solver.step(state, state_out, model.control(), selected, 1.0e-4, observables=observations)
                     results.append(
                         (
