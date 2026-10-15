@@ -23,7 +23,7 @@ from .implicit_aabb_tree import (
     ImplicitAABBTree,
     ImplicitAABBTreeData,
     ImplicitTreeNode,
-    _aabb_disjoint,
+    aabb_disjoint,
     implicit_tree_next_subtree,
 )
 
@@ -164,7 +164,7 @@ def _make_pair_kernels(filter_func: Any, filter_data_type: Any):
             if (
                 max_span < query_span
                 or (max_span == query_span and record.last_leaf <= leaf)
-                or _aabb_disjoint(record.lower, record.upper, query_lower, query_upper)
+                or aabb_disjoint(record.lower, record.upper, query_lower, query_upper)
             ):
                 node = implicit_tree_next_subtree(node)
             elif node < tree.leaf_base:
@@ -234,13 +234,17 @@ class BroadPhaseImplicitTree:
         # Retain the constructor argument for API compatibility. Stackless
         # traversal allocates no per-level pair queues or overflow fallback.
         self.capacity = max(1, queue_capacity_factor * self.shape_count)
-        self.tree = ImplicitAABBTree(max(1, self.shape_count), device=device)
+        # The leaf kernel below places sorted shapes by slot, which needs all
+        # leaves at one depth.
+        self.tree = ImplicitAABBTree(max(1, self.shape_count), device=device, slack=1.0, power_of_two=True)
         self.tree.leaf_count = self.shape_count
         self.tree.data.leaf_count = self.shape_count
         # 60-bit Morton keys on a fixed 1 cm grid; the tree's sort order buffer
         # holds the sorted leaf -> shape_index permutation.
         self.keys = wp.empty(2 * self.shape_count, dtype=wp.uint64, device=device)
-        self.values = self.tree.order
+        # Own sort values: the tree's build scratch aliases its node buffer,
+        # which the leaf kernel below writes while reading this order.
+        self.values = wp.empty(2 * self.shape_count, dtype=wp.int32, device=device)
         self.leaf_base = self.tree.leaf_base
         self._has_custom_filter = filter_func is not None
         self._empty_filter_data = EmptyFilterData()
