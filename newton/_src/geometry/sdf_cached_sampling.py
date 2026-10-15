@@ -163,6 +163,9 @@ class SDFCachedSampling:
         """Which points to keep: ``"rank"`` sorts by the objective against the manifold
         (Alg. 1, line 28); ``"spread"`` keeps the deepest point in contact, then greedily
         the points in contact farthest from those kept, then the rest by depth."""
+        normal_spread: float = 0.5
+        """Relative distance that opposing normals add between two points in
+        ``"spread"`` selection, per unit of ``1 - dot(n_i, n_j)`` [unitless]."""
         replacement_threshold: float = 0.01
         """Relative advantage of a cached point over a new sample in the selection
         [unitless]."""
@@ -206,6 +209,7 @@ class SDFCachedSampling:
             for name in (
                 "repulsion_weight",
                 "replacement_threshold",
+                "normal_spread",
                 "search_radius",
                 "hysteresis",
                 "reoptimize_distance",
@@ -508,6 +512,7 @@ class SDFCachedSampling:
                 float(cfg.merge_distance),
                 float(cfg.replacement_threshold),
                 int(cfg.selection == "spread"),
+                float(cfg.normal_spread),
                 self.pair_key,
                 self.pair_length,
                 self.cand_x,
@@ -1348,6 +1353,7 @@ def _create_kernels(
         merge_rel: float,
         replacement_rel: float,
         spread_selection: int,
+        normal_spread: float,
         pair_key: wp.array[wp.int64],
         pair_length: wp.array[wp.float32],
         cand_x: wp.array[wp.vec3],
@@ -1419,7 +1425,13 @@ def _create_kernels(
                             dmin = float(1.0e30)
                             for j in range(slot):
                                 cj = base + cand_order[base + j]
-                                dmin = wp.min(dmin, wp.length(cand_x[ci] - cand_x[cj]))
+                                # Distance in position and normal: a contact facing
+                                # another way constrains other directions (e.g. the
+                                # opposite thread flank) even when it is close by.
+                                d = wp.length(cand_x[ci] - cand_x[cj]) + normal_spread * L * (
+                                    1.0 - wp.dot(cand_n[ci], cand_n[cj])
+                                )
+                                dmin = wp.min(dmin, d)
                             v = dmin
                     if (cand_flags[ci] & _FLAG_CACHED) != 0:
                         v += bonus

@@ -1093,7 +1093,7 @@ two methods, selected for the whole pipeline with ``sdf_contact_method``:
   :attr:`SDFCachedSampling.Config.cache_size <newton.geometry.SDFCachedSampling.Config.cache_size>`
   persistent contacts per pair, which favors stacking, piles and scenes with many
   bodies. Shapes in contact in many separate regions at once, such as a nut on a
-  bolt, need the edge method.
+  bolt, need a larger ``cache_size`` (about 16).
 
 .. code-block:: python
 

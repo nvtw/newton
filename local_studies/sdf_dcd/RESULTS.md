@@ -35,8 +35,25 @@ its own contacts. 600 frames at 60 Hz. Raw data: `final_v2.json` / `final_v2.log
 | | cached | 87 | 1.034 | 521 | 0.84 | joint 0.05 mm |
 | caterpillar | edge | 78 | 0.684 | 4246 | 49.7 | joint 0.02 mm |
 | | cached | 83 | 0.669 | 1811 | 47.3 | joint 0.03 mm |
-| nut on bolt (M20) | edge | 407 | 0.095 | 109 | 0.00 | nut threads down |
-| | cached | — | 0.059 | 0 | — | **nut falls through** |
+| nut on bolt (M20) | edge | 407 | 0.095 | 109 | 0.00 | nut threads down (z 58.5 mm at 10 s) |
+| | cached (4 points) | — | 0.059 | 0 | — | nut falls through |
+| | cached (16 points, normal spread) | **594** | 0.429 | 16 | 0.20 | nut threads down (z 46.0 mm at 10 s, spins ~2x faster) |
+
+## Update: nut on bolt
+
+Two causes, both fixed: (1) the kept points spread only in position, so the 4-8
+points all landed on the load-bearing upper thread flanks and nothing resisted
+tilting; spread selection now also counts normal difference
+(`Config.normal_spread`), which brings lower-flank and radial contacts into the
+manifold; (2) a thread contacts in many separate regions, which needs about 16
+points (`cache_size=16, random_samples=4`). With 4-8 points the nut still tilts
+off. Smaller soft-max smoothing was not needed and made impact penetration worse
+(bunny drops 19.6 vs 11.4 mm max, sampled every 10 frames), so the default stays.
+`nut_trace.py` prints the nut's height, tilt and contact normal classes per frame.
+
+The edge path was verified unchanged: contacts from `ea2cfe0da` (before this work)
+and from the current head are bit-identical on three scenes, with equal collide
+time.
 
 ## Conclusions
 
@@ -51,10 +68,10 @@ its own contacts. 600 frames at 60 Hz. Raw data: `final_v2.json` / `final_v2.log
   points without relative motion ("frozen") is what makes resting scenes cheap.
 * **Mechanisms with sliding or tight-clearance contact: worse.** Cam/follower
   contacts in the analog clock penetrate 2.3 mm (vs 0.05 mm) and stretch joints,
-  the tourbillon gear train binds, and a nut on a bolt falls through: helical
-  thread contact needs contact in many separate regions, and optimized points
-  converge onto the opposite thread flank, flipping the normal. Increasing
-  `cache_size` to 16 does not fix it. Bike and caterpillar are on par.
+  and the tourbillon gear train binds. A nut on a bolt works only with about 16
+  points: helical thread contact needs contact in many separate regions, and it
+  needed normal-aware spread plus 16 points (see the update above). Bike and
+  caterpillar are on par.
 * Curved shapes resting on flat ones (bunny drops) settle less reliably than with
   edge sampling (one or two of 16 keep rocking in some runs) and show more
   transient penetration.
