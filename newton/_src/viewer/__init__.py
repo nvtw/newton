@@ -39,15 +39,19 @@ Layers:
     activated layer's model.
 """
 
+from typing import TYPE_CHECKING
+
 from .viewer import Layer, ViewerBase
 from .viewer_file import ViewerFile
 from .viewer_gl import ViewerGL
 from .viewer_null import ViewerNull
-from .viewer_optix import ViewerOptix
 from .viewer_rerun import ViewerRerun
 from .viewer_rtx import ViewerRTX
 from .viewer_usd import ViewerUSD
 from .viewer_viser import ViewerViser
+
+if TYPE_CHECKING:
+    from .viewer_optix import ViewerOptix
 
 __all__ = [
     "Layer",
@@ -61,3 +65,13 @@ __all__ = [
     "ViewerUSD",
     "ViewerViser",
 ]
+
+
+def __getattr__(name: str):
+    # The OptiX backend initializes Warp on import, so load it only when requested.
+    if name == "ViewerOptix":
+        from .viewer_optix import ViewerOptix  # noqa: PLC0415
+
+        globals()[name] = ViewerOptix
+        return ViewerOptix
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
