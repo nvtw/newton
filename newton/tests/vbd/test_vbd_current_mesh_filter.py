@@ -494,7 +494,10 @@ def test_coupled_full_surface_rigid_only_fallback(test, device):
 def test_coupled_mesh_source_overflow(test, device):
     """Preserve overflow force policy through packing, cached copies, and new detections."""
     test.allowOutputRegex(
-        r"^Mesh soft-contact capacity exceeded \(2\); this collision result is incomplete\.$", stream="stdout"
+        r"^Mesh soft-contact capacity exceeded: soft_contact_max=2, required=\d+\. "
+        r"Increase soft_contact_max to at least \d+ for this collision pass; "
+        r"this collision result is incomplete\.$",
+        stream="stdout",
     )
     model, state, _pipeline, _contacts = _scene(device)
     q0 = state.particle_q.numpy().copy()
