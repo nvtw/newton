@@ -43,7 +43,6 @@ from .viewer import Layer, ViewerBase
 from .viewer_file import ViewerFile
 from .viewer_gl import ViewerGL
 from .viewer_null import ViewerNull
-from .viewer_optix import ViewerOptix
 from .viewer_rerun import ViewerRerun
 from .viewer_rtx import ViewerRTX
 from .viewer_usd import ViewerUSD
@@ -55,7 +54,6 @@ __all__ = [
     "ViewerFile",
     "ViewerGL",
     "ViewerNull",
-    "ViewerOptix",
     "ViewerRTX",
     "ViewerRerun",
     "ViewerUSD",

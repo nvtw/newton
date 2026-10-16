@@ -403,29 +403,6 @@ Set the PyOpenGL platform before running:
 
 This is a known issue when running OpenGL applications on Wayland display servers.
 
-OptiX Viewer
-~~~~~~~~~~~~
-
-:class:`~newton.viewer.ViewerOptix` is an experimental path-tracing viewer using
-the optional ``warp-optix`` backend and PyOptiX. Its integration API may change.
-Install the backend with its path-tracing and UI dependencies before selecting
-``--viewer optix``. The backend packages carry their own OptiX and DLSS license
-terms; Newton does not bundle those binaries.
-
-The viewer provides physical sky lighting, soft shadows, PBR materials, optional
-DLSS Ray Reconstruction, and a checkerboard floor with meter-sized squares.
-For example:
-
-.. code-block:: bash
-
-    uv run -m newton.examples kamino_stewart_platform --viewer optix
-
-The current adapter supports opaque rigid-body scenes. Per-instance opacity is
-accepted by the common logging interface but is rendered opaque.
-The Stewart flower garden overlaps rendering and physics on separate CUDA
-streams using buffered render states. Pass ``--no-overlap-render`` to run it
-sequentially.
-
 RTX Viewer
 ~~~~~~~~~~
 

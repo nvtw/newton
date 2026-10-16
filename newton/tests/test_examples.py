@@ -1776,7 +1776,8 @@ add_example_test(
     TestKaminoExamples,
     name="kamino.example_kamino_stewart_platform",
     devices=cuda_test_devices,
-    test_options={"num-frames": 120},
+    # Two full-height flowers exercise world indexing and motion variations.
+    test_options={"num-frames": 120, "world-count": 2},
     use_viewer=True,
 )
 add_example_test(

@@ -15,7 +15,6 @@ Thirty flowers form a compact hexagonal patch with gently scattered base positio
 Command: python -m newton.examples kamino_stewart_platform
 """
 
-import argparse
 import math
 
 import numpy as np
@@ -26,7 +25,7 @@ import newton.examples
 from newton.examples.kamino import _hoberman_sphere_data as hoberman
 from newton.solvers import SolverKamino
 
-# The saturated OptiX palette used by the Kapla tower example.
+# Saturated colors distinguish the interlocking flower rings.
 FLOWER_COLORS = (
     (0.86, 0.06, 0.02),
     (0.92, 0.22, 0.01),
@@ -356,8 +355,6 @@ def advance_time(time: wp.array[float], dt: float):
 class Example:
     def __init__(self, viewer: newton.viewer.ViewerBase, args=None):
         self.viewer = viewer
-        self.path_tracing = isinstance(viewer, newton.viewer.ViewerOptix)
-        self.overlap_simulation_render = getattr(args, "overlap_render", True) if args else True
         self.stage_count = args.stage_count if args else 20
         self.world_count = getattr(args, "world_count", 30) if args else 30
         if self.stage_count < 1:
@@ -519,9 +516,7 @@ class Example:
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
         for _ in range(self.world_count):
             builder.add_world(prototype)
-        builder.add_ground_plane(
-            cfg=newton.ModelBuilder.ShapeConfig(is_visible=not self.path_tracing), color=(0.18, 0.21, 0.25)
-        )
+        builder.add_ground_plane(color=(0.18, 0.21, 0.25))
         self.model = builder.finalize(skip_validation_joints=True)
         q_starts = self.model.joint_q_start.numpy()
         dof_starts = self.model.joint_qd_start.numpy()
@@ -563,11 +558,6 @@ class Example:
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
-        if self.path_tracing:
-            # Match RacerX's explicit 1000 m plane, gray color, and roughness.
-            self.floor_xforms = wp.array([wp.transform_identity()], dtype=wp.transform)
-            self.floor_colors = wp.array([wp.vec3(0.7, 0.7, 0.7)], dtype=wp.vec3)
-            self.floor_materials = wp.array([wp.vec4(0.8, 0.0, 0.0, 0.0)], dtype=wp.vec4)
         self.viewer.set_model(self.model)
         self.world_offsets = _garden_offsets(self.world_count)
         self.viewer.set_world_offsets((0.0, 0.0, 0.0))
@@ -585,22 +575,6 @@ class Example:
             with wp.ScopedCapture() as capture:
                 self.simulate()
             self.graph = capture.graph
-        overlap = self.overlap_simulation_render and getattr(viewer, "supports_simulation_render_overlap", False)
-        self.render_states = (self.model.state(), self.model.state()) if overlap else None
-        self.render_done = tuple(wp.Event(self.model.device) for _ in range(2)) if overlap else None
-        self.render_state_index = 0
-        self.render_state_prepared = False
-        self.render_time = 0.0
-
-    def prepare_render_state(self):
-        """Snapshot poses and velocities before physics advances on its own stream."""
-        self.render_state_index = 1 - self.render_state_index
-        wp.wait_event(self.render_done[self.render_state_index])
-        state = self.render_states[self.render_state_index]
-        wp.copy(state.body_q, self.state_0.body_q)
-        wp.copy(state.body_qd, self.state_0.body_qd)
-        self.render_time = self.sim_time
-        self.render_state_prepared = True
 
     def simulate(self):
         for _ in range(self.sim_substeps):
@@ -648,23 +622,9 @@ class Example:
         self.sim_time += self.frame_dt
 
     def render(self):
-        state = self.render_states[self.render_state_index] if self.render_state_prepared else self.state_0
-        self.viewer.begin_frame(self.render_time if self.render_state_prepared else self.sim_time)
-        self.viewer.log_state(state)
-        if self.path_tracing:
-            self.viewer.log_shapes(
-                "/garden/ground",
-                newton.GeoType.PLANE,
-                (1000.0, 1000.0),
-                self.floor_xforms,
-                colors=self.floor_colors,
-                materials=self.floor_materials,
-                hidden=not self.viewer.show_ground,
-            )
+        self.viewer.begin_frame(self.sim_time)
+        self.viewer.log_state(self.state_0)
         self.viewer.end_frame()
-        if self.render_state_prepared:
-            wp.record_event(self.render_done[self.render_state_index])
-        self.render_state_prepared = False
 
     def test_final(self):
         """Check tower tracking, flower breathing, and the mounted mechanism's loop closure."""
@@ -728,15 +688,9 @@ class Example:
     def create_parser():
         parser = newton.examples.create_parser()
         newton.examples.add_world_count_arg(parser)
-        parser.set_defaults(world_count=30, viewer="optix")
+        parser.set_defaults(world_count=30)
         parser.add_argument("--stage-count", type=int, default=20, help="Number of stacked Stewart platforms.")
         parser.add_argument("--substeps", type=int, choices=(2, 4, 6, 12), default=2, help="Physics steps per frame.")
-        parser.add_argument(
-            "--overlap-render",
-            action=argparse.BooleanOptionalAction,
-            default=True,
-            help="Overlap OptiX rendering and CUDA physics.",
-        )
         return parser
 
 
