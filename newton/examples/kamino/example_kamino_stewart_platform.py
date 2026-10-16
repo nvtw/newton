@@ -11,6 +11,8 @@ The choreography blends waves, corkscrews, bows, and traveling curls over 20 s.
 A lightweight 1 m Hoberman flower breathes on a pinned yoke at the tip.
 Separate worlds share the choreography with small variations like flowers in wind.
 Thirty flowers form a compact hexagonal patch with gently scattered base positions.
+Use --flower-resolution to vary scissor cells per 36-degree ring arc; the default
+of two reproduces the original twenty-cell rings procedurally.
 
 Command: python -m newton.examples kamino_stewart_platform
 """
@@ -22,7 +24,7 @@ import warp as wp
 
 import newton
 import newton.examples
-from newton.examples.kamino import _hoberman_sphere_data as hoberman
+from newton.examples.kamino._hoberman_sphere import generate_sphere
 from newton.solvers import SolverKamino
 
 # Saturated colors distinguish the interlocking flower rings.
@@ -67,25 +69,23 @@ def _garden_offsets(world_count):
     return offsets
 
 
-def add_hoberman_flower(builder, plate, joints_tree):
+def add_hoberman_flower(builder, plate, joints_tree, sphere):
     """Mount a scaled sphere by its outer three-hinge crossing on a driven yoke.
 
-    The pole at (-2.2, 0, 0) contains circle0_outer14, joint_402, and
-    circle5_outer19. A bearing supports one strut at this shared crossing;
-    none of the struts is welded to the plate. The bearing turns by half the
-    opening hinge angle, keeping the two circle-0 arms symmetric about the
-    stem while the existing ring joints transmit the opening to the sphere.
+    A bearing supports one strut at a shared outer crossing. It turns by half
+    the opening hinge angle, keeping the supported arms symmetric about the
+    stem while the ring joints transmit the opening to the sphere.
     """
     scale = 1.0 / (2.0 * 2.236)
-    mass_scale = 0.18 / sum(body[4] for body in hoberman.BODIES)
+    mass_scale = 0.18 / sum(body[4] for body in sphere.bodies)
     rotation = wp.quat_between_vectors(wp.vec3(-1.0, 0.0, 0.0), wp.vec3(0.0, 0.0, -1.0))
-    pole = wp.vec3(-2.2 * scale, 0.0, 0.0)
+    pole = wp.vec3(*sphere.pole) * scale
     stem_tip = wp.vec3(0.0, 0.0, 0.055)
     placement = wp.transform_multiply(
         builder.body_q[plate], wp.transform(stem_tip - wp.quat_rotate(rotation, pole), rotation)
     )
     offset = builder.body_count
-    for label, pose, com, inertia, mass in hoberman.BODIES:
+    for label, pose, com, inertia, mass in sphere.bodies:
         builder.add_link(
             xform=wp.transform_multiply(placement, _transform(pose, scale)),
             com=wp.vec3(*com) * scale,
@@ -96,16 +96,16 @@ def add_hoberman_flower(builder, plate, joints_tree):
         )
 
     opening_joint = None
-    mount_child = None
-    mount_frame = None
+    mount_child = offset + sphere.mount_body
+    mount_frame = _transform(sphere.mount_frame, scale)
     closures = []
-    for index, (kind, label, parent, child, xp, xc, axes, coordinates) in enumerate(hoberman.JOINTS):
+    for index, (kind, label, parent, child, xp, xc, axes, coordinates) in enumerate(sphere.joints):
         if kind == "FREE":
             joint = builder.add_joint_free(offset + child, label="flower_root")
             start = builder.joint_q_start[joint]
             builder.joint_q[start : start + 7] = list(builder.body_q[offset + child])
         else:
-            driven = label.endswith("/circle0_outer14")
+            driven = label == sphere.opening_label
             kwargs = {
                 "joint_type": newton.JointType[kind],
                 "parent": offset + parent,
@@ -125,7 +125,7 @@ def add_hoberman_flower(builder, plate, joints_tree):
                 ],
                 "label": label,
             }
-            if index >= hoberman.ARTICULATION_JOINT_COUNT:
+            if index >= sphere.tree_joint_count:
                 closures.append(kwargs)
                 continue
             joint = builder.add_joint(**kwargs)
@@ -133,8 +133,6 @@ def add_hoberman_flower(builder, plate, joints_tree):
             builder.joint_q[start : start + len(coordinates)] = coordinates
             if driven:
                 opening_joint = joint
-                mount_child = offset + child
-                mount_frame = _transform(xc, scale)
         joints_tree.append(joint)
 
     # Both joint frames coincide at the crossing. Its pin axis is tangential,
@@ -160,7 +158,7 @@ def add_hoberman_flower(builder, plate, joints_tree):
         builder.add_joint(**kwargs)
 
     visual = newton.ModelBuilder.ShapeConfig(density=0.0, has_shape_collision=False, has_particle_collision=False)
-    for body, pose, extents, _color in hoberman.TILES:
+    for body, pose, extents, _color in sphere.tiles:
         color = FLOWER_COLORS[body % len(FLOWER_COLORS)]
         builder.add_shape_box(
             offset + body,
@@ -222,6 +220,7 @@ def flower_opening(time: float) -> float:
 def update_flower(
     time: wp.array[float],
     dt: float,
+    opening_slope: float,
     variations: wp.array[wp.vec3],
     coordinates: wp.array[int],
     dofs: wp.array[int],
@@ -236,6 +235,16 @@ def update_flower(
         ratio = 0.5
     angle = variation[1] * flower_opening(wind_time(time[0], 1.5 * variation[0]))
     angle_next = variation[1] * flower_opening(wind_time(time[0] + dt, 1.5 * variation[0]))
+    # Finer rings reach full compaction at smaller hinge angles. Invert their
+    # aperture law to retain the original radial breathing motion safely.
+    reference_slope = (2.2 - 1.35896) / (2.2 + 1.35896) / wp.tan(wp.pi / 20.0)
+    if opening_slope > 1.001 * reference_slope:
+        gain = wp.cos(0.5 * angle) + reference_slope * wp.sin(0.5 * angle)
+        gain_next = wp.cos(0.5 * angle_next) + reference_slope * wp.sin(0.5 * angle_next)
+        magnitude = wp.sqrt(1.0 + opening_slope * opening_slope)
+        rest = wp.atan2(1.0, opening_slope)
+        angle = 2.0 * (wp.asin(wp.clamp(gain / magnitude, -1.0, 1.0)) - rest)
+        angle_next = 2.0 * (wp.asin(wp.clamp(gain_next / magnitude, -1.0, 1.0)) - rest)
     target_q[coordinates[actuator]] = ratio * angle
     target_qd[dofs[actuator]] = ratio * (angle_next - angle) / dt
 
@@ -501,7 +510,8 @@ class Example:
         for upper_args in closures:
             builder.add_joint_d6(**upper_args)
         flower_tree = []
-        opening, mount, flower_body_start = add_hoberman_flower(builder, top, flower_tree)
+        self.sphere = generate_sphere(getattr(args, "flower_resolution", 2) if args else 2)
+        opening, mount, flower_body_start = add_hoberman_flower(builder, top, flower_tree, self.sphere)
         builder.add_articulation(flower_tree, label="hoberman_flower")
 
         # Keep simulation coordinates near the origin; only the viewer spaces
@@ -601,6 +611,7 @@ class Example:
                 inputs=[
                     self.time,
                     self.sim_dt,
+                    self.sphere.opening_slope,
                     self.variations,
                     self.flower_coordinates,
                     self.flower_dofs,
@@ -663,9 +674,9 @@ class Example:
         # small actuator compliance accumulates along the twenty-stage tower.
         for world, plates in enumerate(self.plates):
             start = self.flower_body_starts[world]
-            points = poses[start : start + len(hoberman.BODIES), :3]
+            points = poses[start : start + len(self.sphere.bodies), :3]
             radius = np.mean(np.linalg.norm(points - points.mean(axis=0), axis=1))
-            radius_rest = np.linalg.norm(hoberman.BODIES[0][1][:3]) / (2.0 * 2.236)
+            radius_rest = self.sphere.radius_rest / (2.0 * 2.236)
             assert 0.25 * radius_rest < radius < 1.8 * radius_rest, "Flower lost its spherical shape"
             opening = flower_q[world, 0]
             if abs(opening) > 0.04:
@@ -689,6 +700,12 @@ class Example:
         parser = newton.examples.create_parser()
         newton.examples.add_world_count_arg(parser)
         parser.set_defaults(world_count=30)
+        parser.add_argument(
+            "--flower-resolution",
+            type=int,
+            default=2,
+            help="Scissor cells per 36-degree ring arc (2 reproduces the original sphere).",
+        )
         parser.add_argument("--stage-count", type=int, default=20, help="Number of stacked Stewart platforms.")
         parser.add_argument("--substeps", type=int, choices=(2, 4, 6, 12), default=2, help="Physics steps per frame.")
         return parser

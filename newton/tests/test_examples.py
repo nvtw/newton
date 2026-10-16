@@ -1776,9 +1776,20 @@ add_example_test(
     TestKaminoExamples,
     name="kamino.example_kamino_stewart_platform",
     devices=cuda_test_devices,
-    # Two full-height flowers exercise world indexing and motion variations.
-    test_options={"num-frames": 120, "world-count": 2},
     use_viewer=True,
+    variants=[
+        {
+            "test_suffix": "original",
+            # Two full-height flowers exercise world indexing and variations.
+            "test_options": {"num-frames": 120, "world-count": 2},
+        },
+        {
+            "test_suffix": "fine",
+            # Odd resolution changes the tilted rings' intersection indexing.
+            # Five seconds also exercises the adapted compaction stroke.
+            "test_options": {"num-frames": 300, "world-count": 1, "stage-count": 2, "flower-resolution": 3},
+        },
+    ],
 )
 add_example_test(
     TestKaminoExamples,
