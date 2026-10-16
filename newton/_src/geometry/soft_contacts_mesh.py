@@ -326,7 +326,10 @@ def _build_feature_adjacency(model: Model, meshes: dict[int, Mesh], edge_table: 
     def build(mesh):
         idx = np.asarray(mesh.indices).reshape(-1)
         canon = mesh._canonical_vertex_ids()[idx]
+        triangles = np.asarray(mesh.vertices, dtype=np.float64)[idx].reshape(-1, 3, 3)
+        areas = np.linalg.norm(np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0]), axis=1)
         representative = {}
+        vertex_owner = {}
         incident = {}
         opposite = {}
         edge_owner = {}
@@ -337,20 +340,23 @@ def _build_feature_adjacency(model: Model, meshes: dict[int, Mesh], edge_table: 
             for k in range(3):
                 v = int(tri[k])
                 a, b = int(tri[(k + 1) % 3]), int(tri[(k + 2) % 3])
-                incident[v].update((a, b))
                 key = tuple(sorted((a, b)))
-                opposite.setdefault(key, set()).add(v)
-                edge_owner.setdefault(key, face)
-
-        triangles = np.asarray(mesh.vertices, dtype=np.float64)[idx].reshape(-1, 3, 3)
+                opposite.setdefault(key, set())
+                # Detection skips zero-area faces. They must neither own a shared feature
+                # nor constrain its validity cone, or they can suppress a valid neighbor.
+                if areas[face] > 0.0:
+                    incident[v].update((a, b))
+                    opposite[key].add(v)
+                    vertex_owner.setdefault(v, face)
+                    edge_owner.setdefault(key, face)
 
         def span(vertices, owner, representatives=representative):
             start = len(neighbors)
             neighbors.extend(representatives[v] for v in sorted(vertices))
             return (start, len(neighbors), owner)
 
-        vs = {v: span(n, representative[v] // 3) for v, n in incident.items()}
-        es = {key: span(n, edge_owner[key]) for key, n in opposite.items()}
+        vs = {v: span(n, vertex_owner.get(v, -1)) for v, n in incident.items()}
+        es = {key: span(n, edge_owner.get(key, -1)) for key, n in opposite.items()}
         edge_slots = {}
         offset = len(vertex_spans)
         for slot, v in enumerate(canon):
@@ -800,8 +806,8 @@ def _detect_mesh_face_contacts(
                 if active == 0:
                     continue
 
-                cp, bary, _feature = triangle_closest_point(particle_q[t0], particle_q[t1], particle_q[t2], x_w)
-                r_soft = bary[0] * particle_radius[t0] + bary[1] * particle_radius[t1] + bary[2] * particle_radius[t2]
+                cp, _bary, _feature = triangle_closest_point(particle_q[t0], particle_q[t1], particle_q[t2], x_w)
+                r_soft = wp.max(particle_radius[t0], wp.max(particle_radius[t1], particle_radius[t2]))
                 if wp.length(cp - x_w) < gap + s_margin + r_soft:
                     cp_local = wp.transform_point(_X_sw, cp)
                     diff = cp_local - x_local

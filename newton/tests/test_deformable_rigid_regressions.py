@@ -336,6 +336,59 @@ def test_finite_plane_feature_geometry(test, device):
             np.testing.assert_allclose(normals.numpy()[1], face_normal, atol=1.0e-6)
 
 
+def test_mesh_degenerate_faces_do_not_own_contacts(test, device):
+    """Keep valid edge and vertex contact forces when a degenerate triangle precedes their owner."""
+    for invalid in ([], [0, 1, 1], [0, 1, 3]):
+        with test.subTest(invalid=invalid):
+            builder = newton.ModelBuilder(gravity=wp.vec3())
+            mesh = newton.Mesh(
+                [(0, 0, 0), (1, 0, 0), (0, 1, 0), (0.5, 0, 0)],
+                [*invalid, 0, 1, 2],
+                compute_inertia=False,
+            )
+            builder.add_shape_mesh(body=-1, mesh=mesh, cfg=builder.ShapeConfig(margin=0.0, gap=0.0))
+            for p in ((0.5, -0.005, 0.005), (-0.005, -0.005, 0.005)):
+                builder.add_particle(wp.vec3(*p), wp.vec3(), 1.0, radius=0.01)
+            model = builder.finalize(device=device)
+            pipeline = newton.CollisionPipeline(
+                model, enable_rigid_soft_full_surface_contact=True, soft_contact_gap=0.01
+            )
+            state, contacts = model.state(), pipeline.contacts()
+            pipeline.collide(state, contacts)
+            count = int(contacts.soft_contact_count.numpy()[0])
+            mask = evaluate_soft_contact_force_mask(model, state, contacts).numpy()[:count]
+            particles = contacts.soft_contact_particle.numpy()[:count][mask]
+            np.testing.assert_array_equal(np.sort(particles), (0, 1))
+
+
+def test_mesh_face_contact_uses_maximum_radius(test, device):
+    """Detect the TV contacts whose maximum corner radius activates the VBD force law."""
+    builder = newton.ModelBuilder(gravity=wp.vec3())
+    builder.add_shape_mesh(
+        body=-1,
+        mesh=newton.Mesh.create_box(0.01, 0.01, 0.01),
+        cfg=builder.ShapeConfig(margin=0.0, gap=0.0),
+    )
+    for p, radius in zip(((0, 0, 0.06), (1, 0, 0.06), (0, 1, 0.06)), (0.0, 0.2, 0.0), strict=True):
+        builder.add_particle(wp.vec3(*p), wp.vec3(), 1.0, radius=radius)
+    builder.add_triangle(0, 1, 2)
+    model = builder.finalize(device=device)
+    pipeline = newton.CollisionPipeline(model, enable_rigid_soft_full_surface_contact=True, soft_contact_gap=0.01)
+    state, contacts = model.state(), pipeline.contacts()
+    pipeline.collide(state, contacts)
+    count = int(contacts.soft_contact_count.numpy()[0])
+    features = contacts._soft_contact_mesh_features.numpy()[:count]
+    mask = evaluate_soft_contact_force_mask(model, state, contacts).numpy()[:count]
+    tv = np.flatnonzero(((features[:, 0] & 7) == 1) & mask)
+    test.assertGreater(len(tv), 0)
+    bary = contacts.soft_contact_barycentric.numpy()[tv]
+    ids = contacts.soft_contact_indices.numpy()[tv]
+    x = np.sum(state.particle_q.numpy()[ids] * bary[:, :, None], axis=1)
+    delta = x - contacts.soft_contact_body_pos.numpy()[tv]
+    separation = np.sum(delta * contacts.soft_contact_normal.numpy()[tv], axis=1)
+    test.assertTrue(np.all(separation < 0.2))
+
+
 def test_large_heightfield_task_contacts(test, device):
     """Preserve exact minima across split terrain scans, empty tasks, and graph replay."""
     builder = newton.ModelBuilder()
@@ -1584,6 +1637,8 @@ for device in get_test_devices():
         test_dat_budget_counts_full_surface_mesh_queries,
         test_separated_mesh_shells_keep_default_capacity,
         test_finite_plane_feature_geometry,
+        test_mesh_degenerate_faces_do_not_own_contacts,
+        test_mesh_face_contact_uses_maximum_radius,
         test_large_heightfield_task_contacts,
         test_mesh_detection_reports_every_feature_pair,
         test_mesh_contact_filter_tracks_current_positions,
