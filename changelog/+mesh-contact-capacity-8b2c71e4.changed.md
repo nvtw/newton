@@ -1,0 +1,1 @@
+Size full-surface mesh contact buffers with configurable per-query headroom instead of multiplying every particle query by a nearby-face estimate. Increase `CollisionPipeline.full_surface_bvh_contact_headroom` (default 8) or set `soft_contact_max` explicitly if dense contact patches overflow.

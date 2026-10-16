@@ -1496,6 +1496,7 @@ class CollisionPipeline:
         soft_contact_gap: float | None = None,
         soft_contact_margin: float | None = None,
         enable_rigid_soft_full_surface_contact: bool = False,
+        full_surface_bvh_contact_headroom: int = 8,
         requires_grad: bool | None = None,
         broad_phase: Literal["nxn", "sap", "explicit"]
         | BroadPhaseAllPairs
@@ -1579,6 +1580,19 @@ class CollisionPipeline:
                 :class:`~newton.solvers.SolverVBD`; other solvers raise on such contacts. Records are
                 emitted into :attr:`Contacts.soft_contact_indices`. Defaults to False. Fixed at
                 construction because it sizes the soft-contact buffer headroom.
+                Fine meshes and large contact bands can generate many more records than
+                particle-only contacts or SDF minimization, increasing contact storage and
+                collision/solver time. Adjust ``full_surface_bvh_contact_headroom`` or
+                ``soft_contact_max`` to size storage; these do not reduce the number of
+                feature pairs queried. See :ref:`full-surface-mesh-contact-costs`.
+            full_surface_bvh_contact_headroom: Records reserved per mesh query source
+                (soft vertex-shape pair, rigid vertex, or rigid edge) in the default
+                ``soft_contact_max``. Defaults to 8. Additional storage is reserved for
+                endpoint and recovery records. This is an estimate, not an upper bound;
+                dense contact patches may overflow and produce incomplete contacts.
+                Increase this value or set ``soft_contact_max`` explicitly on overflow.
+                Ignored for sizing when ``soft_contact_max`` is explicit or full-surface
+                mesh contact is disabled. Must be a nonnegative integer.
             requires_grad: Whether pipeline-generated soft contacts and the
                 deprecated automatic rigid-contact outputs require gradients.
                 If None, uses ``model.requires_grad``. Explicit calls to
@@ -1717,6 +1731,13 @@ class CollisionPipeline:
         self._contact_sort_shape_index_bits = contact_sort_shape_index_bits(shape_count)
         device = model.device
         using_expert_components = broad_phase_instance is not None or narrow_phase is not None
+
+        if (
+            not isinstance(full_surface_bvh_contact_headroom, (int, np.integer))
+            or full_surface_bvh_contact_headroom < 0
+        ):
+            raise ValueError("full_surface_bvh_contact_headroom must be a nonnegative integer.")
+        full_surface_bvh_contact_headroom = int(full_surface_bvh_contact_headroom)
 
         # Resolve rigid contact capacity with explicit > model > estimated precedence.
         if rigid_contact_max is None:
@@ -2192,7 +2213,9 @@ class CollisionPipeline:
             self._soft_heightfield_face_pairs = _build_soft_face_rigid_contact_pairs(model, heightfield_capable)
             mesh_vertex_pairs = _build_soft_particle_rigid_contact_pairs(model, shape_ok=mesh_mask)
             if len(mesh_vertex_pairs):
-                self._soft_mesh_contact_data = MeshContactData(model, mesh_mask, mesh_vertex_pairs, soft_contact_gap)
+                self._soft_mesh_contact_data = MeshContactData(
+                    model, mesh_mask, mesh_vertex_pairs, full_surface_bvh_contact_headroom
+                )
         else:
             self.soft_edge_rigid_pairs = empty_pairs
             self.soft_face_rigid_pairs = empty_pairs

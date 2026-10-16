@@ -171,7 +171,7 @@ def test_soft_contact_workspace_storage(test, device):
 
 
 def test_disconnected_mesh_contact_capacity(test, device):
-    """Reserve default contact storage for every face near a particle, across disconnected patches."""
+    """Allow explicit headroom for dense contacts across disconnected patches."""
     base = newton.Mesh.create_box(0.02, 0.02, 0.02, compute_inertia=False)
     centers = np.array(
         (
@@ -194,13 +194,17 @@ def test_disconnected_mesh_contact_capacity(test, device):
     builder.add_particle(wp.vec3(0.0), wp.vec3(0.0), mass=1.0, radius=0.0)
     model = builder.finalize(device=device)
     pipeline = newton.CollisionPipeline(
-        model, broad_phase="nxn", soft_contact_gap=0.05, enable_rigid_soft_full_surface_contact=True
+        model,
+        broad_phase="nxn",
+        soft_contact_gap=0.05,
+        enable_rigid_soft_full_surface_contact=True,
+        full_surface_bvh_contact_headroom=len(indices) // 3,
     )
     contacts = pipeline.contacts()
     state = model.state()
     pipeline.collide(state, contacts)
 
-    # Detection reports every face within the band, which must fit the default capacity.
+    # Detection reports every face within the band, which must fit the requested capacity.
     raw_count = int(contacts.soft_contact_count.numpy()[0])
     test.assertGreater(raw_count, len(centers))
     test.assertLessEqual(raw_count, contacts.soft_contact_max)
@@ -648,31 +652,12 @@ def test_identical_meshes_share_contact_precomputation(test, device):
     )
     model = builder.finalize(device=device)
     feature_data = mock.Mock(wraps=soft_contacts_mesh._mesh_feature_data)
-    components = mock.Mock(wraps=soft_contacts_mesh._max_faces_near_point)
-    with (
-        mock.patch.object(soft_contacts_mesh, "_mesh_feature_data", feature_data),
-        mock.patch.object(soft_contacts_mesh, "_max_faces_near_point", components),
-    ):
-        newton.CollisionPipeline(model, enable_rigid_soft_full_surface_contact=True)
+    with mock.patch.object(soft_contacts_mesh, "_mesh_feature_data", feature_data):
+        pipeline = newton.CollisionPipeline(model, enable_rigid_soft_full_surface_contact=True)
     test.assertEqual(feature_data.call_count, 1)
-    reference_calls = components.call_count
-
-    builder = newton.ModelBuilder()
-    builder.add_shape_mesh(body=-1, mesh=sphere)
-    builder.add_cloth_grid(
-        pos=wp.vec3(-0.5, -0.5, 0.3),
-        rot=wp.quat_identity(),
-        vel=wp.vec3(),
-        dim_x=1,
-        dim_y=1,
-        cell_x=1.0,
-        cell_y=1.0,
-        mass=0.1,
-    )
-    components.reset_mock()
-    with mock.patch.object(soft_contacts_mesh, "_max_faces_near_point", components):
-        newton.CollisionPipeline(builder.finalize(device=device), enable_rigid_soft_full_surface_contact=True)
-    test.assertEqual(reference_calls, components.call_count)
+    # Identical instances share the actual adjacency spans, not just feature construction.
+    offsets = pipeline._soft_mesh_contact_data.adjacency[0].numpy()
+    np.testing.assert_array_equal(offsets, np.zeros_like(offsets))
 
 
 def _pinched_pad_contact_normals(device, depth, offset=(0.0, 0.0, 0.0), yaw=0.0):
@@ -817,7 +802,7 @@ def test_dat_budget_counts_full_surface_mesh_queries(test, device):
 
 
 def test_separated_mesh_shells_keep_default_capacity(test, device):
-    """Shells that no particle can touch together must not multiply the default contact capacity."""
+    """Budget added shells by rigid features rather than all particle-face combinations."""
     box = newton.Mesh.create_box(0.05, 0.05, 0.05, compute_inertia=False)
     vertices, indices = np.asarray(box.vertices), np.asarray(box.indices).reshape(-1)
 
@@ -844,17 +829,45 @@ def test_separated_mesh_shells_keep_default_capacity(test, device):
         model = builder.finalize(device=device)
         return newton.CollisionPipeline(model, enable_rigid_soft_full_surface_contact=True).soft_contact_max
 
-    # No particle can be near faces of two shells, so each particle reserves at most one
-    # shell's faces, however many shells the mesh has. The additional estimate for
-    # TV/EE endpoint rows and particle recovery depends only on the soft topology.
-    particles = 17 * 17
-    soft_triangles = 2 * 16 * 16
-    soft_edges = 2 * 16 * 17 + 16 * 16
-    shell_faces = len(indices) // 3
-    for shell_count in (1, 16):
-        test.assertLessEqual(
-            default_capacity(shell_count), particles * shell_faces + particles + 3 * soft_triangles + 2 * soft_edges
+    # Each triangulated box adds eight vertex and eighteen edge query sources. It must not
+    # multiply the existing cloth workload by the number of shells.
+    test.assertEqual(default_capacity(16) - default_capacity(1), 8 * (8 + 18) * 15)
+
+
+def test_mesh_contact_capacity_headroom(test, device):
+    """Bound high-poly storage and honor configurable headroom and explicit capacity."""
+    builder = newton.ModelBuilder()
+    builder.add_shape_mesh(body=-1, mesh=newton.Mesh.create_sphere(0.18, num_latitudes=16, num_longitudes=32))
+    builder.add_cloth_grid(
+        pos=wp.vec3(-1.0, -1.0, 0.05),
+        rot=wp.quat_identity(),
+        vel=wp.vec3(),
+        dim_x=16,
+        dim_y=16,
+        cell_x=0.125,
+        cell_y=0.125,
+        mass=0.1,
+        particle_radius=0.0,
+    )
+    model = builder.finalize(device=device)
+
+    def pipeline(**kwargs):
+        return newton.CollisionPipeline(
+            model, soft_contact_gap=0.05, enable_rigid_soft_full_surface_contact=True, **kwargs
         )
+
+    default = pipeline().soft_contact_max
+    # Keep a generous memory ceiling independent of the exact triangulation.
+    # The former nearby-face multiplier exceeds this for this fixture.
+    test.assertLess(default, 30000)
+    zero = pipeline(full_surface_bvh_contact_headroom=0).soft_contact_max
+    doubled = pipeline(full_surface_bvh_contact_headroom=16).soft_contact_max
+    test.assertGreater(default, zero)
+    test.assertEqual(doubled - zero, 2 * (default - zero))
+    test.assertEqual(pipeline(soft_contact_max=123, full_surface_bvh_contact_headroom=8).soft_contact_max, 123)
+    for invalid in (-1, 1.5):
+        with test.assertRaisesRegex(ValueError, "nonnegative integer"):
+            pipeline(full_surface_bvh_contact_headroom=invalid)
 
 
 def _cloth_over_mesh_contacts(device, gap=0.02):
@@ -1636,6 +1649,7 @@ for device in get_test_devices():
         test_mesh_pad_pinch_pushes_toward_nearest_exit,
         test_dat_budget_counts_full_surface_mesh_queries,
         test_separated_mesh_shells_keep_default_capacity,
+        test_mesh_contact_capacity_headroom,
         test_finite_plane_feature_geometry,
         test_mesh_degenerate_faces_do_not_own_contacts,
         test_mesh_face_contact_uses_maximum_radius,

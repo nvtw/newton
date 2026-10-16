@@ -283,42 +283,10 @@ def _edge_rows(keys: np.ndarray, query: np.ndarray, what: str) -> np.ndarray:
     return rows
 
 
-def _max_faces_near_point(lower: np.ndarray, upper: np.ndarray, band: float) -> int:
-    """Bound how many faces, given by their bounds, a single point can lie within ``band`` of.
-
-    Such a point lies in each face's band-expanded bounds. Grid cells as large as the largest
-    expanded bounds let every face overlap at most two cells per axis, and a point's faces all
-    overlap its cell, so the most faces overlapping one cell bounds the faces near any point.
-    """
-    if len(lower) == 0:
-        return 0
-    lower = lower - band
-    upper = upper + band
-    cell = float(np.max(upper - lower))
-    if cell <= 0.0:
-        return len(lower)
-    first = np.floor(lower / cell).astype(np.int64)
-    last = np.floor(upper / cell).astype(np.int64)
-    cells = []
-    for offset in np.ndindex(2, 2, 2):
-        corner = first + offset
-        cells.append(corner[np.all(corner <= last, axis=1)])
-    _, counts = np.unique(np.concatenate(cells), axis=0, return_counts=True)
-    return int(counts.max())
-
-
-def _build_feature_adjacency(model: Model, meshes: dict[int, Mesh], edge_table: wp.array, contact_band: float):
-    """Build fixed incident-feature spans and ownership.
-
-    Also returns, per shape, how many faces one particle can lie within ``contact_band`` plus the
-    shape's margin of, which bounds the vertex contacts that detection reports for it.
-    """
+def _build_feature_adjacency(model: Model, meshes: dict[int, Mesh], edge_table: wp.array):
+    """Build fixed incident-feature spans and ownership."""
     et = edge_table.numpy()
     offsets = np.zeros(model.shape_count, dtype=np.int32)
-    near_faces = np.zeros(model.shape_count, dtype=np.int32)
-    shape_scale = model.shape_scale.numpy()
-    shape_margin = model.shape_margin.numpy() if model.shape_margin is not None else np.zeros(model.shape_count)
-    near_faces_cache = {}
     vertex_spans, edge_spans, neighbors = [], [], []
     ee = np.zeros(len(et), dtype=np.int32)
     cache = {}
@@ -368,7 +336,7 @@ def _build_feature_adjacency(model: Model, meshes: dict[int, Mesh], edge_table: 
         keys = sorted(es)
         edge_keys = np.asarray([(a << 32) | b for a, b in keys], dtype=np.int64)
         edge_data = np.asarray([edge_slots[key] for key in keys], dtype=np.int32)
-        return offset, canon, edge_keys, edge_data, triangles
+        return offset, canon, edge_keys, edge_data
 
     # Shape instances share immutable local topology. Only the feature rows
     # carry a shape id; constructing full adjacency per world is unnecessary.
@@ -376,15 +344,8 @@ def _build_feature_adjacency(model: Model, meshes: dict[int, Mesh], edge_table: 
         key = _geometry_key(mesh)
         if key not in cache:
             cache[key] = build(mesh)
-        offset, canon, edge_keys, edge_data, triangles = cache[key]
+        offset, canon, edge_keys, edge_data = cache[key]
         offsets[shape] = offset
-        scale = shape_scale[shape].astype(np.float64)
-        band = contact_band + float(shape_margin[shape])
-        near_key = (key, tuple(scale), band)
-        if near_key not in near_faces_cache:
-            scaled = triangles * scale
-            near_faces_cache[near_key] = _max_faces_near_point(scaled.min(axis=1), scaled.max(axis=1), band)
-        near_faces[shape] = near_faces_cache[near_key]
         start, end = np.searchsorted(et[:, 0], (shape, shape + 1))
         edge_canon = np.sort(canon[et[start:end, 1:]].astype(np.int64), axis=1)
         keys = (edge_canon[:, 0] << 32) | edge_canon[:, 1]
@@ -398,7 +359,7 @@ def _build_feature_adjacency(model: Model, meshes: dict[int, Mesh], edge_table: 
     )
     arrays.append(wp.array(ee, dtype=int, device=model.device))
     arrays.append(wp.array(neighbors, dtype=int, device=model.device))
-    return arrays, near_faces
+    return arrays
 
 
 CONTACT_NORMAL_DEGENERATE_EPS = wp.constant(1.0e-6)
@@ -1697,7 +1658,7 @@ class MeshContactData:
     def edge_edge_parallel_epsilon(self) -> float:
         return self.detector.edge_edge_parallel_epsilon if self.detector is not None else 1.0e-5
 
-    def __init__(self, model: Model, shape_mask: np.ndarray, vertex_pairs: wp.array[wp.vec2i], gap: float):
+    def __init__(self, model: Model, shape_mask: np.ndarray, vertex_pairs: wp.array[wp.vec2i], contact_headroom: int):
         self.vertex_pairs = vertex_pairs
         meshes = _collision_meshes(model, shape_mask)
         if model.tri_count:
@@ -1732,7 +1693,7 @@ class MeshContactData:
             > np.iinfo(np.int32).max
         ):
             raise ValueError("Mesh contact queries exceed 32-bit indexing capacity.")
-        adjacency, near_faces = _build_feature_adjacency(model, meshes, edges, gap + model.particle_max_radius)
+        adjacency = _build_feature_adjacency(model, meshes, edges)
         self.adjacency = [*adjacency, vertex_normals, edge_normals]
         # A query emits at most one contact per feature pair, or two depth probes per
         # face crossing. Bound the wide append counter before allocating; final writes
@@ -1747,9 +1708,8 @@ class MeshContactData:
         if bound > np.iinfo(np.int64).max - np.iinfo(np.int32).max:
             raise ValueError("Mesh contact pairs exceed 64-bit counting capacity.")
         self.contact_count = wp.empty(1, dtype=wp.int64, device=model.device)
-        # Size final storage primarily from the deformable workload. Retain a
-        # rigid-feature floor for fine flat patches touching very coarse cloth.
-        # This remains an estimate; every write checks the caller-sized capacity.
+        # Budget records per query source, as in the dense BVH backend. This is
+        # a tunable estimate, not a bound; every write remains capacity checked.
         particle_world = model.particle_world.numpy()
         shape_world = model.shape_world.numpy()[shape_mask]
         shape_counts = np.bincount(shape_world + 1, minlength=model.world_count + 1)
@@ -1768,12 +1728,10 @@ class MeshContactData:
 
         face_pairs = count_pairs(model.tri_indices, 0)
         edge_pairs = count_pairs(model.edge_indices, 2)
-        # Detection reports every face within the band of a particle.
-        vertex_pair_shapes = vertex_pairs.numpy()[:, 1]
-        vertex_patch_hint = int(near_faces[vertex_pair_shapes].sum(dtype=np.int64))
+        query_count = len(vertex_pairs) + len(vertices) + len(edges)
         # Endpoint records coexist with VT until the solver filters them. Estimate
         # one TV row per soft triangle corner and one EE row per soft edge endpoint,
         # plus one nearest-surface recovery row per particle query. Like the previous
         # per-feature estimate, this is not a bound on dense overlapping surfaces.
         endpoint_hint = 3 * face_pairs + 2 * edge_pairs + len(vertex_pairs)
-        self.contact_capacity_hint = max(vertex_patch_hint + endpoint_hint, len(vertices) + len(edges))
+        self.contact_capacity_hint = contact_headroom * query_count + endpoint_hint

@@ -1598,6 +1598,33 @@ Preserving returned rows does not guarantee complete contact topology:
 mesh detection may use SDF-selected rigid edges, and edge penetration-recovery
 records are not ordinary edge-edge quadrature samples.
 
+.. _full-surface-mesh-contact-costs:
+
+Full-surface mesh contact costs
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Full-surface contact catches rigid features that can pass between deformable
+vertices, which is useful for coarse cloth. On finely tessellated or complex
+rigid meshes, however, retaining nearby feature pairs can produce many more
+records than particle-only contacts or SDF minimization. This increases contact
+storage and can substantially increase both collision detection and VBD solve
+time. Larger contact bands also admit more pairs. Profile the intended scene;
+the cost depends on mesh resolution, geometry, and contact density.
+
+:class:`CollisionPipeline` estimates mesh contact storage with
+``full_surface_bvh_contact_headroom`` (default ``8``), reserving that many records
+per query source plus additional endpoint and recovery storage. Set
+``soft_contact_max`` to override the total soft-contact capacity explicitly.
+The estimate is not an upper bound: dense patches can still overflow. Increase
+the headroom or explicit capacity if overflow is reported, and verify that
+contacts fit throughout the simulation before relying on the results.
+
+These settings control reserved storage, not the contact band or the number of
+feature pairs queried. Lowering capacity can save memory but produces incomplete
+contacts if it is too small; it is not a way to reduce query work while preserving
+the same contacts. The edge and vertex queries and the processing of their
+records remain a runtime cost even when the buffer is sized appropriately.
+
 .. _collision-frequency-in-the-simulation-loop:
 
 Collision frequency in the simulation loop
