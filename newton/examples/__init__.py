@@ -551,6 +551,8 @@ def run(example, args):
 
     while viewer.is_running():
         frame_start_time = time.perf_counter()
+        if hasattr(viewer, "synchronize_simulation_step"):
+            viewer.synchronize_simulation_step()
 
         if browser is not None and browser.switch_target is not None:
             example, example_class = browser.switch(example_class)
@@ -572,9 +574,20 @@ def run(example, args):
             _throttle_render_fps(frame_start_time, render_fps)
             continue
 
+        overlap = (
+            not perform_test
+            and bool(getattr(example, "overlap_simulation_render", False))
+            and bool(getattr(viewer, "supports_simulation_render_overlap", False))
+        )
+        prepare_render_state = getattr(example, "prepare_render_state", None)
+        if overlap and not callable(prepare_render_state):
+            raise RuntimeError("Examples enabling render overlap must implement prepare_render_state().")
         if viewer.should_step():
             with wp.ScopedTimer("step", active=False):
-                example.step()
+                if overlap:
+                    viewer.launch_simulation_step(example.step, prepare_render_state=prepare_render_state)
+                else:
+                    example.step()
         if test_post_step:
             example.test_post_step()
 
@@ -583,6 +596,8 @@ def run(example, args):
 
         _throttle_render_fps(frame_start_time, render_fps)
 
+    if hasattr(viewer, "synchronize_simulation_step"):
+        viewer.synchronize_simulation_step()
     if perform_test:
         example.test_final()
 
@@ -657,8 +672,8 @@ def create_parser():
         "--viewer",
         type=str,
         default="gl",
-        choices=["gl", "usd", "rtx", "rerun", "null", "viser"],
-        help="Viewer to use (gl, usd, rtx, rerun, null, or viser).",
+        choices=["gl", "optix", "usd", "rtx", "rerun", "null", "viser"],
+        help="Viewer to use (gl, optix, usd, rtx, rerun, null, or viser).",
     )
     parser.add_argument(
         "--rerun-address",
@@ -680,7 +695,7 @@ def create_parser():
         "--headless",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="Whether to initialize the viewer headless (for OpenGL viewer only).",
+        help="Whether to initialize the GL, OptiX, or RTX viewer headless.",
     )
     parser.add_argument(
         "--test",
@@ -922,6 +937,13 @@ def init(parser=None):
     visible_gl = args.viewer == "gl" and not args.headless
     if args.viewer == "gl":
         viewer = newton.viewer.ViewerGL(headless=args.headless, paused=args.paused, num_frames=args.num_frames)
+    elif args.viewer == "optix":
+        viewer = newton.viewer.ViewerOptix(
+            headless=args.headless,
+            paused=args.paused,
+            num_frames=args.num_frames if args.headless else None,
+            max_instances=131072,
+        )
     elif args.viewer == "usd":
         if args.output_path is None:
             raise ValueError("--output-path is required when using usd viewer")

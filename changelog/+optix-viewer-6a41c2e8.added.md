@@ -1,0 +1,1 @@
+Add an experimental `ViewerOptix` adapter and `--viewer optix` support for the optional `warp-optix` path tracer, including metric checkerboard floors, the saturated Kapla scene palette, and CUDA physics/render overlap with buffered pose snapshots.

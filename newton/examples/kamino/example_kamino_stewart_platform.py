@@ -1,18 +1,21 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Animate a tower of twenty 10 cm Stewart platforms using Kamino DVI.
+"""Animate a garden of twenty-stage Stewart platform flowers using Kamino DVI.
 
 Each plate is the moving platform of one stage and the base of the next.
 Universal joints attach both ends of each hydraulic actuator. A passive axial
 swivel in each cylinder prevents the universal joints from binding in torsion.
 Only piston extensions are driven; all plate poses emerge from the dynamics.
 The choreography blends waves, corkscrews, bows, and traveling curls over 20 s.
+A lightweight 1 m Hoberman flower breathes on a pinned yoke at the tip.
+Separate worlds share the choreography with small variations like flowers in wind.
+Thirty flowers form a compact hexagonal patch with gently scattered base positions.
 
 Command: python -m newton.examples kamino_stewart_platform
 """
 
-import colorsys
+import argparse
 import math
 
 import numpy as np
@@ -20,7 +23,222 @@ import warp as wp
 
 import newton
 import newton.examples
+from newton.examples.kamino import _hoberman_sphere_data as hoberman
 from newton.solvers import SolverKamino
+
+# The saturated OptiX palette used by the Kapla tower example.
+FLOWER_COLORS = (
+    (0.86, 0.06, 0.02),
+    (0.92, 0.22, 0.01),
+    (0.94, 0.42, 0.01),
+    (0.88, 0.62, 0.01),
+    (0.78, 0.72, 0.01),
+    (0.46, 0.72, 0.01),
+    (0.03, 0.60, 0.12),
+    (0.00, 0.58, 0.38),
+    (0.00, 0.62, 0.68),
+    (0.00, 0.53, 0.88),
+    (0.06, 0.30, 0.88),
+    (0.22, 0.12, 0.78),
+    (0.42, 0.10, 0.76),
+    (0.58, 0.08, 0.68),
+)
+
+
+def _transform(values, scale=1.0):
+    return wp.transform(wp.vec3(*values[:3]) * scale, wp.quat(*values[3:]))
+
+
+def _garden_offsets(world_count):
+    """Place flowers on a 2 m hexagonal lattice with up to 16 cm of fixed jitter."""
+    radius = 0
+    while 1 + 3 * radius * (radius + 1) < world_count:
+        radius += 1
+    cells = [(q, r) for q in range(-radius, radius + 1) for r in range(-radius, radius + 1) if abs(q + r) <= radius]
+    # Fill from the center outward to avoid a rectangular boundary.
+    cells.sort(key=lambda cell: (cell[0] ** 2 + cell[0] * cell[1] + cell[1] ** 2, math.atan2(cell[1], cell[0])))
+    offsets = np.zeros((world_count, 3), dtype=np.float32)
+    offsets[:, :2] = [(2.0 * (q + 0.5 * r), math.sqrt(3.0) * r) for q, r in cells[:world_count]]
+    rng = np.random.default_rng(2026)
+    angles = rng.uniform(0.0, 2.0 * math.pi, world_count)
+    lengths = 0.16 * np.sqrt(rng.uniform(0.0, 1.0, world_count))
+    offsets[:, 0] += lengths * np.cos(angles)
+    offsets[:, 1] += lengths * np.sin(angles)
+    offsets -= offsets.mean(axis=0)
+    return offsets
+
+
+def add_hoberman_flower(builder, plate, joints_tree):
+    """Mount a scaled sphere by its outer three-hinge crossing on a driven yoke.
+
+    The pole at (-2.2, 0, 0) contains circle0_outer14, joint_402, and
+    circle5_outer19. A bearing supports one strut at this shared crossing;
+    none of the struts is welded to the plate. The bearing turns by half the
+    opening hinge angle, keeping the two circle-0 arms symmetric about the
+    stem while the existing ring joints transmit the opening to the sphere.
+    """
+    scale = 1.0 / (2.0 * 2.236)
+    mass_scale = 0.18 / sum(body[4] for body in hoberman.BODIES)
+    rotation = wp.quat_between_vectors(wp.vec3(-1.0, 0.0, 0.0), wp.vec3(0.0, 0.0, -1.0))
+    pole = wp.vec3(-2.2 * scale, 0.0, 0.0)
+    stem_tip = wp.vec3(0.0, 0.0, 0.055)
+    placement = wp.transform_multiply(
+        builder.body_q[plate], wp.transform(stem_tip - wp.quat_rotate(rotation, pole), rotation)
+    )
+    offset = builder.body_count
+    for label, pose, com, inertia, mass in hoberman.BODIES:
+        builder.add_link(
+            xform=wp.transform_multiply(placement, _transform(pose, scale)),
+            com=wp.vec3(*com) * scale,
+            inertia=wp.mat33(np.asarray(inertia) * mass_scale * scale**2),
+            mass=mass * mass_scale,
+            lock_inertia=True,
+            label=label,
+        )
+
+    opening_joint = None
+    mount_child = None
+    mount_frame = None
+    closures = []
+    for index, (kind, label, parent, child, xp, xc, axes, coordinates) in enumerate(hoberman.JOINTS):
+        if kind == "FREE":
+            joint = builder.add_joint_free(offset + child, label="flower_root")
+            start = builder.joint_q_start[joint]
+            builder.joint_q[start : start + 7] = list(builder.body_q[offset + child])
+        else:
+            driven = label.endswith("/circle0_outer14")
+            kwargs = {
+                "joint_type": newton.JointType[kind],
+                "parent": offset + parent,
+                "child": offset + child,
+                "parent_xform": _transform(xp, scale),
+                "child_xform": _transform(xc, scale),
+                "angular_axes": [
+                    newton.ModelBuilder.JointDofConfig(
+                        axis=wp.vec3(*axis),
+                        target_ke=300.0 if driven else 0.0,
+                        target_kd=3.0 if driven else 0.0,
+                        actuator_mode=newton.JointTargetMode.POSITION_VELOCITY
+                        if driven
+                        else newton.JointTargetMode.NONE,
+                    )
+                    for axis in axes
+                ],
+                "label": label,
+            }
+            if index >= hoberman.ARTICULATION_JOINT_COUNT:
+                closures.append(kwargs)
+                continue
+            joint = builder.add_joint(**kwargs)
+            start = builder.joint_q_start[joint]
+            builder.joint_q[start : start + len(coordinates)] = coordinates
+            if driven:
+                opening_joint = joint
+                mount_child = offset + child
+                mount_frame = _transform(xc, scale)
+        joints_tree.append(joint)
+
+    # Both joint frames coincide at the crossing. Its pin axis is tangential,
+    # so the supported strut can rotate as the sphere opens around the pole.
+    child = mount_child
+    child_frame = mount_frame
+    parent_frame = wp.transform_multiply(
+        wp.transform_inverse(builder.body_q[plate]),
+        wp.transform_multiply(builder.body_q[child], child_frame),
+    )
+    mount = builder.add_joint_revolute(
+        plate,
+        child,
+        parent_xform=parent_frame,
+        child_xform=child_frame,
+        axis=newton.Axis.X,
+        target_ke=600.0,
+        target_kd=6.0,
+        actuator_mode=newton.JointTargetMode.POSITION_VELOCITY,
+        label="flower_mount",
+    )
+    for kwargs in closures:
+        builder.add_joint(**kwargs)
+
+    visual = newton.ModelBuilder.ShapeConfig(density=0.0, has_shape_collision=False, has_particle_collision=False)
+    for body, pose, extents, _color in hoberman.TILES:
+        color = FLOWER_COLORS[body % len(FLOWER_COLORS)]
+        builder.add_shape_box(
+            offset + body,
+            xform=_transform(pose, scale),
+            hx=extents[0] * scale,
+            hy=extents[1] * scale,
+            hz=extents[2] * scale,
+            cfg=visual,
+            color=color,
+        )
+
+    gold = (0.92, 0.65, 0.25)
+    builder.add_shape_cylinder(
+        plate,
+        xform=wp.transform((0.0, 0.0, 0.025), wp.quat_identity()),
+        radius=0.009,
+        half_height=0.022,
+        cfg=visual,
+        color=gold,
+    )
+    pin_axis = wp.transform_vector(parent_frame, wp.vec3(1.0, 0.0, 0.0))
+    pin_rotation = wp.quat_between_vectors(wp.vec3(0.0, 0.0, 1.0), pin_axis)
+    for sign in (-1.0, 1.0):
+        bearing = stem_tip + sign * 0.012 * pin_axis
+        builder.add_shape_box(
+            plate,
+            xform=wp.transform(bearing - wp.vec3(0.0, 0.0, 0.006), pin_rotation),
+            hx=0.007,
+            hy=0.013,
+            hz=0.003,
+            cfg=visual,
+            color=(0.20, 0.25, 0.30),
+        )
+    builder.add_shape_cylinder(
+        plate,
+        xform=wp.transform(stem_tip, pin_rotation),
+        radius=0.003,
+        half_height=0.018,
+        cfg=visual,
+        color=gold,
+    )
+    return opening_joint, mount, offset
+
+
+@wp.func
+def wind_time(time: float, lag: float) -> float:
+    # Fixed offsets keep the common rhythm; fading them in preserves the rest pose.
+    return time + lag * (1.0 - wp.exp(-0.35 * time * time))
+
+
+@wp.func
+def flower_opening(time: float) -> float:
+    # Start at the authored pose and ease into a slow, six-second breath.
+    phase = 1.04719755 * time
+    return (1.0 - wp.exp(-0.35 * time * time)) * (0.2 * (1.0 - wp.cos(phase)) + 0.9 * wp.sin(phase))
+
+
+@wp.kernel
+def update_flower(
+    time: wp.array[float],
+    dt: float,
+    variations: wp.array[wp.vec3],
+    coordinates: wp.array[int],
+    dofs: wp.array[int],
+    target_q: wp.array[float],
+    target_qd: wp.array[float],
+):
+    actuator = wp.tid()
+    motor = actuator % 2
+    variation = variations[actuator / 2]
+    ratio = 1.0
+    if motor == 1:
+        ratio = 0.5
+    angle = variation[1] * flower_opening(wind_time(time[0], 1.5 * variation[0]))
+    angle_next = variation[1] * flower_opening(wind_time(time[0] + dt, 1.5 * variation[0]))
+    target_q[coordinates[actuator]] = ratio * angle
+    target_qd[dofs[actuator]] = ratio * (angle_next - angle) / dt
 
 
 @wp.func
@@ -87,26 +305,46 @@ def stage_pose(stage: int, stage_count: int, time: float) -> wp.transform:
     return wp.transform(position, rotation)
 
 
+@wp.func
+def wind_pose(stage: int, stage_count: int, time: float, variation: wp.vec3) -> wp.transform:
+    common = stage_pose(stage, stage_count, wind_time(time, variation[0]))
+    gain = variation[1]
+    fade = 1.0 - wp.exp(-0.35 * time * time)
+    flutter = 0.004 * fade * wp.sin(variation[2])
+    rotation = wp.quat_slerp(wp.quat_identity(), wp.transform_get_rotation(common), gain)
+    rotation *= wp.quat_rpy(
+        flutter * wp.sin(1.7 * time + variation[2]),
+        flutter * wp.sin(1.3 * time + variation[2]),
+        0.0,
+    )
+    position = wp.transform_get_translation(common)
+    position = wp.vec3(gain * position[0], gain * position[1], 0.1 + gain * (position[2] - 0.1))
+    return wp.transform(position, rotation)
+
+
 @wp.kernel
 def update_actuators(
     time: wp.array[float],
     dt: float,
     stage_count: int,
+    variations: wp.array[wp.vec3],
     anchors_base: wp.array[wp.vec3],
     anchors_top: wp.array[wp.vec3],
     lengths_rest: wp.array[float],
     actuator_dofs: wp.array[int],
+    actuator_coordinates: wp.array[int],
     target_q: wp.array[float],
     target_qd: wp.array[float],
 ):
     actuator = wp.tid()
-    stage = actuator / 6
-    pose = stage_pose(stage, stage_count, time[0])
-    pose_next = stage_pose(stage, stage_count, time[0] + dt)
+    stage = (actuator / 6) % stage_count
+    variation = variations[actuator / (6 * stage_count)]
+    pose = wind_pose(stage, stage_count, time[0], variation)
+    pose_next = wind_pose(stage, stage_count, time[0] + dt, variation)
     length = wp.length(wp.transform_point(pose, anchors_top[actuator]) - anchors_base[actuator])
     length_next = wp.length(wp.transform_point(pose_next, anchors_top[actuator]) - anchors_base[actuator])
     dof = actuator_dofs[actuator]
-    target_q[dof] = length - lengths_rest[actuator]
+    target_q[actuator_coordinates[actuator]] = length - lengths_rest[actuator]
     target_qd[dof] = (length_next - length) / dt
 
 
@@ -118,13 +356,18 @@ def advance_time(time: wp.array[float], dt: float):
 class Example:
     def __init__(self, viewer: newton.viewer.ViewerBase, args=None):
         self.viewer = viewer
+        self.path_tracing = isinstance(viewer, newton.viewer.ViewerOptix)
+        self.overlap_simulation_render = getattr(args, "overlap_render", True) if args else True
         self.stage_count = args.stage_count if args else 20
+        self.world_count = getattr(args, "world_count", 30) if args else 30
         if self.stage_count < 1:
             raise ValueError("--stage-count must be positive")
+        if self.world_count < 1:
+            raise ValueError("--world-count must be positive")
         self.frame_dt = 1.0 / 60.0
-        # Implicit actuation remains stable at four substeps; twelve spends most
-        # of the frame repeating the tower's sparse constraint factorization.
-        self.sim_substeps = getattr(args, "substeps", 4) if args else 4
+        # Two implicit steps retain loop closure and actuator tracking while
+        # avoiding repeated factorization of the flower's dense joint graph.
+        self.sim_substeps = getattr(args, "substeps", 2) if args else 2
         self.sim_dt = self.frame_dt / self.sim_substeps
         self.sim_time = 0.0
         self.time = wp.zeros(1, dtype=float)
@@ -135,7 +378,6 @@ class Example:
         # spaced fittings is excluded, as in the Kamino test-mechanism example.
         builder.default_shape_cfg.has_shape_collision = False
         builder.default_shape_cfg.density = 1600.0
-        builder.add_ground_plane(color=(0.18, 0.21, 0.25))
         builder.add_shape_cylinder(
             -1,
             xform=wp.transform((0.0, 0.0, 0.005), wp.quat_identity()),
@@ -150,14 +392,14 @@ class Example:
         joints_tree = []
         closures = []
         self.plates = []
-        anchors_base, anchors_top, lengths_rest, actuator_dofs = [], [], [], []
+        anchors_base, anchors_top, lengths_rest, actuator_joints = [], [], [], []
 
         def add_plate(level):
             body = builder.add_link(
                 xform=wp.transform((0.0, 0.0, 0.012 + 0.1 * level), wp.quat_identity()),
                 label=f"plate_{level}",
             )
-            color = colorsys.hsv_to_rgb(0.52 + 0.30 * level / self.stage_count, 0.65, 0.85)
+            color = FLOWER_COLORS[level % len(FLOWER_COLORS)]
             builder.add_shape_cylinder(body, radius=0.05, half_height=0.002, color=color)
             builder.add_shape_cylinder(body, radius=0.047, half_height=0.0024, color=(0.12, 0.16, 0.20))
             self.plates.append(body)
@@ -254,19 +496,50 @@ class Example:
                 anchors_base.append(a)
                 anchors_top.append(b)
                 lengths_rest.append(length)
-                actuator_dofs.append(builder.joint_qd_start[actuator])
+                actuator_joints.append(actuator)
             base = top
 
         # The remaining upper universal joints close the six parallel leg loops.
         builder.add_articulation(joints_tree, label="stewart_tower")
         for upper_args in closures:
             builder.add_joint_d6(**upper_args)
+        flower_tree = []
+        opening, mount, flower_body_start = add_hoberman_flower(builder, top, flower_tree)
+        builder.add_articulation(flower_tree, label="hoberman_flower")
+
+        # Keep simulation coordinates near the origin; only the viewer spaces
+        # the worlds apart. Each world gets its own constraints and controls.
+        prototype = builder
+        body_offsets = np.arange(self.world_count) * prototype.body_count
+        joint_offsets = np.arange(self.world_count) * prototype.joint_count
+        self.plates = np.asarray(self.plates)[None, :] + body_offsets[:, None]
+        self.flower_body_starts = flower_body_start + body_offsets
+        self.flower_joint_indices = (np.array((opening, mount))[None, :] + joint_offsets[:, None]).reshape(-1)
+        actuator_joints = (np.asarray(actuator_joints)[None, :] + joint_offsets[:, None]).reshape(-1)
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        for _ in range(self.world_count):
+            builder.add_world(prototype)
+        builder.add_ground_plane(
+            cfg=newton.ModelBuilder.ShapeConfig(is_visible=not self.path_tracing), color=(0.18, 0.21, 0.25)
+        )
         self.model = builder.finalize(skip_validation_joints=True)
-        self.anchors_base = wp.array(anchors_base, dtype=wp.vec3)
-        self.anchors_top = wp.array(anchors_top, dtype=wp.vec3)
-        self.lengths_rest = wp.array(lengths_rest, dtype=float)
-        self.actuator_dofs = wp.array(actuator_dofs, dtype=int)
-        self.actuator_dofs_host = np.array(actuator_dofs)
+        q_starts = self.model.joint_q_start.numpy()
+        dof_starts = self.model.joint_qd_start.numpy()
+        target_starts = self.model.joint_target_q_start.numpy()
+        self.flower_q_indices = q_starts[self.flower_joint_indices]
+        self.flower_coords_host = target_starts[self.flower_joint_indices]
+        self.flower_coordinates = wp.array(self.flower_coords_host, dtype=int)
+        self.flower_dofs = wp.array(dof_starts[self.flower_joint_indices], dtype=int)
+        self.anchors_base = wp.array(anchors_base * self.world_count, dtype=wp.vec3)
+        self.anchors_top = wp.array(anchors_top * self.world_count, dtype=wp.vec3)
+        self.lengths_rest = wp.array(lengths_rest * self.world_count, dtype=float)
+        self.actuator_q_indices = q_starts[actuator_joints]
+        self.actuator_coords_host = target_starts[actuator_joints]
+        self.actuator_dofs = wp.array(dof_starts[actuator_joints], dtype=int)
+        self.actuator_coordinates = wp.array(self.actuator_coords_host, dtype=int)
+        phases = np.arange(self.world_count) * 2.39996323
+        self.variations_host = np.column_stack((0.3 * np.sin(phases), 1.0 + 0.04 * np.sin(phases), phases))
+        self.variations = wp.array(self.variations_host, dtype=wp.vec3)
 
         config = SolverKamino.Config.from_model(
             self.model, dynamics_solver="dvi", sparse_dynamics=True, sparse_jacobian=True
@@ -290,28 +563,73 @@ class Example:
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
+        if self.path_tracing:
+            # Match RacerX's explicit 1000 m plane, gray color, and roughness.
+            self.floor_xforms = wp.array([wp.transform_identity()], dtype=wp.transform)
+            self.floor_colors = wp.array([wp.vec3(0.7, 0.7, 0.7)], dtype=wp.vec3)
+            self.floor_materials = wp.array([wp.vec4(0.8, 0.0, 0.0, 0.0)], dtype=wp.vec4)
         self.viewer.set_model(self.model)
+        self.world_offsets = _garden_offsets(self.world_count)
+        self.viewer.set_world_offsets((0.0, 0.0, 0.0))
+        # Assign in place so rendering and picking retain the same offset array.
+        self.viewer.world_offsets.assign(self.world_offsets)
         if hasattr(self.viewer, "set_camera"):
-            self.viewer.set_camera(wp.vec3(1.5, -2.6, 0.15 + 0.05 * self.stage_count), pitch=-3.0, yaw=120.0)
+            height = 0.1 * self.stage_count + 1.1
+            span = float(np.ptp(self.world_offsets[:, :2], axis=0).max())
+            distance = height + 0.45 * span
+            elevation = 0.55 * height + 0.75 * span
+            pitch = -math.degrees(math.atan2(elevation - 0.5 * height, math.hypot(0.8, 1.38) * distance))
+            self.viewer.set_camera(wp.vec3(0.8 * distance, -1.38 * distance, elevation), pitch=pitch, yaw=120.0)
         self.graph = None
         if self.model.device.is_cuda and not wp.config.verify_cuda:
             with wp.ScopedCapture() as capture:
                 self.simulate()
             self.graph = capture.graph
+        overlap = self.overlap_simulation_render and getattr(viewer, "supports_simulation_render_overlap", False)
+        self.render_states = (self.model.state(), self.model.state()) if overlap else None
+        self.render_done = tuple(wp.Event(self.model.device) for _ in range(2)) if overlap else None
+        self.render_state_index = 0
+        self.render_state_prepared = False
+        self.render_time = 0.0
+
+    def prepare_render_state(self):
+        """Snapshot poses and velocities before physics advances on its own stream."""
+        self.render_state_index = 1 - self.render_state_index
+        wp.wait_event(self.render_done[self.render_state_index])
+        state = self.render_states[self.render_state_index]
+        wp.copy(state.body_q, self.state_0.body_q)
+        wp.copy(state.body_qd, self.state_0.body_qd)
+        self.render_time = self.sim_time
+        self.render_state_prepared = True
 
     def simulate(self):
         for _ in range(self.sim_substeps):
             wp.launch(
                 update_actuators,
-                dim=6 * self.stage_count,
+                dim=6 * self.stage_count * self.world_count,
                 inputs=[
                     self.time,
                     self.sim_dt,
                     self.stage_count,
+                    self.variations,
                     self.anchors_base,
                     self.anchors_top,
                     self.lengths_rest,
                     self.actuator_dofs,
+                    self.actuator_coordinates,
+                    self.control.joint_target_q,
+                    self.control.joint_target_qd,
+                ],
+            )
+            wp.launch(
+                update_flower,
+                dim=2 * self.world_count,
+                inputs=[
+                    self.time,
+                    self.sim_dt,
+                    self.variations,
+                    self.flower_coordinates,
+                    self.flower_dofs,
                     self.control.joint_target_q,
                     self.control.joint_target_qd,
                 ],
@@ -330,49 +648,95 @@ class Example:
         self.sim_time += self.frame_dt
 
     def render(self):
-        self.viewer.begin_frame(self.sim_time)
-        self.viewer.log_state(self.state_0)
+        state = self.render_states[self.render_state_index] if self.render_state_prepared else self.state_0
+        self.viewer.begin_frame(self.render_time if self.render_state_prepared else self.sim_time)
+        self.viewer.log_state(state)
+        if self.path_tracing:
+            self.viewer.log_shapes(
+                "/garden/ground",
+                newton.GeoType.PLANE,
+                (1000.0, 1000.0),
+                self.floor_xforms,
+                colors=self.floor_colors,
+                materials=self.floor_materials,
+                hidden=not self.viewer.show_ground,
+            )
         self.viewer.end_frame()
+        if self.render_state_prepared:
+            wp.record_event(self.render_done[self.render_state_index])
+        self.render_state_prepared = False
 
     def test_final(self):
-        """Check ground anchoring, loop closure, stroke limits, and actuator tracking."""
+        """Check tower tracking, flower breathing, and the mounted mechanism's loop closure."""
         poses = self.state_0.body_q.numpy()
         assert np.isfinite(poses).all(), "Non-finite body poses"
-        np.testing.assert_allclose(poses[self.plates[0], :3], (0.0, 0.0, 0.012), atol=2e-4)
-        np.testing.assert_allclose(poses[self.plates[0], 3:], (0.0, 0.0, 0.0, 1.0), atol=2e-4)
+        assert self.model.world_count == self.world_count, "Flower worlds were not replicated"
+        for plates in self.plates:
+            np.testing.assert_allclose(poses[plates[0], :3], (0.0, 0.0, 0.012), atol=2e-4)
+            np.testing.assert_allclose(poses[plates[0], 3:], (0.0, 0.0, 0.0, 1.0), atol=2e-4)
         parent = self.model.joint_parent.numpy()
         child = self.model.joint_child.numpy()
         xp = self.model.joint_X_p.numpy()
         xc = self.model.joint_X_c.numpy()
         for joint, label in enumerate(self.model.joint_label):
-            if not label.startswith("universal_"):
+            if not (label.startswith("universal_") or label.startswith("/hoberman_sphere/") or label == "flower_mount"):
                 continue
             a = wp.transform_point(wp.transform(*poses[parent[joint]]), wp.vec3(*xp[joint, :3]))
             b = wp.transform_point(wp.transform(*poses[child[joint]]), wp.vec3(*xc[joint, :3]))
-            assert wp.length(a - b) < 0.001, f"Universal joint opened: {label}"
-        q = self.state_0.joint_q.numpy()[self.actuator_dofs_host]
-        target = self.control.joint_target_q.numpy()[self.actuator_dofs_host]
+            assert wp.length(a - b) < 0.001, f"Joint opened: {label}"
+        joint_q = self.state_0.joint_q.numpy()
+        target_q = self.control.joint_target_q.numpy()
+        q = joint_q[self.actuator_q_indices]
+        target = target_q[self.actuator_coords_host]
         assert np.max(np.abs(q)) < 0.026, "Piston exceeded its stroke"
         np.testing.assert_allclose(q, target, atol=0.002)
+        flower_q = joint_q[self.flower_q_indices].reshape(self.world_count, 2)
+        flower_target = target_q[self.flower_coords_host].reshape(self.world_count, 2)
+        np.testing.assert_allclose(flower_q, flower_target, atol=0.01)
+        assert np.max(np.abs(flower_q[:, 1] - 0.5 * flower_q[:, 0])) < 0.005, (
+            "Flower mount lost opening synchronization"
+        )
+        if self.world_count > 1 and self.sim_time > 1.0:
+            spread = np.max(np.ptp(q.reshape(self.world_count, -1), axis=0))
+            assert 1e-5 < spread < 0.012, "Worlds lost their subtle motion variations"
         # Check each stage: the traveling curl deliberately lowers the tip, and
         # small actuator compliance accumulates along the twenty-stage tower.
-        for stage in range(self.stage_count):
-            relative = wp.transform_multiply(
-                wp.transform_inverse(wp.transform(*poses[self.plates[stage]])),
-                wp.transform(*poses[self.plates[stage + 1]]),
-            )
-            desired = stage_pose(stage, self.stage_count, self.sim_time)
-            np.testing.assert_allclose(np.array(relative)[:3], np.array(desired)[:3], atol=0.003)
-            rotation_error = wp.quat_inverse(wp.transform_get_rotation(desired)) * wp.transform_get_rotation(relative)
-            assert wp.length(wp.vec3(rotation_error[0], rotation_error[1], rotation_error[2])) < 0.035, (
-                f"Platform {stage} did not follow the commanded tilt"
-            )
+        for world, plates in enumerate(self.plates):
+            start = self.flower_body_starts[world]
+            points = poses[start : start + len(hoberman.BODIES), :3]
+            radius = np.mean(np.linalg.norm(points - points.mean(axis=0), axis=1))
+            radius_rest = np.linalg.norm(hoberman.BODIES[0][1][:3]) / (2.0 * 2.236)
+            assert 0.25 * radius_rest < radius < 1.8 * radius_rest, "Flower lost its spherical shape"
+            opening = flower_q[world, 0]
+            if abs(opening) > 0.04:
+                assert (radius - radius_rest) * np.sign(opening) > 0.003, "Flower did not expand or contract"
+            for stage in range(self.stage_count):
+                relative = wp.transform_multiply(
+                    wp.transform_inverse(wp.transform(*poses[plates[stage]])),
+                    wp.transform(*poses[plates[stage + 1]]),
+                )
+                desired = wind_pose(stage, self.stage_count, self.sim_time, wp.vec3(*self.variations_host[world]))
+                np.testing.assert_allclose(np.array(relative)[:3], np.array(desired)[:3], atol=0.003)
+                rotation_error = wp.quat_inverse(wp.transform_get_rotation(desired)) * wp.transform_get_rotation(
+                    relative
+                )
+                assert wp.length(wp.vec3(rotation_error[0], rotation_error[1], rotation_error[2])) < 0.035, (
+                    f"World {world} platform {stage} did not follow the commanded tilt"
+                )
 
     @staticmethod
     def create_parser():
         parser = newton.examples.create_parser()
+        newton.examples.add_world_count_arg(parser)
+        parser.set_defaults(world_count=30, viewer="optix")
         parser.add_argument("--stage-count", type=int, default=20, help="Number of stacked Stewart platforms.")
-        parser.add_argument("--substeps", type=int, choices=(2, 4, 6, 12), default=4, help="Physics steps per frame.")
+        parser.add_argument("--substeps", type=int, choices=(2, 4, 6, 12), default=2, help="Physics steps per frame.")
+        parser.add_argument(
+            "--overlap-render",
+            action=argparse.BooleanOptionalAction,
+            default=True,
+            help="Overlap OptiX rendering and CUDA physics.",
+        )
         return parser
 
 
