@@ -247,9 +247,21 @@ def test_soft_contact_accumulation_thread_counts(test, device):
         pipeline.collide(state_in, contacts)
         test.assertGreater(int(contacts.soft_contact_count.numpy()[0]), 128)
         solver.step(state_in, state_out, model.control(), contacts, 0.001)
-        results.append((state_out.body_q.numpy(), state_out.body_qd.numpy(), state_out.particle_q.numpy()))
-    for serial, parallel in zip(*results, strict=True):
+        body_qd = state_out.body_qd.numpy()
+        results.append(
+            (
+                state_out.body_q.numpy(),
+                body_qd[:, :3],
+                state_out.particle_q.numpy(),
+                body_qd[:, 3:],
+            )
+        )
+    for serial, parallel in zip(results[0][:3], results[1][:3], strict=True):
         np.testing.assert_allclose(parallel, serial, rtol=1.0e-5, atol=1.0e-6)
+    # Different FP32 accumulation orders perturb the nearly cancelling torques.
+    # Reconstructing angular velocity over 1 ms amplifies this pose roundoff;
+    # 5e-6 rad/s corresponds to only 5e-9 radians over the step.
+    np.testing.assert_allclose(results[1][3], results[0][3], rtol=1.0e-5, atol=5.0e-6)
 
 
 @wp.kernel
