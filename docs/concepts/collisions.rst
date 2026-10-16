@@ -1611,15 +1611,15 @@ storage and can substantially increase both collision detection and VBD solve
 time. Larger contact bands also admit more pairs. Profile the intended scene;
 the cost depends on mesh resolution, geometry, and contact density.
 
-:class:`CollisionPipeline` estimates mesh contact storage with
-``full_surface_bvh_contact_headroom`` (default ``8``), reserving that many records
-per query source plus additional endpoint and recovery storage. Set
-``soft_contact_max`` to override the total soft-contact capacity explicitly.
-The estimate is not an upper bound: dense patches can still overflow. Increase
-the headroom or explicit capacity if overflow is reported, and verify that
-contacts fit throughout the simulation before relying on the results.
+:class:`CollisionPipeline` automatically estimates mesh contact storage. Set
+``soft_contact_max`` to choose the total soft-contact capacity explicitly.
+The estimate is not an upper bound: dense patches can still overflow. The mesh
+overflow warning prints the current ``soft_contact_max`` and the required count
+for that collision pass. Increase ``soft_contact_max`` to at least that count,
+and verify that contacts fit throughout the simulation before relying on the
+results; later frames may require more storage.
 
-These settings control reserved storage, not the contact band or the number of
+This setting controls reserved storage, not the contact band or the number of
 feature pairs queried. Lowering capacity can save memory but produces incomplete
 contacts if it is too small; it is not a way to reduce query work while preserving
 the same contacts. The edge and vertex queries and the processing of their

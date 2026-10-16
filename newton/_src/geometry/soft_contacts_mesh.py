@@ -504,8 +504,6 @@ def _append_mesh_contact(
 ) -> int:
     """Append a feature record, returning its final slot or -1 when capacity is exhausted."""
     index = wp.atomic_add(contact_count, 0, wp.int64(1))
-    if index == wp.int64(contact_max):
-        wp.printf("Mesh soft-contact capacity exceeded (%d); this collision result is incomplete.\n", contact_max)
     if index < wp.int64(contact_max):
         features[index] = wp.vec3i(family, soft_feature, rigid_feature)
         contact_shapes[index] = rigid_shape
@@ -523,6 +521,15 @@ def _begin_mesh_contacts(source: wp.array[int], destination: wp.array[wp.int64],
 @wp.kernel(enable_backward=False)
 def _end_mesh_contacts(source: wp.array[wp.int64], destination: wp.array[int], capacity: int):
     destination[0] = wp.int32(wp.min(source[0], wp.int64(capacity) + wp.int64(1)))
+    if source[0] > wp.int64(capacity):
+        wp.printf(
+            "Mesh soft-contact capacity exceeded: soft_contact_max=%d, required=%lld. "
+            "Increase soft_contact_max to at least %lld for this collision pass; "
+            "this collision result is incomplete.\n",
+            capacity,
+            source[0],
+            source[0],
+        )
 
 
 @wp.func
@@ -1658,7 +1665,9 @@ class MeshContactData:
     def edge_edge_parallel_epsilon(self) -> float:
         return self.detector.edge_edge_parallel_epsilon if self.detector is not None else 1.0e-5
 
-    def __init__(self, model: Model, shape_mask: np.ndarray, vertex_pairs: wp.array[wp.vec2i], contact_headroom: int):
+    def __init__(
+        self, model: Model, shape_mask: np.ndarray, vertex_pairs: wp.array[wp.vec2i], contact_headroom: int = 8
+    ):
         self.vertex_pairs = vertex_pairs
         meshes = _collision_meshes(model, shape_mask)
         if model.tri_count:

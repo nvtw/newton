@@ -171,7 +171,7 @@ def test_soft_contact_workspace_storage(test, device):
 
 
 def test_disconnected_mesh_contact_capacity(test, device):
-    """Allow explicit headroom for dense contacts across disconnected patches."""
+    """Allow explicit capacity for dense contacts across disconnected patches."""
     base = newton.Mesh.create_box(0.02, 0.02, 0.02, compute_inertia=False)
     centers = np.array(
         (
@@ -198,7 +198,8 @@ def test_disconnected_mesh_contact_capacity(test, device):
         broad_phase="nxn",
         soft_contact_gap=0.05,
         enable_rigid_soft_full_surface_contact=True,
-        full_surface_bvh_contact_headroom=len(indices) // 3,
+        # Reserve every face plus a recovery row for this particle's dense patch.
+        soft_contact_max=len(indices) // 3 + 1,
     )
     contacts = pipeline.contacts()
     state = model.state()
@@ -834,8 +835,8 @@ def test_separated_mesh_shells_keep_default_capacity(test, device):
     test.assertEqual(default_capacity(16) - default_capacity(1), 8 * (8 + 18) * 15)
 
 
-def test_mesh_contact_capacity_headroom(test, device):
-    """Bound high-poly storage and honor configurable headroom and explicit capacity."""
+def test_mesh_contact_capacity(test, device):
+    """Bound high-poly storage and honor explicit contact capacity."""
     builder = newton.ModelBuilder()
     builder.add_shape_mesh(body=-1, mesh=newton.Mesh.create_sphere(0.18, num_latitudes=16, num_longitudes=32))
     builder.add_cloth_grid(
@@ -860,14 +861,9 @@ def test_mesh_contact_capacity_headroom(test, device):
     # Keep a generous memory ceiling independent of the exact triangulation.
     # The former nearby-face multiplier exceeds this for this fixture.
     test.assertLess(default, 30000)
-    zero = pipeline(full_surface_bvh_contact_headroom=0).soft_contact_max
-    doubled = pipeline(full_surface_bvh_contact_headroom=16).soft_contact_max
-    test.assertGreater(default, zero)
-    test.assertEqual(doubled - zero, 2 * (default - zero))
-    test.assertEqual(pipeline(soft_contact_max=123, full_surface_bvh_contact_headroom=8).soft_contact_max, 123)
-    for invalid in (-1, 1.5):
-        with test.assertRaisesRegex(ValueError, "nonnegative integer"):
-            pipeline(full_surface_bvh_contact_headroom=invalid)
+    test.assertGreater(default, 0)
+    for capacity in (0, 123, default * 2):
+        test.assertEqual(pipeline(soft_contact_max=capacity).soft_contact_max, capacity)
 
 
 def _cloth_over_mesh_contacts(device, gap=0.02):
@@ -1608,22 +1604,27 @@ def test_mesh_edge_recovery_shared_triangle_boundary(test, device):
 
 def test_mesh_filter_preserves_overflow(test, device):
     """Leave an overflowing buffer intact instead of hiding its incomplete detection."""
+    points = [(0.02, 0.02, 0.055), (-0.02, -0.02, 0.055)]
     capture = StdOutCapture()
     capture.begin()
     try:
         model, state, contacts = _box_patch_contacts(
             device,
-            [(0.02, 0.02, 0.055), (-0.02, -0.02, 0.055)],
+            points,
             [],
             capacity=1,
         )
         wp.synchronize()
     finally:
         output = capture.end()
+    required = int(contacts._soft_contact_mesh_data.contact_count.numpy()[0])
+    test.assertGreater(required, contacts.soft_contact_max + 1)
     # Warp's native printf capture is unreliable on Windows (see its print tests).
     if sys.platform != "win32":
-        test.assertIn("Mesh soft-contact capacity exceeded (1)", output)
-    test.assertGreater(int(contacts.soft_contact_count.numpy()[0]), contacts.soft_contact_max)
+        test.assertEqual(output.count("Mesh soft-contact capacity exceeded"), 1)
+        test.assertIn(f"soft_contact_max=1, required={required}", output)
+        test.assertIn(f"Increase soft_contact_max to at least {required}", output)
+    test.assertEqual(int(contacts.soft_contact_count.numpy()[0]), contacts.soft_contact_max + 1)
     features = contacts._soft_contact_mesh_features.numpy().copy()
     positions = contacts.soft_contact_body_pos.numpy().copy()
     for _ in range(2):
@@ -1632,6 +1633,16 @@ def test_mesh_filter_preserves_overflow(test, device):
         np.testing.assert_array_equal(contacts._soft_contact_mesh_features.numpy(), features)
         np.testing.assert_array_equal(contacts.soft_contact_body_pos.numpy(), positions)
     test.assertTrue(np.all(mask.numpy()))
+
+    # The printed requirement must fit a complete rerun of the same collision pass.
+    capture.begin()
+    try:
+        _, _, complete = _box_patch_contacts(device, points, [], capacity=required)
+        test.assertEqual(int(complete.soft_contact_count.numpy()[0]), required)
+    finally:
+        output = capture.end()
+    if sys.platform != "win32":
+        test.assertNotIn("Mesh soft-contact capacity exceeded", output)
 
 
 for device in get_test_devices():
@@ -1649,7 +1660,7 @@ for device in get_test_devices():
         test_mesh_pad_pinch_pushes_toward_nearest_exit,
         test_dat_budget_counts_full_surface_mesh_queries,
         test_separated_mesh_shells_keep_default_capacity,
-        test_mesh_contact_capacity_headroom,
+        test_mesh_contact_capacity,
         test_finite_plane_feature_geometry,
         test_mesh_degenerate_faces_do_not_own_contacts,
         test_mesh_face_contact_uses_maximum_radius,
