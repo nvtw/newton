@@ -3,6 +3,8 @@
 
 """Validate procedural Hoberman geometry against the original sphere."""
 
+import contextlib
+import io
 import unittest
 from collections import Counter
 from itertools import product
@@ -11,6 +13,7 @@ import numpy as np
 import warp as wp
 
 from newton.examples.kamino._hoberman_sphere import generate_sphere
+from newton.examples.kamino.example_kamino_stewart_platform import Example
 
 
 class TestHobermanGeometry(unittest.TestCase):
@@ -109,6 +112,17 @@ class TestHobermanGeometry(unittest.TestCase):
         for resolution in (0, -1, 1.5, True):
             with self.assertRaises(ValueError):
                 generate_sphere(resolution)
+        parser = Example.create_parser()
+        self.assertEqual(parser.parse_args([]).flower_resolution, 2)
+        self.assertEqual(parser.parse_args(["--flower-resolution", "3"]).flower_resolution, 3)
+        for value in ("0", "-1", "1.5"):
+            with self.subTest(cli_resolution=value):
+                errors = io.StringIO()
+                with contextlib.redirect_stderr(errors), self.assertRaises(SystemExit) as raised:
+                    parser.parse_args(["--flower-resolution", value])
+                self.assertEqual(raised.exception.code, 2)
+                self.assertIn("--flower-resolution", errors.getvalue())
+                self.assertIn("positive integer", errors.getvalue())
 
 
 if __name__ == "__main__":

@@ -17,6 +17,7 @@ of two reproduces the original twenty-cell rings procedurally.
 Command: python -m newton.examples kamino_stewart_platform
 """
 
+import argparse
 import math
 
 import numpy as np
@@ -697,12 +698,21 @@ class Example:
 
     @staticmethod
     def create_parser():
+        def positive_int(value: str) -> int:
+            try:
+                result = int(value)
+            except ValueError:
+                raise argparse.ArgumentTypeError("must be a positive integer") from None
+            if result < 1:
+                raise argparse.ArgumentTypeError("must be a positive integer")
+            return result
+
         parser = newton.examples.create_parser()
         newton.examples.add_world_count_arg(parser)
         parser.set_defaults(world_count=30)
         parser.add_argument(
             "--flower-resolution",
-            type=int,
+            type=positive_int,
             default=2,
             help="Scissor cells per 36-degree ring arc (2 reproduces the original sphere).",
         )
