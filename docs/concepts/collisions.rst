@@ -1156,7 +1156,7 @@ heightfield collision data. Rebuild the baked geometry when its scale changes.
 
    The packed collision-edge fields ``Model.mesh_edge_indices``, ``Model.mesh_edge_centers``,
    ``Model.mesh_edge_halves``, and ``Model.shape_edge_range`` are internal acceleration data.
-   Their public aliases remain readable and writable with a :class:`DeprecationWarning`
+   Their public aliases remain readable and writable with a :class:`~newton.exceptions.NewtonDeprecationWarning`
    through Newton 1.8 and will be removed in 1.9. Use :class:`~newton.CollisionPipeline` for
    model collision detection. Expert callers of :class:`~newton.geometry.NarrowPhase` can
    supply their own edge arrays; centers and half-vectors must use unscaled mesh coordinates.

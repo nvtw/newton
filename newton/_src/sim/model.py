@@ -1658,14 +1658,14 @@ class Model:
             Use :class:`CollisionPipeline` or supply edge arrays to :class:`geometry.NarrowPhase`.
         """
         warnings.warn(
-            _COLLISION_EDGE_DEPRECATION_MSG.format(name="mesh_edge_indices"), DeprecationWarning, stacklevel=2
+            _COLLISION_EDGE_DEPRECATION_MSG.format(name="mesh_edge_indices"), NewtonDeprecationWarning, stacklevel=2
         )
         return self._mesh_edge_indices
 
     @mesh_edge_indices.setter
     def mesh_edge_indices(self, value: wp.array[wp.vec2i] | None) -> None:
         warnings.warn(
-            _COLLISION_EDGE_DEPRECATION_MSG.format(name="mesh_edge_indices"), DeprecationWarning, stacklevel=2
+            _COLLISION_EDGE_DEPRECATION_MSG.format(name="mesh_edge_indices"), NewtonDeprecationWarning, stacklevel=2
         )
         self._mesh_edge_indices = value
 
@@ -1680,14 +1680,14 @@ class Model:
             Use :class:`CollisionPipeline` or supply edge arrays to :class:`geometry.NarrowPhase`.
         """
         warnings.warn(
-            _COLLISION_EDGE_DEPRECATION_MSG.format(name="mesh_edge_centers"), DeprecationWarning, stacklevel=2
+            _COLLISION_EDGE_DEPRECATION_MSG.format(name="mesh_edge_centers"), NewtonDeprecationWarning, stacklevel=2
         )
         return self._mesh_edge_centers
 
     @mesh_edge_centers.setter
     def mesh_edge_centers(self, value: wp.array[wp.vec4] | None) -> None:
         warnings.warn(
-            _COLLISION_EDGE_DEPRECATION_MSG.format(name="mesh_edge_centers"), DeprecationWarning, stacklevel=2
+            _COLLISION_EDGE_DEPRECATION_MSG.format(name="mesh_edge_centers"), NewtonDeprecationWarning, stacklevel=2
         )
         self._mesh_edge_centers = value
 
@@ -1701,12 +1701,16 @@ class Model:
             This acceleration data is internal and the public alias will be removed in 1.9.
             Use :class:`CollisionPipeline` or supply edge arrays to :class:`geometry.NarrowPhase`.
         """
-        warnings.warn(_COLLISION_EDGE_DEPRECATION_MSG.format(name="mesh_edge_halves"), DeprecationWarning, stacklevel=2)
+        warnings.warn(
+            _COLLISION_EDGE_DEPRECATION_MSG.format(name="mesh_edge_halves"), NewtonDeprecationWarning, stacklevel=2
+        )
         return self._mesh_edge_halves
 
     @mesh_edge_halves.setter
     def mesh_edge_halves(self, value: wp.array[wp.vec4] | None) -> None:
-        warnings.warn(_COLLISION_EDGE_DEPRECATION_MSG.format(name="mesh_edge_halves"), DeprecationWarning, stacklevel=2)
+        warnings.warn(
+            _COLLISION_EDGE_DEPRECATION_MSG.format(name="mesh_edge_halves"), NewtonDeprecationWarning, stacklevel=2
+        )
         self._mesh_edge_halves = value
 
     @property
@@ -1719,12 +1723,16 @@ class Model:
             This acceleration data is internal and the public alias will be removed in 1.9.
             Use :class:`CollisionPipeline` or supply edge arrays to :class:`geometry.NarrowPhase`.
         """
-        warnings.warn(_COLLISION_EDGE_DEPRECATION_MSG.format(name="shape_edge_range"), DeprecationWarning, stacklevel=2)
+        warnings.warn(
+            _COLLISION_EDGE_DEPRECATION_MSG.format(name="shape_edge_range"), NewtonDeprecationWarning, stacklevel=2
+        )
         return self._shape_edge_range
 
     @shape_edge_range.setter
     def shape_edge_range(self, value: wp.array[wp.vec2i] | None) -> None:
-        warnings.warn(_COLLISION_EDGE_DEPRECATION_MSG.format(name="shape_edge_range"), DeprecationWarning, stacklevel=2)
+        warnings.warn(
+            _COLLISION_EDGE_DEPRECATION_MSG.format(name="shape_edge_range"), NewtonDeprecationWarning, stacklevel=2
+        )
         self._shape_edge_range = value
 
     @property

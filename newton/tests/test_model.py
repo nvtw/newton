@@ -25,6 +25,7 @@ from newton._src.geometry.utils import transform_points
 from newton._src.solvers.coupled.model_view import ModelView
 from newton._src.solvers.mujoco.equality import _add_equality_constraint
 from newton._src.viewer.viewer_file import depointer_as_key, pointer_as_key, transfer_to_model
+from newton.exceptions import NewtonDeprecationWarning
 from newton.tests.unittest_utils import assert_np_equal, patch_sys_module
 
 
@@ -46,18 +47,18 @@ class TestModelAttributeSpecs(unittest.TestCase):
         model = builder.finalize(device="cpu")
         for name in ("mesh_edge_indices", "mesh_edge_centers", "mesh_edge_halves", "shape_edge_range"):
             with self.subTest(attribute=name):
-                with self.assertWarnsRegex(DeprecationWarning, rf"Model\.{name}.*Newton 1\.8") as warning:
+                with self.assertWarnsRegex(NewtonDeprecationWarning, rf"Model\.{name}.*Newton 1\.8") as warning:
                     original = getattr(model, name)
                 self.assertEqual(warning.filename, __file__)
                 self.assertIs(original, getattr(model, f"_{name}"))
                 replacement = wp.clone(original)
-                with self.assertWarnsRegex(DeprecationWarning, rf"Model\.{name}"):
+                with self.assertWarnsRegex(NewtonDeprecationWarning, rf"Model\.{name}"):
                     setattr(model, name, replacement)
                 self.assertIs(getattr(model, f"_{name}"), replacement)
-                with self.assertWarnsRegex(DeprecationWarning, rf"Model\.{name}"):
+                with self.assertWarnsRegex(NewtonDeprecationWarning, rf"Model\.{name}"):
                     getattr(model, name).zero_()
                 np.testing.assert_array_equal(getattr(model, f"_{name}").numpy(), 0)
-                with self.assertWarnsRegex(DeprecationWarning, rf"Model\.{name}"):
+                with self.assertWarnsRegex(NewtonDeprecationWarning, rf"Model\.{name}"):
                     setattr(model, name, None)
                 self.assertIsNone(getattr(model, f"_{name}"))
 
@@ -72,10 +73,10 @@ class TestModelAttributeSpecs(unittest.TestCase):
                 private_name = f"_{name}"
                 original = getattr(model, private_name)
                 replacement = wp.clone(original)
-                with self.assertWarnsRegex(DeprecationWarning, rf"Model\.{name}"):
+                with self.assertWarnsRegex(NewtonDeprecationWarning, rf"Model\.{name}"):
                     setattr(view, name, replacement)
                 self.assertIs(getattr(view, private_name), replacement)
-                with self.assertWarnsRegex(DeprecationWarning, rf"Model\.{name}"):
+                with self.assertWarnsRegex(NewtonDeprecationWarning, rf"Model\.{name}"):
                     self.assertIs(getattr(view, name), replacement)
                 self.assertIs(getattr(model, private_name), original)
                 self.assertNotIn(name, dict(model._iter_attribute_specs()))
