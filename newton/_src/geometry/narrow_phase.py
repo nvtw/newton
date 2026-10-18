@@ -63,7 +63,6 @@ from ..geometry.contact_reduction_global import (
 from ..geometry.contact_sort import ContactSorter
 from ..geometry.flags import ShapeFlags
 from ..geometry.mpr import create_solve_mpr, create_support_map_function
-from ..geometry.penetration import box_hull_certificate
 from ..geometry.sdf_contact import (
     MESH_SDF_BLOCK_DIM,
     compute_block_counts_from_weights,
@@ -1571,17 +1570,20 @@ def create_narrow_phase_kernels_gjk_mpr_split(
                     normal = wp.vec3(0.0)
                     signed_distance = float(0.0)
                     if wp.static(refine_overlap):
-                        certificate_ready, certificate_normal, certificate_depth = box_hull_certificate(
+                        pending = query_results[pair_index]
+                        certificate_ready, certificate_normal, certificate_depth = wp.static(
+                            solve_mpr.box_hull_certificate
+                        )(
                             query.geom_a,
                             query.geom_b,
                             query.relative_orientation_b,
                             query.relative_position_b,
                             provider,
+                            pending.normal,
                             lane,
                             wp.block_dim(),
                         )
                         if lane == 0:
-                            pending = query_results[pair_index]
                             seed = pending.point_a
                             if witnesses_valid:
                                 seed = wp.vec3(0.0)

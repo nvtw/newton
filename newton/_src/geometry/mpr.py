@@ -884,4 +884,5 @@ def create_solve_mpr(support_func: Any, _support_funcs: Any = None):
     solve_mpr.needs_certificate = solve_mpr_needs_certificate
     solve_mpr.refine_core = solve_mpr_refine
     solve_mpr.needs_refine = solve_mpr_needs_refine
+    solve_mpr.box_hull_certificate = solve_sat.cooperative
     return solve_mpr

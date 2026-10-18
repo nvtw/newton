@@ -7,7 +7,12 @@ from typing import Any
 
 import warp as wp
 
-from .support_function import GeoTypeEx, _hull_edge_block, unpack_mesh_ptr
+from .support_function import (
+    _CONVEX_SUPPORT_RESOLUTION_MASK,
+    GeoTypeEx,
+    _hull_edge_block,
+    unpack_mesh_ptr,
+)
 from .types import GeoType
 
 # Tangent offset [unitless] of the tilted certificate normals, about 0.2 degrees.
@@ -256,35 +261,6 @@ def _box_hull_depth(
     return _box_hull_finish(a, b, rotation, position, upper, lower, normal, depth)
 
 
-@wp.func
-def box_hull_certificate(
-    a: Any, b: Any, rotation: wp.quat, position: wp.vec3, provider: Any, lane: int, lanes: int
-) -> tuple[bool, wp.vec3, float]:
-    """Compute a box-hull minimum depth cooperatively across a thread block.
-
-    Every thread of the block must call this with the same pair. Returns
-    False for pairs other than a box and a verified hull.
-    """
-    hull = b
-    if a.shape_type == int(GeoType.CONVEX_MESH):
-        hull = a
-    edge_block = int(-1)
-    if (a.shape_type == int(GeoType.BOX) and b.shape_type == int(GeoType.CONVEX_MESH)) or (
-        a.shape_type == int(GeoType.CONVEX_MESH) and b.shape_type == int(GeoType.BOX)
-    ):
-        edge_block = _hull_edge_block(hull, provider)
-    if edge_block < 0:
-        return False, wp.vec3(0.0), 0.0
-    upper, lower, normal, depth = _box_hull_partial(a, b, rotation, position, provider, edge_block, lane, lanes)
-    upper = wp.tile_reduce(wp.max, wp.tile(upper, preserve_type=True))[0]
-    lower = wp.tile_reduce(wp.min, wp.tile(lower, preserve_type=True))[0]
-    best = wp.tile_argmin(wp.tile(depth))[0]
-    normal = wp.tile(normal, preserve_type=True)[best]
-    depth = wp.tile_min(wp.tile(depth))[0]
-    normal, depth = _box_hull_finish(a, b, rotation, position, upper, lower, normal, depth)
-    return True, normal, depth
-
-
 def create_solve_box_penetration(support: Any):
     """Find minimum depth for a box against a box, triangle, or convex mesh.
 
@@ -330,29 +306,15 @@ def create_solve_box_penetration(support: Any):
         return normal, wp.dot(vertex.BtoA, normal), lower
 
     @wp.func
-    def solve(
+    def cheap_certificate(
         a: Any, b: Any, rotation: wp.quat, position: wp.vec3, provider: Any, hint: wp.vec3
-    ) -> tuple[wp.vec3, float, bool]:
-        """Return a depth candidate and whether its minimum is certified."""
-        if a.shape_type == int(GeoTypeEx.TRIANGLE) and b.shape_type == int(GeoType.BOX):
-            # Triangle support vertices are (0, scale, auxiliary) in A's frame.
-            # Compute the SAT depth in the box frame, then orient A toward B.
-            p0 = wp.quat_rotate_inv(rotation, -position)
-            p1 = wp.quat_rotate_inv(rotation, a.scale - position)
-            p2 = wp.quat_rotate_inv(rotation, a.auxiliary - position)
-            depth, normal = _box_triangle_depth(b.scale, p0, p1, p2)
-            return -wp.quat_rotate(rotation, normal), depth, True
-        if b.shape_type == int(GeoTypeEx.TRIANGLE) and a.shape_type == int(GeoType.BOX):
-            p0 = position
-            p1 = position + wp.quat_rotate(rotation, b.scale)
-            p2 = position + wp.quat_rotate(rotation, b.auxiliary)
-            depth, normal = _box_triangle_depth(a.scale, p0, p1, p2)
-            return normal, depth, True
-        if a.shape_type == int(GeoType.BOX) and b.shape_type == int(GeoType.BOX):
-            normal, depth = _box_box_depth(a.scale, b.scale, rotation, position)
-            return normal, depth, True
+    ) -> tuple[bool, wp.vec3, float]:
+        """Bound a box-mesh minimum depth with a few support queries.
+
+        Returns whether the bounds met and so certify the minimum, with the
+        best support-plane depth candidate and its normal either way.
+        """
         box_a = a.shape_type == int(GeoType.BOX)
-        edge_block = _hull_edge_block(b if box_a else a, provider)
         normal = wp.vec3(1.0, 0.0, 0.0)
         depth = float(1.0e30)
         half = a.scale if box_a else b.scale
@@ -376,7 +338,8 @@ def create_solve_box_penetration(support: Any):
             depth = opposite_depth
             normal = -normal
         if depth < 0.0:
-            return normal, depth, False
+            # A negative support depth already proves separation.
+            return False, normal, depth
         # A box plus a segment of genuine partner points is an inner
         # Minkowski body. Matching its depth to a support-plane upper bound
         # certifies the global minimum without visiting the mesh's edges.
@@ -384,7 +347,7 @@ def create_solve_box_penetration(support: Any):
         far = partner_point(box_a, rotation, position, opposite)
         lower, _direction = _box_triangle_depth(half, point, point, far)
         if lower > 0.0 and depth - lower <= 1.0e-6:
-            return normal, depth, True
+            return True, normal, depth
         # Partner points supporting normals tilted around the caller's
         # candidate (e.g. a portal normal) span the partner's contact feature.
         hint_length = wp.length(hint)
@@ -405,11 +368,40 @@ def create_solve_box_penetration(support: Any):
                 a, b, rotation, position, provider, box_a, half, points[0], points[1], points[2]
             )
             if lower > 0.0 and upper - lower <= 1.0e-6:
-                return hint, upper, True
+                return True, hint, upper
             if upper < depth:
                 depth = upper
                 normal = hint
-        if edge_block >= 0:
+        return False, normal, depth
+
+    @wp.func
+    def solve(
+        a: Any, b: Any, rotation: wp.quat, position: wp.vec3, provider: Any, hint: wp.vec3
+    ) -> tuple[wp.vec3, float, bool]:
+        """Return a depth candidate and whether its minimum is certified."""
+        if a.shape_type == int(GeoTypeEx.TRIANGLE) and b.shape_type == int(GeoType.BOX):
+            # Triangle support vertices are (0, scale, auxiliary) in A's frame.
+            # Compute the SAT depth in the box frame, then orient A toward B.
+            p0 = wp.quat_rotate_inv(rotation, -position)
+            p1 = wp.quat_rotate_inv(rotation, a.scale - position)
+            p2 = wp.quat_rotate_inv(rotation, a.auxiliary - position)
+            depth, normal = _box_triangle_depth(b.scale, p0, p1, p2)
+            return -wp.quat_rotate(rotation, normal), depth, True
+        if b.shape_type == int(GeoTypeEx.TRIANGLE) and a.shape_type == int(GeoType.BOX):
+            p0 = position
+            p1 = position + wp.quat_rotate(rotation, b.scale)
+            p2 = position + wp.quat_rotate(rotation, b.auxiliary)
+            depth, normal = _box_triangle_depth(a.scale, p0, p1, p2)
+            return normal, depth, True
+        if a.shape_type == int(GeoType.BOX) and b.shape_type == int(GeoType.BOX):
+            normal, depth = _box_box_depth(a.scale, b.scale, rotation, position)
+            return normal, depth, True
+        box_a = a.shape_type == int(GeoType.BOX)
+        edge_block = _hull_edge_block(b if box_a else a, provider)
+        certified, normal, depth = cheap_certificate(a, b, rotation, position, provider, hint)
+        if certified:
+            return normal, depth, True
+        if edge_block >= 0 and depth >= 0.0:
             # Partner points did not pin the minimum; scan every axis exactly.
             normal, depth = _box_hull_depth(a, b, rotation, position, provider, edge_block)
             return normal, depth, True
@@ -417,4 +409,51 @@ def create_solve_box_penetration(support: Any):
         # ball or a minimum depth. Keep the support-plane candidate as an upper bound.
         return normal, depth, False
 
+    @wp.func
+    def cooperative_certificate(
+        a: Any, b: Any, rotation: wp.quat, position: wp.vec3, provider: Any, hint: wp.vec3, lane: int, lanes: int
+    ) -> tuple[bool, wp.vec3, float]:
+        """Compute a box-hull minimum depth cooperatively across a thread block.
+
+        Every thread of the block must call this with the same pair. The first
+        lane tries the partner-point certificate; only pairs it cannot pin down
+        scan the hull with all lanes. Returns False for pairs other than a box
+        and a verified hull.
+        """
+        hull = b
+        if a.shape_type == int(GeoType.CONVEX_MESH):
+            hull = a
+        edge_block = int(-1)
+        if (a.shape_type == int(GeoType.BOX) and b.shape_type == int(GeoType.CONVEX_MESH)) or (
+            a.shape_type == int(GeoType.CONVEX_MESH) and b.shape_type == int(GeoType.BOX)
+        ):
+            edge_block = _hull_edge_block(hull, provider)
+        if edge_block < 0:
+            return False, wp.vec3(0.0), 0.0
+        certified = int(0)
+        normal = wp.vec3(0.0)
+        depth = float(0.0)
+        # The certificate's few support queries are short walks on accelerated
+        # hulls. Without acceleration they scan every vertex serially, which
+        # costs more than the cooperative scan below.
+        packed = provider.shape_support_data[hull.shape_index][3]
+        if lane == 0 and (packed & _CONVEX_SUPPORT_RESOLUTION_MASK) > 0:
+            ok, normal, depth = cheap_certificate(a, b, rotation, position, provider, hint)
+            if ok or depth < 0.0:
+                certified = 1
+        certified = wp.tile_max(wp.tile(certified))[0]
+        if certified != 0:
+            normal = wp.tile(normal, preserve_type=True)[0]
+            depth = wp.tile(depth)[0]
+            return True, normal, depth
+        upper, lower, normal, depth = _box_hull_partial(a, b, rotation, position, provider, edge_block, lane, lanes)
+        upper = wp.tile_reduce(wp.max, wp.tile(upper, preserve_type=True))[0]
+        lower = wp.tile_reduce(wp.min, wp.tile(lower, preserve_type=True))[0]
+        best = wp.tile_argmin(wp.tile(depth))[0]
+        normal = wp.tile(normal, preserve_type=True)[best]
+        depth = wp.tile_min(wp.tile(depth))[0]
+        normal, depth = _box_hull_finish(a, b, rotation, position, upper, lower, normal, depth)
+        return True, normal, depth
+
+    solve.cooperative = cooperative_certificate
     return solve
