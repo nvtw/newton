@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import math
 from typing import Any
 
@@ -2943,6 +2944,14 @@ class NarrowPhase:
             # events fork it from and join it back to the caller's stream.
             self.split_refine_stream = wp.Stream(device) if self.split_gjk_mpr else None
             self.split_refine_events = (wp.Event(device), wp.Event(device)) if self.split_gjk_mpr else None
+            # Generic convex pairs run beside mesh and SDF stages when the scene has them.
+            overlap_convex = (
+                wp.get_device(device).is_cuda
+                and self.has_generic_convex_pairs
+                and (has_meshes or has_heightfields or hydroelastic_sdf is not None)
+            )
+            self.convex_stream = wp.Stream(device) if overlap_convex else None
+            self.convex_events = (wp.Event(device), wp.Event(device)) if overlap_convex else None
             self.shape_pairs_mesh = (
                 wp.zeros(max_candidate_pairs, dtype=wp.vec2i, device=device) if has_mesh_like else None
             )
@@ -3080,6 +3089,141 @@ class NarrowPhase:
             self.mesh_plane_target_blocks = self.num_tile_blocks
             self.mesh_plane_block_offsets = None
             self.mesh_plane_block_counts = None
+
+    def _launch_generic_convex(
+        self,
+        device: Devicelike,
+        candidate_pair_count: wp.array[int],
+        shape_types: wp.array[int],
+        shape_data: wp.array[wp.vec4],
+        shape_transform: wp.array[wp.transform],
+        shape_source: wp.array[wp.uint64],
+        shape_support_data: wp.array[wp.vec4i],
+        support_lut: wp.array[int],
+        support_vertex_offsets: wp.array[int],
+        support_neighbors: wp.array[int],
+        shape_gap: wp.array[float],
+        shape_collision_radius: wp.array[float],
+        shape_collision_aabb_lower: wp.array[wp.vec3],
+        shape_collision_aabb_upper: wp.array[wp.vec3],
+        writer_data: Any,
+    ):
+        """Launch the GJK/MPR stage for the convex pairs routed by the primitive kernel."""
+        if self.has_generic_convex_pairs:
+            convex_pairs = self.gjk_candidate_pairs
+            convex_pair_count = candidate_pair_count if self.sparse_gjk_pairs else self.gjk_candidate_pairs_count
+            if self.split_gjk_mpr:
+                common_inputs = [
+                    shape_types,
+                    shape_data,
+                    shape_transform,
+                    shape_source,
+                    shape_support_data,
+                    support_lut,
+                    support_vertex_offsets,
+                    support_neighbors,
+                    shape_gap,
+                    shape_collision_radius,
+                    self.shape_aabb_lower,
+                    self.shape_aabb_upper,
+                    shape_collision_aabb_lower,
+                    shape_collision_aabb_upper,
+                ]
+                wp.launch(
+                    kernel=self.narrow_phase_mpr_kernel,
+                    dim=self.split_convex_total_num_threads,
+                    inputs=[
+                        convex_pairs,
+                        convex_pair_count,
+                        *common_inputs,
+                        self.split_convex_total_num_threads,
+                        self.split_query_results,
+                        self.split_gjk_work_items,
+                        self.split_gjk_work_count,
+                        self.split_manifold_work_items,
+                        self.split_manifold_work_count,
+                    ],
+                    device=device,
+                    block_dim=self.split_convex_block_dim,
+                    record_tape=False,
+                )
+                distance_inputs = [
+                    convex_pairs,
+                    *common_inputs,
+                    self.split_convex_total_num_threads,
+                    self.split_query_results,
+                    self.split_gjk_work_items,
+                    self.split_gjk_work_count,
+                    self.split_manifold_work_items,
+                    self.split_manifold_work_count,
+                ]
+                # Refinements and separated queries use disjoint queue segments
+                # and results, so their latency tails overlap on two streams.
+                main_stream = wp.get_stream(device)
+                fork_event, join_event = self.split_refine_events
+                self.split_refine_stream.wait_event(main_stream.record_event(fork_event))
+                wp.launch(
+                    kernel=self.narrow_phase_refine_kernel,
+                    dim=self.split_convex_total_num_threads,
+                    inputs=distance_inputs,
+                    device=device,
+                    stream=self.split_refine_stream,
+                    block_dim=_REFINE_BLOCK_DIM,
+                    record_tape=False,
+                )
+                wp.launch(
+                    kernel=self.narrow_phase_gjk_kernel,
+                    dim=self.split_convex_total_num_threads,
+                    inputs=distance_inputs,
+                    device=device,
+                    block_dim=self.split_convex_block_dim,
+                    record_tape=False,
+                )
+                main_stream.wait_event(self.split_refine_stream.record_event(join_event))
+                wp.launch(
+                    kernel=self.narrow_phase_manifold_kernel,
+                    dim=self.split_convex_total_num_threads,
+                    inputs=[
+                        convex_pairs,
+                        *common_inputs,
+                        writer_data,
+                        self.split_convex_total_num_threads,
+                        self.split_query_results,
+                        self.split_manifold_work_items,
+                        self.split_manifold_work_count,
+                    ],
+                    device=device,
+                    block_dim=self.split_convex_block_dim,
+                    record_tape=False,
+                )
+            else:
+                wp.launch(
+                    kernel=self.narrow_phase_kernel,
+                    dim=self.total_num_threads,
+                    inputs=[
+                        convex_pairs,
+                        convex_pair_count,
+                        shape_types,
+                        shape_data,
+                        shape_transform,
+                        shape_source,
+                        shape_support_data,
+                        support_lut,
+                        support_vertex_offsets,
+                        support_neighbors,
+                        shape_gap,
+                        shape_collision_radius,
+                        self.shape_aabb_lower,
+                        self.shape_aabb_upper,
+                        shape_collision_aabb_lower,
+                        shape_collision_aabb_upper,
+                        writer_data,
+                        self.total_num_threads,
+                    ],
+                    device=device,
+                    block_dim=self.block_dim,
+                    record_tape=False,
+                )
 
     def launch_custom_write(
         self,
@@ -3270,121 +3414,30 @@ class NarrowPhase:
         # Stage 2: Launch GJK/MPR kernel for remaining convex pairs
         # These are pairs that couldn't be handled analytically (box, cylinder, cone, convex hull, etc.)
         # All routing has been done by the primitive kernel, so this kernel just does GJK/MPR.
-        if self.has_generic_convex_pairs:
-            convex_pairs = self.gjk_candidate_pairs
-            convex_pair_count = candidate_pair_count if self.sparse_gjk_pairs else self.gjk_candidate_pairs_count
-            if self.split_gjk_mpr:
-                common_inputs = [
-                    shape_types,
-                    shape_data,
-                    shape_transform,
-                    shape_source,
-                    shape_support_data,
-                    support_lut,
-                    support_vertex_offsets,
-                    support_neighbors,
-                    shape_gap,
-                    shape_collision_radius,
-                    self.shape_aabb_lower,
-                    self.shape_aabb_upper,
-                    shape_collision_aabb_lower,
-                    shape_collision_aabb_upper,
-                ]
-                wp.launch(
-                    kernel=self.narrow_phase_mpr_kernel,
-                    dim=self.split_convex_total_num_threads,
-                    inputs=[
-                        convex_pairs,
-                        convex_pair_count,
-                        *common_inputs,
-                        self.split_convex_total_num_threads,
-                        self.split_query_results,
-                        self.split_gjk_work_items,
-                        self.split_gjk_work_count,
-                        self.split_manifold_work_items,
-                        self.split_manifold_work_count,
-                    ],
-                    device=device,
-                    block_dim=self.split_convex_block_dim,
-                    record_tape=False,
-                )
-                distance_inputs = [
-                    convex_pairs,
-                    *common_inputs,
-                    self.split_convex_total_num_threads,
-                    self.split_query_results,
-                    self.split_gjk_work_items,
-                    self.split_gjk_work_count,
-                    self.split_manifold_work_items,
-                    self.split_manifold_work_count,
-                ]
-                # Refinements and separated queries use disjoint queue segments
-                # and results, so their latency tails overlap on two streams.
-                main_stream = wp.get_stream(device)
-                fork_event, join_event = self.split_refine_events
-                self.split_refine_stream.wait_event(main_stream.record_event(fork_event))
-                wp.launch(
-                    kernel=self.narrow_phase_refine_kernel,
-                    dim=self.split_convex_total_num_threads,
-                    inputs=distance_inputs,
-                    device=device,
-                    stream=self.split_refine_stream,
-                    block_dim=_REFINE_BLOCK_DIM,
-                    record_tape=False,
-                )
-                wp.launch(
-                    kernel=self.narrow_phase_gjk_kernel,
-                    dim=self.split_convex_total_num_threads,
-                    inputs=distance_inputs,
-                    device=device,
-                    block_dim=self.split_convex_block_dim,
-                    record_tape=False,
-                )
-                main_stream.wait_event(self.split_refine_stream.record_event(join_event))
-                wp.launch(
-                    kernel=self.narrow_phase_manifold_kernel,
-                    dim=self.split_convex_total_num_threads,
-                    inputs=[
-                        convex_pairs,
-                        *common_inputs,
-                        writer_data,
-                        self.split_convex_total_num_threads,
-                        self.split_query_results,
-                        self.split_manifold_work_items,
-                        self.split_manifold_work_count,
-                    ],
-                    device=device,
-                    block_dim=self.split_convex_block_dim,
-                    record_tape=False,
-                )
-            else:
-                wp.launch(
-                    kernel=self.narrow_phase_kernel,
-                    dim=self.total_num_threads,
-                    inputs=[
-                        convex_pairs,
-                        convex_pair_count,
-                        shape_types,
-                        shape_data,
-                        shape_transform,
-                        shape_source,
-                        shape_support_data,
-                        support_lut,
-                        support_vertex_offsets,
-                        support_neighbors,
-                        shape_gap,
-                        shape_collision_radius,
-                        self.shape_aabb_lower,
-                        self.shape_aabb_upper,
-                        shape_collision_aabb_lower,
-                        shape_collision_aabb_upper,
-                        writer_data,
-                        self.total_num_threads,
-                    ],
-                    device=device,
-                    block_dim=self.block_dim,
-                    record_tape=False,
-                )
+        # Convex pairs only append contacts, so they overlap the mesh and SDF
+        # stages on a second stream; a few slow pairs no longer serialize them.
+        main_stream = None
+        if self.convex_stream is not None and self.has_generic_convex_pairs:
+            main_stream = wp.get_stream(device)
+            self.convex_stream.wait_event(main_stream.record_event(self.convex_events[0]))
+        with wp.ScopedStream(self.convex_stream) if main_stream is not None else contextlib.nullcontext():
+            self._launch_generic_convex(
+                device,
+                candidate_pair_count,
+                shape_types,
+                shape_data,
+                shape_transform,
+                shape_source,
+                shape_support_data,
+                support_lut,
+                support_vertex_offsets,
+                support_neighbors,
+                shape_gap,
+                shape_collision_radius,
+                shape_collision_aabb_lower,
+                shape_collision_aabb_upper,
+                writer_data,
+            )
 
         # Skip mesh/heightfield kernels when no meshes or heightfields are present
         if self.has_meshes or self.has_heightfields:
@@ -3799,6 +3852,9 @@ class NarrowPhase:
                 writer_data,
                 hydroelastic_shape_sdf_data_prepared,
             )
+
+        if main_stream is not None:
+            main_stream.wait_event(self.convex_stream.record_event(self.convex_events[1]))
 
         # Verify no collision pipeline buffers overflowed
         if self.verify_buffers:
