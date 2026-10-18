@@ -283,11 +283,13 @@ def box_hull_certificate(
 def create_solve_box_penetration(support: Any):
     """Find minimum depth for a box against a box, triangle, or convex mesh.
 
-    Box and triangle pairs use the closed-form separating-axis test, and
-    verified hulls the Gauss-map test of :func:`_box_hull_depth`. Other
-    convex meshes try cheap certificates: a box plus a triangle of genuine
+    Box and triangle pairs use the closed-form separating-axis test. Convex
+    meshes first try cheap certificates: a box plus a triangle of genuine
     partner points is an inner Minkowski body, so its depth bounds the
-    minimum from below, and a support plane bounds it from above.
+    minimum from below, and a support plane bounds it from above; matching
+    bounds certify the minimum with a few support queries. Verified hulls
+    that remain fall back to the exact Gauss-map test of
+    :func:`_box_hull_depth`.
     """
 
     @wp.func
@@ -346,9 +348,6 @@ def create_solve_box_penetration(support: Any):
             return normal, depth, True
         box_a = a.shape_type == int(GeoType.BOX)
         edge_block = _hull_edge_block(b if box_a else a, provider)
-        if edge_block >= 0:
-            normal, depth = _box_hull_depth(a, b, rotation, position, provider, edge_block)
-            return normal, depth, True
         normal = wp.vec3(1.0, 0.0, 0.0)
         depth = float(1.0e30)
         half = a.scale if box_a else b.scale
@@ -405,6 +404,10 @@ def create_solve_box_penetration(support: Any):
             if upper < depth:
                 depth = upper
                 normal = hint
+        if edge_block >= 0:
+            # Partner points did not pin the minimum; scan every axis exactly.
+            normal, depth = _box_hull_depth(a, b, rotation, position, provider, edge_block)
+            return normal, depth, True
         # Without verified hull topology, triangles cannot certify an interior
         # ball or a minimum depth. Keep the support-plane candidate as an upper bound.
         return normal, depth, False
