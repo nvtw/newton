@@ -135,17 +135,10 @@ def _box_box_depth(half_a: wp.vec3, half_b: wp.vec3, rotation: wp.quat, position
 
 
 @wp.func
-def _box_hull_depth(
-    a: Any, b: Any, rotation: wp.quat, position: wp.vec3, provider: Any, edge_block: int
-) -> tuple[wp.vec3, float]:
-    """Return the exact minimum-depth normal and depth of a box and a verified hull.
-
-    Separating axes are the box faces, the hull faces, and the box-edge/hull-edge
-    cross products whose Gauss-map arcs intersect. Supports along hull faces and
-    intersecting edge arcs are their own vertices, so no axis needs a support
-    query: the cost is one pass over the vertices plus one over the edges.
-    """
-    mesh_a = a.shape_type == int(GeoType.CONVEX_MESH)
+def _box_hull_frame(
+    a: Any, b: Any, rotation: wp.quat, position: wp.vec3
+) -> tuple[wp.vec3, wp.uint64, wp.vec3, wp.quat, wp.mat33, wp.vec3, float]:
+    """Return the hull scale and mesh, box half extents, and the box axes and offset in the hull frame."""
     mesh_scale = b.scale
     mesh_ptr = b.auxiliary
     half = a.scale
@@ -155,7 +148,7 @@ def _box_hull_depth(
     offset = wp.quat_rotate_inv(rotation, position)
     # The common normal points from B to A; flip mesh directions for B.
     side = float(-1.0)
-    if mesh_a:
+    if a.shape_type == int(GeoType.CONVEX_MESH):
         mesh_scale = a.scale
         mesh_ptr = a.auxiliary
         half = b.scale
@@ -164,39 +157,39 @@ def _box_hull_depth(
         offset = -position
         side = 1.0
     # Rows are the box axes in the mesh frame.
-    box_axes = wp.quat_to_matrix(to_box)
-    mesh = wp.mesh_get(unpack_mesh_ptr(mesh_ptr))
+    return mesh_scale, unpack_mesh_ptr(mesh_ptr), half, mesh_rotation, wp.quat_to_matrix(to_box), offset, side
+
+
+@wp.func
+def _box_hull_partial(
+    a: Any, b: Any, rotation: wp.quat, position: wp.vec3, provider: Any, edge_block: int, lane: int, lanes: int
+) -> tuple[wp.vec3, wp.vec3, wp.vec3, float]:
+    """Scan every ``lanes``-th hull vertex and edge for :func:`_box_hull_depth`.
+
+    Returns the extreme vertex projections onto the box axes and the
+    shallowest hull-face or edge-pair axis, in the hull frame. Lanes combine
+    by componentwise max, min, and the minimum depth.
+    """
+    mesh_scale, mesh_id, half, _mesh_rotation, box_axes, offset, _side = _box_hull_frame(a, b, rotation, position)
+    mesh = wp.mesh_get(mesh_id)
+    upper = wp.vec3(-1.0e30)
+    lower = wp.vec3(1.0e30)
+    for i in range(lane, mesh.points.shape[0], lanes):
+        projection = box_axes * wp.cw_mul(mesh.points[i], mesh_scale)
+        upper = wp.max(upper, projection)
+        lower = wp.min(lower, projection)
+
     # Mirroring scales reverse the stored face orientation.
     orientation = float(1.0)
     if mesh_scale[0] * mesh_scale[1] * mesh_scale[2] < 0.0:
         orientation = -1.0
-
-    # Box faces: the hull's support along each box axis and its opposite.
-    upper = wp.vec3(-1.0e30)
-    lower = wp.vec3(1.0e30)
-    for i in range(mesh.points.shape[0]):
-        projection = box_axes * wp.cw_mul(mesh.points[i], mesh_scale)
-        upper = wp.max(upper, projection)
-        lower = wp.min(lower, projection)
-    base = box_axes * offset
     depth = float(1.0e30)
     normal = wp.vec3(1.0, 0.0, 0.0)
-    for axis in range(3):
-        positive = upper[axis] + base[axis] + half[axis]
-        negative = half[axis] - lower[axis] - base[axis]
-        if positive < depth:
-            depth = positive
-            normal = box_axes[axis]
-        if negative < depth:
-            depth = negative
-            normal = -box_axes[axis]
-
     edges = provider.support_neighbors
-    for edge in range(edges[edge_block]):
+    for edge in range(lane, edges[edge_block], lanes):
         record = edge_block + 1 + 4 * edge
         p0 = wp.cw_mul(mesh.points[edges[record]], mesh_scale)
-        p1 = wp.cw_mul(mesh.points[edges[record + 1]], mesh_scale)
-        direction = p1 - p0
+        direction = wp.cw_mul(mesh.points[edges[record + 1]], mesh_scale) - p0
         face_0 = orientation * wp.cross(direction, wp.cw_mul(mesh.points[edges[record + 2]], mesh_scale) - p0)
         face_1 = orientation * wp.cross(wp.cw_mul(mesh.points[edges[record + 3]], mesh_scale) - p0, direction)
         for candidate in range(5):
@@ -221,7 +214,70 @@ def _box_hull_depth(
                 if candidate_depth < depth:
                     depth = candidate_depth
                     normal = m
+    return upper, lower, normal, depth
+
+
+@wp.func
+def _box_hull_finish(
+    a: Any, b: Any, rotation: wp.quat, position: wp.vec3, upper: wp.vec3, lower: wp.vec3, normal: wp.vec3, depth: float
+) -> tuple[wp.vec3, float]:
+    """Add the box-face axes to combined :func:`_box_hull_partial` results."""
+    _mesh_scale, _mesh_id, half, mesh_rotation, box_axes, offset, side = _box_hull_frame(a, b, rotation, position)
+    base = box_axes * offset
+    for axis in range(3):
+        positive = upper[axis] + base[axis] + half[axis]
+        negative = half[axis] - lower[axis] - base[axis]
+        if positive < depth:
+            depth = positive
+            normal = box_axes[axis]
+        if negative < depth:
+            depth = negative
+            normal = -box_axes[axis]
     return side * wp.quat_rotate(mesh_rotation, normal), depth
+
+
+@wp.func
+def _box_hull_depth(
+    a: Any, b: Any, rotation: wp.quat, position: wp.vec3, provider: Any, edge_block: int
+) -> tuple[wp.vec3, float]:
+    """Return the exact minimum-depth normal and depth of a box and a verified hull.
+
+    Separating axes are the box faces, the hull faces, and the box-edge/hull-edge
+    cross products whose Gauss-map arcs intersect. Supports along hull faces and
+    intersecting edge arcs are their own vertices, so no axis needs a support
+    query: the cost is one pass over the vertices plus one over the edges.
+    """
+    upper, lower, normal, depth = _box_hull_partial(a, b, rotation, position, provider, edge_block, 0, 1)
+    return _box_hull_finish(a, b, rotation, position, upper, lower, normal, depth)
+
+
+@wp.func
+def box_hull_certificate(
+    a: Any, b: Any, rotation: wp.quat, position: wp.vec3, provider: Any, lane: int, lanes: int
+) -> tuple[bool, wp.vec3, float]:
+    """Compute a box-hull minimum depth cooperatively across a thread block.
+
+    Every thread of the block must call this with the same pair. Returns
+    False for pairs other than a box and a verified hull.
+    """
+    hull = b
+    if a.shape_type == int(GeoType.CONVEX_MESH):
+        hull = a
+    edge_block = int(-1)
+    if (a.shape_type == int(GeoType.BOX) and b.shape_type == int(GeoType.CONVEX_MESH)) or (
+        a.shape_type == int(GeoType.CONVEX_MESH) and b.shape_type == int(GeoType.BOX)
+    ):
+        edge_block = _hull_edge_block(hull, provider)
+    if edge_block < 0:
+        return False, wp.vec3(0.0), 0.0
+    upper, lower, normal, depth = _box_hull_partial(a, b, rotation, position, provider, edge_block, lane, lanes)
+    upper = wp.tile_reduce(wp.max, wp.tile(upper, preserve_type=True))[0]
+    lower = wp.tile_reduce(wp.min, wp.tile(lower, preserve_type=True))[0]
+    best = wp.tile_argmin(wp.tile(depth))[0]
+    normal = wp.tile(normal, preserve_type=True)[best]
+    depth = wp.tile_min(wp.tile(depth))[0]
+    normal, depth = _box_hull_finish(a, b, rotation, position, upper, lower, normal, depth)
+    return True, normal, depth
 
 
 def create_solve_box_penetration(support: Any):

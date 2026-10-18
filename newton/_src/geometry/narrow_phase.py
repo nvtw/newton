@@ -62,6 +62,7 @@ from ..geometry.contact_reduction_global import (
 from ..geometry.contact_sort import ContactSorter
 from ..geometry.flags import ShapeFlags
 from ..geometry.mpr import create_solve_mpr, create_support_map_function
+from ..geometry.penetration import box_hull_certificate
 from ..geometry.sdf_contact import (
     MESH_SDF_BLOCK_DIM,
     compute_block_counts_from_weights,
@@ -202,6 +203,10 @@ def _penetration_bounds_half(
     elif shape_type == GeoType.CONVEX_MESH and lower.shape[0] > 0:
         half = 0.5 * (upper[shape] - lower[shape])
     return half
+
+
+# Threads that share one overlap refinement's box-hull certificate.
+_REFINE_BLOCK_DIM = 32
 
 
 def create_prepare_convex_pair(external_aabb: bool, speculative: bool = False):
@@ -1500,9 +1505,18 @@ def create_narrow_phase_kernels_gjk_mpr_split(
             # refinements the back.
             num_distance = wp.min(gjk_work_items.shape[0], gjk_work_count[0])
             num_work_items = num_distance
+            # A refinement's box-hull certificate loops over the whole hull.
+            # Few pairs need it, so each takes a thread block that splits that
+            # loop; the first thread runs the remaining serial refinement.
+            lane = int(0)
+            first = tid
+            stride = total_num_threads
             if wp.static(refine_overlap):
                 num_work_items = wp.min(gjk_work_items.shape[0] - num_distance, gjk_work_count[1])
-            for work_index in range(tid, num_work_items, total_num_threads):
+                lane = tid % wp.block_dim()
+                first = tid / wp.block_dim()
+                stride = total_num_threads / wp.block_dim()
+            for work_index in range(first, num_work_items, stride):
                 pair_index = gjk_work_items[work_index]
                 witnesses_valid = False
                 if wp.static(refine_overlap):
@@ -1553,27 +1567,43 @@ def create_narrow_phase_kernels_gjk_mpr_split(
                     normal = wp.vec3(0.0)
                     signed_distance = float(0.0)
                     if wp.static(refine_overlap):
-                        pending = query_results[pair_index]
-                        seed = pending.point_a
-                        if witnesses_valid:
-                            seed = wp.vec3(0.0)
-                        point_a, point_b, normal, penetration, resolved = wp.static(solve_mpr.refine_core)(
+                        certificate_ready, certificate_normal, certificate_depth = box_hull_certificate(
                             query.geom_a,
                             query.geom_b,
                             query.relative_orientation_b,
                             query.relative_position_b,
-                            query.enlarge,
                             provider,
-                            seed,
-                            pending.point_a,
-                            pending.point_b,
-                            pending.normal,
-                            pending.signed_distance,
-                            witnesses_valid,
+                            lane,
+                            wp.block_dim(),
                         )
-                        point_a -= normal * (0.5 * query.enlarge)
-                        point_b += normal * (0.5 * query.enlarge)
-                        signed_distance = -penetration + query.enlarge
+                        if lane == 0:
+                            pending = query_results[pair_index]
+                            seed = pending.point_a
+                            if witnesses_valid:
+                                seed = wp.vec3(0.0)
+                            point_a, point_b, normal, penetration, resolved = wp.static(solve_mpr.refine_core)(
+                                query.geom_a,
+                                query.geom_b,
+                                query.relative_orientation_b,
+                                query.relative_position_b,
+                                query.enlarge,
+                                provider,
+                                seed,
+                                pending.point_a,
+                                pending.point_b,
+                                pending.normal,
+                                pending.signed_distance,
+                                witnesses_valid,
+                                certificate_ready,
+                                certificate_normal,
+                                certificate_depth,
+                            )
+                            point_a -= normal * (0.5 * query.enlarge)
+                            point_b += normal * (0.5 * query.enlarge)
+                            signed_distance = -penetration + query.enlarge
+                        else:
+                            resolved = True
+                            signed_distance = 1.0e30
                     # Unresolved refinements follow the ordinary distance query.
                     if not resolved:
                         resolved = True
@@ -3269,7 +3299,7 @@ class NarrowPhase:
                     inputs=distance_inputs,
                     device=device,
                     stream=self.split_refine_stream,
-                    block_dim=self.split_convex_block_dim,
+                    block_dim=_REFINE_BLOCK_DIM,
                     record_tape=False,
                 )
                 wp.launch(

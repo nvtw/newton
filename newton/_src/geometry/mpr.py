@@ -667,13 +667,18 @@ def create_solve_mpr(support_func: Any, _support_funcs: Any = None):
         normal: wp.vec3,
         penetration: float,
         valid: bool,
+        certificate_ready: bool,
+        certificate_normal: wp.vec3,
+        certificate_depth: float,
         MAX_ITER: int = 30,
         COLLIDE_EPSILON: float = 1e-5,
     ) -> tuple[wp.vec3, wp.vec3, wp.vec3, float, bool]:
         """Certify or retry a portal overlap and report whether a physical contact is resolved.
 
-        The arguments after ``data_provider`` are the portal's result. Split and
-        fused kernels pass identical values, so both make the same decisions.
+        The arguments from ``seed`` to ``valid`` are the portal's result. Split
+        and fused kernels pass identical values, so both make the same
+        decisions. A ready certificate is a verified minimum-depth normal and
+        depth that replaces the separating-axis query of certificate pairs.
         """
         # The first portal's support plane bounds the depth; a deeper retry
         # landed on a worse face (seeds near the boundary are ill-conditioned).
@@ -685,9 +690,13 @@ def create_solve_mpr(support_func: Any, _support_funcs: Any = None):
         bound_normal = normal
         bound_depth = float(1.0e30)
         if solve_mpr_needs_certificate(geom_a, geom_b):
-            minimum_normal, minimum_depth, minimum_verified = solve_sat(
-                geom_a, geom_b, orientation_b, position_b, data_provider, normal
-            )
+            minimum_normal = certificate_normal
+            minimum_depth = certificate_depth
+            minimum_verified = certificate_ready
+            if not certificate_ready:
+                minimum_normal, minimum_depth, minimum_verified = solve_sat(
+                    geom_a, geom_b, orientation_b, position_b, data_provider, normal
+                )
             if minimum_verified and minimum_depth > COLLIDE_EPSILON:
                 if not valid or wp.abs(penetration - extend - minimum_depth) > COLLIDE_EPSILON:
                     # SAT certifies an interior ball and its nearest plane.
@@ -796,6 +805,9 @@ def create_solve_mpr(support_func: Any, _support_funcs: Any = None):
                 normal,
                 penetration,
                 valid,
+                False,
+                wp.vec3(0.0),
+                0.0,
                 MAX_ITER,
                 COLLIDE_EPSILON,
             )
