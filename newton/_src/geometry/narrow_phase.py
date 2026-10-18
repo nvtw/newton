@@ -205,6 +205,9 @@ def _penetration_bounds_half(
     return half
 
 
+# Threads per mesh-convex midphase query when there are many queries.
+_MIDPHASE_NARROW_TILE_SIZE = wp.constant(32)
+
 # Threads that share one overlap refinement's box-hull certificate.
 _REFINE_BLOCK_DIM = 32
 
@@ -1779,126 +1782,147 @@ def compute_shape_interior_points_kernel(
     shape_interior_point[shape] = point
 
 
-@wp.kernel(enable_backward=False)
-def narrow_phase_find_mesh_triangle_overlaps_kernel(
-    shape_types: wp.array[int],
-    shape_transform: wp.array[wp.transform],
-    shape_source: wp.array[wp.uint64],
-    shape_gap: wp.array[float],  # Per-shape contact gaps
-    shape_data: wp.array[wp.vec4],  # Shape data (scale xyz, margin w)
-    shape_collision_radius: wp.array[float],
-    shape_collision_aabb_lower: wp.array[wp.vec3],  # Local-space AABB lower bounds
-    shape_collision_aabb_upper: wp.array[wp.vec3],  # Local-space AABB upper bounds
-    shape_interior_point: wp.array[wp.vec3],  # Local interior points for back-face culling
-    shape_heightfield_index: wp.array[wp.int32],
-    heightfield_data: wp.array[HeightfieldData],
-    heightfield_elevations: wp.array[wp.float32],
-    shape_pairs_mesh: wp.array[wp.vec2i],
-    shape_pairs_mesh_count: wp.array[int],
-    total_num_threads: int,
-    # outputs
-    triangle_pairs: wp.array[wp.vec3i],  # (shape_a, shape_b, triangle_idx)
-    triangle_pairs_count: wp.array[int],
-):
-    """Find triangles that overlap with a convex shape for mesh and heightfield pairs.
+def _create_find_mesh_triangle_overlaps_kernel(narrow_ratio: int):
+    """Create the mesh/heightfield-vs-convex midphase kernel.
 
-    For mesh pairs, uses a tiled BVH query. For heightfield pairs, projects the
-    convex shape's bounding sphere onto the heightfield grid and emits triangle
-    pairs for each overlapping cell.
-
-    Outputs triples of ``(mesh_or_hfield_shape, other_shape, triangle_idx)``.
+    The wide kernel (``narrow_ratio == 0``) runs a tile block per query while
+    there are at most as many queries as blocks. Beyond that, BVH traversal
+    latency bounds the midphase, and a narrow kernel launched with
+    ``narrow_ratio`` times as many one-warp blocks runs instead.
     """
-    tid, j = wp.tid()
 
-    num_mesh_pairs = shape_pairs_mesh_count[0]
+    @wp.kernel(enable_backward=False, module=f"narrow_phase_mesh_overlaps_{narrow_ratio}")
+    def narrow_phase_find_mesh_triangle_overlaps_kernel(
+        shape_types: wp.array[int],
+        shape_transform: wp.array[wp.transform],
+        shape_source: wp.array[wp.uint64],
+        shape_gap: wp.array[float],  # Per-shape contact gaps
+        shape_data: wp.array[wp.vec4],  # Shape data (scale xyz, margin w)
+        shape_collision_radius: wp.array[float],
+        shape_collision_aabb_lower: wp.array[wp.vec3],  # Local-space AABB lower bounds
+        shape_collision_aabb_upper: wp.array[wp.vec3],  # Local-space AABB upper bounds
+        shape_interior_point: wp.array[wp.vec3],  # Local interior points for back-face culling
+        shape_heightfield_index: wp.array[wp.int32],
+        heightfield_data: wp.array[HeightfieldData],
+        heightfield_elevations: wp.array[wp.float32],
+        shape_pairs_mesh: wp.array[wp.vec2i],
+        shape_pairs_mesh_count: wp.array[int],
+        total_num_threads: int,
+        # outputs
+        triangle_pairs: wp.array[wp.vec3i],  # (shape_a, shape_b, triangle_idx)
+        triangle_pairs_count: wp.array[int],
+    ):
+        """Find triangles that overlap with a convex shape for mesh and heightfield pairs.
 
-    # Strided loop over mesh pairs
-    for i in range(tid, num_mesh_pairs, total_num_threads):
-        pair = shape_pairs_mesh[i]
-        shape_a = pair[0]
-        shape_b = pair[1]
+        For mesh pairs, uses a tiled BVH query. For heightfield pairs, projects the
+        convex shape's bounding sphere onto the heightfield grid and emits triangle
+        pairs for each overlapping cell.
 
-        type_a = shape_types[shape_a]
-        type_b = shape_types[shape_b]
+        Outputs triples of ``(mesh_or_hfield_shape, other_shape, triangle_idx)``.
+        """
+        tid, j = wp.tid()
 
-        # -----------------------------------------------------------------
-        # Heightfield-vs-convex midphase (grid cell lookup)
-        # Pairs are normalized so the heightfield is always shape_a.
-        # -----------------------------------------------------------------
-        if type_a == GeoType.HFIELD:
-            # Only run on j==0; the j dimension is for tiled BVH queries (mesh only).
-            if j != 0:
+        num_mesh_pairs = shape_pairs_mesh_count[0]
+        if wp.static(narrow_ratio == 0):
+            # The wide GPU launch gives each query a block; past one query per
+            # block, the narrow launch takes over all of them.
+            if wp.block_dim() > _MIDPHASE_NARROW_TILE_SIZE and num_mesh_pairs > total_num_threads:
+                return
+        elif num_mesh_pairs <= total_num_threads // narrow_ratio:
+            return
+
+        # Strided loop over mesh pairs
+        for i in range(tid, num_mesh_pairs, total_num_threads):
+            pair = shape_pairs_mesh[i]
+            shape_a = pair[0]
+            shape_b = pair[1]
+
+            type_a = shape_types[shape_a]
+            type_b = shape_types[shape_b]
+
+            # -----------------------------------------------------------------
+            # Heightfield-vs-convex midphase (grid cell lookup)
+            # Pairs are normalized so the heightfield is always shape_a.
+            # -----------------------------------------------------------------
+            if type_a == GeoType.HFIELD:
+                # Only run on j==0; the j dimension is for tiled BVH queries (mesh only).
+                if j != 0:
+                    continue
+                hfd = heightfield_data[shape_heightfield_index[shape_a]]
+                heightfield_vs_convex_midphase(
+                    shape_a,
+                    shape_b,
+                    hfd,
+                    heightfield_elevations,
+                    shape_transform,
+                    shape_collision_aabb_lower,
+                    shape_collision_aabb_upper,
+                    shape_data,
+                    shape_gap,
+                    triangle_pairs,
+                    triangle_pairs_count,
+                    # A plane's cached local AABB does not bound its surface.
+                    type_b != GeoType.PLANE,
+                )
                 continue
-            hfd = heightfield_data[shape_heightfield_index[shape_a]]
-            heightfield_vs_convex_midphase(
-                shape_a,
-                shape_b,
-                hfd,
-                heightfield_elevations,
-                shape_transform,
-                shape_collision_aabb_lower,
-                shape_collision_aabb_upper,
+
+            # -----------------------------------------------------------------
+            # Mesh-vs-convex midphase (BVH query)
+            # -----------------------------------------------------------------
+            mesh_shape = -1
+            non_mesh_shape = -1
+
+            if type_a == GeoType.MESH and type_b != GeoType.MESH:
+                mesh_shape = shape_a
+                non_mesh_shape = shape_b
+            elif type_b == GeoType.MESH and type_a != GeoType.MESH:
+                mesh_shape = shape_b
+                non_mesh_shape = shape_a
+            else:
+                # Mesh-mesh collision not supported in this path
+                continue
+
+            # Get mesh BVH ID and mesh transform
+            mesh_id = shape_source[mesh_shape]
+            if mesh_id == wp.uint64(0):
+                continue
+
+            # Get mesh world transform
+            X_mesh_ws = shape_transform[mesh_shape]
+
+            # Get non-mesh shape world transform
+            X_ws = shape_transform[non_mesh_shape]
+
+            # Use the same margin+gap shell for triangle candidates that the
+            # narrow phase uses when accepting contacts.
+            gap_non_mesh = shape_gap[non_mesh_shape]
+            gap_mesh = shape_gap[mesh_shape]
+            gap_sum = gap_non_mesh + gap_mesh
+            margin_non_mesh = shape_data[non_mesh_shape][3]
+            margin_mesh = shape_data[mesh_shape][3]
+            contact_threshold = gap_sum + margin_non_mesh + margin_mesh
+
+            # Call mesh_vs_convex_midphase with the shape_data and pair contact threshold.
+            mesh_vs_convex_midphase(
+                j,
+                mesh_shape,
+                non_mesh_shape,
+                X_mesh_ws,
+                X_ws,
+                mesh_id,
+                shape_types,
                 shape_data,
-                shape_gap,
+                shape_source,
+                contact_threshold,
+                shape_interior_point[non_mesh_shape],
                 triangle_pairs,
                 triangle_pairs_count,
-                # A plane's cached local AABB does not bound its surface.
-                type_b != GeoType.PLANE,
             )
-            continue
 
-        # -----------------------------------------------------------------
-        # Mesh-vs-convex midphase (BVH query)
-        # -----------------------------------------------------------------
-        mesh_shape = -1
-        non_mesh_shape = -1
+    return narrow_phase_find_mesh_triangle_overlaps_kernel
 
-        if type_a == GeoType.MESH and type_b != GeoType.MESH:
-            mesh_shape = shape_a
-            non_mesh_shape = shape_b
-        elif type_b == GeoType.MESH and type_a != GeoType.MESH:
-            mesh_shape = shape_b
-            non_mesh_shape = shape_a
-        else:
-            # Mesh-mesh collision not supported in this path
-            continue
 
-        # Get mesh BVH ID and mesh transform
-        mesh_id = shape_source[mesh_shape]
-        if mesh_id == wp.uint64(0):
-            continue
-
-        # Get mesh world transform
-        X_mesh_ws = shape_transform[mesh_shape]
-
-        # Get non-mesh shape world transform
-        X_ws = shape_transform[non_mesh_shape]
-
-        # Use the same margin+gap shell for triangle candidates that the
-        # narrow phase uses when accepting contacts.
-        gap_non_mesh = shape_gap[non_mesh_shape]
-        gap_mesh = shape_gap[mesh_shape]
-        gap_sum = gap_non_mesh + gap_mesh
-        margin_non_mesh = shape_data[non_mesh_shape][3]
-        margin_mesh = shape_data[mesh_shape][3]
-        contact_threshold = gap_sum + margin_non_mesh + margin_mesh
-
-        # Call mesh_vs_convex_midphase with the shape_data and pair contact threshold.
-        mesh_vs_convex_midphase(
-            j,
-            mesh_shape,
-            non_mesh_shape,
-            X_mesh_ws,
-            X_ws,
-            mesh_id,
-            shape_types,
-            shape_data,
-            shape_source,
-            contact_threshold,
-            shape_interior_point[non_mesh_shape],
-            triangle_pairs,
-            triangle_pairs_count,
-        )
+narrow_phase_find_mesh_triangle_overlaps_kernel = _create_find_mesh_triangle_overlaps_kernel(0)
 
 
 def create_narrow_phase_process_mesh_triangle_contacts_kernel(
@@ -3001,6 +3025,12 @@ class NarrowPhase:
         num_blocks = max(min_blocks, min(candidate_blocks, max_blocks_limit))
         self.total_num_threads = self.block_dim * num_blocks
         self.num_tile_blocks = num_blocks
+        self.midphase_narrow_ratio = max(self.tile_size_mesh_convex // _MIDPHASE_NARROW_TILE_SIZE, 1)
+        self.midphase_narrow_kernel = (
+            _create_find_mesh_triangle_overlaps_kernel(self.midphase_narrow_ratio)
+            if self.tile_size_mesh_convex > _MIDPHASE_NARROW_TILE_SIZE and (has_meshes or has_heightfields)
+            else None
+        )
         # Split-convex blocks distribute independent serial pair queries across
         # lanes. Use one warp while preserving the block distribution; lanes
         # grid-stride over larger block queues. That suits the accelerated
@@ -3446,6 +3476,22 @@ class NarrowPhase:
                 block_dim=self.tile_size_mesh_convex,
                 record_tape=False,
             )
+            if not self._heightfield_packed_pairs and self.midphase_narrow_kernel is not None:
+                # Many queries: one warp each, so more of them hide BVH latency.
+                narrow_blocks = self.num_tile_blocks * self.midphase_narrow_ratio
+                midphase_inputs[-1] = narrow_blocks
+                wp.launch(
+                    kernel=self.midphase_narrow_kernel,
+                    dim=[narrow_blocks, _MIDPHASE_NARROW_TILE_SIZE],
+                    inputs=midphase_inputs,
+                    outputs=[
+                        self.triangle_pairs,
+                        self.triangle_pairs_count,
+                    ],
+                    device=device,
+                    block_dim=_MIDPHASE_NARROW_TILE_SIZE,
+                    record_tape=False,
+                )
 
             # Launch contact processing for triangle pairs
             if self.reduce_contacts:
