@@ -10,8 +10,13 @@ import warp as wp
 from .support_function import GeoTypeEx, _hull_edge_block, unpack_mesh_ptr
 from .types import GeoType
 
-# Tangent offset [unitless] of the tilted certificate normals, about 2 degrees.
-_CERTIFICATE_TILT = wp.constant(0.035)
+# Tangent offset [unitless] of the tilted certificate normals, about 0.2 degrees.
+# On a curved partner the tilted support points lie below the apex by about
+# radius * tilt^2 / 2, which must stay within the certificate tolerance for
+# the inner-body bound to meet the support plane; this covers radii up to
+# roughly 0.4 m. Flat faces certify at any tilt, and pairs the certificate
+# cannot pin down fall back to the exact scan.
+_CERTIFICATE_TILT = wp.constant(0.003)
 
 
 @wp.func
