@@ -1180,6 +1180,7 @@ def create_narrow_phase_kernel_gjk_mpr(
                 shape_data_b.center = 0.5 * (shape_collision_aabb_lower[shape_b] + shape_collision_aabb_upper[shape_b])
             data_provider = provider_type()
             data_provider.shape_support_data = shape_support_data
+            data_provider.support_neighbors = support_neighbors
             if type_a != GeoType.PLANE and type_b != GeoType.PLANE:
                 shape_data_a.bounds_half = _penetration_bounds_half(
                     shape_a, type_a, shape_data, shape_collision_aabb_lower, shape_collision_aabb_upper
@@ -1190,7 +1191,6 @@ def create_narrow_phase_kernel_gjk_mpr(
             if wp.static(accelerated_support):
                 data_provider.support_lut = support_lut
                 data_provider.support_vertex_offsets = support_vertex_offsets
-                data_provider.support_neighbors = support_neighbors
 
             # Check for infinite planes
             is_infinite_plane_a = (type_a == GeoType.PLANE) and (scale_a[0] == 0.0 and scale_a[1] == 0.0)
@@ -1391,10 +1391,10 @@ def create_narrow_phase_kernels_gjk_mpr_split(
             if valid:
                 provider = provider_type()
                 provider.shape_support_data = shape_support_data
+                provider.support_neighbors = support_neighbors
                 if wp.static(accelerated_support):
                     provider.support_lut = support_lut
                     provider.support_vertex_offsets = support_vertex_offsets
-                    provider.support_neighbors = support_neighbors
                 collision, point_a, point_b, normal, penetration, seed, witnesses_valid = wp.static(
                     solve_mpr.portal_core
                 )(
@@ -1406,12 +1406,32 @@ def create_narrow_phase_kernels_gjk_mpr_split(
                     provider,
                     wp.vec3(0.0),
                 )
-                needs_certificate = wp.static(solve_mpr.needs_certificate)(query.geom_a, query.geom_b)
-                needs_certificate = needs_certificate or (
-                    query.type_a != GeoType.PLANE
-                    and query.type_b != GeoType.PLANE
-                    and shape_collision_aabb_lower.shape[0] > 0
-                )
+                needs_certificate = False
+                if collision:
+                    if query.type_a != GeoType.PLANE and query.type_b != GeoType.PLANE:
+                        query.geom_a.bounds_half = _penetration_bounds_half(
+                            query.shape_a,
+                            query.type_a,
+                            shape_data,
+                            shape_collision_aabb_lower,
+                            shape_collision_aabb_upper,
+                        )
+                        query.geom_b.bounds_half = _penetration_bounds_half(
+                            query.shape_b,
+                            query.type_b,
+                            shape_data,
+                            shape_collision_aabb_lower,
+                            shape_collision_aabb_upper,
+                        )
+                    needs_certificate = wp.static(solve_mpr.needs_refine)(
+                        query.geom_a,
+                        query.geom_b,
+                        query.relative_orientation_b,
+                        query.relative_position_b,
+                        query.enlarge,
+                        penetration,
+                        witnesses_valid,
+                    )
                 if collision and (not witnesses_valid or needs_certificate):
                     # Queue confirmed overlaps from the back of the same array,
                     # keeping both passes compact without another work buffer.
@@ -1508,6 +1528,7 @@ def create_narrow_phase_kernels_gjk_mpr_split(
                 if valid:
                     provider = provider_type()
                     provider.shape_support_data = shape_support_data
+                    provider.support_neighbors = support_neighbors
                     if query.type_a != GeoType.PLANE and query.type_b != GeoType.PLANE:
                         query.geom_a.bounds_half = _penetration_bounds_half(
                             query.shape_a,
@@ -1526,7 +1547,6 @@ def create_narrow_phase_kernels_gjk_mpr_split(
                     if wp.static(accelerated_support):
                         provider.support_lut = support_lut
                         provider.support_vertex_offsets = support_vertex_offsets
-                        provider.support_neighbors = support_neighbors
                     resolved = False
                     point_a = wp.vec3(0.0)
                     point_b = wp.vec3(0.0)
@@ -1640,10 +1660,10 @@ def create_narrow_phase_kernels_gjk_mpr_split(
             )
             provider = provider_type()
             provider.shape_support_data = shape_support_data
+            provider.support_neighbors = support_neighbors
             if wp.static(accelerated_support):
                 provider.support_lut = support_lut
                 provider.support_vertex_offsets = support_vertex_offsets
-                provider.support_neighbors = support_neighbors
             wp.static(write_result)(
                 query.geom_a,
                 query.geom_b,
@@ -1951,10 +1971,10 @@ def create_narrow_phase_process_mesh_triangle_contacts_kernel(
 
             data_provider = provider_type()
             data_provider.shape_support_data = shape_support_data
+            data_provider.support_neighbors = support_neighbors
             if wp.static(convex_support_acceleration):
                 data_provider.support_lut = support_lut
                 data_provider.support_vertex_offsets = support_vertex_offsets
-                data_provider.support_neighbors = support_neighbors
             wp.static(compute_contacts)(
                 shape_data_a,
                 shape_data_b,

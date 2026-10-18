@@ -35,13 +35,14 @@ from typing import Any
 
 import warp as wp
 
-from .penetration import _box_face_depth, create_solve_box_penetration
+from .penetration import _box_box_depth, _box_face_depth, create_solve_box_penetration
 from .penetration import box_polyhedron_pair as solve_mpr_needs_certificate
 from .support_function import (
     _has_verified_hull,
     create_shape_center_function,
     create_shape_support_function,
 )
+from .types import GeoType
 
 
 @wp.struct
@@ -735,6 +736,36 @@ def create_solve_mpr(support_func: Any, _support_funcs: Any = None):
         return point_a, point_b, normal, penetration, valid
 
     @wp.func
+    def solve_mpr_needs_refine(
+        geom_a: Any,
+        geom_b: Any,
+        orientation_b: wp.quat,
+        position_b: wp.vec3,
+        extend: float,
+        penetration: float,
+        valid: bool,
+        COLLIDE_EPSILON: float = 1e-5,
+    ) -> bool:
+        """Return whether a portal overlap needs :func:`solve_mpr_refine`.
+
+        Closed-form checks accept the portal exactly when the refinement would
+        keep it unchanged, so only pairs that refinement may alter, or whose
+        certificate needs support queries, pay for it.
+        """
+        if not valid:
+            return True
+        if solve_mpr_needs_certificate(geom_a, geom_b):
+            if geom_a.shape_type == int(GeoType.BOX) and geom_b.shape_type == int(GeoType.BOX):
+                _n, depth = _box_box_depth(geom_a.scale, geom_b.scale, orientation_b, position_b)
+                return depth > COLLIDE_EPSILON and wp.abs(penetration - extend - depth) > COLLIDE_EPSILON
+            return True
+        if wp.min(geom_a.bounds_half) > 0.0 and wp.min(geom_b.bounds_half) > 0.0:
+            offset = position_b + wp.quat_rotate(orientation_b, geom_b.center) - geom_a.center
+            _n, bound_depth = _box_face_depth(geom_a.bounds_half, geom_b.bounds_half, orientation_b, offset)
+            return penetration > bound_depth + extend + COLLIDE_EPSILON
+        return False
+
+    @wp.func
     def solve_mpr_core(
         geom_a: Any,
         geom_b: Any,
@@ -749,10 +780,8 @@ def create_solve_mpr(support_func: Any, _support_funcs: Any = None):
         collision, point_a, point_b, normal, penetration, seed, valid = solve_mpr_portal(
             geom_a, geom_b, orientation_b, position_b, extend, data_provider, wp.vec3(0.0), MAX_ITER, COLLIDE_EPSILON
         )
-        if collision and (
-            not valid
-            or solve_mpr_needs_certificate(geom_a, geom_b)
-            or (wp.min(geom_a.bounds_half) > 0.0 and wp.min(geom_b.bounds_half) > 0.0)
+        if collision and solve_mpr_needs_refine(
+            geom_a, geom_b, orientation_b, position_b, extend, penetration, valid, COLLIDE_EPSILON
         ):
             point_a, point_b, normal, penetration, collision = solve_mpr_refine(
                 geom_a,
@@ -842,4 +871,5 @@ def create_solve_mpr(support_func: Any, _support_funcs: Any = None):
     solve_mpr.portal_core = solve_mpr_portal
     solve_mpr.needs_certificate = solve_mpr_needs_certificate
     solve_mpr.refine_core = solve_mpr_refine
+    solve_mpr.needs_refine = solve_mpr_needs_refine
     return solve_mpr
