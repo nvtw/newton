@@ -589,6 +589,7 @@ def create_solve_mpr(support_func: Any, _support_funcs: Any = None, depth_certif
             support = mpr_support(geom_a, geom_b, direction, orientation_b, position_b, 0.0, data_provider)
             translation = wp.dot(support.BtoA, direction) + 1e-5 * tolerance
             gradient = direction
+            accepted = bool(False)
             for _ray_step in range(30):
                 separated, pa, pb, separating_normal, gap = solve_gjk(
                     geom_a,
@@ -667,8 +668,13 @@ def create_solve_mpr(support_func: Any, _support_funcs: Any = None, depth_certif
                     point_b = pb - correction
                     penetration = depth
                     resolved = True
+                    accepted = True
                 if gap > 2e-6 * tolerance:
                     gradient = separating_normal
+                if accepted:
+                    # This direction has a certified candidate; further ray
+                    # steps only tighten a gap that is already within budget.
+                    break
                 if gap < 5e-7 * tolerance:
                     break
                 slope = wp.dot(separating_normal, direction)
