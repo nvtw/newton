@@ -14,6 +14,10 @@ Thirty flowers form a compact hexagonal patch with gently scattered base positio
 Use --flower-resolution to vary scissor cells per 36-degree ring arc; the default
 of two reproduces the original twenty-cell rings procedurally.
 
+The custom garden layout is assigned once after model setup. Calling the
+viewer's set_visible_worlds() or set_world_offsets() afterward replaces it;
+reapply viewer.world_offsets.assign(example.world_offsets) to restore it.
+
 Command: python -m newton.examples kamino_stewart_platform
 """
 
@@ -77,7 +81,7 @@ def add_hoberman_flower(builder, plate, joints_tree, sphere):
     the opening hinge angle, keeping the supported arms symmetric about the
     stem while the ring joints transmit the opening to the sphere.
     """
-    scale = 1.0 / (2.0 * 2.236)
+    scale = 1.0 / sphere.diameter_rest
     mass_scale = 0.18 / sum(body[4] for body in sphere.bodies)
     rotation = wp.quat_between_vectors(wp.vec3(-1.0, 0.0, 0.0), wp.vec3(0.0, 0.0, -1.0))
     pole = wp.vec3(*sphere.pole) * scale
@@ -159,7 +163,7 @@ def add_hoberman_flower(builder, plate, joints_tree, sphere):
         builder.add_joint(**kwargs)
 
     visual = newton.ModelBuilder.ShapeConfig(density=0.0, has_shape_collision=False, has_particle_collision=False)
-    for body, pose, extents, _color in sphere.tiles:
+    for body, pose, extents in sphere.tiles:
         color = FLOWER_COLORS[body % len(FLOWER_COLORS)]
         builder.add_shape_box(
             offset + body,
@@ -222,6 +226,8 @@ def update_flower(
     time: wp.array[float],
     dt: float,
     opening_slope: float,
+    reference_slope: float,
+    adapt_opening: bool,
     variations: wp.array[wp.vec3],
     coordinates: wp.array[int],
     dofs: wp.array[int],
@@ -238,8 +244,7 @@ def update_flower(
     angle_next = variation[1] * flower_opening(wind_time(time[0] + dt, 1.5 * variation[0]))
     # Finer rings reach full compaction at smaller hinge angles. Invert their
     # aperture law to retain the original radial breathing motion safely.
-    reference_slope = (2.2 - 1.35896) / (2.2 + 1.35896) / wp.tan(wp.pi / 20.0)
-    if opening_slope > 1.001 * reference_slope:
+    if adapt_opening:
         gain = wp.cos(0.5 * angle) + reference_slope * wp.sin(0.5 * angle)
         gain_next = wp.cos(0.5 * angle_next) + reference_slope * wp.sin(0.5 * angle_next)
         magnitude = wp.sqrt(1.0 + opening_slope * opening_slope)
@@ -512,6 +517,7 @@ class Example:
             builder.add_joint_d6(**upper_args)
         flower_tree = []
         self.sphere = generate_sphere(getattr(args, "flower_resolution", 2) if args else 2)
+        self.adapt_flower_opening = self.sphere.opening_slope > 1.001 * self.sphere.reference_opening_slope
         opening, mount, flower_body_start = add_hoberman_flower(builder, top, flower_tree, self.sphere)
         builder.add_articulation(flower_tree, label="hoberman_flower")
 
@@ -573,6 +579,7 @@ class Example:
         self.world_offsets = _garden_offsets(self.world_count)
         self.viewer.set_world_offsets((0.0, 0.0, 0.0))
         # Assign in place so rendering and picking retain the same offset array.
+        # Visibility or spacing changes replace this custom layout; reassign it afterward.
         self.viewer.world_offsets.assign(self.world_offsets)
         if hasattr(self.viewer, "set_camera"):
             height = 0.1 * self.stage_count + 1.1
@@ -613,6 +620,8 @@ class Example:
                     self.time,
                     self.sim_dt,
                     self.sphere.opening_slope,
+                    self.sphere.reference_opening_slope,
+                    self.adapt_flower_opening,
                     self.variations,
                     self.flower_coordinates,
                     self.flower_dofs,
@@ -677,7 +686,7 @@ class Example:
             start = self.flower_body_starts[world]
             points = poses[start : start + len(self.sphere.bodies), :3]
             radius = np.mean(np.linalg.norm(points - points.mean(axis=0), axis=1))
-            radius_rest = self.sphere.radius_rest / (2.0 * 2.236)
+            radius_rest = self.sphere.radius_rest / self.sphere.diameter_rest
             assert 0.25 * radius_rest < radius < 1.8 * radius_rest, "Flower lost its spherical shape"
             opening = flower_q[world, 0]
             if abs(opening) > 0.04:
@@ -716,8 +725,15 @@ class Example:
             default=2,
             help="Scissor cells per 36-degree ring arc (2 reproduces the original sphere).",
         )
-        parser.add_argument("--stage-count", type=int, default=20, help="Number of stacked Stewart platforms.")
-        parser.add_argument("--substeps", type=int, choices=(2, 4, 6, 12), default=2, help="Physics steps per frame.")
+        parser.add_argument("--stage-count", type=positive_int, default=20, help="Number of stacked Stewart platforms.")
+        # Even counts return captured simulation steps to the original state buffer.
+        parser.add_argument(
+            "--substeps",
+            type=int,
+            choices=(2, 4, 6, 12),
+            default=2,
+            help="Even physics steps per frame; presets give 120, 240, 360 or 720 Hz at 60 fps.",
+        )
         return parser
 
 

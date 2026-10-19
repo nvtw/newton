@@ -15,6 +15,7 @@ result to a 1 m resting diameter and 0.18 kg total mass.
 import math
 from collections import deque
 from dataclasses import dataclass
+from itertools import product
 
 import numpy as np
 import warp as wp
@@ -22,16 +23,41 @@ import warp as wp
 
 @dataclass
 class HobermanSphere:
+    """Describe a mechanism in the original asset's meter scale."""
+
     bodies: list[tuple]
+    """Records of (label, world pose, local center of mass [m], inertia [kg m²], mass [kg]).
+
+    Poses contain (x, y, z, qx, qy, qz, qw), with positions in meters.
+    Inertias are 3-by-3 matrices about the center of mass in body axes.
+    """
     joints: list[tuple]
+    """Records of (kind, label, parent, child, parent pose, child pose, axes, coordinates).
+
+    Body indices use -1 for the world. Joint poses are relative to each body;
+    axes are in the joint frame. Coordinates are a free pose, ball quaternion,
+    or revolute angle [rad], according to kind.
+    """
     tiles: list[tuple]
+    """Visual box records of (body index, body-local pose, half-extents [m])."""
     tree_joint_count: int
+    """Number of leading joints forming the articulation tree; remaining joints close loops."""
     opening_label: str
+    """Label of the outer crossing hinge that drives the mechanism."""
     mount_body: int
+    """Index of the body supported at the outer crossing."""
     mount_frame: tuple
+    """Body-local mount pose, with position in meters."""
     pole: np.ndarray
+    """World-space outer crossing position in the neutral mechanism [m]."""
     radius_rest: float
+    """Mean radius of the body centers in the rest pose [m]."""
     opening_slope: float
+    """Dimensionless sine coefficient in the radial gain cos(phi) + slope*sin(phi)."""
+    reference_opening_slope: float
+    """Radial gain coefficient for the original resolution-two mechanism."""
+    diameter_rest: float
+    """Diameter of the origin-centered bounding sphere enclosing the resting strut boxes [m]."""
 
 
 def _rotation_z(angle):
@@ -59,10 +85,13 @@ def generate_sphere(resolution: int = 2) -> HobermanSphere:
         raise ValueError("Hoberman resolution must be a positive integer")
     count = 10 * resolution
     step = 2.0 * math.pi / count
+    reference_half_step = math.pi / 20
     outer, inner = 2.2, 1.35896
     width = 0.025 * min(1.0, 2.0 / resolution)
     bodies, joints, tiles = [], [], []
     centers, rotations, starts = [], [], []
+    corner_signs = np.array(list(product((-1, 1), repeat=3)))
+    radius_bounds = 0.0
 
     # The six unoriented icosahedral axes: one polar axis and five tilted axes.
     tilt = math.acos(1.0 / math.sqrt(5.0))
@@ -81,7 +110,7 @@ def generate_sphere(resolution: int = 2) -> HobermanSphere:
         ((0.0775690539384, -0.111760600551, 0), (-0.111760600551, 0.169415565709, 0), (0, 0, 0.245869636536))
     )
     mass = 2.6759607791900635
-    reference = np.column_stack((cell_anchors(math.pi / 20), np.ones(3)))
+    reference = np.column_stack((cell_anchors(reference_half_step), np.ones(3)))
     affine = np.linalg.solve(reference, cell_anchors(step / 2)).T
     deformation = np.zeros((3, 3))
     deformation[:2, :2] = affine[:, :2]
@@ -127,7 +156,9 @@ def generate_sphere(resolution: int = 2) -> HobermanSphere:
                     position = frame @ (anchors[1] + half_length * direction + np.array((0, 0, width)))
                     quantum = min(0.001, width)
                     extents = tuple(np.round(np.array((half_length, width, width)) / quantum) * quantum)
-                    tiles.append((body, _pose(position - center, axes), extents, (0.46, 0.46, 0.46)))
+                    tiles.append((body, _pose(position - center, axes), extents))
+                    corners = position + (corner_signs * extents) @ axes.T
+                    radius_bounds = max(radius_bounds, float(np.linalg.norm(corners, axis=1).max()))
 
     def body_index(ring, cell, side):
         return ring * 2 * count + 2 * (cell % count) + side
@@ -267,4 +298,6 @@ def generate_sphere(resolution: int = 2) -> HobermanSphere:
         pole,
         float(np.linalg.norm(centers[0])),
         opening_slope,
+        (outer - inner) / (outer + inner) / math.tan(reference_half_step),
+        2.0 * radius_bounds,
     )
