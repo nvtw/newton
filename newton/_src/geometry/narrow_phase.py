@@ -3422,7 +3422,12 @@ class NarrowPhase:
         if self._convex_stream is not None and self.has_generic_convex_pairs:
             main_stream = wp.get_stream(device)
             self._convex_stream.wait_event(main_stream.record_event(self._convex_events[0]))
-        with wp.ScopedStream(self._convex_stream) if main_stream is not None else contextlib.nullcontext():
+        # The explicit event already forks the stream, so skip ScopedStream's own sync.
+        with (
+            wp.ScopedStream(self._convex_stream, sync_enter=False)
+            if main_stream is not None
+            else contextlib.nullcontext()
+        ):
             self._launch_generic_convex(
                 device,
                 candidate_pair_count,
