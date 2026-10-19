@@ -974,6 +974,34 @@ def convex_mesh_interior_point(mesh_id: wp.uint64, scale: wp.vec3) -> wp.vec3:
 
 
 @wp.func
+def _query_aabb_to_bvh(
+    lower: wp.vec3,
+    upper: wp.vec3,
+    X_mesh_shape: wp.transform,
+    mesh_data: wp.vec4,
+    contact_threshold: float,
+    center: wp.vec3,
+) -> tuple[wp.vec3, wp.vec3, wp.vec3]:
+    """Convert scaled mesh-local query bounds to the unscaled mesh-BVH frame.
+
+    Pads the bounds by the world-space contact threshold and maps the shape's
+    interior point ``center`` into the same frame for back-face culling. Both
+    midphase bound builders use this so their query boxes stay identical.
+    """
+    mesh_scale = wp.vec3(mesh_data[0], mesh_data[1], mesh_data[2])
+    lower_bvh, upper_bvh, inv_scale = aabb_to_unscaled(lower, upper, mesh_scale)
+    margin_vec = wp.vec3(
+        contact_threshold / wp.max(wp.abs(mesh_scale[0]), 1.0e-12),
+        contact_threshold / wp.max(wp.abs(mesh_scale[1]), 1.0e-12),
+        contact_threshold / wp.max(wp.abs(mesh_scale[2]), 1.0e-12),
+    )
+    # Cull against an interior point. A hull's origin and AABB center can
+    # both lie outside it, which discards triangles touching the hull.
+    center_in_bvh = wp.cw_mul(wp.transform_point(X_mesh_shape, center), inv_scale)
+    return lower_bvh - margin_vec, upper_bvh + margin_vec, center_in_bvh
+
+
+@wp.func
 def _compute_mesh_vs_convex_query_aabb(
     mesh_shape: int,
     non_mesh_shape: int,
@@ -1009,19 +1037,9 @@ def _compute_mesh_vs_convex_query_aabb(
         generic_shape_data, orientation_in_mesh, pos_in_mesh, data_provider
     )
 
-    # Convert the bounds and world-space threshold to the unscaled BVH frame.
-    mesh_scale_vec4 = shape_data[mesh_shape]
-    mesh_scale = wp.vec3(mesh_scale_vec4[0], mesh_scale_vec4[1], mesh_scale_vec4[2])
-    aabb_lower_bvh, aabb_upper_bvh, inv_scale = aabb_to_unscaled(aabb_lower, aabb_upper, mesh_scale)
-    margin_vec = wp.vec3(
-        contact_threshold / wp.max(wp.abs(mesh_scale[0]), 1.0e-12),
-        contact_threshold / wp.max(wp.abs(mesh_scale[1]), 1.0e-12),
-        contact_threshold / wp.max(wp.abs(mesh_scale[2]), 1.0e-12),
+    return _query_aabb_to_bvh(
+        aabb_lower, aabb_upper, X_mesh_shape, shape_data[mesh_shape], contact_threshold, non_mesh_center
     )
-    # Cull against an interior point. A hull's origin and AABB center can
-    # both lie outside it, which discards triangles touching the hull.
-    center_in_bvh = wp.cw_mul(wp.transform_point(X_mesh_shape, non_mesh_center), inv_scale)
-    return aabb_lower_bvh - margin_vec, aabb_upper_bvh + margin_vec, center_in_bvh
 
 
 @wp.func
@@ -1081,17 +1099,7 @@ def _compute_mesh_vs_hull_query_aabb_tiled(
     lower = wp.tile_reduce(wp.min, wp.tile(lower, preserve_type=True))[0] + pos_in_mesh
     upper = wp.tile_reduce(wp.max, wp.tile(upper, preserve_type=True))[0] + pos_in_mesh
 
-    # Convert the bounds and world-space threshold to the unscaled BVH frame.
-    mesh_scale_vec4 = shape_data[mesh_shape]
-    mesh_scale = wp.vec3(mesh_scale_vec4[0], mesh_scale_vec4[1], mesh_scale_vec4[2])
-    aabb_lower_bvh, aabb_upper_bvh, inv_scale = aabb_to_unscaled(lower, upper, mesh_scale)
-    margin_vec = wp.vec3(
-        contact_threshold / wp.max(wp.abs(mesh_scale[0]), 1.0e-12),
-        contact_threshold / wp.max(wp.abs(mesh_scale[1]), 1.0e-12),
-        contact_threshold / wp.max(wp.abs(mesh_scale[2]), 1.0e-12),
-    )
-    center_in_bvh = wp.cw_mul(wp.transform_point(X_mesh_shape, hull_center), inv_scale)
-    return aabb_lower_bvh - margin_vec, aabb_upper_bvh + margin_vec, center_in_bvh
+    return _query_aabb_to_bvh(lower, upper, X_mesh_shape, shape_data[mesh_shape], contact_threshold, hull_center)
 
 
 @wp.func
