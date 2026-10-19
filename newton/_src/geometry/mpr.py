@@ -672,8 +672,8 @@ def create_solve_mpr(support_func: Any, _support_funcs: Any = None, depth_certif
                 if gap > 2e-6 * tolerance:
                     gradient = separating_normal
                 if accepted:
-                    # This direction has a certified candidate; further ray
-                    # steps only tighten a gap that is already within budget.
+                    # Accept this direction's certified contact and let the
+                    # outer search decide whether to explore another direction.
                     break
                 if gap < 5e-7 * tolerance:
                     break
@@ -686,8 +686,8 @@ def create_solve_mpr(support_func: Any, _support_funcs: Any = None, depth_certif
             if wp.dot(direction, gradient) > 1.0 - 1e-7:
                 break
             if resolved and depth_before - penetration < accuracy:
-                # Another direction cannot improve a certified depth beyond
-                # the acceptance budget; the search has converged.
+                # Stop when this direction does not reduce the certified depth
+                # by at least the acceptance budget.
                 break
             direction = gradient
         if not resolved:
@@ -901,7 +901,7 @@ def create_solve_mpr(support_func: Any, _support_funcs: Any = None, depth_certif
         if collision and solve_mpr_needs_refine(
             geom_a, geom_b, orientation_b, position_b, extend, penetration, valid, COLLIDE_EPSILON
         ):
-            if penetration <= extend:
+            if not valid and penetration <= extend:
                 resolved, separated_a, separated_b, separated_normal, separated_depth = solve_mpr_separated(
                     geom_a, geom_b, orientation_b, position_b, extend, data_provider, MAX_ITER, COLLIDE_EPSILON
                 )

@@ -375,8 +375,8 @@ def support_map(geom: GenericShapeData, direction: wp.vec3, data_provider: Any) 
         dir_xy_len_sq = wp.length_sq(dir_xy)
 
         if barrel_radius == 0.0:
-            # Keep the regular-cylinder path unchanged.
-            if dir_xy_len_sq > eps:
+            # Resolve lateral directions independently of the query magnitude.
+            if dir_xy_len_sq > eps * wp.length_sq(direction):
                 n_xy = dir_xy * _support_rsqrt_rn(dir_xy_len_sq)
                 lateral_point = wp.vec3(n_xy[0] * radius, n_xy[1] * radius, 0.0)
             else:
