@@ -93,26 +93,6 @@ def _box_triangle_depth(half: wp.vec3, first: wp.vec3, second: wp.vec3, third: w
 
 
 @wp.func
-def _box_face_depth(half_a: wp.vec3, half_b: wp.vec3, rotation: wp.quat, position: wp.vec3) -> tuple[wp.vec3, float]:
-    """Bound separation depth along the face normals of two enclosing boxes."""
-    axes_b = wp.quat_to_matrix(rotation)
-    normal = wp.vec3(1.0, 0.0, 0.0)
-    depth = float(1.0e30)
-    for index in range(3):
-        overlap_a = half_a[index] + wp.dot(wp.abs(axes_b[index]), half_b) - wp.abs(position[index])
-        if overlap_a < depth:
-            depth = overlap_a
-            normal = _axis(index) if position[index] >= 0.0 else -_axis(index)
-        axis_b = axes_b * _axis(index)
-        offset_b = wp.dot(axis_b, position)
-        overlap_b = half_b[index] + wp.dot(wp.abs(axis_b), half_a) - wp.abs(offset_b)
-        if overlap_b < depth:
-            depth = overlap_b
-            normal = axis_b if offset_b >= 0.0 else -axis_b
-    return normal, depth
-
-
-@wp.func
 def _box_box_depth(half_a: wp.vec3, half_b: wp.vec3, rotation: wp.quat, position: wp.vec3) -> tuple[wp.vec3, float]:
     """Return the minimum-depth normal and depth of two boxes in A's frame.
 
@@ -455,5 +435,15 @@ def create_solve_box_penetration(support: Any):
         normal, depth = _box_hull_finish(a, b, rotation, position, upper, lower, normal, depth)
         return True, normal, depth
 
+    @wp.func
+    def closed_form_depth(a: Any, b: Any, rotation: wp.quat, position: wp.vec3) -> tuple[float, bool]:
+        """Return the exact box-box depth, and whether the pair has a closed form."""
+        if a.shape_type == int(GeoType.BOX) and b.shape_type == int(GeoType.BOX):
+            _normal, depth = _box_box_depth(a.scale, b.scale, rotation, position)
+            return depth, True
+        return 0.0, False
+
+    solve.applies = box_polyhedron_pair
+    solve.closed_form = closed_form_depth
     solve.cooperative = cooperative_certificate
     return solve

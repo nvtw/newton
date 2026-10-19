@@ -35,14 +35,11 @@ from typing import Any
 
 import warp as wp
 
-from .penetration import _box_box_depth, _box_face_depth, create_solve_box_penetration
-from .penetration import box_polyhedron_pair as solve_mpr_needs_certificate
 from .support_function import (
     _has_verified_hull,
     create_shape_center_function,
     create_shape_support_function,
 )
-from .types import GeoType
 
 
 @wp.struct
@@ -163,7 +160,60 @@ def create_support_map_function(support_func: Any, use_precomputed_center: bool 
     return support_map_b, minkowski_support, geometric_center
 
 
-def create_solve_mpr(support_func: Any, _support_funcs: Any = None):
+@wp.func
+def _enclosing_box_depth(
+    half_a: wp.vec3, half_b: wp.vec3, rotation: wp.quat, position: wp.vec3
+) -> tuple[wp.vec3, float]:
+    """Bound the overlap depth along the face normals of two enclosing boxes."""
+    axes_b = wp.quat_to_matrix(rotation)
+    normal = wp.vec3(1.0, 0.0, 0.0)
+    depth = float(1.0e30)
+    for index in range(3):
+        axis_a = wp.vec3(0.0)
+        axis_a[index] = 1.0
+        overlap_a = half_a[index] + wp.dot(wp.abs(axes_b[index]), half_b) - wp.abs(position[index])
+        if overlap_a < depth:
+            depth = overlap_a
+            normal = axis_a if position[index] >= 0.0 else -axis_a
+        axis_b = axes_b * axis_a
+        offset_b = wp.dot(axis_b, position)
+        overlap_b = half_b[index] + wp.dot(wp.abs(axis_b), half_a) - wp.abs(offset_b)
+        if overlap_b < depth:
+            depth = overlap_b
+            normal = axis_b if offset_b >= 0.0 else -axis_b
+    return normal, depth
+
+
+def _no_depth_certificate():
+    """Depth certificate for solvers without shape-specific minimum-depth tests."""
+
+    @wp.func
+    def applies(a: Any, b: Any) -> bool:
+        return False
+
+    @wp.func
+    def closed_form(a: Any, b: Any, rotation: wp.quat, position: wp.vec3) -> tuple[float, bool]:
+        return 0.0, False
+
+    @wp.func
+    def solve(
+        a: Any, b: Any, rotation: wp.quat, position: wp.vec3, provider: Any, hint: wp.vec3
+    ) -> tuple[wp.vec3, float, bool]:
+        return hint, 0.0, False
+
+    @wp.func
+    def cooperative(
+        a: Any, b: Any, rotation: wp.quat, position: wp.vec3, provider: Any, hint: wp.vec3, lane: int, lanes: int
+    ) -> tuple[bool, wp.vec3, float]:
+        return False, hint, 0.0
+
+    solve.applies = applies
+    solve.closed_form = closed_form
+    solve.cooperative = cooperative
+    return solve
+
+
+def create_solve_mpr(support_func: Any, _support_funcs: Any = None, depth_certificate: Any = None):
     """
     Factory function to create MPR solver with specific support and center functions.
 
@@ -173,6 +223,15 @@ def create_solve_mpr(support_func: Any, _support_funcs: Any = None):
             :func:`create_support_map_function`. When provided, these are reused
             instead of creating new ones, allowing multiple solvers to share
             compiled support code.
+        depth_certificate: Optional factory ``f(support) -> certificate`` for
+            shape pairs whose minimum depth has a closed-form or otherwise
+            exact test, such as :func:`~newton._src.geometry.penetration.create_solve_box_penetration`.
+            ``certificate.applies(a, b)`` selects the pairs,
+            ``certificate(a, b, rotation, position, provider, hint)`` returns
+            ``(normal, depth, verified)``, ``certificate.closed_form`` an exact
+            depth without support queries when one exists, and
+            ``certificate.cooperative`` the block-cooperative variant used by
+            the split refinement kernel. MPR itself stays shape-agnostic.
 
     Returns:
         ``solve_mpr`` wrapper function.  The core function is available as
@@ -180,8 +239,8 @@ def create_solve_mpr(support_func: Any, _support_funcs: Any = None):
         transform themselves (e.g. fused MPR+GJK). Split kernels use
         ``solve_mpr.portal_core`` for the bare portal pass, which also reports
         whether its witnesses are valid, and ``solve_mpr.refine_core`` to
-        refine overlaps whose witnesses are not or for which
-        ``solve_mpr.needs_certificate`` requires a minimum-depth check.
+        refine overlaps whose witnesses are not or for which the depth
+        certificate applies.
     """
 
     if _support_funcs is not None:
@@ -213,7 +272,10 @@ def create_solve_mpr(support_func: Any, _support_funcs: Any = None):
             query_b.shape_index = -1
         return _minkowski_support(query_a, query_b, direction, rotation, position, extend, provider)
 
-    solve_sat = create_solve_box_penetration(certificate_support)
+    if depth_certificate is not None:
+        certificate = depth_certificate(certificate_support)
+    else:
+        certificate = _no_depth_certificate()
 
     @wp.func
     def portal_retry_seed(v0: Any, v1: Vert, v2: Vert, v3: Vert, normal: wp.vec3, seed: wp.vec3) -> wp.vec3:
@@ -689,12 +751,12 @@ def create_solve_mpr(support_func: Any, _support_funcs: Any = None):
         minimum_verified = False
         bound_normal = normal
         bound_depth = float(1.0e30)
-        if solve_mpr_needs_certificate(geom_a, geom_b):
+        if certificate.applies(geom_a, geom_b):
             minimum_normal = certificate_normal
             minimum_depth = certificate_depth
             minimum_verified = certificate_ready
             if not certificate_ready:
-                minimum_normal, minimum_depth, minimum_verified = solve_sat(
+                minimum_normal, minimum_depth, minimum_verified = certificate(
                     geom_a, geom_b, orientation_b, position_b, data_provider, normal
                 )
             if minimum_verified and minimum_depth > COLLIDE_EPSILON:
@@ -708,7 +770,7 @@ def create_solve_mpr(support_func: Any, _support_funcs: Any = None):
         else:
             if wp.min(geom_a.bounds_half) > 0.0 and wp.min(geom_b.bounds_half) > 0.0:
                 offset = position_b + wp.quat_rotate(orientation_b, geom_b.center) - geom_a.center
-                bound_normal, bound_depth = _box_face_depth(
+                bound_normal, bound_depth = _enclosing_box_depth(
                     geom_a.bounds_half, geom_b.bounds_half, orientation_b, offset
                 )
                 # Separating enclosing boxes separates the shapes. A deeper portal
@@ -763,14 +825,14 @@ def create_solve_mpr(support_func: Any, _support_funcs: Any = None):
         """
         if not valid:
             return True
-        if solve_mpr_needs_certificate(geom_a, geom_b):
-            if geom_a.shape_type == int(GeoType.BOX) and geom_b.shape_type == int(GeoType.BOX):
-                _n, depth = _box_box_depth(geom_a.scale, geom_b.scale, orientation_b, position_b)
+        if certificate.applies(geom_a, geom_b):
+            depth, known = certificate.closed_form(geom_a, geom_b, orientation_b, position_b)
+            if known:
                 return depth > COLLIDE_EPSILON and wp.abs(penetration - extend - depth) > COLLIDE_EPSILON
             return True
         if wp.min(geom_a.bounds_half) > 0.0 and wp.min(geom_b.bounds_half) > 0.0:
             offset = position_b + wp.quat_rotate(orientation_b, geom_b.center) - geom_a.center
-            _n, bound_depth = _box_face_depth(geom_a.bounds_half, geom_b.bounds_half, orientation_b, offset)
+            _n, bound_depth = _enclosing_box_depth(geom_a.bounds_half, geom_b.bounds_half, orientation_b, offset)
             return penetration > bound_depth + extend + COLLIDE_EPSILON
         return False
 
@@ -922,9 +984,8 @@ def create_solve_mpr(support_func: Any, _support_funcs: Any = None):
     # Split collision kernels refine unresolved portals in a separate pass so
     # the common MPR pass does not carry the raycast's register/local storage.
     solve_mpr.portal_core = solve_mpr_portal
-    solve_mpr.needs_certificate = solve_mpr_needs_certificate
     solve_mpr.refine_core = solve_mpr_refine
     solve_mpr.separated_core = solve_mpr_separated
     solve_mpr.needs_refine = solve_mpr_needs_refine
-    solve_mpr.box_hull_certificate = solve_sat.cooperative
+    solve_mpr.cooperative_certificate = certificate.cooperative
     return solve_mpr

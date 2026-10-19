@@ -89,6 +89,7 @@ from ..utils.heightfield import (
     get_triangle_shape_from_heightfield,
     heightfield_vs_convex_midphase,
 )
+from .penetration import create_solve_box_penetration
 
 _SPARSE_GJK_PAIR_CAPACITY_THRESHOLD = 1_000_000
 
@@ -1327,7 +1328,9 @@ def create_narrow_phase_kernels_gjk_mpr_split(
         post_process_contact = post_process_axial_on_discrete_contact
 
     support_funcs = create_support_map_function(support_func, use_precomputed_center=True)
-    solve_mpr = create_solve_mpr(support_func, _support_funcs=support_funcs)
+    solve_mpr = create_solve_mpr(
+        support_func, _support_funcs=support_funcs, depth_certificate=create_solve_box_penetration
+    )
     solve_gjk = create_solve_closest_distance(support_func, _support_funcs=support_funcs)
     prepare_pair = create_prepare_convex_pair(external_aabb, speculative)
     write_result = create_write_convex_query_result(
@@ -1414,7 +1417,7 @@ def create_narrow_phase_kernels_gjk_mpr_split(
                     provider,
                     wp.vec3(0.0),
                 )
-                needs_certificate = False
+                refine_portal = False
                 if collision:
                     if query.type_a != GeoType.PLANE and query.type_b != GeoType.PLANE:
                         query.geom_a.bounds_half = _penetration_bounds_half(
@@ -1431,7 +1434,7 @@ def create_narrow_phase_kernels_gjk_mpr_split(
                             shape_collision_aabb_lower,
                             shape_collision_aabb_upper,
                         )
-                    needs_certificate = wp.static(solve_mpr.needs_refine)(
+                    refine_portal = wp.static(solve_mpr.needs_refine)(
                         query.geom_a,
                         query.geom_b,
                         query.relative_orientation_b,
@@ -1440,7 +1443,7 @@ def create_narrow_phase_kernels_gjk_mpr_split(
                         penetration,
                         witnesses_valid,
                     )
-                if collision and (not witnesses_valid or needs_certificate):
+                if collision and (not witnesses_valid or refine_portal):
                     # Queue confirmed overlaps from the back of the same array,
                     # keeping both passes compact without another work buffer.
                     result = ConvexQueryResult()
@@ -1580,7 +1583,7 @@ def create_narrow_phase_kernels_gjk_mpr_split(
                         certificate_depth = float(0.0)
                         if not separated_pair:
                             certificate_ready, certificate_normal, certificate_depth = wp.static(
-                                solve_mpr.box_hull_certificate
+                                solve_mpr.cooperative_certificate
                             )(
                                 query.geom_a,
                                 query.geom_b,
