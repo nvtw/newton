@@ -192,10 +192,6 @@ def _no_depth_certificate():
         return False
 
     @wp.func
-    def closed_form(a: Any, b: Any, rotation: wp.quat, position: wp.vec3) -> tuple[float, bool]:
-        return 0.0, False
-
-    @wp.func
     def solve(
         a: Any, b: Any, rotation: wp.quat, position: wp.vec3, provider: Any, hint: wp.vec3
     ) -> tuple[wp.vec3, float, bool]:
@@ -208,7 +204,6 @@ def _no_depth_certificate():
         return False, hint, 0.0
 
     solve.applies = applies
-    solve.closed_form = closed_form
     solve.cooperative = cooperative
     return solve
 
@@ -228,10 +223,9 @@ def create_solve_mpr(support_func: Any, _support_funcs: Any = None, depth_certif
             exact test, such as :func:`~newton._src.geometry.penetration.create_solve_box_penetration`.
             ``certificate.applies(a, b)`` selects the pairs,
             ``certificate(a, b, rotation, position, provider, hint)`` returns
-            ``(normal, depth, verified)``, ``certificate.closed_form`` an exact
-            depth without support queries when one exists, and
-            ``certificate.cooperative`` the block-cooperative variant used by
-            the split refinement kernel. MPR itself stays shape-agnostic.
+            ``(normal, depth, verified)``, and ``certificate.cooperative`` is
+            the block-cooperative variant used by the split refinement
+            kernel. MPR itself stays shape-agnostic.
 
     Returns:
         ``solve_mpr`` wrapper function.  The core function is available as
@@ -839,9 +833,9 @@ def create_solve_mpr(support_func: Any, _support_funcs: Any = None, depth_certif
         if not valid:
             return True
         if certificate.applies(geom_a, geom_b):
-            depth, known = certificate.closed_form(geom_a, geom_b, orientation_b, position_b)
-            if known:
-                return depth > COLLIDE_EPSILON and wp.abs(penetration - extend - depth) > COLLIDE_EPSILON
+            # The certificate itself is the cheapest exact test for these
+            # pairs; inlining a closed form here would only lengthen the
+            # portal pass's latency chain for every pair.
             return True
         if wp.min(geom_a.bounds_half) > 0.0 and wp.min(geom_b.bounds_half) > 0.0:
             offset = position_b + wp.quat_rotate(orientation_b, geom_b.center) - geom_a.center

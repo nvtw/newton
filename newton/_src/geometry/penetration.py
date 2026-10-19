@@ -435,15 +435,6 @@ def create_solve_box_penetration(support: Any):
         normal, depth = _box_hull_finish(a, b, rotation, position, upper, lower, normal, depth)
         return True, normal, depth
 
-    @wp.func
-    def closed_form_depth(a: Any, b: Any, rotation: wp.quat, position: wp.vec3) -> tuple[float, bool]:
-        """Return the exact box-box depth, and whether the pair has a closed form."""
-        if a.shape_type == int(GeoType.BOX) and b.shape_type == int(GeoType.BOX):
-            _normal, depth = _box_box_depth(a.scale, b.scale, rotation, position)
-            return depth, True
-        return 0.0, False
-
     solve.applies = box_polyhedron_pair
-    solve.closed_form = closed_form_depth
     solve.cooperative = cooperative_certificate
     return solve
