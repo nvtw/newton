@@ -1574,10 +1574,9 @@ def create_narrow_phase_kernels_gjk_mpr_split(
                     signed_distance = float(0.0)
                     if wp.static(refine_overlap):
                         pending = query_results[pair_index]
-                        # A portal depth within the margin proves the physical
-                        # shapes are separated; the distance query resolves them
-                        # exactly, so neither certificate nor retries are needed.
-                        separated_pair = pending.signed_distance <= query.enlarge
+                        # Try a distance query for a near-touching invalid portal
+                        # before the heavier overlap recovery.
+                        separated_pair = not witnesses_valid and pending.signed_distance <= query.enlarge
                         certificate_ready = False
                         certificate_normal = wp.vec3(0.0)
                         certificate_depth = float(0.0)
