@@ -45,45 +45,6 @@ GJK_CUTOFF_TOLERANCE = 64.0 * 1.1920929e-7
 Mat83f = wp.types.matrix(shape=(8, 3), dtype=wp.float32)
 
 
-# Runtime indices into the simplex force it into local memory. These helpers
-# select among statically indexed slots so it can stay in registers.
-@wp.func
-def _row(v: Mat83f, row: int) -> wp.vec3:
-    """Return row ``row`` of ``v``."""
-    result = v[0]
-    for k in range(1, 8):
-        if row == k:
-            result = v[k]
-    return result
-
-
-@wp.func
-def _with_row(v: Mat83f, row: int, value: wp.vec3) -> Mat83f:
-    """Return ``v`` with row ``row`` replaced by ``value``."""
-    for k in range(8):
-        if row == k:
-            v[k] = value
-    return v
-
-
-@wp.func
-def _with_component(x: wp.vec4, index: int, value: float) -> wp.vec4:
-    """Return ``x`` with component ``index`` replaced by ``value``."""
-    for k in range(4):
-        if index == k:
-            x[k] = value
-    return x
-
-
-@wp.func
-def _with_index(x: wp.vec4i, index: int, value: int) -> wp.vec4i:
-    """Return ``x`` with component ``index`` replaced by ``value``."""
-    for k in range(4):
-        if index == k:
-            x[k] = value
-    return x
-
-
 @wp.func
 def coordinate_scale(x: wp.vec3) -> float:
     """Return the sum of absolute coordinates, an upper bound on the length [m]."""
@@ -133,8 +94,8 @@ def create_solve_closest_distance(support_func: Any, _support_funcs: Any = None)
         - v[2*i + 1] stores BtoA (vector from B to A)
         """
         result = Vert()
-        result.B = _row(v, 2 * i)
-        result.BtoA = _row(v, 2 * i + 1)
+        result.B = v[2 * i]
+        result.BtoA = v[2 * i + 1]
         return result
 
     @wp.func
@@ -146,8 +107,8 @@ def create_solve_closest_distance(support_func: Any, _support_funcs: Any = None)
         """Find closest point on line segment."""
 
         # Get Minkowski difference vectors (BtoA) directly
-        a = _row(v, 2 * i0 + 1)
-        b = _row(v, 2 * i1 + 1)
+        a = v[2 * i0 + 1]
+        b = v[2 * i1 + 1]
 
         edge = b - a
         vsq = wp.length_sq(edge)
@@ -175,8 +136,8 @@ def create_solve_closest_distance(support_func: Any, _support_funcs: Any = None)
             lambda0 = 1.0
             lambda1 = 0.0
 
-        bc = _with_component(bc, i0, lambda0)
-        bc = _with_component(bc, i1, lambda1)
+        bc[i0] = lambda0
+        bc[i1] = lambda1
 
         closest = lambda0 * a + lambda1 * b
         if lambda0 > 0.0 and lambda1 > 0.0 and wp.length_sq(closest) <= EPSILON * EPSILON:
@@ -194,9 +155,9 @@ def create_solve_closest_distance(support_func: Any, _support_funcs: Any = None)
         """Find closest point on triangle."""
 
         # Get Minkowski difference vectors (BtoA) directly
-        a = _row(v, 2 * i0 + 1)
-        b = _row(v, 2 * i1 + 1)
-        c = _row(v, 2 * i2 + 1)
+        a = v[2 * i0 + 1]
+        b = v[2 * i1 + 1]
+        c = v[2 * i2 + 1]
 
         u = a - b
         w = a - c
@@ -255,9 +216,9 @@ def create_solve_closest_distance(support_func: Any, _support_funcs: Any = None)
         if mask != wp.uint32(0):
             return closest_pt, bc, mask
 
-        bc = _with_component(bc, i0, lambda0)
-        bc = _with_component(bc, i1, lambda1)
-        bc = _with_component(bc, i2, lambda2)
+        bc[i0] = lambda0
+        bc[i1] = lambda1
+        bc[i2] = lambda2
 
         mask = (wp.uint32(1) << wp.uint32(i0)) | (wp.uint32(1) << wp.uint32(i1)) | (wp.uint32(1) << wp.uint32(i2))
         # Project onto the face directly. Summing large weighted vertices can
@@ -511,6 +472,7 @@ def create_solve_closest_distance(support_func: Any, _support_funcs: Any = None)
                     # Compare BtoA vectors directly
                     if wp.length_sq(simplex_v[2 * i + 1] - w_v) < duplicate_epsilon * duplicate_epsilon:
                         is_duplicate = bool(True)
+                        break
             if is_duplicate:
                 break
 
@@ -522,16 +484,16 @@ def create_solve_closest_distance(support_func: Any, _support_funcs: Any = None)
 
             for i in range(4):
                 if (simplex_usage_mask & (wp.uint32(1) << wp.uint32(i))) != wp.uint32(0):
-                    indices = _with_index(indices, use_count, i)
+                    indices[use_count] = i
                     use_count += 1
                 else:
                     free_slot = i
 
-            indices = _with_index(indices, use_count, free_slot)
+            indices[use_count] = free_slot
             use_count += 1
             # Set vertex in simplex using new storage convention: B, then BtoA
-            simplex_v = _with_row(simplex_v, 2 * free_slot, w.B)
-            simplex_v = _with_row(simplex_v, 2 * free_slot + 1, w.BtoA)
+            simplex_v[2 * free_slot] = w.B
+            simplex_v[2 * free_slot + 1] = w.BtoA
 
             closest = wp.vec3(0.0, 0.0, 0.0)
             success = True
@@ -539,9 +501,9 @@ def create_solve_closest_distance(support_func: Any, _support_funcs: Any = None)
             if use_count == 1:
                 i0 = indices[0]
                 # Get BtoA directly (Minkowski difference)
-                closest = _row(simplex_v, 2 * i0 + 1)
+                closest = simplex_v[2 * i0 + 1]
                 simplex_usage_mask = wp.uint32(1) << wp.uint32(i0)
-                simplex_barycentric = _with_component(simplex_barycentric, i0, 1.0)
+                simplex_barycentric[i0] = 1.0
             elif use_count == 2:
                 i0 = indices[0]
                 i1 = indices[1]
