@@ -1804,9 +1804,9 @@ add_example_test(
         },
         {
             "test_suffix": "fine",
-            # Odd resolution changes the tilted rings' intersection indexing.
-            # Five seconds also exercises the adapted compaction stroke.
-            "test_options": {"num-frames": 300, "world-count": 1, "stage-count": 2, "flower-resolution": 3},
+            # Exercise the finer rings' adapted compaction stroke on a short tower.
+            # At 220 frames the opening is about -0.15 rad, past the 0.04 rad check.
+            "test_options": {"num-frames": 220, "world-count": 1, "stage-count": 2, "flower-resolution": 3},
         },
     ],
 )

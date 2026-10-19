@@ -25,7 +25,7 @@ import warp as wp
 
 import newton
 import newton.examples
-from newton.examples.kamino._hoberman_sphere import generate_sphere
+from newton.examples.kamino.utils.hoberman import generate_sphere
 from newton.solvers import SolverKamino
 
 # Saturated colors distinguish the interlocking flower rings.

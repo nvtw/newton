@@ -12,8 +12,8 @@ from itertools import product
 import numpy as np
 import warp as wp
 
-from newton.examples.kamino._hoberman_sphere import generate_sphere
 from newton.examples.kamino.example_kamino_stewart_platform import Example
+from newton.examples.kamino.utils.hoberman import generate_sphere
 
 
 class TestHobermanGeometry(unittest.TestCase):
