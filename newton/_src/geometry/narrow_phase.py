@@ -3282,15 +3282,21 @@ class NarrowPhase:
             shape_transform: Array of world-space transforms for each shape
             shape_source: Array of source pointers (mesh IDs, etc.) for each shape
             shape_support_data: Optional per-shape ``wp.vec4i`` metadata containing
-                packed support-LUT, vertex-offset, and neighbor starts plus the LUT resolution.
-                The final entry packs resolution in its low 16 bits and strict hull
-                validity in bit 16. Zero resolution disables acceleration.
+                packed support-LUT, vertex-offset, and ``support_neighbors`` block starts
+                plus the LUT resolution. The block start is also set for verified hulls
+                without acceleration. The final entry packs resolution in its low 16 bits
+                and strict hull validity in bit 16. Zero resolution disables acceleration.
             support_lut: Optional packed octahedral-direction lookup tables whose entries
                 select seed vertices for convex support walks.
             support_vertex_offsets: Optional packed CSR offsets delimiting each convex
-                vertex's entries in ``support_neighbors``.
-            support_neighbors: Optional packed CSR vertex-adjacency indices used by convex
-                support walks.
+                vertex's entries in ``support_neighbors``. They index past the hull's
+                edge records.
+            support_neighbors: Optional packed per-hull blocks. A verified hull's block
+                starts with its edge count and one ``(a, b, c1, c2)`` vertex record per
+                edge, whose faces ``cross(b - a, c1 - a)`` and ``cross(c2 - a, b - a)``
+                point outward; exact box-hull depth certificates read these records.
+                CSR vertex-adjacency indices for support walks follow. Without the edge
+                records, box-hull depths fall back to uncertified support-plane bounds.
             shape_mesh_properties: Per-shape mesh property bitfield.
             mesh_boundary_flags: Optional packed per-face bits marking open-boundary
                 edges and vertices of meshes queried with pseudo-normal signs.
@@ -3976,15 +3982,21 @@ class NarrowPhase:
             shape_transform: Array of world-space transforms for each shape
             shape_source: Array of source pointers (mesh IDs, etc.) for each shape
             shape_support_data: Optional per-shape ``wp.vec4i`` metadata containing
-                packed support-LUT, vertex-offset, and neighbor starts plus the LUT resolution.
-                The final entry packs resolution in its low 16 bits and strict hull
-                validity in bit 16. Zero resolution disables acceleration.
+                packed support-LUT, vertex-offset, and ``support_neighbors`` block starts
+                plus the LUT resolution. The block start is also set for verified hulls
+                without acceleration. The final entry packs resolution in its low 16 bits
+                and strict hull validity in bit 16. Zero resolution disables acceleration.
             support_lut: Optional packed octahedral-direction lookup tables whose entries
                 select seed vertices for convex support walks.
             support_vertex_offsets: Optional packed CSR offsets delimiting each convex
-                vertex's entries in ``support_neighbors``.
-            support_neighbors: Optional packed CSR vertex-adjacency indices used by convex
-                support walks.
+                vertex's entries in ``support_neighbors``. They index past the hull's
+                edge records.
+            support_neighbors: Optional packed per-hull blocks. A verified hull's block
+                starts with its edge count and one ``(a, b, c1, c2)`` vertex record per
+                edge, whose faces ``cross(b - a, c1 - a)`` and ``cross(c2 - a, b - a)``
+                point outward; exact box-hull depth certificates read these records.
+                CSR vertex-adjacency indices for support walks follow. Without the edge
+                records, box-hull depths fall back to uncertified support-plane bounds.
             shape_mesh_properties: Per-shape mesh property bitfield.
             mesh_boundary_flags: Optional packed per-face bits marking open-boundary
                 edges and vertices of meshes queried with pseudo-normal signs.
