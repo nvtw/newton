@@ -1571,39 +1571,58 @@ def create_narrow_phase_kernels_gjk_mpr_split(
                     signed_distance = float(0.0)
                     if wp.static(refine_overlap):
                         pending = query_results[pair_index]
-                        certificate_ready, certificate_normal, certificate_depth = wp.static(
-                            solve_mpr.box_hull_certificate
-                        )(
-                            query.geom_a,
-                            query.geom_b,
-                            query.relative_orientation_b,
-                            query.relative_position_b,
-                            provider,
-                            pending.normal,
-                            lane,
-                            wp.block_dim(),
-                        )
-                        if lane == 0:
-                            seed = pending.point_a
-                            if witnesses_valid:
-                                seed = wp.vec3(0.0)
-                            point_a, point_b, normal, penetration, resolved = wp.static(solve_mpr.refine_core)(
+                        # A portal depth within the margin proves the physical
+                        # shapes are separated; the distance query resolves them
+                        # exactly, so neither certificate nor retries are needed.
+                        separated_pair = pending.signed_distance <= query.enlarge
+                        certificate_ready = False
+                        certificate_normal = wp.vec3(0.0)
+                        certificate_depth = float(0.0)
+                        if not separated_pair:
+                            certificate_ready, certificate_normal, certificate_depth = wp.static(
+                                solve_mpr.box_hull_certificate
+                            )(
                                 query.geom_a,
                                 query.geom_b,
                                 query.relative_orientation_b,
                                 query.relative_position_b,
-                                query.enlarge,
                                 provider,
-                                seed,
-                                pending.point_a,
-                                pending.point_b,
                                 pending.normal,
-                                pending.signed_distance,
-                                witnesses_valid,
-                                certificate_ready,
-                                certificate_normal,
-                                certificate_depth,
+                                lane,
+                                wp.block_dim(),
                             )
+                        if lane == 0:
+                            penetration = float(0.0)
+                            if separated_pair:
+                                resolved, point_a, point_b, normal, penetration = wp.static(solve_mpr.separated_core)(
+                                    query.geom_a,
+                                    query.geom_b,
+                                    query.relative_orientation_b,
+                                    query.relative_position_b,
+                                    query.enlarge,
+                                    provider,
+                                )
+                            if not resolved:
+                                seed = pending.point_a
+                                if witnesses_valid:
+                                    seed = wp.vec3(0.0)
+                                point_a, point_b, normal, penetration, resolved = wp.static(solve_mpr.refine_core)(
+                                    query.geom_a,
+                                    query.geom_b,
+                                    query.relative_orientation_b,
+                                    query.relative_position_b,
+                                    query.enlarge,
+                                    provider,
+                                    seed,
+                                    pending.point_a,
+                                    pending.point_b,
+                                    pending.normal,
+                                    pending.signed_distance,
+                                    witnesses_valid,
+                                    certificate_ready,
+                                    certificate_normal,
+                                    certificate_depth,
+                                )
                             point_a -= normal * (0.5 * query.enlarge)
                             point_b += normal * (0.5 * query.enlarge)
                             signed_distance = -penetration + query.enlarge

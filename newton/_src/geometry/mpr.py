@@ -775,6 +775,40 @@ def create_solve_mpr(support_func: Any, _support_funcs: Any = None):
         return False
 
     @wp.func
+    def solve_mpr_separated(
+        geom_a: Any,
+        geom_b: Any,
+        orientation_b: wp.quat,
+        position_b: wp.vec3,
+        extend: float,
+        data_provider: Any,
+        MAX_ITER: int = 30,
+        COLLIDE_EPSILON: float = 1e-5,
+    ) -> tuple[bool, wp.vec3, wp.vec3, wp.vec3, float]:
+        """Resolve a pair whose portal depth is within the margin with a distance query.
+
+        The portal depth is a support value and so bounds the true depth from
+        above: such shapes are physically separated, and the distance query
+        gives their exact gap, witnesses and normal without any retries. The
+        gap is accepted when the support plane of the reported normal confirms
+        it, which an unconverged query cannot do.
+        """
+        # The gaps to resolve are below GJK's default tolerance; query at the
+        # raycast's precision, relative to the coordinate scale like its tolerances.
+        scale = wp.max(1.0, wp.length(position_b))
+        separated, point_a, point_b, normal, gap = solve_gjk(
+            geom_a, geom_b, orientation_b, position_b, 0.0, data_provider, MAX_ITER, 1.0e-7 * scale
+        )
+        if not separated or wp.abs(wp.length_sq(normal) - 1.0) > 1e-4:
+            return False, point_a, point_b, normal, gap
+        certificate = certificate_support(geom_a, geom_b, normal, orientation_b, position_b, 0.0, data_provider)
+        tolerance = COLLIDE_EPSILON * wp.max(1.0, wp.max(wp.length(point_a), wp.length(point_b)))
+        if wp.abs(wp.dot(certificate.BtoA, normal) + gap) > tolerance:
+            return False, point_a, point_b, normal, gap
+        correction = normal * (0.5 * extend)
+        return True, point_a + correction, point_b - correction, normal, extend - gap
+
+    @wp.func
     def solve_mpr_core(
         geom_a: Any,
         geom_b: Any,
@@ -792,6 +826,13 @@ def create_solve_mpr(support_func: Any, _support_funcs: Any = None):
         if collision and solve_mpr_needs_refine(
             geom_a, geom_b, orientation_b, position_b, extend, penetration, valid, COLLIDE_EPSILON
         ):
+            resolved = False
+            if penetration <= extend:
+                resolved, point_a, point_b, normal, penetration = solve_mpr_separated(
+                    geom_a, geom_b, orientation_b, position_b, extend, data_provider, MAX_ITER, COLLIDE_EPSILON
+                )
+            if resolved:
+                return True, point_a, point_b, normal, penetration
             point_a, point_b, normal, penetration, collision = solve_mpr_refine(
                 geom_a,
                 geom_b,
@@ -883,6 +924,7 @@ def create_solve_mpr(support_func: Any, _support_funcs: Any = None):
     solve_mpr.portal_core = solve_mpr_portal
     solve_mpr.needs_certificate = solve_mpr_needs_certificate
     solve_mpr.refine_core = solve_mpr_refine
+    solve_mpr.separated_core = solve_mpr_separated
     solve_mpr.needs_refine = solve_mpr_needs_refine
     solve_mpr.box_hull_certificate = solve_sat.cooperative
     return solve_mpr
