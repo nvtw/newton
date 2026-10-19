@@ -110,6 +110,22 @@ def test_refinement_signed_separation(test, device):
             elif shift == -2.0 * gap:
                 test.assertTrue(np.all(depths > 0.0))
 
+    # A near-touching box-hull pair can have a valid portal but an uncertified
+    # GJK shortcut. Keep the portal witnesses and depth when that query fails.
+    vertices = np.array(list(product((-0.5, 0.5), repeat=3)), dtype=np.float32)
+    indices = ConvexHull(vertices).simplices
+    pose = wp.transform(wp.vec3(1.000001, 0.0, 0.49), wp.quat_identity())
+    expected_gap = float(pose.p[0]) - 1.0
+    for split, swap in product((False, True) if device.is_cuda else (False,), (False, True)):
+        with test.subTest(shortcut_fallback=True, split=split, swap=swap):
+            pa, pb, normals = _contacts(
+                test, device, np.full(3, 0.5), vertices, indices, pose, np.ones(3), split=split, swap=swap
+            )
+            np.testing.assert_allclose(normals, np.tile([1.0, 0.0, 0.0], (len(normals), 1)), atol=1.0e-5)
+            np.testing.assert_allclose(pa[:, 0], 0.5, atol=1.0e-6)
+            np.testing.assert_allclose(pb[:, 0], 0.5 + expected_gap, atol=1.0e-6)
+            np.testing.assert_allclose(np.sum((pa - pb) * normals, axis=1), -expected_gap, atol=1.0e-6)
+
 
 def test_refinement_source_topology(test, device):
     """Keep correct contacts when the same support vertices have concave or incomplete triangles."""

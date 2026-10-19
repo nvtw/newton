@@ -895,13 +895,14 @@ def create_solve_mpr(support_func: Any, _support_funcs: Any = None, depth_certif
         if collision and solve_mpr_needs_refine(
             geom_a, geom_b, orientation_b, position_b, extend, penetration, valid, COLLIDE_EPSILON
         ):
-            resolved = False
             if penetration <= extend:
-                resolved, point_a, point_b, normal, penetration = solve_mpr_separated(
+                resolved, separated_a, separated_b, separated_normal, separated_depth = solve_mpr_separated(
                     geom_a, geom_b, orientation_b, position_b, extend, data_provider, MAX_ITER, COLLIDE_EPSILON
                 )
-            if resolved:
-                return True, point_a, point_b, normal, penetration
+                if resolved:
+                    return True, separated_a, separated_b, separated_normal, separated_depth
+            # A rejected distance query must not replace the portal's valid
+            # witnesses or its penetration bound for refinement.
             point_a, point_b, normal, penetration, collision = solve_mpr_refine(
                 geom_a,
                 geom_b,
