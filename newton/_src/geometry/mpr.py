@@ -581,7 +581,11 @@ def create_solve_mpr(support_func: Any, _support_funcs: Any = None, depth_certif
         point_a += normal * (0.5 * extend)
         point_b -= normal * (0.5 * extend)
 
+        accuracy = COLLIDE_EPSILON * tolerance
         for _optimization in range(4):
+            depth_before = float(1.0e30)
+            if resolved:
+                depth_before = penetration
             support = mpr_support(geom_a, geom_b, direction, orientation_b, position_b, 0.0, data_provider)
             translation = wp.dot(support.BtoA, direction) + 1e-5 * tolerance
             gradient = direction
@@ -648,7 +652,6 @@ def create_solve_mpr(support_func: Any, _support_funcs: Any = None, depth_certif
                 # support deficits bounds each witness's surface error. The
                 # budget is the portal's contact tolerance scaled by
                 # coordinate magnitude, like the other raycast tolerances.
-                accuracy = COLLIDE_EPSILON * tolerance
                 # Depths are support-plane depths within that budget; a
                 # certified pair as deep as the fallback ray must win.
                 if (
@@ -675,6 +678,10 @@ def create_solve_mpr(support_func: Any, _support_funcs: Any = None, depth_certif
                 # would lose the boundary witnesses of the distance query.
                 translation -= wp.max(gap - 2e-7 * tolerance, 0.0) / slope
             if wp.dot(direction, gradient) > 1.0 - 1e-7:
+                break
+            if resolved and depth_before - penetration < accuracy:
+                # Another direction cannot improve a certified depth beyond
+                # the acceptance budget; the search has converged.
                 break
             direction = gradient
         if not resolved:
