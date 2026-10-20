@@ -7773,5 +7773,127 @@ for _expert_test in (
     add_function_test(TestCollisionPipeline, _expert_test.__name__, _expert_test, devices=get_test_devices())
 
 
+def test_mesh_midphase_many_pairs(test, device):
+    """Find mesh contacts when there are more mesh pairs than midphase thread blocks.
+
+    Past one pair per block, the CUDA midphase switches from one tile block per
+    query to a launch with several one-warp blocks per tile block. Boxes and
+    cube hulls cover both query-bound builders.
+    """
+    side = 18
+    spacing = 0.5
+    half = 0.1
+    depth = 0.01
+    extent = 0.5 * spacing * side + 1.0
+    cells = 2 * side
+    grid = np.linspace(-extent, extent, cells + 1, dtype=np.float32)
+    xs, ys = np.meshgrid(grid, grid, indexing="ij")
+    ground_vertices = np.stack((xs.ravel(), ys.ravel(), np.zeros(xs.size, dtype=np.float32)), axis=1)
+    ground_indices = []
+    for i, j in itertools.product(range(cells), range(cells)):
+        v = i * (cells + 1) + j
+        ground_indices += [v, v + cells + 1, v + 1, v + 1, v + cells + 1, v + cells + 2]
+    cube_vertices = np.array(list(itertools.product((-1.0, 1.0), repeat=3)), dtype=np.float32)
+    cube_indices = [
+        0,
+        2,
+        1,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        5,
+        7,
+        6,
+        0,
+        1,
+        4,
+        1,
+        5,
+        4,
+        2,
+        6,
+        3,
+        3,
+        6,
+        7,
+        0,
+        4,
+        2,
+        2,
+        4,
+        6,
+        1,
+        3,
+        5,
+        3,
+        7,
+        5,
+    ]
+    cube = newton.Mesh(cube_vertices, np.array(cube_indices, dtype=np.int32), compute_inertia=False)
+
+    builder = newton.ModelBuilder()
+    # The ground (group -1) collides with every shape. Distinct positive groups
+    # keep the other shapes from pairing with each other, so the pair count
+    # stays small enough for the minimum number of midphase tile blocks.
+    cfg = builder.ShapeConfig(margin=0.0, gap=1.0e-3, density=0.0, collision_group=-1)
+    ground = builder.add_shape_mesh(
+        -1, mesh=newton.Mesh(ground_vertices, np.array(ground_indices, dtype=np.int32), compute_inertia=False), cfg=cfg
+    )
+    shapes = []
+    for i, j in itertools.product(range(side), range(side)):
+        cfg = builder.ShapeConfig(margin=0.0, gap=1.0e-3, density=0.0, collision_group=len(shapes) + 1)
+        position = wp.vec3((i - 0.5 * side) * spacing, (j - 0.5 * side) * spacing, half - depth)
+        body = builder.add_body(xform=wp.transform(position, wp.quat_identity()), mass=1.0, inertia=wp.mat33(np.eye(3)))
+        if (i + j) % 2:
+            shapes.append(builder.add_shape_convex_hull(body, mesh=cube, scale=(half, half, half), cfg=cfg))
+        else:
+            shapes.append(builder.add_shape_box(body, hx=half, hy=half, hz=half, cfg=cfg))
+    model = builder.finalize(device)
+    pipeline = newton.CollisionPipeline(model, broad_phase="explicit", rigid_contact_max=64 * len(shapes))
+    contacts = pipeline.contacts()
+    pipeline.collide(model.state(), contacts)
+
+    narrow_phase = pipeline.narrow_phase
+    mesh_pairs = int(narrow_phase.shape_pairs_mesh_count.numpy()[0])
+    test.assertEqual(mesh_pairs, len(shapes))
+    if device.is_cuda:
+        test.assertIsNotNone(narrow_phase._midphase_narrow_kernel)
+        test.assertGreater(mesh_pairs, narrow_phase.num_tile_blocks)
+
+    count = int(contacts.rigid_contact_count.numpy()[0])
+    shape0 = contacts.rigid_contact_shape0.numpy()[:count]
+    shape1 = contacts.rigid_contact_shape1.numpy()[:count]
+    points0 = contacts.rigid_contact_point0.numpy()[:count]
+    points1 = contacts.rigid_contact_point1.numpy()[:count]
+    normals = contacts.rigid_contact_normal.numpy()[:count]
+    body_q = model.body_q.numpy()
+    shape_body = model.shape_body.numpy()
+    deepest = dict.fromkeys(shapes, -np.inf)
+    for i in range(count):
+        test.assertIn(ground, (shape0[i], shape1[i]))
+        shape = shape1[i] if shape0[i] == ground else shape0[i]
+        world = []
+        for index, point in ((shape0[i], points0[i]), (shape1[i], points1[i])):
+            body = shape_body[index]
+            pose = wp.transform(*body_q[body]) if body >= 0 else wp.transform_identity()
+            world.append(np.asarray(wp.transform_point(pose, wp.vec3(point))))
+        # Triangles that clip a box side can report lateral normals; the
+        # face contact must still match the resting depth.
+        if abs(float(normals[i][2])) < 0.99:
+            continue
+        # Normals point from shape 0 to shape 1.
+        deepest[shape] = max(deepest[shape], -float(np.dot(world[1] - world[0], normals[i])))
+    for shape in shapes:
+        test.assertAlmostEqual(deepest[shape], depth, delta=1.0e-4, msg=f"shape {shape}")
+
+
+add_function_test(
+    TestCollisionPipeline, "test_mesh_midphase_many_pairs", test_mesh_midphase_many_pairs, devices=get_test_devices()
+)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2, failfast=False)
