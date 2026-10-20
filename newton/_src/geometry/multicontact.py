@@ -28,8 +28,8 @@ from .types import GeoType
 
 # Constants
 EPS = 0.00001
-# Upper bound for merging clipped contact-polygon vertices [m].
-MAX_CLIP_VERTEX_MERGE_DISTANCE = wp.static(math.sqrt(EPS))
+# Upper bound [m], preserving the cleanup radius used before #4643.
+MAX_CLIP_VERTEX_MERGE_DISTANCE = 0.0031622776601683794
 # The tilt angle defines how much the search direction gets tilted while searching for
 # points on the contact manifold.
 TILT_ANGLE_RAD = wp.static(2.0 * math.pi / 180.0)
@@ -614,8 +614,16 @@ def approx_max_quadrilateral_area_with_calipers(hull: wp.array[wp.vec2], hull_co
 def polygon_width(loop: wp.array[wp.vec2], loop_count: int) -> float:
     """Estimate a convex polygon's narrowest width [m].
 
-    Area over the larger bounding extent is within a factor of sqrt(2) of the
-    true width under rotation. Points and segments have zero width.
+    Area over the larger bounding extent is between half and sqrt(2) times
+    the true width. This linear-time estimate conservatively reduces merging
+    for triangular features instead of computing exact edge-normal spans.
+
+    Args:
+        loop: Convex polygon vertices [m].
+        loop_count: Number of vertices in the loop.
+
+    Returns:
+        Estimated width [m], or zero for points and segments.
     """
     if loop_count < 3:
         return 0.0
@@ -816,8 +824,10 @@ def create_build_manifold(support_func: Any, writer_func: Any, post_process_cont
 
         # Clipping wide, slightly tilted faces leaves sliver polygons whose
         # extra vertices turn line contacts into poorly supported manifolds
-        # and destabilize resting stacks. Merge them up to the cap, but never
-        # across half of the narrower feature, so thin faces keep both sides.
+        # and destabilize resting stacks. Limit merging by half the estimated
+        # input feature width (with an EPS floor) so thin faces keep both sides.
+        # Small overlaps of wide faces can collapse entirely within the cap;
+        # these intentionally fall back to the single deepest contact.
         merge_distance = wp.clamp(
             0.5 * wp.min(polygon_width(m_a, m_a_count), polygon_width(m_b, m_b_count)),
             EPS,
