@@ -40,10 +40,10 @@ from .types import Axis, GeoType
 # brute-force grid reference
 # (newton/tests/test_collision_pipeline.py, TestFullSurfaceSoftContact): edge golden-section is
 # accurate (~1e-4); the face
-# Frank-Wolfe tail is ~O(1/iters) (~3e-3 at 24 iters), sufficient for contact within margin.
-SDF_EDGE_ITERS = 24
-SDF_FACE_ITERS = 24
-SDF_LS_ITERS = 16
+# Frank-Wolfe tail is ~O(1/iters) (~6.5e-3 at 12 iters on the test triangle), sufficient for contact within margin.
+SDF_EDGE_ITERS = 12
+SDF_FACE_ITERS = 12
+SDF_LS_ITERS = 12
 
 # Keep smaller workloads fused, where rematerializing compacted features costs more than it saves.
 _SDF_COMPACTION_MIN_PAIRS = 2 * 1024 * 1024

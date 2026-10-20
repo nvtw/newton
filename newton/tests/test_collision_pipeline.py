@@ -5556,8 +5556,9 @@ def test_optimize_face_sdf_sphere(test, device):
         for i in range(n + 1)
         for j in range(n + 1 - i)
     )
-    # Face Frank-Wolfe tail at SDF_FACE_ITERS on a smooth field (~3e-3); ample for contact-within-margin.
-    test.assertLess(abs(phi_opt - best), 6.0e-3)
+    # Face Frank-Wolfe tail at SDF_FACE_ITERS on a smooth field (~6.5e-3 at 12 iterations for this 1.4 m
+    # triangle on a 0.5 m sphere); ample for contact-within-margin.
+    test.assertLess(abs(phi_opt - best), 1.0e-2)
 
 
 # ---------------------------------------------------------------------------
