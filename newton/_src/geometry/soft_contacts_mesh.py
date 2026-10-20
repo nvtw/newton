@@ -2,26 +2,29 @@
 # SPDX-License-Identifier: Apache-2.0
 
 
-"""Full-surface mesh contacts with local feature validity and final-slot emission.
+"""Full-surface mesh contacts with final-slot emission and a separate feature filter.
 
 Vertex-face, face-vertex, and edge-edge pairs describe the same surface-distance
-problem at every deformable resolution. Incident-feature cones reject redundant
-representations without discarding distinct nearby surface patches. Detection
-records immutable feature IDs; a separate differentiable pass evaluates only
-the accepted final contacts. No intermediate contact pool is required.
+problem at every deformable resolution. Detection reports every feature pair
+within the contact band, so solvers keep the pairs they need for penetration
+prevention. Detection records immutable feature IDs; a separate differentiable
+pass evaluates the final contacts. No intermediate contact pool is required.
+
+Incident-feature cones identify redundant representations of one surface patch.
+:func:`mesh_contact_valid` exposes the per-record test to solver kernels.
 """
 
 from __future__ import annotations
 
-from functools import lru_cache
 from typing import TYPE_CHECKING
 
 import numpy as np
 import warp as wp
 
+from ..utils.mesh import MeshAdjacencyData, get_vertex_adjacent_face_id_order, get_vertex_num_adjacent_faces
 from .collision_core import transform_normal_with_scale
-from .flags import ParticleFlags, ShapeFlags
-from .kernels import triangle_closest_point
+from .flags import MeshSignMethod, ParticleFlags, ShapeFlags
+from .kernels import mesh_query_point_sign, resolve_mesh_sign_method, triangle_closest_point
 from .soft_contacts_sdf import _shape_frames
 from .tri_mesh_collision import TriMeshCollisionDetector
 from .types import GeoType
@@ -62,7 +65,8 @@ const unsigned mask = __activemask();
 const int leader = (threadIdx.x & 31) & ~(lanes - 1);
 if ((threadIdx.x & (lanes - 1)) == 0) {
 #endif
-    const auto query = wp::mesh_query_point_sign_normal(mesh_id, point, radius);
+    const auto query = parity ? wp::mesh_query_point_sign_parity(mesh_id, point, radius)
+                              : wp::mesh_query_point_sign_normal(mesh_id, point, radius);
     sign = query.result ? (query.sign < 0.0f ? -1 : 1) : 0;
 #if defined(__CUDA_ARCH__)
 }
@@ -71,8 +75,10 @@ return __shfl_sync(mask, sign, leader);
 return sign;
 #endif
 """)
-def _mesh_partition_sign(mesh_id: wp.uint64, point: wp.vec3, radius: float, lanes: int) -> int:
+def _mesh_partition_sign(mesh_id: wp.uint64, point: wp.vec3, radius: float, lanes: int, parity: bool) -> int:
     """Share an exact nearest query within a power-of-two group of CUDA lanes.
+
+    ``parity`` selects ray-crossing parity (watertight meshes) instead of the pseudo-normal sign.
 
     All lanes in each group must participate with identical query arguments.
     Group size must divide the CUDA warp size and the launch block dimension.
@@ -80,92 +86,49 @@ def _mesh_partition_sign(mesh_id: wp.uint64, point: wp.vec3, radius: float, lane
     ...
 
 
+@wp.func_native("""
+const wp::vec3 direction = q - p;
+float t, u, v, sign;
+if (wp::dot(direction, direction) == 0.0f ||
+    !wp::intersect_ray_tri_woop(p, direction, a, b, c, t, u, v, sign, nullptr) || t > 1.0f)
+    return wp::vec4(-1.0f, 0.0f, 0.0f, 0.0f);
+// Obtain the third weight directly, not as 1-u-v: subtraction can obscure an
+// exact edge hit. Both calls use Warp's watertight ray/triangle predicate.
+float cyclic_t, cyclic_u, w, cyclic_sign;
+if (!wp::intersect_ray_tri_woop(p, direction, b, c, a, cyclic_t, cyclic_u, w, cyclic_sign, nullptr))
+    return wp::vec4(-1.0f, 0.0f, 0.0f, 0.0f);
+return wp::vec4(t, u, v, w);
+""")
+def _segment_triangle_hit(p: wp.vec3, q: wp.vec3, a: wp.vec3, b: wp.vec3, c: wp.vec3) -> wp.vec4:
+    """Segment parameter and triangle weights; a negative parameter means no hit."""
+    ...
+
+
 @wp.func
-def _feature_query_capsule(
-    scale: wp.vec3,
-    transform: wp.transform,
-    bounds: wp.vec4,
-    error: wp.vec3,
-    radius: float,
-):
-    s = wp.max(wp.abs(scale[0]), wp.max(wp.abs(scale[1]), wp.abs(scale[2])))
-    minimum = wp.min(wp.abs(scale[0]), wp.min(wp.abs(scale[1]), wp.abs(scale[2])))
-    padding = error[0] * s * s + error[1] * s * radius + error[2] * radius * radius
-    axis = wp.normalize(wp.transform_vector(transform, wp.cw_div(wp.vec3(bounds[0], bounds[1], bounds[2]), scale)))
-    width = (bounds[3] * s * radius + padding) / minimum
-    return axis, wp.min(width, radius)
+def _is_inside(mesh: wp.uint64, X_sw: wp.transform, scale: wp.vec3, point: wp.vec3, sign_method: int) -> bool:
+    """Whether a world point lies inside the mesh, excluding an exact surface hit."""
+    local = wp.cw_div(wp.transform_point(X_sw, point), scale)
+    query = mesh_query_point_sign(mesh, local, 1.0e6, sign_method)
+    if not query.result or query.sign >= 0.0:
+        return False
+    # A sign query may label an exact boundary point as inside. A soft edge
+    # along the surface is not an interior chord needing penetration recovery.
+    surface = wp.mesh_eval_position(mesh, query.face, query.u, query.v)
+    return wp.length_sq(local - surface) > 0.0
 
 
-@lru_cache(maxsize=16)
-def _cone_pair_indices(count: int) -> tuple[np.ndarray, np.ndarray]:
-    """Reuse pair indices for at most six cone directions or sixteen axes."""
-    return np.triu_indices(count, 1)
-
-
-def _cone_query_bounds(
-    point: np.ndarray, positions: np.ndarray, *, edge: np.ndarray | None = None
-) -> tuple[np.ndarray, np.ndarray]:
-    """Bound both validity cones by an axis and relative capsule radius.
-
-    Opposing halfspaces imply a slab. Two independent slabs bound transverse
-    distance by their smallest Gram eigenvalue. Dropping constraints only
-    widens this bound. The returned polynomial propagates the same rounding
-    allowance as ``_cone_valid`` through those slab inequalities.
-    """
-    directions = positions - point
-    length = np.linalg.norm(directions, axis=1)
-    point_bound = np.linalg.norm(point)
-    fallback = np.array([0.0, 0.0, 1.0, 1.0])
-    if edge is not None:
-        half_length = np.linalg.norm(edge) * 0.5
-        if half_length == 0:
-            return fallback, np.zeros(3)
-        axis = edge / (2 * half_length)
-        directions -= (directions @ axis)[:, None] * axis
-        length += half_length
-        point_bound += half_length
-    projected = np.linalg.norm(directions, axis=1)
-    valid = projected > 0
-    directions = directions[valid] / projected[valid, None]
-    p = point_bound + np.linalg.norm(positions[valid], axis=1)
-    errors = 2.0e-6 * np.column_stack((p * length[valid], p + length[valid], np.ones(len(p)))) / projected[valid, None]
-    if len(directions) < 2:
-        return fallback, np.zeros(3)
-    # Six extremal halfspaces suffice for a conservative accelerator. Limit
-    # precomputation storage/work even at arbitrarily high-valence vertices;
-    # the exact acceptance test still uses every incident neighbor.
-    if len(directions) > 6:
-        support = np.unique(np.concatenate((np.argmin(directions, axis=0), np.argmax(directions, axis=0))))
-        directions, errors = directions[support], errors[support]
-    i, j = _cone_pair_indices(len(directions))
-    delta = directions[i] - directions[j]
-    a = np.linalg.norm(delta, axis=1)
-    b = np.linalg.norm(directions[i] + directions[j], axis=1)
-    valid = a > b
-    if not np.any(valid):
-        return fallback, np.zeros(3)
-    i, j, delta, a, b = i[valid], j[valid], delta[valid], a[valid], b[valid]
-    axes = delta / a[:, None]
-    width = b / a
-    relaxation = 2 * np.maximum(errors[i], errors[j]) / a[:, None]
-    if edge is not None:
-        axes = np.vstack((axes, axis))
-        width = np.append(width, 0.0)
-        relaxation = np.vstack((relaxation, np.zeros(3)))
-    i, j = _cone_pair_indices(len(axes))
-    eigenvalue = 1 - np.abs(np.sum(axes[i] * axes[j], axis=1))
-    valid = eigenvalue > 1.0e-12
-    if not np.any(valid):
-        return fallback, np.zeros(3)
-    i, j, eigenvalue = i[valid], j[valid], eigenvalue[valid]
-    widths = np.sqrt((width[i] ** 2 + width[j] ** 2) / eigenvalue)
-    best = np.argmin(widths)
-    if widths[best] >= 1.0:
-        return fallback, np.zeros(3)
-    direction = np.cross(axes[i[best]], axes[j[best]])
-    direction /= np.linalg.norm(direction)
-    error = (relaxation[i[best]] + relaxation[j[best]]) / np.sqrt(eigenvalue[best])
-    return np.append(direction, widths[best] + 1.0e-5), error
+@wp.func
+def _crossing_owner(
+    face: int, hit: wp.vec4, offset: int, vertex_spans: wp.array[wp.vec3i], edge_spans: wp.array[wp.vec3i]
+) -> int:
+    """Give a shared vertex/edge crossing the same owner regardless of the hit triangle."""
+    for k in range(3):
+        if hit[1 + (k + 1) % 3] == 0.0 and hit[1 + (k + 2) % 3] == 0.0:
+            return vertex_spans[offset + 3 * face + k][2]
+    for k in range(3):
+        if hit[1 + k] == 0.0:
+            return edge_spans[offset + 3 * face + k][2]
+    return face
 
 
 @wp.func
@@ -219,20 +182,122 @@ def _face_valid(
     return True
 
 
-def _build_feature_adjacency(model: Model, vertex_table: wp.array, edge_table: wp.array):
-    """Build fixed incident-feature spans, ownership, and per-shape component counts."""
+@wp.func
+def _soft_face_valid(
+    particle_q: wp.array[wp.vec3],
+    particle_flags: wp.array[int],
+    tri_indices: wp.array2d[int],
+    adjacency: MeshAdjacencyData,
+    point: wp.vec3,
+    diff: wp.vec3,
+    bary: wp.vec3,
+    face: int,
+) -> bool:
+    # TV is a rigid-vertex query against the SOFT target surface. As in VT,
+    # a target face interior needs no cone test; a target edge/vertex must pass
+    # all its incident-neighbor tests and have just one representing triangle.
+    count = int(0)
+    positive = int(0)
+    zero = int(0)
+    for k in range(3):
+        if bary[k] > 0.0:
+            count += 1
+            positive = k
+        else:
+            zero = k
+    if count == 3:
+        return True
+
+    vertex = tri_indices[face, positive]
+    other = int(-1)
+    if count == 2:
+        vertex = tri_indices[face, (zero + 1) % 3]
+        other = tri_indices[face, (zero + 2) % 3]
+    for i in range(get_vertex_num_adjacent_faces(adjacency, vertex)):
+        adjacent_face, _slot = get_vertex_adjacent_face_id_order(adjacency, vertex, i)
+        # For an edge target, only triangles containing BOTH endpoints belong
+        # to its adjacency. This also works when bending edges are not present.
+        if other >= 0:
+            contains_other = bool(False)
+            for k in range(3):
+                if tri_indices[adjacent_face, k] == other:
+                    contains_other = True
+            if not contains_other:
+                continue
+        if adjacent_face < face:
+            # Detection skips wholly inactive triangles, so they cannot own a
+            # returned row. Their geometric neighbors still constrain the block.
+            active = int(0)
+            for k in range(3):
+                active |= particle_flags[tri_indices[adjacent_face, k]] & ParticleFlags.ACTIVE
+            if active != 0:
+                return False
+        for k in range(3):
+            neighbor_index = tri_indices[adjacent_face, k]
+            if neighbor_index != vertex and neighbor_index != other:
+                neighbor = particle_q[neighbor_index]
+                direction = neighbor - point
+                tolerance = (
+                    2.0e-6
+                    * (wp.length(point) + wp.length(neighbor) + wp.length(diff))
+                    * (wp.length(direction) + wp.length(diff))
+                )
+                if wp.dot(diff, direction) > tolerance:
+                    return False
+    return True
+
+
+def _collision_meshes(model: Model, shape_mask: np.ndarray) -> dict[int, Mesh]:
+    """Return the mesh backing each masked shape's ``shape_source_ptr`` and edge table.
+
+    Convex hulls collide against a vertex-deduplicated copy of their source, so its packed
+    collision edges use that copy's vertex numbering, not ``model.shape_source``'s.
+    """
+    from ..sim.builder import _deduplicate_convex_collision_mesh  # noqa: PLC0415
+
+    shape_types = model.shape_type.numpy()
+    convex_copies: dict[int, Mesh] = {}
+    meshes = {}
+    for shape in np.flatnonzero(shape_mask):
+        mesh = model.shape_source[shape]
+        if mesh is None or not hasattr(mesh, "indices"):
+            raise ValueError(f"mesh/convex shape {int(shape)} has no shape_source Mesh")
+        if shape_types[shape] == int(GeoType.CONVEX_MESH):
+            if id(mesh) not in convex_copies:
+                convex_copies[id(mesh)] = _deduplicate_convex_collision_mesh(mesh)
+            mesh = convex_copies[id(mesh)]
+        meshes[int(shape)] = mesh
+    return meshes
+
+
+def _geometry_key(mesh: Mesh) -> tuple[int, int, int]:
+    """Share per-mesh precomputation across distinct but identical Mesh objects."""
+    return (len(mesh.vertices), len(mesh.indices), hash(mesh))
+
+
+def _edge_rows(keys: np.ndarray, query: np.ndarray, what: str) -> np.ndarray:
+    """Locate sorted edge keys, rejecting edges that are not part of the triangle topology."""
+    rows = np.searchsorted(keys, query)
+    if np.any(rows >= len(keys)) or np.any(keys[np.minimum(rows, len(keys) - 1)] != query):
+        raise ValueError(f"{what} contains an edge that is not an edge of the mesh triangles.")
+    return rows
+
+
+def _build_feature_adjacency(model: Model, meshes: dict[int, Mesh], edge_table: wp.array):
+    """Build fixed incident-feature spans and ownership."""
     et = edge_table.numpy()
     offsets = np.zeros(model.shape_count, dtype=np.int32)
-    component_counts = np.zeros(model.shape_count, dtype=np.int32)
     vertex_spans, edge_spans, neighbors = [], [], []
-    vertex_bounds, vertex_errors, edge_bounds, edge_errors = [], [], [], []
     ee = np.zeros(len(et), dtype=np.int32)
     cache = {}
 
     def build(mesh):
         idx = np.asarray(mesh.indices).reshape(-1)
         canon = mesh._canonical_vertex_ids()[idx]
+        triangles = np.asarray(mesh.vertices, dtype=np.float64)[idx].reshape(-1, 3, 3)
+        areas = np.linalg.norm(np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0]), axis=1)
         representative = {}
+        vertex_owner = {}
         incident = {}
         opposite = {}
         edge_owner = {}
@@ -243,77 +308,48 @@ def _build_feature_adjacency(model: Model, vertex_table: wp.array, edge_table: w
             for k in range(3):
                 v = int(tri[k])
                 a, b = int(tri[(k + 1) % 3]), int(tri[(k + 2) % 3])
-                incident[v].update((a, b))
                 key = tuple(sorted((a, b)))
-                opposite.setdefault(key, set()).add(v)
-                edge_owner.setdefault(key, face)
-
-        unvisited = set(incident)
-        component_count = 0
-        while unvisited:
-            component_count += 1
-            pending = [unvisited.pop()]
-            while pending:
-                connected = incident[pending.pop()] & unvisited
-                unvisited.difference_update(connected)
-                pending.extend(connected)
+                opposite.setdefault(key, set())
+                # Detection skips zero-area faces. They must neither own a shared feature
+                # nor constrain its validity cone, or they can suppress a valid neighbor.
+                if areas[face] > 0.0:
+                    incident[v].update((a, b))
+                    opposite[key].add(v)
+                    vertex_owner.setdefault(v, face)
+                    edge_owner.setdefault(key, face)
 
         def span(vertices, owner, representatives=representative):
             start = len(neighbors)
             neighbors.extend(representatives[v] for v in sorted(vertices))
             return (start, len(neighbors), owner)
 
-        vs = {v: span(n, representative[v] // 3) for v, n in incident.items()}
-        es = {key: span(n, edge_owner[key]) for key, n in opposite.items()}
-        points = np.asarray(mesh.vertices, dtype=np.float64)[idx]
-        vb = {
-            v: (
-                _cone_query_bounds(points[representative[v]], points[[representative[n] for n in ns]])
-                if len(vertex_table)
-                else (np.array([0.0, 0.0, 1.0, 1.0]), np.zeros(3))
-            )
-            for v, ns in incident.items()
-        }
-        eb = {}
+        vs = {v: span(n, vertex_owner.get(v, -1)) for v, n in incident.items()}
+        es = {key: span(n, edge_owner.get(key, -1)) for key, n in opposite.items()}
         edge_slots = {}
-        for key, ns in opposite.items():
-            p, q = points[[representative[v] for v in key]]
-            eb[key] = (
-                _cone_query_bounds((p + q) * 0.5, points[[representative[n] for n in ns]], edge=q - p)
-                if len(et)
-                else (np.array([0.0, 0.0, 1.0, 1.0]), np.zeros(3))
-            )
         offset = len(vertex_spans)
         for slot, v in enumerate(canon):
             vertex_spans.append(vs[int(v)])
-            vertex_bounds.append(vb[int(v)][0])
-            vertex_errors.append(vb[int(v)][1])
             base, k = (slot // 3) * 3, slot % 3
             key = tuple(sorted((int(canon[base + (k + 1) % 3]), int(canon[base + (k + 2) % 3]))))
             edge_spans.append(es[key])
-            edge_bounds.append(eb[key][0])
-            edge_errors.append(eb[key][1])
             edge_slots.setdefault(key, offset + slot)
         keys = sorted(es)
         edge_keys = np.asarray([(a << 32) | b for a, b in keys], dtype=np.int64)
         edge_data = np.asarray([edge_slots[key] for key in keys], dtype=np.int32)
-        return offset, canon, edge_keys, edge_data, component_count
+        return offset, canon, edge_keys, edge_data
 
     # Shape instances share immutable local topology. Only the feature rows
     # carry a shape id; constructing full adjacency per world is unnecessary.
-    for shape, mesh in enumerate(model.shape_source):
-        if mesh is None or not hasattr(mesh, "indices"):
-            continue
-        key = id(mesh)
+    for shape, mesh in meshes.items():
+        key = _geometry_key(mesh)
         if key not in cache:
             cache[key] = build(mesh)
-        offset, canon, edge_keys, edge_data, component_count = cache[key]
+        offset, canon, edge_keys, edge_data = cache[key]
         offsets[shape] = offset
-        component_counts[shape] = component_count
         start, end = np.searchsorted(et[:, 0], (shape, shape + 1))
         edge_canon = np.sort(canon[et[start:end, 1:]].astype(np.int64), axis=1)
         keys = (edge_canon[:, 0] << 32) | edge_canon[:, 1]
-        ee[start:end] = edge_data[np.searchsorted(edge_keys, keys)]
+        ee[start:end] = edge_data[_edge_rows(edge_keys, keys, "Rigid edge table")]
     if max(len(vertex_spans), len(edge_spans), len(neighbors)) > np.iinfo(np.int32).max:
         raise ValueError("Mesh contact topology exceeds 32-bit indexing capacity.")
     arrays = [wp.array(offsets, dtype=int, device=model.device)]
@@ -323,16 +359,7 @@ def _build_feature_adjacency(model: Model, vertex_table: wp.array, edge_table: w
     )
     arrays.append(wp.array(ee, dtype=int, device=model.device))
     arrays.append(wp.array(neighbors, dtype=int, device=model.device))
-    arrays.extend(
-        wp.array(np.asarray(x, dtype=np.float32).reshape(-1, width), dtype=dtype, device=model.device)
-        for x, width, dtype in (
-            (vertex_bounds, 4, wp.vec4),
-            (vertex_errors, 3, wp.vec3),
-            (edge_bounds, 4, wp.vec4),
-            (edge_errors, 3, wp.vec3),
-        )
-    )
-    return arrays, component_counts
+    return arrays
 
 
 CONTACT_NORMAL_DEGENERATE_EPS = wp.constant(1.0e-6)
@@ -351,7 +378,9 @@ def _mesh_feature_data(
     canonical = mesh._canonical_vertex_ids()
     n_canon = int(canonical.max()) + 1
 
-    orig_edges, slot_keys, _sort_order, _keys_sorted, face_normals, face_norms = mesh._build_edge_slot_topology()
+    orig_edges, slot_keys, _sort_order, _keys_sorted, face_normals, face_norms = mesh._build_edge_slot_topology(
+        canonical
+    )
     valid_faces = face_norms > 0.0
     fn_unit = np.zeros_like(face_normals)
     fn_unit[valid_faces] = face_normals[valid_faces] / face_norms[valid_faces, None]
@@ -392,21 +421,22 @@ def _mesh_feature_data(
     edge_normal_accumulation = np.zeros((len(first_idx), 3), dtype=np.float64)
     np.add.at(edge_normal_accumulation, inverse, np.repeat(fn_unit, 3, axis=0))
     edge_outward = _unit(edge_normal_accumulation).astype(np.float32)
-    edge_canon = canonical[orig_edges[first_idx]]
-    if collision_edges is not None:
+    if collision_edges is None:
+        edge_canon = canonical[orig_edges[first_idx]]
+    else:
         # Keep exactly the SDF edge set, including an intentionally empty set.
         # Full triangle adjacency still supplies the normals and validity cones.
         edge_canon = canonical[collision_edges]
         sorted_canon = np.sort(edge_canon.astype(np.int64), axis=1)
         selected_keys = (sorted_canon[:, 0] << 32) | sorted_canon[:, 1]
-        edge_outward = edge_outward[np.searchsorted(edge_keys, selected_keys)]
+        edge_outward = edge_outward[_edge_rows(edge_keys, selected_keys, "Mesh collision edge set")]
     edge_table = np.column_stack((index_of_canon[edge_canon[:, 0]], index_of_canon[edge_canon[:, 1]])).astype(np.int32)
 
     return vertex_table, vertex_normals, edge_table, edge_outward
 
 
 def _build_rigid_features(
-    model: Model, bvh_shape_mask: np.ndarray
+    model: Model, meshes: dict[int, Mesh]
 ) -> tuple[wp.array[wp.vec2i], wp.array[wp.vec3], wp.array[wp.vec3i], wp.array[wp.vec3]]:
 
     device = model.device
@@ -414,19 +444,16 @@ def _build_rigid_features(
     vertex_normals: list[np.ndarray] = []
     edge_rows: list[np.ndarray] = []
     edge_outwards: list[np.ndarray] = []
-    cache: dict[tuple[int, bytes | None], tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
+    cache: dict[tuple, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = {}
     edge_ranges = model.shape_edge_range.numpy()
     packed_edges = model.mesh_edge_indices.numpy()
 
-    for shape in np.flatnonzero(bvh_shape_mask):
-        mesh = model.shape_source[shape]
-        if mesh is None:
-            raise ValueError(f"mesh/convex shape {int(shape)} has no shape_source Mesh")
+    for shape, mesh in meshes.items():
         start, count = (int(value) for value in edge_ranges[shape])
         # Finalized tables include SDF edges cooked by the builder, which need
         # not be attached to the source Mesh. Slices may differ for one source.
         collision_edges = packed_edges[start : start + count] if start >= 0 else mesh._collision_edges
-        key = (id(mesh), None if collision_edges is None else np.asarray(collision_edges).tobytes())
+        key = (_geometry_key(mesh), None if collision_edges is None else np.asarray(collision_edges).tobytes())
         data = cache.get(key)
         if data is None:
             data = _mesh_feature_data(mesh, collision_edges=collision_edges)
@@ -456,6 +483,12 @@ def _build_rigid_features(
 _MESH_FEATURE_VT = wp.constant(0)
 _MESH_FEATURE_TV = wp.constant(1)
 _MESH_FEATURE_EE = wp.constant(2)
+# Edge penetration recovery: the middle of a soft-edge chord inside the solid, whose soft-edge
+# parameter is stored with the record, pairs with its nearest surface point. Bit 3 marks penetration.
+_MESH_FEATURE_EE_DEPTH = wp.constant(3)
+_MESH_FEATURE_INSIDE = wp.constant(8)
+# Penetration recovery records have no incident-feature representation, so the filter keeps them.
+_MESH_FEATURE_RECOVERY = wp.constant(16)
 
 
 @wp.func
@@ -468,24 +501,35 @@ def _append_mesh_contact(
     contact_count: wp.array[wp.int64],
     features: wp.array[wp.vec3i],
     contact_shapes: wp.array[int],
-):
-
+) -> int:
+    """Append a feature record, returning its final slot or -1 when capacity is exhausted."""
     index = wp.atomic_add(contact_count, 0, wp.int64(1))
-    if index == wp.int64(contact_max):
-        wp.printf("Mesh soft-contact capacity exceeded (%d); this collision result is incomplete.\n", contact_max)
     if index < wp.int64(contact_max):
         features[index] = wp.vec3i(family, soft_feature, rigid_feature)
         contact_shapes[index] = rigid_shape
+        return wp.int32(index)
+    return -1
 
 
 @wp.kernel(enable_backward=False)
-def _begin_mesh_contacts(source: wp.array[int], destination: wp.array[wp.int64]):
+def _begin_mesh_contacts(source: wp.array[int], destination: wp.array[wp.int64], mesh_state: wp.array[wp.int32]):
     destination[0] = wp.int64(source[0])
+    # Geometry evaluation only visits the appended mesh records.
+    mesh_state[0] = source[0]
 
 
 @wp.kernel(enable_backward=False)
 def _end_mesh_contacts(source: wp.array[wp.int64], destination: wp.array[int], capacity: int):
     destination[0] = wp.int32(wp.min(source[0], wp.int64(capacity) + wp.int64(1)))
+    if source[0] > wp.int64(capacity):
+        wp.printf(
+            "Mesh soft-contact capacity exceeded: soft_contact_max=%d, required=%lld. "
+            "Increase soft_contact_max to at least %lld for this collision pass; "
+            "this collision result is incomplete.\n",
+            capacity,
+            source[0],
+            source[0],
+        )
 
 
 @wp.func
@@ -507,16 +551,34 @@ def _face_vertex_velocity(mesh: wp.uint64, index: wp.int32):
 
 
 @wp.func
-def _feature_mesh_sign(mesh: wp.uint64, X_sw: wp.transform, scale: wp.vec3, soft: wp.vec3):
+def _feature_mesh_sign(
+    mesh: wp.uint64, X_sw: wp.transform, scale: wp.vec3, soft: wp.vec3, sign_method: int, feature_distance: float
+):
+    """Sign a soft feature point: -1 inside, 1 outside, 2 on the surface, 0 without a surface.
+
+    A soft edge crossing a rigid face has its closest point to that face's boundary edges exactly
+    on the face, where a global inside/outside query only reports roundoff; the caller then
+    resolves the side from local feature geometry. The on-surface tolerance, in world units,
+    covers rounding of the world-to-mesh transform and separations negligible against the pair's
+    feature distance.
+    """
     query_point = wp.cw_div(wp.transform_point(X_sw, soft), scale)
-    query = wp.mesh_query_point_sign_normal(mesh, query_point, 1.0e6)
+    query = mesh_query_point_sign(mesh, query_point, 1.0e6, sign_method)
     if not query.result:
         return int(0)
     surface = wp.mesh_eval_position(mesh, query.face, query.u, query.v)
-    uncertainty = 2.0e-6 * (wp.length(query_point) + wp.length(surface))
-    if wp.length(query_point - surface) <= uncertainty:
+    separation = wp.length(wp.cw_mul(query_point - surface, scale))
+    if separation <= 2.0e-6 * (wp.length(soft) + wp.length(X_sw.p)) + 1.0e-4 * feature_distance:
         return int(2)
     return wp.where(query.sign < 0.0, -1, 1)
+
+
+@wp.func
+def _local_side(outward: bool, inward: bool, separation: wp.vec3, reference: wp.vec3) -> int:
+    """Side of an on-surface soft point: an exclusive validity cone decides, else ``reference``."""
+    if outward != inward:
+        return wp.where(inward, -1, 1)
+    return wp.where(wp.dot(separation, reference) < 0.0, -1, 1)
 
 
 @wp.kernel(enable_backward=False)
@@ -532,26 +594,17 @@ def _detect_mesh_vertex_contacts(
     shape_flags: wp.array[wp.int32],
     shape_scale: wp.array[wp.vec3],
     shape_source_ptr: wp.array[wp.uint64],
+    shape_mesh_properties: wp.array[wp.int32],
     shape_lower: wp.array[wp.vec3],
     shape_upper: wp.array[wp.vec3],
     shape_margin: wp.array[float],
     gap: float,
     contact_max: wp.int32,
-    face_offsets: wp.array[int],
-    vertex_spans: wp.array[wp.vec3i],
-    edge_spans: wp.array[wp.vec3i],
-    rigid_edge_slots: wp.array[int],
-    neighbors: wp.array[int],
-    vertex_bounds: wp.array[wp.vec4],
-    vertex_errors: wp.array[wp.vec3],
-    edge_bounds: wp.array[wp.vec4],
-    edge_errors: wp.array[wp.vec3],
-    vertex_outward: wp.array[wp.vec3],
-    edge_outward: wp.array[wp.vec3],
     contact_count: wp.array[wp.int64],
     features: wp.array[wp.vec3i],
     contact_shapes: wp.array[int],
 ):
+    """Report every rigid face within the contact band of a soft vertex."""
 
     partitions = 1 << partition_depth
     tid = wp.tid() >> partition_depth
@@ -587,17 +640,18 @@ def _detect_mesh_vertex_contacts(
     min_scale = wp.min(wp.min(wp.abs(scale[0]), wp.abs(scale[1])), wp.abs(scale[2]))
     x_mesh = wp.cw_div(x_local, scale)
     r_mesh = threshold / min_scale
-    vertex_sign = _mesh_partition_sign(mesh, x_mesh, r_mesh, partitions)
+    sign_method = resolve_mesh_sign_method(shape_mesh_properties[shape_index])
+    vertex_sign = _mesh_partition_sign(mesh, x_mesh, r_mesh, partitions, sign_method == MeshSignMethod.PARITY)
     if vertex_sign == 0:
         if lane != 0:
             return
         # A finite proximity band must not discard already penetrating points.
         # The expanded shape bounds have already rejected distant particles.
         recovery_radius = wp.length(upper_bound - lower_bound) / min_scale
-        recovery = wp.mesh_query_point_sign_normal(mesh, x_mesh, recovery_radius)
+        recovery = mesh_query_point_sign(mesh, x_mesh, recovery_radius, sign_method)
         if recovery.result and recovery.sign < 0.0:
             _append_mesh_contact(
-                _MESH_FEATURE_VT + 8,
+                _MESH_FEATURE_VT + _MESH_FEATURE_INSIDE + _MESH_FEATURE_RECOVERY,
                 particle_index,
                 shape_index,
                 recovery.face,
@@ -616,35 +670,20 @@ def _detect_mesh_vertex_contacts(
         a = wp.cw_mul(wp.mesh_get_point(mesh, face * 3 + 0), scale)
         b = wp.cw_mul(wp.mesh_get_point(mesh, face * 3 + 1), scale)
         c = wp.cw_mul(wp.mesh_get_point(mesh, face * 3 + 2), scale)
-        cp, rigid_bary, _feature = triangle_closest_point(a, b, c, x_local)
+        cp, _rigid_bary, _feature = triangle_closest_point(a, b, c, x_local)
         if wp.length(x_local - cp) < threshold:
             if wp.length_sq(wp.cross(b - a, c - a)) == 0.0:
                 continue  # degenerate sliver: no meaningful normal, neighbors still report
-            if not _face_valid(
-                mesh,
-                scale,
-                cp,
-                float(vertex_sign) * (x_local - cp),
-                rigid_bary,
+            _append_mesh_contact(
+                _MESH_FEATURE_VT + wp.where(vertex_sign < 0, _MESH_FEATURE_INSIDE, 0),
+                particle_index,
+                shape_index,
                 face,
-                face_offsets[shape_index],
-                vertex_spans,
-                edge_spans,
-                neighbors,
-            ):
-                continue
-            sign = vertex_sign
-            if sign != 0:
-                _append_mesh_contact(
-                    _MESH_FEATURE_VT + wp.where(sign < 0, 8, 0),
-                    particle_index,
-                    shape_index,
-                    face,
-                    contact_max,
-                    contact_count,
-                    features,
-                    contact_shapes,
-                )
+                contact_max,
+                contact_count,
+                features,
+                contact_shapes,
+            )
 
 
 @wp.kernel(enable_backward=False)
@@ -660,6 +699,7 @@ def _detect_mesh_face_contacts(
     shape_flags: wp.array[wp.int32],
     shape_scale: wp.array[wp.vec3],
     shape_source_ptr: wp.array[wp.uint64],
+    shape_mesh_properties: wp.array[wp.int32],
     shape_world: wp.array[wp.int32],
     shape_margin: wp.array[float],
     bvh_tris_id: wp.uint64,
@@ -673,10 +713,6 @@ def _detect_mesh_face_contacts(
     edge_spans: wp.array[wp.vec3i],
     rigid_edge_slots: wp.array[int],
     neighbors: wp.array[int],
-    vertex_bounds: wp.array[wp.vec4],
-    vertex_errors: wp.array[wp.vec3],
-    edge_bounds: wp.array[wp.vec4],
-    edge_errors: wp.array[wp.vec3],
     vertex_outward: wp.array[wp.vec3],
     edge_outward: wp.array[wp.vec3],
     contact_count: wp.array[wp.int64],
@@ -699,9 +735,8 @@ def _detect_mesh_face_contacts(
     s_margin = shape_margin[shape_index] if shape_margin.shape[0] > 0 else 0.0
     bound = gap + s_margin + max_particle_radius
     slot = face_offsets[shape_index] + index
-    axis, width = _feature_query_capsule(scale, X_ws, vertex_bounds[slot], vertex_errors[slot], bound)
-    half_length = wp.where(width < bound, bound, 0.0)
-    start = x_w - half_length * axis
+    lower = x_w - wp.vec3(bound)
+    upper = x_w + wp.vec3(bound)
 
     rigid_world = shape_world[shape_index]
 
@@ -723,12 +758,11 @@ def _detect_mesh_face_contacts(
 
         if run_query:
             if query_all:
-                query = wp.bvh_query_capsule(bvh_tris_id, start, axis, width)
-            else:
-                query = wp.bvh_query_capsule(bvh_tris_id, start, axis, width, group_root)
+                group_root = -1
+            query = wp.bvh_query_aabb(bvh_tris_id, lower, upper, group_root)
 
             tri_index = wp.int32(0)
-            while wp.bvh_query_next(query, tri_index, 2.0 * half_length):
+            while wp.bvh_query_next(query, tri_index):
                 t0 = tri_indices[tri_index, 0]
                 t1 = tri_indices[tri_index, 1]
                 t2 = tri_indices[tri_index, 2]
@@ -740,24 +774,29 @@ def _detect_mesh_face_contacts(
                 if active == 0:
                     continue
 
-                cp, bary, _feature = triangle_closest_point(particle_q[t0], particle_q[t1], particle_q[t2], x_w)
-                r_soft = bary[0] * particle_radius[t0] + bary[1] * particle_radius[t1] + bary[2] * particle_radius[t2]
+                cp, _bary, _feature = triangle_closest_point(particle_q[t0], particle_q[t1], particle_q[t2], x_w)
+                r_soft = wp.max(particle_radius[t0], wp.max(particle_radius[t1], particle_radius[t2]))
                 if wp.length(cp - x_w) < gap + s_margin + r_soft:
-                    if bary[0] == 1.0 or bary[1] == 1.0 or bary[2] == 1.0:
-                        continue
                     cp_local = wp.transform_point(_X_sw, cp)
                     diff = cp_local - x_local
+                    # The cones only resolve which side an on-surface point lies on; they do not
+                    # reject the pair (see mesh_contact_valid).
                     outward = _cone_valid(mesh, scale, x_local, diff, vertex_spans[slot], neighbors)
                     inward = _cone_valid(mesh, scale, x_local, -diff, vertex_spans[slot], neighbors)
-                    if not outward and not inward:
-                        continue
-                    sign = _feature_mesh_sign(mesh, _X_sw, scale, cp)
+                    sign = _feature_mesh_sign(
+                        mesh,
+                        _X_sw,
+                        scale,
+                        cp,
+                        resolve_mesh_sign_method(shape_mesh_properties[shape_index]),
+                        wp.length(cp - x_w),
+                    )
                     if sign == 2:
                         reference = transform_normal_with_scale(X_ws, scale, vertex_outward[tid])
-                        sign = wp.where(wp.dot(cp - x_w, reference) < 0.0, -1, 1)
-                    if (sign > 0 and outward) or (sign < 0 and inward):
+                        sign = _local_side(outward, inward, cp - x_w, reference)
+                    if sign != 0:
                         _append_mesh_contact(
-                            _MESH_FEATURE_TV + wp.where(sign < 0, 8, 0),
+                            _MESH_FEATURE_TV + wp.where(sign < 0, _MESH_FEATURE_INSIDE, 0),
                             tri_index,
                             shape_index,
                             tid,
@@ -781,6 +820,7 @@ def _detect_mesh_edge_contacts(
     shape_flags: wp.array[wp.int32],
     shape_scale: wp.array[wp.vec3],
     shape_source_ptr: wp.array[wp.uint64],
+    shape_mesh_properties: wp.array[wp.int32],
     shape_world: wp.array[wp.int32],
     shape_margin: wp.array[float],
     bvh_edges_id: wp.uint64,
@@ -795,10 +835,6 @@ def _detect_mesh_edge_contacts(
     edge_spans: wp.array[wp.vec3i],
     rigid_edge_slots: wp.array[int],
     neighbors: wp.array[int],
-    vertex_bounds: wp.array[wp.vec4],
-    vertex_errors: wp.array[wp.vec3],
-    edge_bounds: wp.array[wp.vec4],
-    edge_errors: wp.array[wp.vec3],
     vertex_outward: wp.array[wp.vec3],
     edge_outward: wp.array[wp.vec3],
     contact_count: wp.array[wp.int64],
@@ -821,18 +857,11 @@ def _detect_mesh_edge_contacts(
     r1_w = wp.transform_point(X_ws, wp.cw_mul(wp.mesh_get_point(mesh, index1), scale))
     s_margin = shape_margin[shape_index] if shape_margin.shape[0] > 0 else 0.0
     bound = gap + s_margin + max_particle_radius
-    lower = wp.min(r0_w, r1_w)
-    upper = wp.max(r0_w, r1_w)
     slot = rigid_edge_slots[tid]
-    axis, width = _feature_query_capsule(scale, X_ws, edge_bounds[slot], edge_errors[slot], bound)
-    half_length = bound + 0.5 * wp.length(r1_w - r0_w)
-    width += 0.5 * wp.length(r1_w - r0_w)
-    start = 0.5 * (r0_w + r1_w) - half_length * axis
-    lower -= wp.vec3(bound)
-    upper += wp.vec3(bound)
-    capsule_size = 2.0 * (wp.vec3(wp.abs(axis[0]), wp.abs(axis[1]), wp.abs(axis[2])) * half_length + wp.vec3(width))
-    box_size = upper - lower
-    use_capsule = capsule_size[0] * capsule_size[1] * capsule_size[2] < box_size[0] * box_size[1] * box_size[2]
+    edge_length = wp.length(r1_w - r0_w)
+    axis = wp.vec3(0.0, 0.0, 1.0)
+    if edge_length > 0.0:
+        axis = (r1_w - r0_w) / edge_length
 
     rigid_world = shape_world[shape_index]
 
@@ -855,13 +884,10 @@ def _detect_mesh_edge_contacts(
         if run_query:
             if query_all:
                 group_root = -1
-            if use_capsule:
-                query = wp.bvh_query_capsule(bvh_edges_id, start, axis, width, group_root)
-            else:
-                query = wp.bvh_query_aabb(bvh_edges_id, lower, upper, group_root)
+            query = wp.bvh_query_capsule(bvh_edges_id, r0_w, axis, bound, group_root)
 
             edge_index = wp.int32(0)
-            while wp.bvh_query_next(query, edge_index, 2.0 * half_length):
+            while wp.bvh_query_next(query, edge_index, edge_length):
                 sv0 = edge_indices[edge_index, 2]
                 sv1 = edge_indices[edge_index, 3]
                 active = (particle_flags[sv0] & ParticleFlags.ACTIVE) | (particle_flags[sv1] & ParticleFlags.ACTIVE)
@@ -875,35 +901,25 @@ def _detect_mesh_edge_contacts(
                 if std[2] < gap + s_margin + r_soft:
                     soft_point = particle_q[sv0] + std[1] * (particle_q[sv1] - particle_q[sv0])
                     rigid_point = r0_w + std[0] * (r1_w - r0_w)
-                    if std[0] <= 0.0 or std[0] >= 1.0 or std[1] <= 0.0 or std[1] >= 1.0:
-                        continue
                     rigid_local = wp.transform_point(_X_sw, rigid_point)
                     diff_local = wp.transform_vector(_X_sw, soft_point - rigid_point)
+                    # As for face contacts, the cones only resolve on-surface sides.
                     outward = _cone_valid(mesh, scale, rigid_local, diff_local, edge_spans[slot], neighbors)
                     inward = _cone_valid(mesh, scale, rigid_local, -diff_local, edge_spans[slot], neighbors)
-                    if not outward and not inward:
-                        continue
-                    sign = _feature_mesh_sign(mesh, _X_sw, scale, soft_point)
+                    sign = _feature_mesh_sign(
+                        mesh,
+                        _X_sw,
+                        scale,
+                        soft_point,
+                        resolve_mesh_sign_method(shape_mesh_properties[shape_index]),
+                        std[2],
+                    )
                     if sign == 2:
                         reference = transform_normal_with_scale(X_ws, scale, edge_outward[tid])
-                        sign = wp.where(wp.dot(soft_point - rigid_point, reference) < 0.0, -1, 1)
-                    if not ((sign > 0 and outward) or (sign < 0 and inward)):
-                        continue
-                    valid_soft = bool(True)
-                    for side in range(2):
-                        opposite = edge_indices[edge_index, side]
-                        if opposite >= 0:
-                            direction = particle_q[opposite] - soft_point
-                            diff_soft = float(sign) * (rigid_point - soft_point)
-                            if wp.dot(diff_soft, direction) > 2.0e-6 * (
-                                wp.length(soft_point) + wp.length(rigid_point) + wp.length(particle_q[opposite])
-                            ) * (wp.length(diff_soft) + wp.length(direction)):
-                                valid_soft = False
-                    if not valid_soft:
-                        continue
+                        sign = _local_side(outward, inward, soft_point - rigid_point, reference)
                     if sign != 0:
                         _append_mesh_contact(
-                            _MESH_FEATURE_EE + wp.where(sign < 0, 8, 0),
+                            _MESH_FEATURE_EE + wp.where(sign < 0, _MESH_FEATURE_INSIDE, 0),
                             edge_index,
                             shape_index,
                             tid,
@@ -914,8 +930,141 @@ def _detect_mesh_edge_contacts(
                         )
 
 
+@wp.kernel(enable_backward=False)
+def _detect_mesh_edge_penetrations(
+    rigid_face_table: wp.array[wp.vec2i],
+    particle_q: wp.array[wp.vec3],
+    particle_flags: wp.array[wp.int32],
+    edge_indices: wp.array2d[wp.int32],
+    body_q: wp.array[wp.transform],
+    shape_transform: wp.array[wp.transform],
+    shape_body: wp.array[wp.int32],
+    shape_flags: wp.array[wp.int32],
+    shape_scale: wp.array[wp.vec3],
+    shape_source_ptr: wp.array[wp.uint64],
+    shape_mesh_properties: wp.array[wp.int32],
+    shape_world: wp.array[wp.int32],
+    bvh_edges_id: wp.uint64,
+    bvh_edges_group_roots: wp.array[wp.int32],
+    world_count: wp.int32,
+    contact_max: wp.int32,
+    face_offsets: wp.array[int],
+    vertex_spans: wp.array[wp.vec3i],
+    edge_spans: wp.array[wp.vec3i],
+    contact_count: wp.array[wp.int64],
+    features: wp.array[wp.vec3i],
+    params: wp.array[float],
+    contact_shapes: wp.array[int],
+):
+    """Recover soft edges that pass through a mesh, including deeper than feature pairs track.
+
+    A gripper can pinch a soft edge, whose vertices stay outside, deeper into a pad than the band
+    that feature pairs search. Such an edge enters and leaves the solid through rigid triangles;
+    the contact pairs the middle of that chord with its nearest surface point (see evaluation).
+    Each triangle searches only its own bounds, so scenes without crossings stay cheap.
+    This retains the last-crossing recovery strategy: it does not enumerate every
+    interior interval when an edge passes through a nonconvex or disconnected solid.
+    """
+    tid = wp.tid()
+    entry = rigid_face_table[tid]
+    shape_index = entry[0]
+    face = entry[1]
+    if (shape_flags[shape_index] & ShapeFlags.COLLIDE_PARTICLES) == 0:
+        return
+    scale = shape_scale[shape_index]
+    _X_bs, X_ws, X_sw = _shape_frames(shape_body, body_q, shape_transform, shape_index)
+    mesh = shape_source_ptr[shape_index]
+    a = wp.transform_point(X_ws, wp.cw_mul(wp.mesh_get_point(mesh, face * 3 + 0), scale))
+    b = wp.transform_point(X_ws, wp.cw_mul(wp.mesh_get_point(mesh, face * 3 + 1), scale))
+    c = wp.transform_point(X_ws, wp.cw_mul(wp.mesh_get_point(mesh, face * 3 + 2), scale))
+    method = resolve_mesh_sign_method(shape_mesh_properties[shape_index])
+    lower = wp.min(a, wp.min(b, c))
+    upper = wp.max(a, wp.max(b, c))
+
+    rigid_world = shape_world[shape_index]
+    for query_pass in range(2):
+        group_root = wp.int32(-1)
+        run_query = rigid_world < 0 and query_pass == 0
+        if rigid_world >= 0:
+            group_root = bvh_edges_group_roots[wp.where(query_pass == 0, rigid_world, world_count)]
+            run_query = group_root >= 0
+        if run_query:
+            query = wp.bvh_query_aabb(bvh_edges_id, lower, upper, group_root)
+            edge_index = wp.int32(0)
+            while wp.bvh_query_next(query, edge_index):
+                sv0 = edge_indices[edge_index, 2]
+                sv1 = edge_indices[edge_index, 3]
+                active = (particle_flags[sv0] & ParticleFlags.ACTIVE) | (particle_flags[sv1] & ParticleFlags.ACTIVE)
+                if active == 0:
+                    continue
+                soft0 = particle_q[sv0]
+                soft1 = particle_q[sv1]
+                p = wp.cw_div(wp.transform_point(X_sw, soft0), scale)
+                q = wp.cw_div(wp.transform_point(X_sw, soft1), scale)
+                hit = _segment_triangle_hit(
+                    p,
+                    q,
+                    wp.mesh_get_point(mesh, face * 3),
+                    wp.mesh_get_point(mesh, face * 3 + 1),
+                    wp.mesh_get_point(mesh, face * 3 + 2),
+                )
+                crossing = hit[0]
+                offset = face_offsets[shape_index]
+                if crossing < 0.0 or _crossing_owner(face, hit, offset, vertex_spans, edge_spans) != face:
+                    continue
+                # For a single interior interval, the first and last crossings bound
+                # one chord. Its midpoint is the deepest point of a slab such as a pad.
+                # If the chord reaches a soft endpoint, the vertex pass handles it.
+                length = wp.length(p - q)
+                last_hit = wp.mesh_query_ray(mesh, q, (p - q) / length, length)
+                if not last_hit.result:
+                    continue
+                last_face = last_hit.face
+                last = _segment_triangle_hit(
+                    p,
+                    q,
+                    wp.mesh_get_point(mesh, last_face * 3),
+                    wp.mesh_get_point(mesh, last_face * 3 + 1),
+                    wp.mesh_get_point(mesh, last_face * 3 + 2),
+                )
+                # A reverse ray can choose the other triangle at this same crossing.
+                # Compare feature owners, not triangle IDs or rounded ray parameters.
+                if last[0] <= crossing or _crossing_owner(last_face, last, offset, vertex_spans, edge_spans) == face:
+                    continue
+                t = 0.5 * (crossing + last[0])
+                if t > crossing and _is_inside(mesh, X_sw, scale, soft0 + t * (soft1 - soft0), method):
+                    slot = _append_mesh_contact(
+                        _MESH_FEATURE_EE_DEPTH + _MESH_FEATURE_INSIDE + _MESH_FEATURE_RECOVERY,
+                        edge_index,
+                        shape_index,
+                        tid,
+                        contact_max,
+                        contact_count,
+                        features,
+                        contact_shapes,
+                    )
+                    if slot >= 0:
+                        params[slot] = t
+
+
+@wp.func
+def _nearest_surface_contact(
+    mesh: wp.uint64, X_bs: wp.transform, X_sw: wp.transform, scale: wp.vec3, point: wp.vec3, sign_method: int
+):
+    """Body-frame position and velocity of the mesh surface point nearest to a world point.
+
+    Also returns that face's shape-frame normal, the fallback for a degenerate separation.
+    """
+    query = mesh_query_point_sign(mesh, wp.cw_div(wp.transform_point(X_sw, point), scale), 1.0e6, sign_method)
+    surface = wp.cw_mul(wp.mesh_eval_position(mesh, query.face, query.u, query.v), scale)
+    velocity = wp.cw_mul(wp.mesh_eval_velocity(mesh, query.face, query.u, query.v), scale)
+    face_normal = wp.mesh_eval_face_normal(mesh, query.face)
+    return wp.transform_point(X_bs, surface), wp.transform_vector(X_bs, velocity), face_normal
+
+
 @wp.kernel
 def _evaluate_mesh_contacts(
+    mesh_state: wp.array[wp.int32],
     contact_count: wp.array[wp.int32],
     features: wp.array[wp.vec3i],
     contact_shapes: wp.array[int],
@@ -929,6 +1078,8 @@ def _evaluate_mesh_contacts(
     shape_body: wp.array[wp.int32],
     shape_scale: wp.array[wp.vec3],
     shape_source_ptr: wp.array[wp.uint64],
+    shape_mesh_properties: wp.array[wp.int32],
+    params: wp.array[float],
     rigid_vertex_table: wp.array[wp.vec2i],
     rigid_vertex_normals: wp.array[wp.vec3],
     rigid_edge_table: wp.array[wp.vec3i],
@@ -943,7 +1094,10 @@ def _evaluate_mesh_contacts(
 ):
 
     tid = wp.tid()
-    if tid >= wp.min(contact_count[0], contact_max):
+    # Records below the mesh block belong to other passes, including per-particle contacts
+    # against meshes excluded from the full-surface pass.
+    # Force selection must not disable this evaluation's backward replay.
+    if tid < mesh_state[0] or tid >= wp.min(contact_count[0], contact_max):
         return
     shape = contact_shapes[tid]
     if shape_type[shape] != GeoType.MESH and shape_type[shape] != GeoType.CONVEX_MESH:
@@ -984,6 +1138,17 @@ def _evaluate_mesh_contacts(
         v_local = wp.cw_mul(wp.mesh_eval_velocity(mesh, face, rigid_bary[0], rigid_bary[1]), scale)
         body_pos = wp.transform_point(X_bs, cp)
         body_vel = wp.transform_vector(X_bs, v_local)
+    elif family == _MESH_FEATURE_EE_DEPTH:
+        sv0 = edge_indices[soft_feature, 2]
+        sv1 = edge_indices[soft_feature, 3]
+        corners = wp.vec3i(sv0, sv1, -1)
+        t = params[tid]
+        bary = wp.vec3(1.0 - t, t, 0.0)
+        probe = particle_q[sv0] + t * (particle_q[sv1] - particle_q[sv0])
+        body_pos, body_vel, face_normal = _nearest_surface_contact(
+            mesh, X_bs, X_sw, scale, probe, resolve_mesh_sign_method(shape_mesh_properties[shape_index])
+        )
+        normal = transform_normal_with_scale(X_ws, scale, face_normal)
     elif family == _MESH_FEATURE_TV:
         vertex_entry = rigid_vertex_table[rigid_feature]
         index = vertex_entry[1]
@@ -1046,7 +1211,7 @@ def _evaluate_mesh_contacts(
     diff_world = soft_point - rigid_point
     distance_world = wp.length(diff_world)
     if distance_world > CONTACT_NORMAL_DEGENERATE_EPS:
-        sign = wp.where((feature[0] & 8) != 0, -1.0, 1.0)
+        sign = wp.where((feature[0] & _MESH_FEATURE_INSIDE) != 0, -1.0, 1.0)
         normal = sign * diff_world / distance_world
 
     soft_contact_particle[tid] = particle
@@ -1061,7 +1226,7 @@ def launch_soft_mesh_contacts(*, model: Model, state: State, contacts: Contacts,
     """Append mesh contacts directly to final slots and evaluate their geometry."""
     device = model.device
     vt_pairs = data.vertex_pairs
-    rigid_vertex_table, rigid_vertex_normals, rigid_edge_table, rigid_edge_outward_dirs = data.rigid_features
+    rigid_vertex_table, _vertex_normals, rigid_edge_table, _edge_normals = data.rigid_features
     detector = data.detector
     max_particle_radius = model.particle_max_radius
     if detector is not None:
@@ -1070,16 +1235,22 @@ def launch_soft_mesh_contacts(*, model: Model, state: State, contacts: Contacts,
         if model.edge_count:
             detector.refit_edges()
     contact_count = data.contact_count
+    if contacts._soft_contact_mesh_features is None:
+        allocate_soft_mesh_contact_buffers(contacts)
+    contacts._soft_contact_mesh_data = data
+    # A previous mesh row may now contain an analytic contact. Explicit tags also
+    # survive the row reordering performed by coupled contact buffers.
+    contacts._soft_contact_mesh_features.fill_(wp.vec3i(-1, -1, -1))
     wp.launch(
         _begin_mesh_contacts,
         dim=1,
         inputs=[contacts.soft_contact_count, contact_count],
+        outputs=[contacts._soft_contact_mesh_state],
         device=device,
         record_tape=False,
     )
-    if contacts._soft_contact_mesh_features is None:
-        contacts._soft_contact_mesh_features = wp.empty(contacts.soft_contact_max, dtype=wp.vec3i, device=device)
     features = contacts._soft_contact_mesh_features
+    params = contacts._soft_contact_mesh_params
     contact_shapes = contacts.soft_contact_shape
     n_vt = int(vt_pairs.shape[0])
     n_tv = int(rigid_vertex_table.shape[0])
@@ -1097,8 +1268,9 @@ def launch_soft_mesh_contacts(*, model: Model, state: State, contacts: Contacts,
         model.shape_flags,
         model.shape_scale,
         model.shape_source_ptr,
+        model._shape_mesh_properties,
     ]
-    parallel_epsilon = detector.edge_edge_parallel_epsilon if detector is not None else 1.0e-5
+    parallel_epsilon = data.edge_edge_parallel_epsilon
 
     if n_vt > 0:
         # CUDA shares the nearest query within a warp. CPU queries keep one
@@ -1119,12 +1291,12 @@ def launch_soft_mesh_contacts(*, model: Model, state: State, contacts: Contacts,
                 model.shape_flags,
                 model.shape_scale,
                 model.shape_source_ptr,
+                model._shape_mesh_properties,
                 model.shape_collision_aabb_lower,
                 model.shape_collision_aabb_upper,
                 model.shape_margin,
                 gap,
                 contact_max,
-                *cone_args,
             ],
             outputs=[contact_count, features, contact_shapes],
             device=device,
@@ -1187,6 +1359,29 @@ def launch_soft_mesh_contacts(*, model: Model, state: State, contacts: Contacts,
             block_dim=64,
         )
 
+    if detector is not None and model.edge_count and len(data.rigid_faces):
+        wp.launch(
+            _detect_mesh_edge_penetrations,
+            dim=len(data.rigid_faces),
+            inputs=[
+                data.rigid_faces,
+                state.particle_q,
+                model.particle_flags,
+                model.edge_indices,
+                *shape_args,
+                model.shape_world,
+                detector.bvh_edges.id,
+                detector.bvh_edges_group_roots,
+                model.world_count,
+                contact_max,
+                *data.adjacency[:3],
+            ],
+            outputs=[contact_count, features, params, contact_shapes],
+            device=device,
+            record_tape=False,
+            block_dim=64,
+        )
+
     wp.launch(
         _end_mesh_contacts,
         dim=1,
@@ -1196,14 +1391,22 @@ def launch_soft_mesh_contacts(*, model: Model, state: State, contacts: Contacts,
     )
     if contact_max == 0:
         return
+    _launch_evaluate_mesh_contacts(model, state, contacts, data)
+
+
+def _launch_evaluate_mesh_contacts(model: Model, state: State, contacts: Contacts, data, *, record_tape: bool = True):
+    """Evaluate contact geometry for the mesh block's feature records."""
+    features = contacts._soft_contact_mesh_features
+    rigid_vertex_table, rigid_vertex_normals, rigid_edge_table, rigid_edge_outward_dirs = data.rigid_features
     wp.launch(
         _evaluate_mesh_contacts,
-        dim=contact_max,
+        dim=features.shape[0],
         inputs=[
+            contacts._soft_contact_mesh_state,
             contacts.soft_contact_count,
             features,
-            contact_shapes,
-            contact_max,
+            contacts.soft_contact_shape,
+            features.shape[0],
             model.shape_type,
             state.particle_q,
             model.tri_indices,
@@ -1213,11 +1416,13 @@ def launch_soft_mesh_contacts(*, model: Model, state: State, contacts: Contacts,
             model.shape_body,
             model.shape_scale,
             model.shape_source_ptr,
+            model._shape_mesh_properties,
+            contacts._soft_contact_mesh_params,
             rigid_vertex_table,
             rigid_vertex_normals,
             rigid_edge_table,
             rigid_edge_outward_dirs,
-            parallel_epsilon,
+            data.edge_edge_parallel_epsilon,
         ],
         outputs=[
             contacts.soft_contact_particle,
@@ -1227,17 +1432,246 @@ def launch_soft_mesh_contacts(*, model: Model, state: State, contacts: Contacts,
             contacts.soft_contact_body_vel,
             contacts.soft_contact_normal,
         ],
-        device=device,
+        device=model.device,
+        record_tape=record_tape,
+    )
+
+
+def allocate_soft_mesh_contact_buffers(contacts: Contacts) -> None:
+    """Allocate mesh feature records and detection-time geometry workspace."""
+    capacity = contacts.soft_contact_max
+    device = contacts.device
+    contacts._soft_contact_mesh_features = wp.full(capacity, wp.vec3i(-1, -1, -1), dtype=wp.vec3i, device=device)
+    contacts._soft_contact_mesh_params = wp.empty(capacity, dtype=float, device=device)
+    # First mesh record, used only by detection-time geometry evaluation.
+    contacts._soft_contact_mesh_state = wp.zeros(1, dtype=wp.int32, device=device)
+
+
+@wp.func
+def mesh_contact_valid(
+    feature: wp.vec3i,
+    shape_index: int,
+    particle_q: wp.array[wp.vec3],
+    particle_flags: wp.array[wp.int32],
+    tri_indices: wp.array2d[wp.int32],
+    edge_indices: wp.array2d[wp.int32],
+    body_q: wp.array[wp.transform],
+    shape_transform: wp.array[wp.transform],
+    shape_body: wp.array[wp.int32],
+    shape_scale: wp.array[wp.vec3],
+    shape_source_ptr: wp.array[wp.uint64],
+    rigid_vertex_table: wp.array[wp.vec2i],
+    rigid_edge_table: wp.array[wp.vec3i],
+    face_offsets: wp.array[int],
+    vertex_spans: wp.array[wp.vec3i],
+    edge_spans: wp.array[wp.vec3i],
+    rigid_edge_slots: wp.array[int],
+    neighbors: wp.array[int],
+    soft_adjacency: MeshAdjacencyData,
+    edge_edge_parallel_epsilon: float,
+) -> bool:
+    """Whether a mesh feature record is the canonical representation of its surface patch.
+
+    VT/TV test the closest TARGET feature's incident neighbors and keep one owner face for a
+    shared target vertex/edge. Reverse VT and TV queries are separate energy contributions,
+    even at vertex endpoints. EE tests both sides and defers endpoint solutions to VT/TV. This
+    test is discrete: a small motion can flip it, so solvers should apply it to force evaluation
+    only and keep every record for penetration prevention. Penetration recovery records always
+    pass.
+    """
+    if (feature[0] & _MESH_FEATURE_RECOVERY) != 0:
+        return True
+    family = feature[0] & 7
+    if family == _MESH_FEATURE_EE_DEPTH:
+        return True
+    sign = wp.where((feature[0] & _MESH_FEATURE_INSIDE) != 0, -1.0, 1.0)
+    _X_bs, X_ws, X_sw = _shape_frames(shape_body, body_q, shape_transform, shape_index)
+    mesh = shape_source_ptr[shape_index]
+    scale = shape_scale[shape_index]
+
+    if family == _MESH_FEATURE_VT:
+        face = feature[2]
+        x_local = wp.transform_point(X_sw, particle_q[feature[1]])
+        a = wp.cw_mul(wp.mesh_get_point(mesh, face * 3 + 0), scale)
+        b = wp.cw_mul(wp.mesh_get_point(mesh, face * 3 + 1), scale)
+        c = wp.cw_mul(wp.mesh_get_point(mesh, face * 3 + 2), scale)
+        cp, rigid_bary, _feature = triangle_closest_point(a, b, c, x_local)
+        return _face_valid(
+            mesh,
+            scale,
+            cp,
+            sign * (x_local - cp),
+            rigid_bary,
+            face,
+            face_offsets[shape_index],
+            vertex_spans,
+            edge_spans,
+            neighbors,
+        )
+
+    if family == _MESH_FEATURE_TV:
+        index = rigid_vertex_table[feature[2]][1]
+        x_local = wp.cw_mul(wp.mesh_get_point(mesh, index), scale)
+        x_w = wp.transform_point(X_ws, x_local)
+        t0 = tri_indices[feature[1], 0]
+        t1 = tri_indices[feature[1], 1]
+        t2 = tri_indices[feature[1], 2]
+        cp, bary, _feature = triangle_closest_point(particle_q[t0], particle_q[t1], particle_q[t2], x_w)
+        return _soft_face_valid(
+            particle_q, particle_flags, tri_indices, soft_adjacency, cp, sign * (x_w - cp), bary, feature[1]
+        )
+
+    entry = rigid_edge_table[feature[2]]
+    r0_w = wp.transform_point(X_ws, wp.cw_mul(wp.mesh_get_point(mesh, entry[1]), scale))
+    r1_w = wp.transform_point(X_ws, wp.cw_mul(wp.mesh_get_point(mesh, entry[2]), scale))
+    sv0 = edge_indices[feature[1], 2]
+    sv1 = edge_indices[feature[1], 3]
+    std = wp.closest_point_edge_edge(r0_w, r1_w, particle_q[sv0], particle_q[sv1], edge_edge_parallel_epsilon)
+    if std[0] <= 0.0 or std[0] >= 1.0 or std[1] <= 0.0 or std[1] >= 1.0:
+        return False
+    soft_point = particle_q[sv0] + std[1] * (particle_q[sv1] - particle_q[sv0])
+    rigid_point = r0_w + std[0] * (r1_w - r0_w)
+    rigid_local = wp.transform_point(X_sw, rigid_point)
+    diff_local = wp.transform_vector(X_sw, soft_point - rigid_point)
+    span = edge_spans[rigid_edge_slots[feature[2]]]
+    if not _cone_valid(mesh, scale, rigid_local, sign * diff_local, span, neighbors):
+        return False
+    # The separation must not point into either soft triangle adjacent to the soft edge.
+    diff_soft = sign * (rigid_point - soft_point)
+    for side in range(2):
+        opposite = edge_indices[feature[1], side]
+        if opposite >= 0:
+            direction = particle_q[opposite] - soft_point
+            if wp.dot(diff_soft, direction) > 2.0e-6 * (
+                wp.length(soft_point) + wp.length(rigid_point) + wp.length(particle_q[opposite])
+            ) * (wp.length(diff_soft) + wp.length(direction)):
+                return False
+    return True
+
+
+@wp.struct
+class _SoftContactFilterData:
+    """References used to select forces at the consumer's current configuration."""
+
+    features: wp.array[wp.vec3i]
+    contact_count: wp.array[wp.int32]
+    contact_max: int
+    contact_shapes: wp.array[wp.int32]
+    source_overflow: wp.array[wp.int32]
+    particle_q: wp.array[wp.vec3]
+    particle_flags: wp.array[wp.int32]
+    tri_indices: wp.array2d[wp.int32]
+    edge_indices: wp.array2d[wp.int32]
+    body_q: wp.array[wp.transform]
+    shape_transform: wp.array[wp.transform]
+    shape_body: wp.array[wp.int32]
+    shape_scale: wp.array[wp.vec3]
+    shape_source_ptr: wp.array[wp.uint64]
+    rigid_vertex_table: wp.array[wp.vec2i]
+    rigid_edge_table: wp.array[wp.vec3i]
+    face_offsets: wp.array[int]
+    vertex_spans: wp.array[wp.vec3i]
+    edge_spans: wp.array[wp.vec3i]
+    rigid_edge_slots: wp.array[int]
+    neighbors: wp.array[int]
+    soft_adjacency: MeshAdjacencyData
+    edge_edge_parallel_epsilon: float
+
+
+def _make_soft_contact_filter_data(
+    model: Model,
+    contacts: Contacts,
+    particle_q: wp.array[wp.vec3],
+    body_q: wp.array[wp.transform] | None,
+) -> _SoftContactFilterData:
+    """Bind existing arrays to an evaluation; allocate no device storage or position snapshots."""
+    result = _SoftContactFilterData()
+    data = contacts._soft_contact_mesh_data
+    if data is None:
+        if contacts._soft_contact_mesh_features is not None:
+            raise ValueError("Mesh contact features require their topology data for force evaluation")
+        return result
+    if contacts._soft_contact_mesh_features is None:
+        raise ValueError("Mesh contact topology requires per-contact feature records")
+    result.features = contacts._soft_contact_mesh_features
+    result.contact_count = contacts.soft_contact_count
+    result.contact_max = contacts.soft_contact_max
+    result.source_overflow = contacts._soft_contact_source_overflow
+    result.contact_shapes = contacts.soft_contact_shape
+    result.particle_q = particle_q
+    result.particle_flags = model.particle_flags
+    result.tri_indices = model.tri_indices
+    result.edge_indices = model.edge_indices
+    result.body_q = body_q
+    result.shape_transform = model.shape_transform
+    # Coupled views retain shape IDs but may compact body IDs.
+    result.shape_body = model.shape_body
+    result.shape_scale = model.shape_scale
+    result.shape_source_ptr = model.shape_source_ptr
+    result.rigid_vertex_table, _vertex_normals, result.rigid_edge_table, _edge_normals = data.rigid_features
+    (
+        result.face_offsets,
+        result.vertex_spans,
+        result.edge_spans,
+        result.rigid_edge_slots,
+        result.neighbors,
+    ) = data.adjacency[:5]
+    result.soft_adjacency = model.soft_mesh_adjacency_device
+    result.edge_edge_parallel_epsilon = data.edge_edge_parallel_epsilon
+    return result
+
+
+@wp.func
+def _soft_contact_force_enabled(contact_index: int, data: _SoftContactFilterData) -> bool:
+    """Select a force from the consumer's current geometry."""
+    if not data.features:
+        return True
+    count = wp.min(data.contact_count[0], data.contact_max)
+    if contact_index >= count:
+        return False
+    feature = data.features[contact_index]
+    # Analytic rows have no mesh feature. Keep the existing overflow policy:
+    # accept stored rows if this buffer or its coupled source overflowed.
+    if feature[0] < 0 or data.contact_count[0] > data.contact_max or data.source_overflow[0] != 0:
+        return True
+    return mesh_contact_valid(
+        feature,
+        data.contact_shapes[contact_index],
+        data.particle_q,
+        data.particle_flags,
+        data.tri_indices,
+        data.edge_indices,
+        data.body_q,
+        data.shape_transform,
+        data.shape_body,
+        data.shape_scale,
+        data.shape_source_ptr,
+        data.rigid_vertex_table,
+        data.rigid_edge_table,
+        data.face_offsets,
+        data.vertex_spans,
+        data.edge_spans,
+        data.rigid_edge_slots,
+        data.neighbors,
+        data.soft_adjacency,
+        data.edge_edge_parallel_epsilon,
     )
 
 
 class MeshContactData:
     """Fixed mesh topology and acceleration structures; no candidate-contact buffer."""
 
-    def __init__(self, model: Model, shape_mask: np.ndarray, vertex_pairs: wp.array[wp.vec2i]):
+    @property
+    def edge_edge_parallel_epsilon(self) -> float:
+        return self.detector.edge_edge_parallel_epsilon if self.detector is not None else 1.0e-5
+
+    def __init__(
+        self, model: Model, shape_mask: np.ndarray, vertex_pairs: wp.array[wp.vec2i], contact_headroom: int = 8
+    ):
         self.vertex_pairs = vertex_pairs
+        meshes = _collision_meshes(model, shape_mask)
         if model.tri_count:
-            self.rigid_features = _build_rigid_features(model, shape_mask)
+            self.rigid_features = _build_rigid_features(model, meshes)
             if model.edge_count == 0:
                 self.rigid_features = (
                     *self.rigid_features[:2],
@@ -1253,21 +1687,38 @@ class MeshContactData:
                 wp.empty(0, dtype=wp.vec3, device=model.device),
             )
             self.detector = None
+        face_rows = [
+            np.column_stack((np.full(len(mesh.indices) // 3, shape), np.arange(len(mesh.indices) // 3)))
+            for shape, mesh in meshes.items()
+        ]
+        self.rigid_faces = wp.array(
+            np.concatenate(face_rows).astype(np.int32) if face_rows else np.empty((0, 2), np.int32),
+            dtype=wp.vec2i,
+            device=model.device,
+        )
         vertices, vertex_normals, edges, edge_normals = self.rigid_features
-        if max(_MESH_QUERY_PARTITIONS * len(vertex_pairs), len(vertices), len(edges)) > np.iinfo(np.int32).max:
+        if (
+            max(_MESH_QUERY_PARTITIONS * len(vertex_pairs), len(vertices), len(edges), len(self.rigid_faces))
+            > np.iinfo(np.int32).max
+        ):
             raise ValueError("Mesh contact queries exceed 32-bit indexing capacity.")
-        adjacency, component_counts = _build_feature_adjacency(model, vertices, edges)
+        adjacency = _build_feature_adjacency(model, meshes, edges)
         self.adjacency = [*adjacency, vertex_normals, edge_normals]
-        # A query emits at most one contact per feature pair. Bound the wide
-        # append counter before allocating; final writes remain capacity checked.
-        max_faces = max(len(model.shape_source[s].indices) // 3 for s in np.flatnonzero(shape_mask))
-        bound = len(vertex_pairs) * max_faces + len(vertices) * model.tri_count + len(edges) * model.edge_count
+        # A query emits at most one contact per feature pair, or two depth probes per
+        # face crossing. Bound the wide append counter before allocating; final writes
+        # remain capacity checked.
+        max_faces = max(len(mesh.indices) // 3 for mesh in meshes.values())
+        bound = (
+            len(vertex_pairs) * max_faces
+            + len(vertices) * model.tri_count
+            + len(edges) * model.edge_count
+            + 2 * len(self.rigid_faces) * model.edge_count
+        )
         if bound > np.iinfo(np.int64).max - np.iinfo(np.int32).max:
             raise ValueError("Mesh contact pairs exceed 64-bit counting capacity.")
         self.contact_count = wp.empty(1, dtype=wp.int64, device=model.device)
-        # Size final storage primarily from the deformable workload. Retain a
-        # rigid-feature floor for fine flat patches touching very coarse cloth.
-        # This remains an estimate; every write checks the caller-sized capacity.
+        # Budget records per query source, as in the dense BVH backend. This is
+        # a tunable estimate, not a bound; every write remains capacity checked.
         particle_world = model.particle_world.numpy()
         shape_world = model.shape_world.numpy()[shape_mask]
         shape_counts = np.bincount(shape_world + 1, minlength=model.world_count + 1)
@@ -1284,7 +1735,12 @@ class MeshContactData:
                 + counts[1:] @ shape_counts[1:]
             )
 
-        surface_pairs = len(vertex_pairs) + count_pairs(model.tri_indices, 0) + count_pairs(model.edge_indices, 2)
-        vertex_pair_shapes = vertex_pairs.numpy()[:, 1]
-        vertex_patch_hint = int((4 * component_counts[vertex_pair_shapes]).sum(dtype=np.int64))
-        self.contact_capacity_hint = max(vertex_patch_hint, surface_pairs, len(vertices) + len(edges))
+        face_pairs = count_pairs(model.tri_indices, 0)
+        edge_pairs = count_pairs(model.edge_indices, 2)
+        query_count = len(vertex_pairs) + len(vertices) + len(edges)
+        # Endpoint records coexist with VT until the solver filters them. Estimate
+        # one TV row per soft triangle corner and one EE row per soft edge endpoint,
+        # plus one nearest-surface recovery row per particle query. Like the previous
+        # per-feature estimate, this is not a bound on dense overlapping surfaces.
+        endpoint_hint = 3 * face_pairs + 2 * edge_pairs + len(vertex_pairs)
+        self.contact_capacity_hint = contact_headroom * query_count + endpoint_hint

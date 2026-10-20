@@ -63,6 +63,8 @@ class Example:
             enable_self_collisions=False,
             hide_collision_shapes=True,
             skip_mesh_approximation=True,
+            # Use the same Newton joint drives for both solvers.
+            ignore_paths=[".*/Physics/.*_joint$"],
         )
 
         for i in range(6, g1.joint_dof_count):
@@ -218,9 +220,16 @@ class Example:
         self.viewer.end_frame()
 
     def test_final(self):
-        """Verify the robot remains finite, settled, and graph-stateful."""
+        """Verify the robot remains finite, settled, graph-stateful, and correctly actuated."""
         if self.state_0 is not self._graph_input_state:
             raise ValueError("G1 CUDA graph did not preserve its input state buffer")
+        if self.solver_type == "mujoco":
+            assert self.solver.mj_model.nu == self.model.joint_dof_count // self.world_count - 6, (
+                "Each G1 joint should have exactly one MuJoCo actuator"
+            )
+            assert (self.solver.mjc_actuator_ctrl_source.numpy() == self.solver.CtrlSource.JOINT_TARGET).all(), (
+                "G1 actuators should use Newton joint targets"
+            )
         newton.examples.test_body_state(
             self.model,
             self.state_0,

@@ -3,7 +3,14 @@
 
 import warp as wp
 
-from ..utils.heightfield import HeightfieldData, sample_sdf_grad_heightfield
+from ..utils.heightfield import (
+    HeightfieldData,
+    get_triangle_shape_from_heightfield,
+    heightfield_cell_range,
+    heightfield_point_below,
+    sample_sdf_grad_heightfield,
+    signed_heightfield_feature_distance,
+)
 from .broad_phase_common import binary_search
 from .flags import MeshProperties, MeshSignMethod, ParticleFlags, ShapeFlags
 from .types import (
@@ -1133,6 +1140,46 @@ def counter_increment_replay(
     return -1
 
 
+@wp.func
+def closest_point_heightfield(
+    hfd: HeightfieldData,
+    elevation_data: wp.array[wp.float32],
+    pos: wp.vec3,
+    threshold: float,
+) -> tuple[float, wp.vec3]:
+    """Exact signed distance and contact normal of ``pos`` against nearby heightfield triangles.
+
+    Unlike :func:`sample_sdf_grad_heightfield`, the normal follows the closest-feature delta, so a
+    point beside a step lip is pushed away from the lip rather than along the riser's face normal.
+    Only triangles within ``threshold`` of ``pos`` in XY are searched; farther points return 1e10.
+    """
+    cells = heightfield_cell_range(pos, pos, pos, hfd, threshold)
+    best_sq = float(1.0e20)
+    closest = wp.vec3(0.0)
+    closest_normal = wp.vec3(0.0, 0.0, 1.0)
+    for row in range(cells[2], cells[3] + 1):
+        for col in range(cells[0], cells[1] + 1):
+            for sub in range(2):
+                tri_index = (row * (hfd.ncol - 1) + col) * 2 + sub
+                rigid_shape, u = get_triangle_shape_from_heightfield(
+                    hfd, elevation_data, wp.transform_identity(), tri_index
+                )
+                v = u + rigid_shape.scale
+                w = u + rigid_shape.auxiliary
+                y, _bary, _feature = triangle_closest_point(u, v, w, pos)
+                distance_sq = wp.length_sq(pos - y)
+                if distance_sq < best_sq:
+                    best_sq = distance_sq
+                    closest = y
+                    closest_normal = wp.cross(v - u, w - u)
+    if best_sq >= 1.0e20:
+        return float(1.0e10), wp.vec3(0.0, 0.0, 1.0)
+    best, best_normal = signed_heightfield_feature_distance(
+        pos, closest, wp.normalize(closest_normal), heightfield_point_below(hfd, elevation_data, pos)
+    )
+    return best, best_normal
+
+
 @wp.kernel
 def create_soft_contacts(
     soft_rigid_contact_pairs: wp.array[wp.vec2i],
@@ -1158,6 +1205,7 @@ def create_soft_contacts(
     shape_heightfield_index: wp.array[wp.int32],
     heightfield_data: wp.array[HeightfieldData],
     heightfield_elevations: wp.array[wp.float32],
+    exact_heightfield: bool,
     # outputs
     soft_contact_count: wp.array[int],
     soft_contact_particle: wp.array[int],
@@ -1295,7 +1343,12 @@ def create_soft_contacts(
 
     if geo_type == GeoType.HFIELD:
         hfd = heightfield_data[shape_heightfield_index[shape_index]]
-        d, n = sample_sdf_grad_heightfield(hfd, heightfield_elevations, x_local)
+        if exact_heightfield:
+            # Full-surface contacts rest cloth on step lips, so particles beside a lip need the
+            # closest-feature normal instead of the riser's nearly horizontal face normal.
+            d, n = closest_point_heightfield(hfd, heightfield_elevations, x_local, margin + s_margin + radius)
+        else:
+            d, n = sample_sdf_grad_heightfield(hfd, heightfield_elevations, x_local)
 
     if d < margin + s_margin + radius:
         index = counter_increment(soft_contact_count, 0, soft_contact_tids, tid)

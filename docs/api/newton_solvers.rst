@@ -48,6 +48,7 @@ https://newton-physics.github.io/newton/stable/solvers/index.html.
    SolverMuJoCo
    SolverPhoenX
    SolverSemiImplicit
+   SolverSteel
    SolverStyle3D
    SolverVBD
    SolverXPBD
