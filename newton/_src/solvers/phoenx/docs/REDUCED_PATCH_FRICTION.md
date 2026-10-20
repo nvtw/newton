@@ -54,9 +54,11 @@ for eligible columns. Ineligible columns retain their three point rows. Solve
 all normal pages before any central patch row so a patch sees the complete
 physical normal load, even when one column spans multiple point pages.
 
-The normal friction load excludes Baumgarte-only impulse exactly as the current
-PhoenX contact projection does. Speculative points outside the friction shell
-contribute no patch load.
+The friction limit uses the accumulated normal impulse, consistently with
+point contact projection. Recovery enters the physical normal solve; a local
+bias subtraction cannot isolate its contribution in a coupled system and can
+destroy a converged sticking solution. Speculative points outside the friction
+shell contribute no patch load.
 
 ### Stage 2: whole-column tangent blocks
 

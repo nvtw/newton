@@ -9,14 +9,126 @@ import warp as wp
 
 import newton
 from newton._src.solvers.phoenx.articulations.reduced_forest import ReducedForestContactSystem
-from newton._src.solvers.phoenx.constraints.contact_container import ContactContainer
+from newton._src.solvers.phoenx.constraints.contact_container import ContactContainer, contact_container_zeros
 from newton._src.solvers.phoenx.constraints.contact_projection import (
     _fast_div,
+    contact_project_coupled_velocity_update_mobility_no_soft_pd,
     contact_project_coupled_velocity_update_no_soft_pd,
     contact_project_friction_metric,
+    contact_project_normal_delta_load_no_soft_pd,
     contact_project_velocity_update_no_soft_pd,
 )
 from newton._src.solvers.phoenx.tests.test_reduced_articulation import _total_momentum
+
+
+@wp.kernel(enable_backward=False)
+def _solve_sticking_equilibrium(cc: ContactContainer, sor: float, loads: wp.array[wp.float32]):
+    k = wp.tid()
+    n = wp.vec3f(1.0, 0.0, 0.0)
+    t1 = wp.vec3f(0.0, 1.0, 0.0)
+    t2 = wp.vec3f(0.0, 0.0, 1.0)
+    mass_coeff = wp.float32(0.9)
+    impulse_coeff = wp.float32(0.1)
+    jv = wp.float32(0.02) * cc.impulses[0, k]
+    bias = -jv - impulse_coeff * cc.impulses[0, k] / mass_coeff
+    if k == 0:
+        contact_project_velocity_update_no_soft_pd(
+            cc,
+            k,
+            n,
+            t1,
+            t2,
+            jv,
+            0.0,
+            0.0,
+            1.0,
+            1.0,
+            1.0,
+            bias,
+            0.0,
+            0.0,
+            0.7,
+            0.7,
+            mass_coeff,
+            impulse_coeff,
+            sor,
+            0.0,
+            0.0,
+            0.0,
+        )
+    elif k == 1:
+        contact_project_coupled_velocity_update_no_soft_pd(
+            cc,
+            k,
+            n,
+            t1,
+            t2,
+            jv,
+            0.0,
+            0.0,
+            1.0,
+            1.0,
+            1.0,
+            bias,
+            0.0,
+            0.0,
+            0.7,
+            0.7,
+            mass_coeff,
+            impulse_coeff,
+            sor,
+            0.0,
+            0.0,
+            0.0,
+            0.2,
+            0.1,
+            0.0,
+        )
+    elif k == 2:
+        contact_project_coupled_velocity_update_mobility_no_soft_pd(
+            cc,
+            k,
+            n,
+            t1,
+            t2,
+            jv,
+            0.0,
+            0.0,
+            1.0,
+            1.0,
+            1.0,
+            bias,
+            0.0,
+            0.0,
+            0.7,
+            0.7,
+            mass_coeff,
+            impulse_coeff,
+            sor,
+            0.0,
+            0.0,
+            0.0,
+            0.2,
+            0.1,
+            0.0,
+        )
+    else:
+        result = contact_project_normal_delta_load_no_soft_pd(
+            cc,
+            k,
+            jv,
+            1.0,
+            bias,
+            mass_coeff,
+            impulse_coeff,
+            sor,
+            0.0,
+            0.0,
+            0.0,
+        )
+        loads[k] = result[1]
+    if k < 3:
+        loads[k] = cc.impulses[0, k]
 
 
 @wp.kernel(enable_backward=False)
@@ -172,6 +284,28 @@ def _fast_div_batch(numerator: wp.array[wp.float32], denominator: wp.array[wp.fl
 
 
 class TestContactCoupling(unittest.TestCase):
+    def test_sticking_equilibrium_preserves_normal_load(self):
+        """Preserve a softened contact fixed point inside its Coulomb cone.
+
+        A separating normal velocity can balance recovery and regularization
+        at a converged contact. Subtracting a diagonal bias estimate from the
+        solved load incorrectly shrinks its static cone, even at equilibrium.
+        """
+        devices = ["cpu"] + (["cuda:0"] if wp.is_cuda_available() else [])
+        for device in devices:
+            cc = contact_container_zeros(4, device=device)
+            loads = wp.zeros(4, dtype=wp.float32, device=device)
+            for scale in (1.0e-4, 1.0, 1.0e4):
+                before = np.zeros((3, 4), dtype=np.float32)
+                before[0] = scale
+                before[1] = 0.695 * scale
+                for sor in (0.8, 1.0, 1.2):
+                    with self.subTest(device=device, load_scale=scale, sor=sor):
+                        cc.impulses.assign(before)
+                        wp.launch(_solve_sticking_equilibrium, 4, [cc, sor], [loads], device=device)
+                        np.testing.assert_allclose(cc.impulses.numpy() / scale, before / scale, atol=2.0e-7, rtol=0.0)
+                        np.testing.assert_allclose(loads.numpy() / scale, 1.0, atol=2.0e-7, rtol=0.0)
+
     @unittest.skipUnless(wp.is_cuda_available(), "CUDA fast division")
     def test_fast_division_matches_ieee_range(self):
         """Approximate division stays within a few ulp, including huge and zero divisors."""

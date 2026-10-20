@@ -1,0 +1,1 @@
+Fix PhoenX static-friction creep by preserving the solved Coulomb normal load and accumulated tangential impulses when rebasing material anchors, consistently across point, patch, and articulation contact solves.

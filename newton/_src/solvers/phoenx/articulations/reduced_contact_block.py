@@ -2491,10 +2491,7 @@ def _make_solve_patch_contact_tile_kernel(
                         )
                         cc_set_normal_lambda(cc, contact, normal_update.lambda_new)
                         delta_n = normal_update.delta
-                        load = normal_update.lambda_new + row_mass_coeff * effective_mass * bias * sor_boost
-                        normal_load[packed_articulation, point] = wp.clamp(
-                            load, wp.float32(0.0), normal_update.lambda_new
-                        )
+                        normal_load[packed_articulation, point] = normal_update.lambda_new
                         if speculative and bias > idt * wp.float32(0.002):
                             normal_load[packed_articulation, point] = wp.float32(0.0)
                 delta_n = _broadcast_contact_scalar(delta_n)

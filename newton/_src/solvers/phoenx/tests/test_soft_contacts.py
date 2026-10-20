@@ -420,7 +420,7 @@ class TestSoftContactUnilateral(unittest.TestCase):
         plane; with the clamp in place the sphere must stay put."""
         # Build with zero gravity so the only driver of motion is
         # the (not-supposed-to-fire) contact spring.
-        mb = newton.ModelBuilder(gravity=0.0)
+        mb = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
         # Start the sphere well above the plane so no contact fires.
         body = _add_sphere_on_ground(mb, radius=self.RADIUS, mass=1.0, z0=0.5)
         model, state_in, state_out, contacts, solver = _finalize_phoenx(

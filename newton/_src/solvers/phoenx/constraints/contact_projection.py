@@ -1,6 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
-"""Projected contact row updates shared by rigid and cloth contact paths."""
+"""Projected contact row updates shared by rigid and cloth contact paths.
+
+Coulomb limits use the accumulated normal impulse actually applied by the
+normal row. Recovery and regularization enter that same physical velocity
+solve; subtracting a diagonal bias estimate destroys sticking fixed points.
+"""
 
 from __future__ import annotations
 
@@ -37,19 +42,6 @@ __all__ = [
     "contact_project_velocity_update",
     "contact_project_velocity_update_no_soft_pd",
 ]
-
-
-@wp.func
-def _friction_normal_lambda(
-    lambda_n: wp.float32,
-    eff_n: wp.float32,
-    bias_n: wp.float32,
-    mass_coeff_n: wp.float32,
-    sor_boost: wp.float32,
-) -> wp.float32:
-    """Normal load for Coulomb friction, excluding Baumgarte correction."""
-    load = lambda_n + mass_coeff_n * eff_n * bias_n * sor_boost
-    return wp.clamp(load, wp.float32(0.0), lambda_n)
 
 
 def _make_contact_project_normal_velocity_update(has_soft_contact_pd: bool):
@@ -153,23 +145,6 @@ def _make_contact_project_velocity_update(has_soft_contact_pd: bool):
             BLOCK_LAMBDA_INF,
         )
         lambda_n_friction = normal_update.lambda_new
-        if wp.static(has_soft_contact_pd):
-            if pd_eff_soft_n <= wp.float32(0.0):
-                lambda_n_friction = _friction_normal_lambda(
-                    normal_update.lambda_new,
-                    k_inv_n,
-                    bias_n,
-                    normal_mass_coeff,
-                    sor_boost,
-                )
-        else:
-            lambda_n_friction = _friction_normal_lambda(
-                normal_update.lambda_new,
-                k_inv_n,
-                bias_n,
-                normal_mass_coeff,
-                sor_boost,
-            )
 
         d_lambda_t1 = -(eff_t1 * (jv_t1 + bias_t1))
         d_lambda_t2 = -(eff_t2 * (jv_t2 + bias_t2))
@@ -438,23 +413,6 @@ def _make_contact_project_coupled_velocity_update(has_soft_contact_pd: bool, tan
             BLOCK_LAMBDA_INF,
         )
         lambda_n_friction = normal_update.lambda_new
-        if wp.static(has_soft_contact_pd):
-            if pd_eff_soft_n <= wp.float32(0.0):
-                lambda_n_friction = _friction_normal_lambda(
-                    normal_update.lambda_new,
-                    k_inv_n,
-                    bias_n,
-                    normal_mass_coeff,
-                    sor_boost,
-                )
-        else:
-            lambda_n_friction = _friction_normal_lambda(
-                normal_update.lambda_new,
-                k_inv_n,
-                bias_n,
-                normal_mass_coeff,
-                sor_boost,
-            )
 
         if lambda_n_friction == wp.float32(0.0) or (mu_s == wp.float32(0.0) and mu_k == wp.float32(0.0)):
             # An unloaded contact has a zero Coulomb disk. Removing stale
@@ -570,23 +528,6 @@ def _make_contact_frame_velocity_update(has_soft_contact_pd: bool):
             BLOCK_LAMBDA_INF,
         )
         lambda_n_friction = normal_update.lambda_new
-        if wp.static(has_soft_contact_pd):
-            if pd_eff_soft_n <= wp.float32(0.0):
-                lambda_n_friction = _friction_normal_lambda(
-                    normal_update.lambda_new,
-                    k_inv_n,
-                    bias_n,
-                    normal_mass_coeff,
-                    sor_boost,
-                )
-        else:
-            lambda_n_friction = _friction_normal_lambda(
-                normal_update.lambda_new,
-                k_inv_n,
-                bias_n,
-                normal_mass_coeff,
-                sor_boost,
-            )
 
         d_lambda_t1 = -(eff_t1 * (jv_t1 + bias_t1))
         d_lambda_t2 = -(eff_t2 * (jv_t2 + bias_t2))
@@ -678,13 +619,7 @@ def _make_contact_project_normal_delta_load(has_soft_contact_pd: bool):
             BLOCK_LAMBDA_INF,
         )
         cc_set_normal_lambda(cc, k, update.lambda_new)
-        load = update.lambda_new
-        if wp.static(has_soft_contact_pd):
-            if pd_eff_soft_n <= wp.float32(0.0):
-                load = _friction_normal_lambda(update.lambda_new, eff_n, bias_n, mass_coeff_n, sor_boost)
-        else:
-            load = _friction_normal_lambda(update.lambda_new, eff_n, bias_n, mass_coeff_n, sor_boost)
-        return wp.vec2f(update.delta, load)
+        return wp.vec2f(update.delta, update.lambda_new)
 
     return impl
 

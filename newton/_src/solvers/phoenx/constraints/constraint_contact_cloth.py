@@ -763,23 +763,16 @@ def _make_contact_prepare_for_iteration_at(
 
             if wp.static(not cloth_support):
                 drift_sq = drift_t1_raw * drift_t1_raw + drift_t2_raw * drift_t2_raw
-                lam_t1_prev = cc_get_tangent1_lambda(cc, k)
-                lam_t2_prev = cc_get_tangent2_lambda(cc, k)
-                lam_n_prev = cc_get_normal_lambda(cc, k)
-                limit = mu_s_col * lam_n_prev
-                saturated = lam_n_prev > wp.float32(0.0) and (
-                    lam_t1_prev * lam_t1_prev + lam_t2_prev * lam_t2_prev >= wp.float32(0.98 * 0.98) * limit * limit
-                )
-                if solver_gap > wp.float32(0.0) or drift_sq > slip_threshold * slip_threshold or saturated:
+                if solver_gap > wp.float32(0.0) or drift_sq > slip_threshold * slip_threshold:
                     # These are friction references, never collision witnesses.
-                    # Both material anchors start at one world point.
+                    # Rebase their displacement without discarding the contact's
+                    # accumulated impulse. Proximity to the Coulomb limit alone
+                    # does not imply sliding; the solve projects the impulse.
                     point = wp.float32(0.5) * (p0_world + p1_world)
                     anchor0 = body_com1 + wp.quat_rotate_inv(orientation1, point - position1)
                     anchor1 = body_com2 + wp.quat_rotate_inv(orientation2, point - position2)
                     cc_set_friction_anchor0(cc, k, anchor0)
                     cc_set_friction_anchor1(cc, k, anchor1)
-                    cc_set_tangent1_lambda(cc, k, wp.float32(0.0))
-                    cc_set_tangent2_lambda(cc, k, wp.float32(0.0))
                     drift_t1_raw = wp.float32(0.0)
                     drift_t2_raw = wp.float32(0.0)
 
@@ -1930,12 +1923,6 @@ def _make_contact_iterate_at(
                 if wp.static(patch_friction):
                     if use_patch:
                         lambda_n_load = cc_get_normal_lambda(cc, k)
-                        if pd_eff_soft_n <= wp.float32(0.0):
-                            lambda_n_load = wp.clamp(
-                                lambda_n_load + mass_coeff_n * eff_n * bias_val * sor_boost,
-                                wp.float32(0.0),
-                                lambda_n_load,
-                            )
                         if is_speculative and speculative_bias > idt * wp.float32(0.002):
                             lambda_n_load = wp.float32(0.0)
                         patch_normal_load += lambda_n_load
