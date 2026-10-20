@@ -44,9 +44,9 @@ def _prepare(
 
 class TestRigidFrictionAnchors(unittest.TestCase):
     def test_broken_friction_anchor_starts_without_positional_error(self):
+        """Rebase a slipping reference without discarding its accumulated impulse."""
         if not wp.is_cuda_available():
             self.skipTest("CUDA required")
-        """Reset a broken material reference without changing collision witnesses."""
         biases = []
         for mass in (1.0,):
             builder = newton.ModelBuilder(gravity=wp.vec3(0.0))
@@ -75,7 +75,7 @@ class TestRigidFrictionAnchors(unittest.TestCase):
             self.assertEqual(int(contacts.rigid_contact_count.numpy()[0]), 1)
             # Same stored surface drift and proportionally scaled normal load.
             point = contacts.rigid_contact_point0.numpy()
-            point[0, 0] += 1.0e-5
+            point[0, 0] += 0.003
             contacts.rigid_contact_point0.assign(point)
             world = solver.world
             anchor_rows = world._contact_container.lambdas.numpy()
@@ -100,7 +100,7 @@ class TestRigidFrictionAnchors(unittest.TestCase):
                 device=model.device,
             )
             biases.append(world._contact_container.derived.numpy()[4:6, 0].copy())
-        np.testing.assert_allclose(world._contact_container.impulses.numpy()[1:3, 0], 0.0, atol=1.0e-12)
+        np.testing.assert_array_equal(world._contact_container.impulses.numpy(), impulses)
         np.testing.assert_allclose(biases[0], 0.0, atol=1.0e-8)
         np.testing.assert_array_equal(contacts.rigid_contact_point0.numpy(), point)
         # A second prepare at the same pose must not restore the broken drift.
@@ -122,6 +122,9 @@ class TestRigidFrictionAnchors(unittest.TestCase):
 
         # Slide the dynamic body after the break. The new material reference
         # must recover only this displacement, not the discarded old spring.
+        # A valid load at 99% of the static limit must retain its reference.
+        impulses[1, 0] = 0.495 * impulses[0, 0]
+        world._contact_container.impulses.assign(impulses)
         positions = world.bodies.position.numpy()
         shape0 = int(contacts.rigid_contact_shape0.numpy()[0])
         dynamic_body = int(world._active_contact_views().shape_body.numpy()[shape0])

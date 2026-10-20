@@ -506,11 +506,7 @@ def iterate_direct_contact_runs_kernel(
                         else:
                             cc_set_normal_lambda(contacts, contact, wp.float32(0.0))
                         normal_delta = wp.dot(normal_impulse, normal)
-                        normal_lambda = cc_get_normal_lambda(contacts, contact)
-                        normal_load = normal_lambda
-                        if pd_eff <= wp.float32(0.0):
-                            normal_load += row_mass_coeff * response.mobility[0, contact] * bias * sor_boost
-                            normal_load = wp.clamp(normal_load, wp.float32(0.0), normal_lambda)
+                        normal_load = cc_get_normal_lambda(contacts, contact)
                         rhs0 = velocity1 + response.mobility[3, contact] * normal_delta
                         rhs1 = velocity2 + response.mobility[4, contact] * normal_delta
                         if use_bias:

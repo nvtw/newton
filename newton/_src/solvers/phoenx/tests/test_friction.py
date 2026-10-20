@@ -297,6 +297,58 @@ class TestStaticFrictionThreshold(unittest.TestCase):
     N_FRAMES = 120
     PUSH_RATIO = 0.5
 
+    def test_near_limit_support_does_not_creep(self) -> None:
+        """Hold below the static cone without accumulating displacement over time.
+
+        Tilt gravity instead of the plane to avoid ramp-edge and orientation
+        effects. Existing threshold checks use much smaller loads and permit
+        centimeters of displacement, so they miss steady submillimeter creep.
+        """
+        angle = math.radians(34.0)
+        mu = 0.7
+        self.assertLess(math.tan(angle), mu)
+        for layout, split, model in (
+            ("multi_world", False, "point"),
+            ("single_world", True, "point"),
+            ("multi_world", False, "patch"),
+        ):
+            with self.subTest(step_layout=layout, mass_splitting=split, friction_model=model):
+                scene = _PhoenXScene(
+                    fps=120,
+                    substeps=4,
+                    solver_iterations=10,
+                    velocity_iterations=1,
+                    friction=mu,
+                    step_layout=layout,
+                    mass_splitting=split,
+                    mass_splitting_overflow_only=split,
+                    colored_contact_headers=split,
+                    colored_contact_rows=split,
+                    mass_splitting_batch_size=1,
+                    contact_friction_model=model,
+                )
+                scene.add_ground_plane()
+                body = scene.add_box(position=(0.0, 0.0, 0.251), half_extents=(0.25, 0.25, 0.25))
+                scene.finalize()
+                tangent_g = _G * math.sin(angle)
+                # Point friction also resists twist, so exercise both tangents.
+                # The two-row central patch has no torsional resistance; use a
+                # symmetric push to isolate its translational static threshold.
+                direction = (1.0, 0.0) if model == "patch" else (0.6, 0.8)
+                scene.world.gravity.assign(
+                    [(direction[0] * tangent_g, direction[1] * tangent_g, -_G * math.cos(angle))]
+                )
+                # Exclude landing and recovery of the initial friction spring.
+                for _ in range(600):
+                    scene.step()
+                start = scene.body_position(body).copy()
+                for _ in range(240):
+                    scene.step()
+                displacement = float(np.linalg.norm(scene.body_position(body)[:2] - start[:2]))
+                speed = float(np.linalg.norm(scene.body_velocity(body)[:2]))
+                self.assertLess(displacement, 2.0e-5, f"static support crept {displacement:.6g} m in 2 s")
+                self.assertLess(speed, 2.0e-5, f"static support retained {speed:.6g} m/s of slip")
+
     def _run_mu(self, mu: float) -> tuple[float, float]:
         scene = _PhoenXScene(fps=60, substeps=4, solver_iterations=16, friction=mu)
         scene.add_ground_plane()

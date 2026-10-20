@@ -5,17 +5,11 @@ from __future__ import annotations
 
 import warp as wp
 
-from newton._src.solvers.phoenx.constraints.constraint_container import (
-    DEFAULT_DAMPING_RATIO,
-    DEFAULT_HERTZ_CONTACT,
-    soft_constraint_coefficients,
-)
 from newton._src.solvers.phoenx.constraints.contact_container import (
     ContactContainer,
     cc_get_bias,
     cc_get_bias_t1,
     cc_get_bias_t2,
-    cc_get_eff_n,
     cc_get_normal_lambda,
     cc_get_tangent1_lambda,
     cc_get_tangent2_lambda,
@@ -166,8 +160,6 @@ def g1_scan_foot_contact_metrics_kernel(
     left_foot_body: wp.int32,
     right_foot_body: wp.int32,
     high_tangent_ratio_threshold: wp.float32,
-    dt_substep: wp.float32,
-    sor_boost: wp.float32,
     foot_contact_metrics: wp.array3d[wp.float32],
 ):
     tid = wp.tid()
@@ -206,12 +198,7 @@ def g1_scan_foot_contact_metrics_kernel(
     if tangent_normal_ratio >= high_tangent_ratio_threshold and active_normal_count > wp.float32(0.0):
         high_tangent_ratio_count = wp.float32(1.0)
 
-    _bias_rate, mass_coeff, _impulse_coeff = soft_constraint_coefficients(
-        DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, dt_substep
-    )
-    eff_n = cc_get_eff_n(contact_container, tid)
-    friction_load = normal_impulse + mass_coeff * eff_n * bias * sor_boost
-    friction_load = wp.clamp(friction_load, wp.float32(0.0), normal_impulse)
+    friction_load = normal_impulse
     friction_load_ratio = wp.float32(0.0)
     if normal_impulse > wp.float32(1.0e-8):
         friction_load_ratio = friction_load / normal_impulse
@@ -268,10 +255,6 @@ def scan_g1_foot_contact_metrics(
     if contact_container is None:
         return
 
-    dt_substep = float(env.config.frame_dt) / max(float(env.config.sim_substeps), 1.0)
-    solver_world = getattr(env.solver, "world", env.solver)
-    sor_boost = float(getattr(solver_world, "sor_boost", 1.0))
-
     wp.launch(
         g1_scan_foot_contact_metrics_kernel,
         dim=int(env.contacts.rigid_contact_max),
@@ -286,8 +269,6 @@ def scan_g1_foot_contact_metrics(
             env._left_foot_body_local,
             env._right_foot_body_local,
             float(high_tangent_ratio_threshold),
-            dt_substep,
-            sor_boost,
         ],
         outputs=[foot_contact_metrics],
         device=env.device,
