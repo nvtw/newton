@@ -1,1 +1,1 @@
-Fix clipped example previews in the GitHub README gallery with images that scale to fit three columns and compact labels with command tooltips.
+Fix clipped example previews in the GitHub README gallery by reducing image widths and wrapping the longest captions.
