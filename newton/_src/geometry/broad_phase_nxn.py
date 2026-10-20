@@ -4,7 +4,7 @@
 """NxN (all-pairs) broad phase collision detection.
 
 Provides O(N^2) broad phase using AABB overlap tests. Simple and effective
-for small scenes (<100 shapes). For larger scenes, use SAP broad phase.
+for worlds with few shapes. For larger worlds, consider SAP broad phase.
 
 See Also:
     :class:`BroadPhaseSAP` in ``broad_phase_sap.py`` for O(N log N) performance.
@@ -12,12 +12,14 @@ See Also:
 
 from __future__ import annotations
 
+import warnings
 from typing import Any
 
 import numpy as np
 import warp as wp
 
 from ..core.types import Devicelike
+from ..exceptions import NewtonWarning
 from .broad_phase_common import (
     EmptyFilterData,
     check_aabb_overlap_moving,
@@ -29,6 +31,9 @@ from .broad_phase_common import (
     test_world_and_group_pair,
     write_pair,
 )
+
+_EXPLICIT_LARGE_PAIR_COUNT_PER_WORLD = 20_000
+_EXPLICIT_LARGE_PAIR_COUNT_TOTAL = 100_000_000
 
 
 def create_nxn_broadphase_precomputed_pairs_kernel(filter_func: Any, filter_data_type: Any):
@@ -529,6 +534,31 @@ class BroadPhaseExplicit:
             self._kernel = create_nxn_broadphase_precomputed_pairs_kernel(filter_func, filter_data_type)
             self._has_custom_filter = True
         self._empty_filter_data = EmptyFilterData()
+
+    def _warn_large_pair_count(
+        self,
+        shape_pairs: wp.array[wp.vec2i] | np.ndarray,
+        shape_world: wp.array[wp.int32] | np.ndarray,
+        world_count: int,
+    ) -> None:
+        """Warn during setup when explicit pair testing is large per world."""
+        shape_pair_count = len(shape_pairs)
+        if shape_pair_count <= _EXPLICIT_LARGE_PAIR_COUNT_TOTAL:
+            return
+        if world_count <= 1:
+            busiest_world = shape_pair_count
+        else:
+            pairs = shape_pairs.numpy() if isinstance(shape_pairs, wp.array) else shape_pairs
+            worlds = shape_world.numpy() if isinstance(shape_world, wp.array) else shape_world
+            pair_counts = np.bincount(np.maximum(worlds[pairs[:, 0]], worlds[pairs[:, 1]]) + 1)
+            busiest_world = int(pair_counts[0] + np.max(pair_counts[1:], initial=0))
+        if busiest_world >= _EXPLICIT_LARGE_PAIR_COUNT_PER_WORLD:
+            warnings.warn(
+                f"Explicit broad phase tests {shape_pair_count:,} shape pairs per collision call "
+                f"({busiest_world:,} in the busiest world). Consider broad_phase='sap' for large worlds.",
+                NewtonWarning,
+                stacklevel=3,
+            )
 
     def launch(
         self,
