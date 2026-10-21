@@ -253,6 +253,7 @@ class TestModelBuilderEdgeAngleThreshold(unittest.TestCase):
             self.assertEqual(owned_counts[int(vertex_idx)], 1)
 
     def test_finalize_uses_full_edges_without_build_sdf(self):
+        """Pack every mesh edge when no SDF edge subset was built."""
         mesh = newton.Mesh.create_box(0.5, compute_inertia=False)
 
         builder = newton.ModelBuilder()
@@ -265,6 +266,7 @@ class TestModelBuilderEdgeAngleThreshold(unittest.TestCase):
         self.assertEqual(int(model._mesh_edge_indices.shape[0]), 18)
 
     def test_finalize_shares_edges_across_shapes_referencing_same_mesh(self):
+        """Share one packed edge range across shapes referencing the same mesh."""
         mesh = newton.Mesh.create_box(0.5, compute_inertia=False)
         builder = newton.ModelBuilder()
         body_a = builder.add_body()
@@ -503,6 +505,7 @@ class TestBuildCollisionEdges(unittest.TestCase):
         self.assertEqual(len(self._build(mesh)), 12)
 
     def test_collision_edges_consumed_by_builder(self):
+        """Pack the collision-edge subset supplied by the source mesh."""
         mesh = newton.Mesh.create_box(0.5, compute_inertia=False)
         # Seed _collision_edges with a hand-picked subset (e.g. 6 edges) to
         # simulate ``Mesh.build_sdf()`` having populated it.

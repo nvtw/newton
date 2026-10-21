@@ -1150,7 +1150,11 @@ requires updating :attr:`~newton.Model.shape_collision_radius`,
 bounds already include scale, and collision does not rescale them again; stale bounds can
 cause broadphase culling to omit candidate pairs. ``dynamic_shape_scale=True`` changes only
 unbaked texture-SDF queries and does not update these bounds or rebuild baked SDFs or
-heightfield collision data. Rebuild the baked geometry when its scale changes.
+heightfield collision data. To rebuild, recreate the affected shapes on a
+:class:`~newton.ModelBuilder` with the new scale, then call
+:meth:`~newton.ModelBuilder.finalize` and construct a new :class:`~newton.CollisionPipeline`.
+For explicitly prebuilt mesh SDFs, first rerun :meth:`~newton.Mesh.build_sdf` with
+the new scale before adding the mesh to the builder.
 
 .. deprecated:: 1.8
 

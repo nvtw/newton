@@ -1673,7 +1673,9 @@ class CollisionPipeline:
                 convex meshes, or heightfields, also update :attr:`Model.shape_collision_radius`,
                 :attr:`Model.shape_collision_aabb_lower`, and :attr:`Model.shape_collision_aabb_upper`
                 to match the new scale, or broadphase culling can miss contacts. It does not rebuild
-                baked SDFs or heightfield collision data; rebuild those when changing baked geometry.
+                baked SDFs or heightfield collision data. Recreate affected shapes at the new scale
+                on a :class:`ModelBuilder`, then finalize a new model and construct a new collision pipeline.
+                For explicitly prebuilt mesh SDFs, first rerun :meth:`Mesh.build_sdf` with the new scale.
                 Ignored when ``narrow_phase`` is provided. Defaults to ``False``.
             publish_capacity: Whether to publish the resolved capacities as the model's
                 default :attr:`~newton.Model.rigid_contact_max` and

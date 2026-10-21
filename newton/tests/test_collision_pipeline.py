@@ -3562,6 +3562,7 @@ class TestCurvedPrimitiveSDFExclusion(unittest.TestCase):
 
 class TestPlanarSDFOptIn(unittest.TestCase):
     def test_default_box_does_not_build_general_sdf(self):
+        """Keep default boxes on the analytic path without SDF edge data."""
         builder = newton.ModelBuilder()
         body = builder.add_body()
         box = builder.add_shape_box(body=body, hx=0.5, hy=0.5, hz=0.5)

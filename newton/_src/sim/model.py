@@ -1672,6 +1672,7 @@ class Model:
 
     @mesh_edge_indices.setter
     def mesh_edge_indices(self, value: wp.array[wp.vec2i] | None) -> None:
+        """Replace packed edge indices through the deprecated public alias."""
         warnings.warn(
             _COLLISION_EDGE_DEPRECATION_MSG.format(name="mesh_edge_indices"), NewtonDeprecationWarning, stacklevel=2
         )
@@ -1694,6 +1695,7 @@ class Model:
 
     @mesh_edge_centers.setter
     def mesh_edge_centers(self, value: wp.array[wp.vec4] | None) -> None:
+        """Replace packed edge centers through the deprecated public alias."""
         warnings.warn(
             _COLLISION_EDGE_DEPRECATION_MSG.format(name="mesh_edge_centers"), NewtonDeprecationWarning, stacklevel=2
         )
@@ -1716,6 +1718,7 @@ class Model:
 
     @mesh_edge_halves.setter
     def mesh_edge_halves(self, value: wp.array[wp.vec4] | None) -> None:
+        """Replace packed edge half-vectors through the deprecated public alias."""
         warnings.warn(
             _COLLISION_EDGE_DEPRECATION_MSG.format(name="mesh_edge_halves"), NewtonDeprecationWarning, stacklevel=2
         )
@@ -1738,6 +1741,7 @@ class Model:
 
     @shape_edge_range.setter
     def shape_edge_range(self, value: wp.array[wp.vec2i] | None) -> None:
+        """Replace shape edge ranges through the deprecated public alias."""
         warnings.warn(
             _COLLISION_EDGE_DEPRECATION_MSG.format(name="shape_edge_range"), NewtonDeprecationWarning, stacklevel=2
         )
