@@ -3,6 +3,9 @@
 
 import gc
 import itertools
+import subprocess
+import sys
+import textwrap
 import unittest
 import warnings
 from collections import Counter
@@ -66,6 +69,7 @@ from newton.tests.unittest_utils import (
     add_function_test,
     configure_sdf_for_collision_shapes,
     get_cuda_test_devices,
+    get_strict_warning_args,
     get_test_devices,
 )
 from newton.tests.utils.soft_contacts import evaluate_soft_contact_force_mask
@@ -7543,6 +7547,51 @@ def test_mesh_midphase_many_pairs(test, device):
 
 add_function_test(
     TestCollisionPipeline, "test_mesh_midphase_many_pairs", test_mesh_midphase_many_pairs, devices=get_test_devices()
+)
+
+
+def test_mesh_midphase_many_pairs_scalar(test, device):
+    """Run the many-pairs regression with scalar BVH queries selected before import."""
+    # Warp resolves wp.static at decoration time. Change only this flag while
+    # loading the module in a fresh process, without editing the source checkout.
+    code = textwrap.dedent("""
+        import sys
+        import unittest
+        from importlib.machinery import SourceFileLoader
+        from unittest import mock
+
+        get_code = SourceFileLoader.get_code
+
+        def scalar_get_code(loader, fullname):
+            if fullname == "newton._src.geometry.collision_core":
+                source = loader.get_source(fullname)
+                flag = "ENABLE_TILE_BVH_QUERY = True"
+                assert source.count(flag) == 1
+                return compile(source.replace(flag, "ENABLE_TILE_BVH_QUERY = False"), loader.path, "exec")
+            return get_code(loader, fullname)
+
+        with mock.patch.object(SourceFileLoader, "get_code", scalar_get_code):
+            from newton.tests.test_collision_pipeline import test_mesh_midphase_many_pairs
+
+        import warp as wp
+        test_mesh_midphase_many_pairs(unittest.TestCase(), wp.get_device(sys.argv[1]))
+    """)
+    result = subprocess.run(
+        [sys.executable, *get_strict_warning_args(), "-c", code, device.alias],
+        capture_output=True,
+        text=True,
+        timeout=600,
+        check=False,
+    )
+    test.assertEqual(result.returncode, 0, f"Scalar midphase failed:\n{result.stdout}\n{result.stderr}")
+    sys.stderr.write(result.stderr)
+
+
+add_function_test(
+    TestCollisionPipeline,
+    "test_mesh_midphase_many_pairs_scalar",
+    test_mesh_midphase_many_pairs_scalar,
+    devices=get_cuda_test_devices(),
 )
 
 
