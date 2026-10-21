@@ -12,7 +12,7 @@ from itertools import product
 import numpy as np
 import warp as wp
 
-from newton.examples.kamino.example_kamino_stewart_platform import Example
+from newton.examples.kamino.example_kamino_earworm_flowers import Example
 from newton.examples.kamino.utils.hoberman import generate_sphere
 
 

@@ -1793,7 +1793,7 @@ class TestKaminoExamples(unittest.TestCase):
 
 add_example_test(
     TestKaminoExamples,
-    name="kamino.example_kamino_stewart_platform",
+    name="kamino.example_kamino_earworm_flowers",
     devices=cuda_test_devices,
     use_viewer=True,
     variants=[
