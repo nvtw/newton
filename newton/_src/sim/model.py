@@ -20,7 +20,7 @@ import warp as wp
 from ..core.types import Devicelike
 from ..exceptions import NewtonDeprecationWarning
 from ..geometry.flags import ShapeFlags
-from ..utils.deprecation import RemovedAttribute
+from ..utils.deprecation import RemovedAttribute, warn_deprecation
 from ..utils.mesh import MeshAdjacency, MeshAdjacencyData
 from .contacts import Contacts
 from .control import Control
@@ -38,7 +38,7 @@ _JOINT_TWIST_LIMIT_DEPRECATION_MSG = (
 _COLLISION_EDGE_DEPRECATION_MSG = (
     "Model.{name} is deprecated in Newton 1.8 and will be removed in Newton 1.9. "
     "Packed collision edges are internal acceleration data; use CollisionPipeline for collision detection. "
-    "Custom NarrowPhase callers can supply their own edge arrays."
+    "Low-level NarrowPhase mesh-SDF collision relies on internal edge data without a stable public accessor."
 )
 
 if TYPE_CHECKING:
@@ -1663,19 +1663,16 @@ class Model:
 
         .. deprecated:: 1.8
             This acceleration data is internal and the public alias will be removed in 1.9.
-            Use :class:`CollisionPipeline` or supply edge arrays to :class:`geometry.NarrowPhase`.
+            Use :class:`CollisionPipeline`; low-level :class:`geometry.NarrowPhase` mesh-SDF
+            collision relies on internal edge data without a stable public accessor.
         """
-        warnings.warn(
-            _COLLISION_EDGE_DEPRECATION_MSG.format(name="mesh_edge_indices"), NewtonDeprecationWarning, stacklevel=2
-        )
+        warn_deprecation(_COLLISION_EDGE_DEPRECATION_MSG.format(name="mesh_edge_indices"))
         return self._mesh_edge_indices
 
     @mesh_edge_indices.setter
     def mesh_edge_indices(self, value: wp.array[wp.vec2i] | None) -> None:
         """Replace packed edge indices through the deprecated public alias."""
-        warnings.warn(
-            _COLLISION_EDGE_DEPRECATION_MSG.format(name="mesh_edge_indices"), NewtonDeprecationWarning, stacklevel=2
-        )
+        warn_deprecation(_COLLISION_EDGE_DEPRECATION_MSG.format(name="mesh_edge_indices"))
         self._mesh_edge_indices = value
 
     @property
@@ -1686,19 +1683,16 @@ class Model:
 
         .. deprecated:: 1.8
             This acceleration data is internal and the public alias will be removed in 1.9.
-            Use :class:`CollisionPipeline` or supply edge arrays to :class:`geometry.NarrowPhase`.
+            Use :class:`CollisionPipeline`; low-level :class:`geometry.NarrowPhase` mesh-SDF
+            collision relies on internal edge data without a stable public accessor.
         """
-        warnings.warn(
-            _COLLISION_EDGE_DEPRECATION_MSG.format(name="mesh_edge_centers"), NewtonDeprecationWarning, stacklevel=2
-        )
+        warn_deprecation(_COLLISION_EDGE_DEPRECATION_MSG.format(name="mesh_edge_centers"))
         return self._mesh_edge_centers
 
     @mesh_edge_centers.setter
     def mesh_edge_centers(self, value: wp.array[wp.vec4] | None) -> None:
         """Replace packed edge centers through the deprecated public alias."""
-        warnings.warn(
-            _COLLISION_EDGE_DEPRECATION_MSG.format(name="mesh_edge_centers"), NewtonDeprecationWarning, stacklevel=2
-        )
+        warn_deprecation(_COLLISION_EDGE_DEPRECATION_MSG.format(name="mesh_edge_centers"))
         self._mesh_edge_centers = value
 
     @property
@@ -1709,19 +1703,16 @@ class Model:
 
         .. deprecated:: 1.8
             This acceleration data is internal and the public alias will be removed in 1.9.
-            Use :class:`CollisionPipeline` or supply edge arrays to :class:`geometry.NarrowPhase`.
+            Use :class:`CollisionPipeline`; low-level :class:`geometry.NarrowPhase` mesh-SDF
+            collision relies on internal edge data without a stable public accessor.
         """
-        warnings.warn(
-            _COLLISION_EDGE_DEPRECATION_MSG.format(name="mesh_edge_halves"), NewtonDeprecationWarning, stacklevel=2
-        )
+        warn_deprecation(_COLLISION_EDGE_DEPRECATION_MSG.format(name="mesh_edge_halves"))
         return self._mesh_edge_halves
 
     @mesh_edge_halves.setter
     def mesh_edge_halves(self, value: wp.array[wp.vec4] | None) -> None:
         """Replace packed edge half-vectors through the deprecated public alias."""
-        warnings.warn(
-            _COLLISION_EDGE_DEPRECATION_MSG.format(name="mesh_edge_halves"), NewtonDeprecationWarning, stacklevel=2
-        )
+        warn_deprecation(_COLLISION_EDGE_DEPRECATION_MSG.format(name="mesh_edge_halves"))
         self._mesh_edge_halves = value
 
     @property
@@ -1732,19 +1723,16 @@ class Model:
 
         .. deprecated:: 1.8
             This acceleration data is internal and the public alias will be removed in 1.9.
-            Use :class:`CollisionPipeline` or supply edge arrays to :class:`geometry.NarrowPhase`.
+            Use :class:`CollisionPipeline`; low-level :class:`geometry.NarrowPhase` mesh-SDF
+            collision relies on internal edge data without a stable public accessor.
         """
-        warnings.warn(
-            _COLLISION_EDGE_DEPRECATION_MSG.format(name="shape_edge_range"), NewtonDeprecationWarning, stacklevel=2
-        )
+        warn_deprecation(_COLLISION_EDGE_DEPRECATION_MSG.format(name="shape_edge_range"))
         return self._shape_edge_range
 
     @shape_edge_range.setter
     def shape_edge_range(self, value: wp.array[wp.vec2i] | None) -> None:
         """Replace shape edge ranges through the deprecated public alias."""
-        warnings.warn(
-            _COLLISION_EDGE_DEPRECATION_MSG.format(name="shape_edge_range"), NewtonDeprecationWarning, stacklevel=2
-        )
+        warn_deprecation(_COLLISION_EDGE_DEPRECATION_MSG.format(name="shape_edge_range"))
         self._shape_edge_range = value
 
     @property

@@ -1156,15 +1156,6 @@ heightfield collision data. To rebuild, recreate the affected shapes on a
 For explicitly prebuilt mesh SDFs, first rerun :meth:`~newton.Mesh.build_sdf` with
 the new scale before adding the mesh to the builder.
 
-.. deprecated:: 1.8
-
-   The packed collision-edge fields ``Model.mesh_edge_indices``, ``Model.mesh_edge_centers``,
-   ``Model.mesh_edge_halves``, and ``Model.shape_edge_range`` are internal acceleration data.
-   Their public aliases remain readable and writable with a :class:`~newton.exceptions.NewtonDeprecationWarning`
-   through Newton 1.8 and will be removed in 1.9. Use :class:`~newton.CollisionPipeline` for
-   model collision detection. Expert callers of :class:`~newton.geometry.NarrowPhase` can
-   supply their own edge arrays; centers and half-vectors must use unscaled mesh coordinates.
-
 **Edge simplification.** ``mesh.build_sdf(...)`` also runs a dihedral-angle pre-filter over
 the mesh's manifold edges and caches the surviving subset on the mesh; the SDF-mesh contact
 pipeline picks up that cached set in preference to the unfiltered :attr:`~Mesh.edges`,
@@ -2740,7 +2731,21 @@ specializations. Rebuild the pipeline after modifying or resizing the pair array
 **Narrow phase**
 
 :class:`~geometry.NarrowPhase` accepts the candidate pairs from any broad phase and
-generates contacts:
+generates contacts. Low-level mesh-SDF collision requires packed edge indices and
+per-shape edge ranges; omitting them disables mesh edge contacts. Centers and
+half-vectors are optional acceleration arrays in unscaled mesh coordinates.
+Caller-owned arrays can use the full public :attr:`~newton.Mesh.edges` set and
+zero endpoint-ownership codes, but reproducing the pipeline's simplified edges
+and ownership requires internal data without a stable public accessor. Use
+:class:`~newton.CollisionPipeline` for model collision detection.
+
+.. deprecated:: 1.8
+
+   The ``Model.mesh_edge_indices``, ``Model.mesh_edge_centers``,
+   ``Model.mesh_edge_halves``, and ``Model.shape_edge_range`` aliases expose
+   internal collision acceleration data. They remain readable and writable with
+   :class:`~newton.exceptions.NewtonDeprecationWarning` through Newton 1.8 and
+   will be removed in 1.9. Use :class:`~newton.CollisionPipeline` instead.
 
 .. code-block:: python
 
@@ -2757,7 +2762,7 @@ generates contacts:
         shape_types=...,
         shape_data=...,
         shape_transform=...,
-        # ... remaining geometry arrays from Model
+        # ... remaining geometry arrays and caller-owned mesh edge data
         contact_pair=out_pairs,
         contact_position=out_positions,
         contact_normal=out_normals,

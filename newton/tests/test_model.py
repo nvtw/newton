@@ -73,11 +73,13 @@ class TestModelAttributeSpecs(unittest.TestCase):
                 private_name = f"_{name}"
                 original = getattr(model, private_name)
                 replacement = wp.clone(original)
-                with self.assertWarnsRegex(NewtonDeprecationWarning, rf"Model\.{name}"):
+                with self.assertWarnsRegex(NewtonDeprecationWarning, rf"Model\.{name}") as warning:
                     setattr(view, name, replacement)
+                self.assertEqual(warning.filename, __file__)
                 self.assertIs(getattr(view, private_name), replacement)
-                with self.assertWarnsRegex(NewtonDeprecationWarning, rf"Model\.{name}"):
+                with self.assertWarnsRegex(NewtonDeprecationWarning, rf"Model\.{name}") as warning:
                     self.assertIs(getattr(view, name), replacement)
+                self.assertEqual(warning.filename, __file__)
                 self.assertIs(getattr(model, private_name), original)
                 self.assertNotIn(name, dict(model._iter_attribute_specs()))
                 self.assertIn(private_name, dict(model._iter_attribute_specs()))
@@ -86,7 +88,7 @@ class TestModelAttributeSpecs(unittest.TestCase):
     def test_collision_edge_internal_access_does_not_warn(self):
         """Finalize and collide with packed edges without triggering legacy aliases."""
         with warnings.catch_warnings():
-            warnings.simplefilter("error", DeprecationWarning)
+            warnings.simplefilter("error", NewtonDeprecationWarning)
             builder = ModelBuilder()
             builder.add_ground_plane()
             body = builder.add_body(xform=wp.transform((0.0, 0.0, 0.05), wp.quat_identity()))
