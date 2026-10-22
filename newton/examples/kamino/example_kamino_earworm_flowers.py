@@ -13,6 +13,7 @@ small variations in timing, size, and direction.
 Seven flowers form a compact hexagonal patch with gently scattered base positions.
 Use --flower-resolution to vary scissor cells per 36-degree ring arc; the default
 of two reproduces the original twenty-cell rings procedurally.
+Use --mute to disable audio.
 
 The custom garden layout is assigned once after model setup. Calling the
 viewer's set_visible_worlds() or set_world_offsets() afterward replaces it;
@@ -440,6 +441,12 @@ def play_song(data: bytes):
                 self.audio_format = AudioFormat(channels=2, sample_size=16, sample_rate=SONG_RATE)
                 self.offset = 0
 
+            def seek(self, timestamp):
+                offset = 4 * int(max(timestamp, 0.0) * SONG_RATE)
+                if offset >= len(data):
+                    offset = loop_byte + (offset - loop_byte) % (len(data) - loop_byte)
+                self.offset = offset
+
             def get_audio_data(self, num_bytes, compensation_time=0.0):
                 chunk = bytearray()
                 while len(chunk) < num_bytes:
@@ -460,7 +467,7 @@ def play_song(data: bytes):
 
 @wp.func
 def song_position(time: float) -> float:
-    # Map the audio clock onto the song, which loops back to the end of the intro
+    # Map the dance clock onto the song, which loops back to the end of the intro
     loop = float(SONG_LOOP_BAR) * SONG_BAR
     end = float(SONG_BARS) * SONG_BAR
     if time >= end:
@@ -594,8 +601,8 @@ class Example:
         self.sim_substeps = getattr(args, "substeps", 1) if args else 1
         self.sim_dt = self.frame_dt / self.sim_substeps
         self.sim_time = 0.0
-        # The dance clock: advanced by each step and resynced to audio playback
-        # every frame, so the dance follows the music rather than the frame count.
+        # Follow playback while running so the choreography stays on the beat
+        # regardless of the viewer's frame rate.
         self.time = wp.zeros(1, dtype=float)
         self.player = None
 
@@ -864,6 +871,10 @@ class Example:
         if self.song is not None:
             self.player, self.song = play_song(self.song), None
         if self.player is not None:
+            if self.viewer.is_paused():
+                self.player.pause()
+            else:
+                self.player.play()
             self.time.fill_(self.player.time)
         if self.graphs:
             wp.capture_launch(self.graphs[self.frame % len(self.graphs)])
@@ -873,11 +884,30 @@ class Example:
             self.simulate()
         self.frame += 1
         self.sim_time += self.frame_dt
+        if self.player is not None and self.viewer.is_paused():
+            # Single stepping advances the silent audio cursor as well, so
+            # resuming cannot rewind the choreography to the pause position.
+            self.player.seek(self.player.time + self.frame_dt)
 
     def render(self):
         self.viewer.begin_frame(self.sim_time)
         self.viewer.log_state(self.state_0)
         self.viewer.end_frame()
+        if self.player is not None and self.viewer.is_paused():
+            self.player.pause()
+
+    def close(self):
+        """Stop playback and release its audio worker."""
+        player = getattr(self, "player", None)
+        self.player = None
+        self.song = None
+        if player is not None:
+            player.pause()
+            player.delete()
+
+    def __del__(self):
+        # Reset and browser switching discard the previous example.
+        self.close()
 
     def test_final(self):
         """Check tower tracking, flower breathing, and the mounted mechanism's loop closure."""
@@ -943,7 +973,7 @@ class Example:
             default=2,
             help="Scissor cells per 36-degree ring arc (2 reproduces the original sphere).",
         )
-        parser.add_argument("--mute", action="store_true", help=argparse.SUPPRESS)
+        parser.add_argument("--mute", action="store_true", help="Disable audio.")
         parser.add_argument("--stage-count", type=positive_int, default=20, help="Number of stacked Stewart platforms.")
         parser.add_argument(
             "--substeps",

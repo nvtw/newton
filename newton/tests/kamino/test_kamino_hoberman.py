@@ -4,16 +4,25 @@
 """Validate procedural Hoberman geometry against the original sphere."""
 
 import contextlib
+import gc
 import io
+import time
 import unittest
+import weakref
 from collections import Counter
 from itertools import product
 
 import numpy as np
 import warp as wp
 
-from newton.examples.kamino.example_kamino_earworm_flowers import Example
+from newton.examples.kamino.example_kamino_earworm_flowers import (
+    SONG_LOOP_BAR,
+    SONG_ROW,
+    Example,
+    play_song,
+)
 from newton.examples.kamino.utils.hoberman import generate_sphere
+from newton.tests.test_viewer_get_frame import _make_headless_viewer_gl_or_skip
 
 
 def _box_corners(pose, extents):
@@ -130,6 +139,9 @@ class TestHobermanGeometry(unittest.TestCase):
         self.assertEqual(parser.parse_args(["--flower-resolution", "3"]).flower_resolution, 3)
         self.assertEqual(parser.parse_args([]).stage_count, 20)
         self.assertEqual(parser.parse_args(["--stage-count", "3"]).stage_count, 3)
+        self.assertFalse(parser.parse_args([]).mute)
+        self.assertTrue(parser.parse_args(["--mute"]).mute)
+        self.assertIn("--mute", parser.format_help())
         for flag in ("--flower-resolution", "--stage-count"):
             for value in ("0", "-1", "1.5"):
                 with self.subTest(flag=flag, value=value):
@@ -139,6 +151,77 @@ class TestHobermanGeometry(unittest.TestCase):
                     self.assertEqual(raised.exception.code, 2)
                     self.assertIn(flag, errors.getvalue())
                     self.assertIn("positive integer", errors.getvalue())
+
+
+@unittest.skipUnless(wp.is_cuda_available(), "Requires CUDA for Kamino")
+class TestEarwormPlayback(unittest.TestCase):
+    def test_pause_resume_and_discard(self):
+        """Follow real playback, pause without clock jumps, and release a discarded example."""
+        viewer = _make_headless_viewer_gl_or_skip(self)
+        self.addCleanup(viewer.close)
+        args = Example.create_parser().parse_args(
+            ["--mute", "--world-count", "1", "--stage-count", "1", "--flower-resolution", "1"]
+        )
+        example = Example(viewer, args)
+        # Exercise the real streaming source and player without emitting sound
+        # or synthesizing a full song. Include the intro and one loop bar.
+        player = play_song(bytes(4 * 16 * (SONG_LOOP_BAR + 1) * SONG_ROW))
+        if player is None:
+            self.skipTest("Audio playback unavailable")
+        self.addCleanup(player.delete)
+        self.addCleanup(player.pause)
+        example.player = player
+
+        # A slow frame must advance the dance with the audio, rather than
+        # leave it on a separate clock that drifts at any rate other than 60 Hz.
+        time.sleep(0.04)
+        audio_before = player.time
+        example.step()
+        dance_time = float(example.time.numpy()[0]) - example.frame_dt
+        self.assertGreaterEqual(dance_time, audio_before - 1e-5)
+        self.assertLessEqual(dance_time, player.time + 1e-5)
+        example.render()
+        self.assertTrue(player.playing)
+
+        viewer._paused = True
+        example.render()
+        self.assertFalse(player.playing)
+        paused_time = player.time
+        before = float(example.time.numpy()[0])
+        time.sleep(0.1)
+        example.render()
+        self.assertEqual(player.time, paused_time)
+        self.assertEqual(float(example.time.numpy()[0]), before)
+
+        # A single step while paused must leave playback paused too.
+        example.step()
+        example.render()
+        self.assertFalse(player.playing)
+        self.assertAlmostEqual(float(example.time.numpy()[0]), player.time, places=5)
+        self.assertAlmostEqual(player.time - paused_time, example.frame_dt, places=5)
+        for _ in range(3):
+            example.step()
+        self.assertFalse(player.playing)
+        self.assertAlmostEqual(player.time - paused_time, 4 * example.frame_dt, places=5)
+        self.assertAlmostEqual(float(example.time.numpy()[0]), player.time, places=5)
+
+        viewer._paused = False
+        audio_before = player.time
+        example.step()
+        example.render()
+        self.assertTrue(player.playing)
+        dance_time = float(example.time.numpy()[0]) - example.frame_dt
+        self.assertGreaterEqual(dance_time, audio_before - 1e-5)
+        self.assertLessEqual(dance_time, player.time + 1e-5)
+
+        # Reset and browser switching discard the previous example. Retain the
+        # player to verify that its worker no longer owns playback afterward.
+        reference = weakref.ref(example)
+        del example
+        gc.collect()
+        self.assertIsNone(reference())
+        self.assertFalse(player.playing)
+        self.assertIsNone(player._audio_player)
 
 
 if __name__ == "__main__":
