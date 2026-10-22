@@ -1,1 +1,1 @@
-Fix clipped example previews in the GitHub README gallery by reducing image widths and wrapping the longest captions.
+Fix clipped example previews in the README gallery by placing the three longest commands in expandable captions that preserve the full commands for copying.
