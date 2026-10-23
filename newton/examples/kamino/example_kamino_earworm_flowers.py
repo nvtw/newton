@@ -216,44 +216,93 @@ def flower_opening(time: float) -> float:
     return (1.0 - wp.exp(-0.35 * time * time)) * (0.2 * (1.0 - wp.cos(phase)) + 0.9 * wp.sin(phase))
 
 
-# The song: an original chiptune, synthesized on the GPU at startup.
+# The song: an original 8-bit pop tune, synthesized on the GPU at startup.
 SONG_RATE = 44100
-SONG_ROW = 4725  # samples per 16th note at 140 BPM
+SONG_ROW = 4410  # samples per 16th note at 150 BPM
 SONG_BEAT = 4.0 * SONG_ROW / SONG_RATE  # [s]
 SONG_BAR = 4.0 * SONG_BEAT  # [s]
-SONG_LOOP_BAR = 8  # the loop skips the intro
-LEAD, HARMONY, STABS, BASS, DRUMS, HATS = range(6)
-KICK, CLAP = range(2)
-_CHORDS = {"Am": (45, 69, 72, 76), "F": (41, 69, 72, 77), "C": (48, 67, 72, 76), "G": (43, 67, 71, 74)}
-# One "<note>:<sixteenth notes>" token per note, one string per bar.
-_RIFF = [
-    "E5:2 A5:1 E5:2 C6:2 B5:2 A5:2 E5:1 G5:2 A5:2",
-    "F5:2 A5:1 F5:2 C6:2 B5:2 A5:2 F5:1 G5:2 A5:2",
-    "G5:2 C6:1 G5:2 E6:2 D6:2 C6:2 G5:1 A5:2 B5:2",
-    "D6:2 B5:1 G5:2 D6:2 E6:2 D6:2 B5:1 G5:2 A5:2",
+SONG_LOOP_BAR = 4  # the loop skips the intro
+LEAD, STABS, PAD, BASS, DRUMS, HATS = range(6)
+KICK, SNARE = range(2)
+# Harmonic stacks as (level, fade time [s]) per harmonic. Lead and stab notes are
+# plucks whose upper harmonics fade first; pad and bass harmonics hold.
+_HARMONICS = {
+    LEAD: (
+        (0.92, 0.151),
+        (0.2, 0.159),
+        (0.22, 0.175),
+        (0.34, 0.13),
+        (0.065, 0.156),
+        (0.073, 0.131),
+        (0.041, 0.127),
+        (0.076, 0.114),
+        (0.035, 0.113),
+        (0.043, 0.093),
+    ),
+    STABS: (
+        (0.594, 0.174),
+        (0.574, 0.253),
+        (0.243, 0.244),
+        (0.215, 0.267),
+        (0.117, 0.243),
+        (0.59, 0.247),
+        (0.175, 0.255),
+        (0.313, 0.267),
+    ),
+    PAD: tuple(
+        (a, 1e3) for a in (1.0, 0.684, 0.468, 0.733, 0.197, 0.305, 0.172, 0.359, *(2.87 / k for k in range(9, 25)))
+    ),
+    BASS: tuple((a, 1e3) for a in (1.0, 0.631, *(0.753 / k * math.exp((3 - k) / 6) for k in range(3, 25)))),
+}
+_CHORDS = {
+    "G": (43, 55, 59, 62),
+    "D": (38, 54, 57, 62),
+    "F": (41, 53, 57, 60),
+    "C": (36, 55, 60, 64),
+    "Em": (40, 55, 59, 64),
+    "Eb": (39, 55, 58, 63),
+}
+# One "<note>:<sixteenth notes>" token per note, one string per bar; "-" rests.
+_VERSE = [
+    "B5:3 A5:3 G5:2 A5:2 B5:2 D6:4",
+    "A5:6 -:2 F#5:2 G5:2 A5:2 B5:2",
+    "C6:3 A5:3 F5:2 G5:2 A5:2 C6:4",
+    "G5:6 -:2 E5:2 F5:2 G5:2 A5:2",
+    "B5:3 A5:3 G5:2 A5:2 B5:2 D6:4",
+    "E6:3 D6:3 A5:2 B5:2 A5:2 F#5:2 -:2",
+    "F6:3 E6:3 C6:2 D6:2 C6:2 A5:2 -:2",
+    "G5:4 A5:2 B5:2 C6:2 D6:6",
 ]
-_HOOK = [*_RIFF, *_RIFF[:2], "G5:2 C6:1 G5:2 E6:2 G6:2 E6:2 D6:1 C6:2 D6:2", "E6:2 D6:1 B5:2 G5:2 A5:2 B5:2 D6:1 E6:4"]
-_FINAL = [*_HOOK[:7], "G6:4 E6:2 D6:2 B5:2 D6:1 E6:1 A6:4"]
-_BREAK = [
-    "A5:2 C6:2 F6:4 E6:2 C6:2 A5:4",
-    "B5:2 D6:2 G6:4 F6:2 D6:2 B5:4",
-    "C6:2 E6:2 G6:4 A6:2 G6:2 E6:4",
-    "A6:4 G6:2 E6:2 C6:4 E6:4",
-    "A5:2 C6:2 F6:4 E6:2 C6:2 A5:4",
-    "B5:2 D6:2 G6:4 F6:2 D6:2 B5:4",
-    "E6:2 G6:2 C7:4 B6:2 G6:2 E6:4",
-    "D6:2 B5:2 G5:2 B5:2 D6:2 G6:2 B6:4",
+_BUILD = [
+    "G5:6 B5:6 E6:4",
+    "E6:6 D6:6 C6:4",
+    "D6:6 B5:6 G5:4",
+    "A5:6 B5:6 D6:4",
+    "G5:6 B5:6 E6:4",
+    "E6:6 D6:6 E6:4",
+    "Eb6:6 D6:6 Bb5:4",
+    "C6:6 D6:6 -:4",
 ]
-# Sections: chords, melody, style flags, and dance moves. Flags: i/d/D/k drum
-# style (intro, drive, drop, break), s chord stabs, h harmony, r rolling bass.
-# Moves: sway, bounce, twist, head-bang, bow, bloom.
+_CHORUS = [
+    "D6:3 D6:3 D6:2 E6:2 D6:2 B5:4",
+    "A5:3 A5:3 A5:2 B5:2 D6:2 A5:4",
+    "B5:3 B5:3 B5:2 C6:2 D6:2 E6:4",
+    "E6:6 D6:2 C6:2 B5:2 G5:4",
+    "G5:3 Bb5:3 Eb6:2 D6:2 C6:2 Bb5:4",
+    "A5:3 C6:3 F6:2 E6:2 D6:2 C6:4",
+    "D6:3 D6:3 B5:2 D6:8",
+    "G5:4 -:4 A5:2 B5:2 C6:2 D6:2",
+]
+# Sections: chords, melody, layers, and dance moves. Layers: i intro, b bass,
+# s stabs, d drums, t half-time drums, h/H eighth/sixteenth hats, x stop on the
+# last beat. Moves: sway, bounce, twist, head-bang, bow, bloom.
 _SONG = (
-    ("Am F C G Am F C G", None, "is", (0.05, 0.0, 0.0, 0.0, 0.0, 0.0)),
-    ("Am F C G Am F C G", _HOOK, "d", (0.06, 1.0, 0.0, 0.0, 0.0, 0.4)),
-    ("Am F C G Am F C G", _HOOK, "ds", (0.05, 1.0, 0.07, 0.0, 0.0, 0.4)),
-    ("F G C Am F G C G", _BREAK, "ks", (0.0, 0.0, 0.0, 0.0, 1.0, 0.0)),
-    ("Am F C G Am F C G", _HOOK, "Dshr", (0.03, 1.0, 0.06, 0.05, 0.0, 0.7)),
-    ("Am F C G Am F C G", _FINAL, "Dshr", (0.03, 1.0, 0.06, 0.05, 0.0, 0.7)),
+    ("G G F C", None, "ib", (0.04, 0.0, 0.0, 0.0, 0.0, 0.0)),
+    ("G D F C G D F C", _VERSE, "bdh", (0.06, 0.0, 0.0, 0.0, 0.0, 0.0)),
+    ("G D F C G D F C", _VERSE, "bsdh", (0.06, 0.5, 0.03, 0.0, 0.0, 0.3)),
+    ("Em C G D Em C Eb F", _BUILD, "bsthx", (0.03, 0.3, 0.0, 0.0, 1.0, 0.0)),
+    ("G D Em C Eb F G G", _CHORUS, "bsdH", (0.04, 1.0, 0.05, 0.03, 0.0, 0.6)),
+    ("G D Em C Eb F G D", _CHORUS, "bsdH", (0.04, 1.0, 0.08, 0.06, 0.0, 0.9)),
 )
 SONG_BARS = sum(len(section[0].split()) for section in _SONG)
 
@@ -262,74 +311,63 @@ def _song_score():
     """Expand the sections into note events and per-bar dance moves."""
 
     def note(name):
-        return 12 * int(name[-1]) + 12 + {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}[name[0]]
-
-    def third_below(midi):  # diatonic in A minor
-        return [p for p in range(midi - 5, midi) if p % 12 in (0, 2, 4, 5, 7, 9, 11)][-2]
+        pitch = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}[name[0]]
+        return 12 * int(name[-1]) + 12 + pitch + name.count("#") - name.count("b")
 
     events, moves = [], []  # event: (voice, start row, rows, note x3, velocity)
+    previous = (0.0,) * 6
     for progression, melody, flags, move in _SONG:
         chords = progression.split()
         for bar, chord in enumerate(chords):
-            row, last = 16 * len(moves), bar == len(chords) - 1
-            ramp = bar / (len(chords) - 1) if "i" in flags else 1.0
-            moves.append([m * ramp for m in move])
-            root, *triad = _CHORDS[chord]
-            r = row
-            for token in (melody[bar] if melody else "").split():
-                name, rows = token.split(":")
-                midi, rows = note(name), int(rows)
-                played = 1 if rows < 4 and "k" not in flags else rows  # staccato hook
-                velocity = 1.0 if (r - row) % 4 == 0 else 0.85
-                events.append((LEAD, r, played, midi, midi, midi, velocity))
-                if "h" in flags:
-                    events.append((HARMONY, r, played, *[third_below(midi)] * 3, 0.7 * velocity))
-                r += rows
-            for r, gate in enumerate((1, 0, 1, 1, 0, 1, 1, 0, 1, 0, 1, 1, 0, 1, 0, 1)):
-                if gate and "s" in flags:
-                    velocity = (1.0 if r % 4 == 2 else 0.7) * min(1.0, 0.5 + 0.1 * bar)
-                    events.append((STABS, row + r, 1, *triad, velocity))
-            if not ("i" in flags and bar < 2):  # octave-bouncing bass
-                step = 1 if "r" in flags else 2
-                for r in range(0, 16, step):
-                    interval = 12 if r % 4 == 2 else (7 if r >= 12 else 0)
-                    events.append((BASS, row + r, step, *[root + interval] * 3, 1.0 - 0.3 * (r % 2)))
+            row, last, first = 16 * len(moves), bar == len(chords) - 1, len(events)
+            intro = "i" in flags
+            ramp = (bar + 1) / len(chords) if intro else 1.0
+            # The moves grow from the previous section's over each section. Circles
+            # reverse every two bars, the lean turns every four, and twists and
+            # head-bangs take turns from bar to bar.
+            sway, bounce, twist, bang, bow, bloom = (
+                a + (b - a) * (bar + 1) / len(chords) for a, b in zip(previous, move, strict=True)
+            )
+            accent, index = 0.4 * (-1) ** bar, len(moves)
+            spin, heading = 1 - 2 * (index // 2 % 2), 0.5 * math.pi * (index // 4 % 2)
+            moves.append([sway, bounce, twist * (1 + accent), bang * (1 - accent), bow, bloom, spin, heading])
+            root, *voicing = _CHORDS[chord]
+            events.append((PAD, row, 16, *voicing, ramp))
+            if "b" in flags and not (intro and bar == 0):  # falls to the fifth at the end of every other bar
+                for beat in range(4):
+                    events.append((BASS, row + 4 * beat, 4, *[root + 7 * (bar % 2 == 1 and beat == 3)] * 3, 1.0))
+            if "s" in flags:  # syncopated stabs an octave above the pad
+                for r in (0, 3, 6, 10, 12, 14):
+                    events.append((STABS, row + r, 3, *[m + 12 for m in voicing], 1.0 if r in (0, 6, 12) else 0.75))
             hits = {}
-            if flags[0] in "dD" or ("i" in flags and bar >= 4):
-                hits = dict.fromkeys((0, 4, 8, 12), (KICK, 1.0))
-            if flags[0] in "dD" or ("i" in flags and bar >= 6):
-                hits.update({4: (CLAP, 0.8), 12: (CLAP, 0.8)})
-                if last:
-                    hits.update({r: (CLAP, 0.35 + 0.15 * (r - 12)) for r in (13, 14, 15)})
-            if "k" in flags and bar == len(chords) - 2:
-                hits = {r: (CLAP, 0.25 + 0.01 * r) for r in (0, 4, 8, 12)}
-            if "k" in flags and last:  # clap roll into the drop
-                hits = {r: (CLAP, 0.3 + 0.03 * r) for r in (0, 2, 4, 6, *range(8, 16))}
+            if "d" in flags or (intro and bar >= 1):
+                hits = {0: (KICK, 1.0), 8: (KICK, 1.0)}
+            if "d" in flags or (intro and bar >= 2):
+                hits.update({4: (SNARE, 1.0), 12: (SNARE, 1.0)})
+            if "d" in flags and last:
+                hits.update(dict.fromkeys((13, 14, 15), (SNARE, 1.0)))
+            if "t" in flags:  # half-time, then a snare roll into the stop
+                hits = {0: (KICK, 1.0), 8: (SNARE, 1.0)}
+                if bar >= len(chords) - 2:
+                    hits = {r: (SNARE, 0.5 + 0.03 * r) for r in range(0, 16, 1 if last else 2)}
+                    hits[0] = (KICK, 1.0)
             for r, (kind, velocity) in sorted(hits.items()):
                 events.append((DRUMS, row + r, 4, kind, kind, kind, velocity))
-            if flags[0] in "dDk" or ("i" in flags and bar >= 6):
-                for r in range(1, 16) if flags[0] == "D" else range(2, 16, 4):
-                    open_hat = float(flags[0] in "dD" and r % 4 == 2)
-                    events.append((HATS, row + r, 2, open_hat, open_hat, open_hat, 0.7 if r % 4 == 2 else 0.3))
+            for r in range(16) if "H" in flags else range(2, 16, 4) if "h" in flags else ():
+                open_hat = float("H" in flags and r == 14 and bar % 2 == 1)
+                events.append((HATS, row + r, 3, open_hat, open_hat, open_hat, 1.0 if r % 4 == 2 else 0.5))
+            r = row
+            for token in melody[bar].split() if melody else ():
+                name, rows = token.split(":")
+                if name != "-":
+                    events.append((LEAD, r, int(rows), *[note(name)] * 3, 1.0))
+                r += int(rows)
+            if "x" in flags and last:  # the band stops for the last beat while the flowers crouch
+                stop = row + 12
+                events[first:] = [(e[0], e[1], min(e[2], stop - e[1]), *e[3:]) for e in events[first:] if e[1] < stop]
+                moves[-1][:6] = [0.0, 0.0, 0.0, 0.0, 0.4, 0.0]
+        previous = move
     return events, moves
-
-
-@wp.func
-def _pulse(phase: float, dt: float, duty: float):
-    # Band-limited (PolyBLEP) pulse wave without DC offset
-    p = phase - wp.floor(phase)
-    q = p - duty + 1.0
-    q -= wp.floor(q)
-    v = wp.where(p < duty, 1.0, -1.0) - (2.0 * duty - 1.0)
-    for edge in range(2):
-        x = wp.where(edge == 0, p, q)
-        b = float(0.0)
-        if x < dt:
-            b = 2.0 * x / dt - (x / dt) * (x / dt) - 1.0
-        elif x > 1.0 - dt:
-            b = ((x - 1.0) / dt) * ((x - 1.0) / dt) + 2.0 * (x - 1.0) / dt + 1.0
-        v += wp.where(edge == 0, b, -b)
-    return v
 
 
 @wp.func
@@ -344,6 +382,7 @@ def song_voices_kernel(
     length: wp.array[int],
     note: wp.array[wp.vec3],
     velocity: wp.array[float],
+    harmonics: wp.array2d[wp.vec2],
     out: wp.array2d[float],
 ):
     voice, i = wp.tid()
@@ -353,49 +392,61 @@ def song_voices_kernel(
         t = float(i - start[e]) / float(SONG_RATE)
         n = float(length[e]) / float(SONG_RATE)
         p = note[e]
-        f = 440.0 * wp.pow(2.0, (p[int(t * 50.0) % 3] - 69.0) / 12.0)  # stabs arpeggiate at 50 Hz
-        dt = f / float(SONG_RATE)
-        phase = f * t
-        tri = 4.0 * wp.abs(phase - wp.floor(phase) - 0.5) - 1.0
-        if voice == BASS:
-            v = (0.9 * tri + 0.15 * _pulse(phase, dt, 0.5)) * (0.5 + 0.5 * wp.exp(-t / 0.1))
-            n *= 0.8
-        elif voice == DRUMS:
-            if int(p[0]) == KICK:
-                sweep = 48.0 * t + 110.0 * (1.0 - wp.exp(-30.0 * t)) / 30.0
-                v = wp.sin(2.0 * wp.pi * sweep) * wp.exp(-10.0 * t) + 0.25 * _noise(i, 11) * wp.exp(-300.0 * t)
-            else:
-                burst = wp.where(t < 0.025, wp.exp(-400.0 * wp.mod(t, 0.008)), wp.exp(-18.0 * (t - 0.025)))
-                v = 0.8 * burst * _noise(int(t * 18000.0 * wp.pow(0.9, wp.floor(t * 50.0))), 13)
-        elif voice == HATS:
-            v = _noise(int(t * 30000.0), 17) * wp.exp(-t * wp.where(p[0] > 0.5, 14.0, 60.0))
-        elif voice == STABS:
-            v = _pulse(phase, dt, 0.25) * (0.5 + 0.5 * wp.exp(-t / 0.1))
+        if voice == DRUMS:
+            if int(p[0]) == KICK:  # pitch drop from 170 Hz to 50 Hz with a click
+                sweep = 50.0 * t + 3.0 * (1.0 - wp.exp(-t / 0.025))
+                v = wp.sin(2.0 * wp.pi * sweep) * wp.exp(-t / 0.06) + 0.35 * _noise(i, 11) * wp.exp(-t / 0.004)
+            else:  # bright noise over a 155 Hz thump; differenced half-rate noise spans about 2-11 kHz
+                j = int(t * 22050.0)
+                hiss = 0.5 * (_noise(j, 13) - _noise(j - 1, 13))
+                body = 155.0 * t + 0.8 * (1.0 - wp.exp(-t / 0.02))
+                gate = wp.where(t < 0.03, 1.0, wp.exp(-(t - 0.03) / 0.035))
+                v = hiss * gate + 0.6 * wp.sin(2.0 * wp.pi * body) * wp.exp(-t / 0.04)
+        elif voice == HATS:  # twice-differenced noise keeps only the top octave
+            hiss = 0.25 * (_noise(i, 17) - 2.0 * _noise(i - 1, 17) + _noise(i - 2, 17))
+            v = hiss * wp.exp(-t / wp.where(p[0] > 0.5, 0.09, 0.03))
         else:
-            # Lead and harmony: near-square pulse with a slow width sweep, softened
-            # by a triangle and turned down for high notes that the ear finds harsh
-            duty = 0.44 + 0.06 * wp.sin(0.6 * wp.pi * float(i) / float(SONG_RATE) + 2.1 * float(voice))
-            tone = 0.7 * _pulse(phase, dt, duty) + 0.5 * tri
-            v = tone * wp.sqrt(wp.min(1.0, 660.0 / f)) * (0.6 + 0.4 * wp.exp(-t / 0.12))
-        v *= wp.min(t / 0.002, 1.0) * wp.clamp((n - t) / 0.012, 0.0, 1.0) * velocity[e]
+            # Additive voices: one note, or three for the pad and stabs
+            count = int(1)
+            if voice == PAD or voice == STABS:
+                count = 3
+            te = t
+            if voice == LEAD:  # stretch the pluck's fade over long notes
+                te = wp.where(t < 0.08, t, 0.08 + (t - 0.08) * 0.14 / wp.max(n - 0.08, 0.14))
+            for c in range(count):
+                f = 440.0 * wp.pow(2.0, (p[c] - 69.0) / 12.0)
+                for k in range(harmonics.shape[1]):
+                    h = harmonics[voice, k]
+                    fk = float(k + 1) * f
+                    if h[0] > 0.0 and fk < 16000.0:
+                        fade = 1.0 / (1.0 + wp.exp((te - h[1]) / 0.015))
+                        v += h[0] * fade * wp.sin(2.0 * wp.pi * fk * t + 0.3 * float(k))
+            v /= float(count)
+            if voice == LEAD:
+                v *= wp.min(te / 0.02, 1.0)
+            elif voice == STABS:
+                v *= wp.min(t / 0.01, 1.0)
+                n = wp.min(n, 0.26)
+            elif voice == PAD:
+                v *= 0.8 + 0.2 * wp.exp(-t / 0.15)
+            else:  # bass: a slight punch plus an octave-down thump on each beat
+                f0 = 440.0 * wp.pow(2.0, (p[0] - 69.0) / 12.0)
+                v = v * (0.85 + 0.15 * wp.exp(-t / 0.05)) + 1.1 * wp.sin(wp.pi * f0 * t) * wp.exp(-t / 0.2)
+        v *= wp.min(t / 0.003, 1.0) * wp.clamp((n - t) / 0.012, 0.0, 1.0) * velocity[e]
     out[voice, i] = v
 
 
 @wp.kernel
-def song_mix_kernel(voices: wp.array2d[float], gains: wp.array2d[float], loop_start: int, pcm: wp.array[wp.int16]):
+def song_mix_kernel(voices: wp.array2d[float], gains: wp.array2d[float], mix: wp.array2d[float]):
     i = wp.tid()
     left = float(0.0)
     right = float(0.0)
     for c in range(6):
-        left += gains[0, c] * voices[c, i]
-        right += gains[1, c] * voices[c, i]
-    j = i - 3 * SONG_ROW  # dotted-eighth echo of the lead, wrapping at the loop point
-    if j < loop_start and i >= loop_start:
-        j += voices.shape[1] - loop_start
-    if j >= 0:
-        right += 0.05 * voices[LEAD, j]
-    pcm[2 * i] = wp.int16(32000.0 * wp.tanh(left))
-    pcm[2 * i + 1] = wp.int16(32000.0 * wp.tanh(right))
+        x = wp.tanh(voices[c, i])  # soft-clip each voice, then the bus
+        left += gains[0, c] * x
+        right += gains[1, c] * x
+    mix[i, 0] = wp.tanh(1.2 * left)
+    mix[i, 1] = wp.tanh(1.2 * right)
 
 
 def render_song():
@@ -406,6 +457,9 @@ def render_song():
     for index, event in enumerate(events):  # a later note cuts an earlier one on the same voice
         table[event[0], event[1] : min(event[1] + event[2], rows)] = index
     ev = np.array(events, dtype=np.float32)
+    harmonics = np.zeros((6, 24, 2), dtype=np.float32)
+    for voice, stack in _HARMONICS.items():
+        harmonics[voice, : len(stack)] = stack
     voices = wp.empty((6, rows * SONG_ROW), dtype=float)
     wp.launch(
         song_voices_kernel,
@@ -416,17 +470,17 @@ def render_song():
             wp.array(ev[:, 2].astype(np.int32) * SONG_ROW, dtype=int),
             wp.array(ev[:, 3:6], dtype=wp.vec3),
             wp.array(ev[:, 6], dtype=float),
+            wp.array(harmonics, dtype=wp.vec2),
         ],
         outputs=[voices],
     )
-    gain = 1.4 * np.array((0.1, 0.055, 0.05, 0.17, 0.22, 0.03))  # lead, harmony, stabs, bass, drums, hats
-    pan = np.array((-0.1, 0.3, -0.4, 0.0, 0.0, 0.35))
-    gains = wp.array(np.stack((gain * np.sqrt(0.5 - 0.5 * pan), gain * np.sqrt(0.5 + 0.5 * pan))), dtype=float)
-    pcm = wp.empty(2 * voices.shape[1], dtype=wp.int16)
-    wp.launch(
-        song_mix_kernel, dim=voices.shape[1], inputs=[voices, gains, 16 * SONG_LOOP_BAR * SONG_ROW], outputs=[pcm]
-    )
-    return pcm.numpy().tobytes(), moves
+    gain = np.array((0.2, 0.21, 0.1, 0.135, 0.42, 0.035))  # lead, stabs, pad, bass, drums, hats
+    pan = np.array((0.0, -0.15, 0.15, 0.0, 0.0, 0.2))
+    gains = wp.array(np.stack((gain * np.sqrt(1.0 - pan), gain * np.sqrt(1.0 + pan))), dtype=float)
+    mix = wp.empty((voices.shape[1], 2), dtype=float)
+    wp.launch(song_mix_kernel, dim=voices.shape[1], inputs=[voices, gains], outputs=[mix])
+    mix = mix.numpy()
+    return (mix * (0.85 * 32767.0 / np.abs(mix).max())).astype(np.int16).tobytes(), moves
 
 
 def play_song(data: bytes):
@@ -488,13 +542,15 @@ def dance_move(moves: wp.array2d[float], time: float, move: int) -> float:
 @wp.func
 def dance_pose(stage: int, stage_count: int, time: float, variation: wp.vec3, moves: wp.array2d[float]) -> wp.transform:
     # Bar-long sways, beat bounces, two-beat twists, beat-rate head-bang waves
-    # running up the tower, and slow two-bar bows in the breakdown. Each flower
-    # dances a little differently: its own timing (up to 45 ms early or late),
-    # move size (+-12%), wave phase, and sway direction.
+    # running up the tower, and slow two-bar bows in the build. The sway circle
+    # reverses (spin) and the lean axis turns (heading) between phrases. Each
+    # flower dances a little differently: its own timing (up to 45 ms early or
+    # late), move size (+-12%), wave phase, and sway direction.
     time += 0.15 * variation[0]
     gain = 1.0 + 3.0 * (variation[1] - 1.0)
     wave = 0.6 * wp.sin(1.7 * variation[2])
-    turn = 0.4 * wp.cos(variation[2])
+    turn = 0.4 * wp.cos(variation[2]) + dance_move(moves, time, 7)
+    spin = dance_move(moves, time, 6)
     position = song_position(time)
     bar = 2.0 * wp.pi * position / SONG_BAR
     beat = 2.0 * wp.pi * position / SONG_BEAT
@@ -504,7 +560,11 @@ def dance_pose(stage: int, stage_count: int, time: float, variation: wp.vec3, mo
     bang = dance_move(moves, time, 3)
     bow = 0.06 * bend * dance_move(moves, time, 4)
     x = sway * wp.sin(bar - 0.35 * s + wave) + bang * wp.sin(beat - 0.5 * s + wave) + bow * wp.sin(0.5 * bar)
-    y = 0.7 * sway * wp.cos(bar - 0.35 * s + wave) + 0.5 * bang * wp.cos(0.5 * beat - 0.5 * s) + bow * wp.cos(0.5 * bar)
+    y = (
+        0.7 * spin * sway * wp.cos(bar - 0.35 * s + wave)
+        + 0.5 * bang * wp.cos(0.5 * beat - 0.5 * s)
+        + bow * wp.cos(0.5 * bar)
+    )
     roll = gain * (wp.cos(turn) * x - wp.sin(turn) * y)
     pitch = gain * (wp.sin(turn) * x + wp.cos(turn) * y)
     twist = gain * dance_move(moves, time, 2) * wp.sin(0.5 * beat - 0.3 * s + wave)
