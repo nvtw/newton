@@ -231,6 +231,9 @@ class Picking:
             device=self.model.device,
         )
 
+    # The warp_optix viewer still calls the name from before ``apply_force`` became public.
+    _apply_picking_force = apply_force
+
     def _update_os_inertia(self, state: newton.State, body: int, point_world: wp.vec3f) -> None:
         """Set the operational-space inertia used to turn commanded acceleration into force.
 
