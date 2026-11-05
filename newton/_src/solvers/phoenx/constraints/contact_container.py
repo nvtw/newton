@@ -158,6 +158,10 @@ class ContactContainer:
     lambdas: wp.array2d[wp.float32]
     prev_lambdas: wp.array2d[wp.float32]
     derived: wp.array2d[wp.float32]
+    #: Tangential target slip of conveyor-surface contacts along (t1, t2) [m/s]; empty when the
+    #: container cannot carry it. Written by prepare and read by iterate only when the contacts
+    #: have surface velocities, so other scenes never touch it.
+    surface_target: wp.array[wp.vec2f]
 
 
 @wp.kernel(enable_backward=False)
@@ -566,6 +570,7 @@ def contact_container_zeros(
     cc.lambdas = wp.zeros((CC_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
     cc.prev_lambdas = wp.zeros((CC_RIGID_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
     cc.derived = wp.zeros((CC_DERIVED_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
+    cc.surface_target = wp.zeros(n, dtype=wp.vec2f, device=device)
     return cc
 
 
@@ -586,6 +591,7 @@ def contact_solve_container_zeros(
     lambda_rows = CC_RIGID_DWORDS_PER_CONTACT if rigid_only else CC_DWORDS_PER_CONTACT
     cc.lambdas = wp.zeros((lambda_rows, n), dtype=wp.float32, device=device)
     cc.derived = wp.zeros((CC_DERIVED_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
+    cc.surface_target = wp.empty(0, dtype=wp.vec2f, device=device)
     return cc
 
 

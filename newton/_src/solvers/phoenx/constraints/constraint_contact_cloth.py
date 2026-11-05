@@ -775,6 +775,18 @@ def _make_contact_prepare_for_iteration_at(
                     cc_set_friction_anchor1(cc, k, anchor1)
                     drift_t1_raw = wp.float32(0.0)
                     drift_t2_raw = wp.float32(0.0)
+                if cc.surface_target.shape[0] > 0 and contacts.rigid_contact_surface_velocity.shape[0] > 0:
+                    # Conveyor surfaces: friction drives the slip to the surface velocity. The
+                    # anchors would hold the bodies together, so they follow the contact instead.
+                    surface_velocity = contacts.rigid_contact_surface_velocity[source_k]
+                    target = wp.vec2f(wp.dot(surface_velocity, t1_dir), wp.dot(surface_velocity, t2_dir))
+                    cc.surface_target[k] = target
+                    if wp.length_sq(target) > wp.float32(0.0):
+                        point = wp.float32(0.5) * (p0_world + p1_world)
+                        cc_set_friction_anchor0(cc, k, body_com1 + wp.quat_rotate_inv(orientation1, point - position1))
+                        cc_set_friction_anchor1(cc, k, body_com2 + wp.quat_rotate_inv(orientation2, point - position2))
+                        drift_t1_raw = wp.float32(0.0)
+                        drift_t2_raw = wp.float32(0.0)
 
             if (use_start_gap and solver_gap > wp.float32(0.0)) or effective_gap > wp.float32(0.002):
                 # Far speculative rows are normal velocity caps, not manifolds.
@@ -1592,6 +1604,11 @@ def _make_contact_iterate_at(
                         jv_t2 = wp.dot(vel_rel, t2_dir)
                         eff_t1 = cc_get_eff_t1(cc, k)
                         eff_t2 = cc_get_eff_t2(cc, k)
+                        if cc.surface_target.shape[0] > 0 and contacts.rigid_contact_surface_velocity.shape[0] > 0:
+                            # Slip relative to the conveyor surface, shape 1 minus shape 0.
+                            target = cc.surface_target[k]
+                            jv_t1 += target[0]
+                            jv_t2 += target[1]
                     elif not use_patch:
                         jv_t1 = wp.dot(vel_rel, t1_dir)
                         jv_t2 = wp.dot(vel_rel, t2_dir)

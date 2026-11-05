@@ -2971,6 +2971,7 @@ class PhoenXWorld:
                 rigid_contact_stiffness=contact_stiffness,
                 rigid_contact_damping=contact_damping,
                 rigid_contact_friction=contact_friction,
+                rigid_contact_surface_velocity=contacts.rigid_contact_surface_velocity,
             )
 
         # match_index is already in prev-sorted-k for compound, Newton-order otherwise.

@@ -687,6 +687,8 @@ class ContactViews:
     rigid_contact_damping: wp.array[wp.float32]
     #: Per-contact friction scale. ``0`` leaves material friction unchanged.
     rigid_contact_friction: wp.array[wp.float32]
+    #: Surface velocity of shape 1 minus shape 0 [m/s] (conveyor surfaces), or empty.
+    rigid_contact_surface_velocity: wp.array[wp.vec3f]
 
 
 def contact_views_make(
@@ -704,6 +706,7 @@ def contact_views_make(
     rigid_contact_stiffness: wp.array,
     rigid_contact_damping: wp.array,
     rigid_contact_friction: wp.array,
+    rigid_contact_surface_velocity: wp.array | None = None,
 ) -> ContactViews:
     """Build a :class:`ContactViews` from allocated Warp arrays.
 
@@ -725,6 +728,11 @@ def contact_views_make(
     v.rigid_contact_stiffness = rigid_contact_stiffness
     v.rigid_contact_damping = rigid_contact_damping
     v.rigid_contact_friction = rigid_contact_friction
+    v.rigid_contact_surface_velocity = (
+        rigid_contact_surface_velocity
+        if rigid_contact_surface_velocity is not None
+        else wp.empty(0, dtype=wp.vec3f, device=rigid_contact_count.device)
+    )
     return v
 
 

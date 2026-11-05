@@ -1251,6 +1251,21 @@ class SolverPhoenX(SolverBase):
                 raise RuntimeError("PhoenX deformable contacts require a CollisionPipeline")
             self.world.setup_official_deformable_contacts(model, pipeline)
         self._collision_pipeline = getattr(model, "_collision_pipeline", None)
+        if self._collision_pipeline is not None and self._collision_pipeline._rigid_contact_surface_velocity:
+            # Conveyor surfaces drive the point-friction rows of the canonical contact solve.
+            if (
+                step_layout != "single_world"
+                or solver_scheme != "soft"
+                or articulation_mode != "maximal"
+                or contact_friction_model != "point"
+                or colored_contact_rows
+                or colored_contact_headers
+                or use_body_pair_grouping
+            ):
+                raise ValueError(
+                    "Surface-velocity contacts require the soft single-world maximal point-friction solve "
+                    "without colored contact rows or body-pair grouping"
+                )
 
         if model.shape_material_mu is not None and model.shape_count > 0:
             self._install_shape_materials()
