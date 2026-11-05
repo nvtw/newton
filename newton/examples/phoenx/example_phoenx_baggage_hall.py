@@ -96,19 +96,25 @@ FLIGHT_COLORS = (
 )
 
 
-def _moving_box(builder, center, half_extents, velocity, color):
-    """Static belt: a box mesh whose surface moves with ``velocity``."""
-    box = newton.Mesh.create_box(
-        *half_extents, duplicate_vertices=False, compute_normals=False, compute_uvs=False, compute_inertia=False
+def _moving_box(builder, belts, center, half_extents, velocity, color):
+    """Static belt: a box mesh whose surface moves with ``velocity``.
+
+    Belts of one size and velocity share a mesh, which keeps the viewer at a few draw batches.
+    """
+    key = (tuple(half_extents), tuple(velocity))
+    if key not in belts:
+        box = newton.Mesh.create_box(
+            *half_extents, duplicate_vertices=False, compute_normals=False, compute_uvs=False, compute_inertia=False
+        )
+        mesh = newton.Mesh(box.vertices, box.indices, compute_inertia=False, enable_surface_velocity=True)
+        belts[key] = (mesh, wp.vec3(*velocity))
+    builder.add_shape_mesh(
+        -1,
+        xform=wp.transform(center, wp.quat_identity()),
+        mesh=belts[key][0],
+        cfg=newton.ModelBuilder.ShapeConfig(mu=0.9),
+        color=color,
     )
-    mesh = newton.Mesh(
-        np.asarray(box.vertices) + np.asarray(center, dtype=np.float32),
-        np.asarray(box.indices),
-        compute_inertia=False,
-        enable_surface_velocity=True,
-    )
-    builder.add_shape_mesh(-1, mesh=mesh, cfg=newton.ModelBuilder.ShapeConfig(mu=0.9), color=color)
-    return mesh, wp.vec3(*velocity)
 
 
 def _box(builder, center, half_extents, cfg, color=None):
@@ -336,16 +342,18 @@ def _case_instances_kernel(
     case_kind: wp.array[wp.int32],
     case_flight: wp.array[wp.int32],
     flight_colors: wp.array[wp.vec3],
-    kind: int,
+    half_extents: wp.array[wp.vec3],
     xforms: wp.array[wp.transform],
+    scales: wp.array[wp.vec3],
     colors: wp.array[wp.vec3],
 ):
-    """Instances of one suitcase size, tinted by flight; others are parked out of view."""
+    """One unit-box instance per suitcase slot, scaled to its size; unused slots vanish."""
     slot = wp.tid()
     body = body_start + slot
-    xforms[slot] = wp.transform(wp.vec3(0.0, 0.0, -1000.0), wp.quat_identity())
-    if phoenx_body_is_active(dyn, body) and case_kind[slot] == kind:
-        xforms[slot] = body_q[body]
+    xforms[slot] = body_q[body]
+    scales[slot] = wp.vec3(0.0)
+    if phoenx_body_is_active(dyn, body):
+        scales[slot] = half_extents[case_kind[slot]]
     shade = 0.75 + 0.25 * float(slot % 5) / 4.0
     colors[slot] = flight_colors[case_flight[slot] % FLIGHTS] * shade
 
@@ -365,7 +373,7 @@ class Example:
         belt_color = (0.16, 0.17, 0.19)
         rail_color = (0.85, 0.75, 0.2)
         volumes = {}  # shape -> (kind, index)
-        self.belts = []
+        self.belts = {}
         counters = []
         cart_wall_start = []
         collector_end = DIVERTER_START - 3.0
@@ -377,14 +385,13 @@ class Example:
                 (SORTER_START, collector_end, COLLECTOR_SPEED),
                 (collector_end, SORTER_END, SORTER_SPEED),
             ):
-                self.belts.append(
-                    _moving_box(
-                        builder,
-                        ((start + end) / 2, y0, SORTER_TOP - THICKNESS / 2),
-                        ((end - start) / 2, SORTER_WIDTH / 2, THICKNESS / 2),
-                        (speed, 0, 0),
-                        belt_color,
-                    )
+                _moving_box(
+                    builder,
+                    self.belts,
+                    ((start + end) / 2, y0, SORTER_TOP - THICKNESS / 2),
+                    ((end - start) / 2, SORTER_WIDTH / 2, THICKNESS / 2),
+                    (speed, 0, 0),
+                    belt_color,
                 )
             _box(
                 builder,
@@ -401,14 +408,13 @@ class Example:
                 feeder_near = y0 + SORTER_WIDTH / 2 + 0.05
                 feeder_len = FEEDER_START - feeder_near + y0 + 0.8
                 feeder_center = (x, feeder_near + feeder_len / 2, FEEDER_TOP - THICKNESS / 2)
-                self.belts.append(
-                    _moving_box(
-                        builder,
-                        feeder_center,
-                        (FEEDER_WIDTH / 2, feeder_len / 2, THICKNESS / 2),
-                        (0, -FEEDER_SPEED, 0),
-                        belt_color,
-                    )
+                _moving_box(
+                    builder,
+                    self.belts,
+                    feeder_center,
+                    (FEEDER_WIDTH / 2, feeder_len / 2, THICKNESS / 2),
+                    (0, -FEEDER_SPEED, 0),
+                    belt_color,
                 )
                 for sign in (-1.0, 1.0):
                     _box(
@@ -442,14 +448,13 @@ class Example:
                 chute_near = SORTER_WIDTH / 2 + 0.02
                 chute_len = CHUTE_END - chute_near
                 chute_center = (cx, y0 + side * (chute_near + chute_len / 2), CHUTE_TOP - THICKNESS / 2)
-                self.belts.append(
-                    _moving_box(
-                        builder,
-                        chute_center,
-                        (CHUTE_WIDTH / 2, chute_len / 2, THICKNESS / 2),
-                        (0, side * CHUTE_SPEED, 0),
-                        belt_color,
-                    )
+                _moving_box(
+                    builder,
+                    self.belts,
+                    chute_center,
+                    (CHUTE_WIDTH / 2, chute_len / 2, THICKNESS / 2),
+                    (0, side * CHUTE_SPEED, 0),
+                    belt_color,
                 )
                 for sign in (-1.0, 1.0):
                     _box(
@@ -536,7 +541,7 @@ class Example:
         builder.reserve_dynamic_capacity(bodies=CAPACITY, shapes=CAPACITY)
         self.model = builder.finalize()
         self.body_start = self.model._dynamic_capacity.body_start
-        for mesh, velocity in self.belts:
+        for mesh, velocity in self.belts.values():
             mesh.mesh.velocities.fill_(velocity)
         volume_kind = np.full(self.model.shape_count, -1, dtype=np.int32)
         volume_index = np.full(self.model.shape_count, -1, dtype=np.int32)
@@ -585,8 +590,12 @@ class Example:
         self.cart_departures = wp.zeros(1, dtype=wp.int32)
         self.cart_wall_start = wp.array(cart_wall_start, dtype=wp.int32)
         self.flight_colors = wp.array(FLIGHT_COLORS, dtype=wp.vec3)
-        self.instance_xforms = [wp.zeros(CAPACITY, dtype=wp.transform) for _ in CASE_HALF_EXTENTS]
-        self.instance_colors = [wp.zeros(CAPACITY, dtype=wp.vec3) for _ in CASE_HALF_EXTENTS]
+        self.instance_xforms = wp.zeros(CAPACITY, dtype=wp.transform)
+        self.instance_scales = wp.zeros(CAPACITY, dtype=wp.vec3)
+        self.instance_colors = wp.zeros(CAPACITY, dtype=wp.vec3)
+        self.instance_materials = wp.full(CAPACITY, wp.vec4(0.55, 0.0, 0.0, 0.0), dtype=wp.vec4)
+        # One unit box serves every suitcase size through per-instance scales.
+        viewer.log_geo("/suitcase", newton.GeoType.BOX, (1.0, 1.0, 1.0), 0.0, True)
 
         viewer.set_model(self.model)
         viewer.set_camera(wp.vec3(40.0, -12.0, 14.0), pitch=-28.0, yaw=70.0)
@@ -689,29 +698,28 @@ class Example:
     def render(self):
         self.viewer.begin_frame(self.sim_time)
         self.viewer.log_state(self.state_0)
-        for kind, half_extents in enumerate(CASE_HALF_EXTENTS):
-            wp.launch(
-                _case_instances_kernel,
-                dim=CAPACITY,
-                inputs=[
-                    self.dyn,
-                    self.state_0.body_q,
-                    self.body_start,
-                    self.case_kind,
-                    self.case_flight,
-                    self.flight_colors,
-                    kind,
-                    self.instance_xforms[kind],
-                    self.instance_colors[kind],
-                ],
-            )
-            self.viewer.log_shapes(
-                f"/suitcases_{kind}",
-                newton.GeoType.BOX,
-                half_extents,
-                self.instance_xforms[kind],
-                self.instance_colors[kind],
-            )
+        wp.launch(
+            _case_instances_kernel,
+            dim=CAPACITY,
+            inputs=[
+                self.dyn,
+                self.state_0.body_q,
+                self.body_start,
+                self.case_kind,
+                self.case_flight,
+                self.flight_colors,
+                self.half_extents,
+            ],
+            outputs=[self.instance_xforms, self.instance_scales, self.instance_colors],
+        )
+        self.viewer.log_instances(
+            "/suitcases",
+            "/suitcase",
+            self.instance_xforms,
+            self.instance_scales,
+            self.instance_colors,
+            self.instance_materials,
+        )
         self.viewer.end_frame()
 
     def live_cases(self) -> np.ndarray:
