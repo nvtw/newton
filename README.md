@@ -1231,6 +1231,9 @@ contact accuracy are still being investigated.
       <br><code>python -m newton.examples phoenx_conveyor</code>
     </td>
     <td align="center" width="33%">
+      <img width="320" src="docs/images/examples/example_phoenx_baggage_hall.jpg" alt="PhoenX airport baggage hall">
+      <br><b>Airport baggage hall</b>
+      <br><code>python -m newton.examples phoenx_baggage_hall</code>
     </td>
   </tr>
 </table>
