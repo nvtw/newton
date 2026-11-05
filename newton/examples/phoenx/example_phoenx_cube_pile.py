@@ -226,6 +226,9 @@ class Example:
     @staticmethod
     def create_parser():
         parser = newton.examples.create_parser()
+        # Path-traced rendering, like the Kapla tower, which also suits video recording.
+        # Reserved shape rows count as viewer instances too.
+        parser.set_defaults(viewer="optix", optix_max_instances=24576)
         parser.add_argument("--max-cubes", type=int, default=10000, help="Live cubes kept once the pile is full.")
         parser.add_argument("--spawn-rate", type=float, default=1000.0, help="Cubes spawned per simulated second.")
         parser.add_argument("--substeps", type=int, default=4, help="Physics substeps per frame.")

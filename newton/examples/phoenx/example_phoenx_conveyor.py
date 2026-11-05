@@ -444,6 +444,8 @@ class Example:
     @staticmethod
     def create_parser():
         parser = newton.examples.create_parser()
+        # Path-traced rendering, like the Kapla tower, which also suits video recording.
+        parser.set_defaults(viewer="optix")
         parser.add_argument("--substeps", type=int, default=4, help="Physics substeps per frame.")
         parser.add_argument("--iterations", type=int, default=4, help="Solver iterations per substep.")
         return parser

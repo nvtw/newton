@@ -594,10 +594,10 @@ class Example:
         self.instance_scales = wp.zeros(CAPACITY, dtype=wp.vec3)
         self.instance_colors = wp.zeros(CAPACITY, dtype=wp.vec3)
         self.instance_materials = wp.full(CAPACITY, wp.vec4(0.55, 0.0, 0.0, 0.0), dtype=wp.vec4)
-        # One unit box serves every suitcase size through per-instance scales.
-        viewer.log_geo("/suitcase", newton.GeoType.BOX, (1.0, 1.0, 1.0), 0.0, True)
 
         viewer.set_model(self.model)
+        # One unit box serves every suitcase size through per-instance scales.
+        viewer.log_geo("/suitcase", newton.GeoType.BOX, (1.0, 1.0, 1.0), 0.0, True)
         viewer.set_camera(wp.vec3(40.0, -12.0, 14.0), pitch=-28.0, yaw=70.0)
 
         self.graph = None
@@ -764,6 +764,9 @@ class Example:
     @staticmethod
     def create_parser():
         parser = newton.examples.create_parser()
+        # Path-traced rendering, like the Kapla tower, which also suits video recording.
+        # Reserved shape rows count as viewer instances too.
+        parser.set_defaults(viewer="optix", optix_max_instances=2 * CAPACITY + 8192)
         parser.add_argument("--substeps", type=int, default=4, help="Physics substeps per frame.")
         parser.add_argument("--iterations", type=int, default=4, help="Solver iterations per substep.")
         return parser
