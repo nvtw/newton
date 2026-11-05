@@ -501,7 +501,7 @@ class _SaveStateData:
 
 
 @wp.kernel(enable_backward=False)
-def _save_sorted_state_kernel(data: _SaveStateData):
+def _save_sorted_state_kernel(data: _SaveStateData, reset_world_mask: wp.array[wp.bool]):
     """Copy sorted contacts into the previous-frame buffers for next-frame matching.
 
     The persisted ``dst_pos_world`` is the world-space *midpoint* of the two
@@ -518,6 +518,9 @@ def _save_sorted_state_kernel(data: _SaveStateData):
     spontaneously).
     """
     i = wp.tid()
+    # Matching and reporting have already consumed the mask; saving does not read it.
+    if i < reset_world_mask.shape[0]:
+        reset_world_mask[i] = False
     if i == 0:
         saved = data.src_count[0]
         cap = data.dst_keys.shape[0]
@@ -526,7 +529,7 @@ def _save_sorted_state_kernel(data: _SaveStateData):
         data.dst_count[0] = saved
         data.dst_frame[0] = data.buffer_id
         data.dst_frame[1] = data.src_generation[0]
-    if i < data.src_count[0]:
+    if i < wp.min(data.src_count[0], data.dst_keys.shape[0]):
         data.dst_keys[i] = data.src_keys[i]
         data.dst_claim[i] = _CLAIM_SENTINEL
         if data.has_report != 0:
@@ -958,8 +961,12 @@ class ContactMatcher:
         data.dst_prev_was_matched = self._prev_was_matched
         data.has_report = 1 if self._has_report else 0
 
-        wp.launch(_save_sorted_state_kernel, dim=self._capacity, inputs=[data], device=device)
-        self._reset_world_mask.zero_()
+        wp.launch(
+            _save_sorted_state_kernel,
+            dim=max(self._capacity, self._reset_world_mask.shape[0], 1),
+            inputs=[data, self._reset_world_mask],
+            device=device,
+        )
 
     def build_report(
         self,

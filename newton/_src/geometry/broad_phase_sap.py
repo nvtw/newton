@@ -27,7 +27,6 @@ from .broad_phase_common import (
     is_shape_pair_same_body_filtered,
     keep_all_filter,
     precompute_world_map,
-    test_group_pair,
     test_world_and_group_pair,
     write_pair,
 )
@@ -395,108 +394,6 @@ def _sap_chunk_count_kernel(sap_range: wp.array[wp.int64], chunk_count: wp.array
     chunk_count[tid] = (sap_range[tid] + wp.int64(_SAP_SWEEP_CHUNK_SIZE_WP) - wp.int64(1)) // wp.int64(
         _SAP_SWEEP_CHUNK_SIZE_WP
     )
-
-
-@wp.func
-def _process_sap_work_package(
-    flat_id: int,
-    workid: wp.int64,
-    shape_bounding_box_lower: wp.array[wp.vec3],
-    shape_bounding_box_upper: wp.array[wp.vec3],
-    shape_gap: wp.array[float],
-    shape_displacement: wp.array[wp.vec3],
-    collision_group: wp.array[int],
-    shape_world: wp.array[int],
-    world_index_map: wp.array[int],
-    world_slice_ends: wp.array[int],
-    sap_sort_index_in: wp.array[int],
-    sap_cumulative_sum_in: wp.array[wp.int64],
-    max_shapes_per_world: int,
-    num_regular_worlds: int,
-    single_segment_identity_map: bool,
-    filter_pairs: wp.array[wp.vec2i],
-    num_filter_pairs: int,
-    shape_body: wp.array[int],
-    body_flags: wp.array[int],
-    include_static_kinematic_pairs: bool,
-    candidate_pair: wp.array[wp.vec2i],
-    candidate_pair_count: wp.array[int],
-    max_candidate_pair: int,
-):
-    """Process one mapped SAP work package."""
-    work_end = wp.int64(flat_id) + workid + wp.int64(1)
-    if flat_id > 0:
-        work_end -= sap_cumulative_sum_in[flat_id - 1]
-    j = wp.int32(work_end)
-
-    # With no regular worlds, the map contains only the dedicated global
-    # segment. Avoid per-pair segment arithmetic and redundant world reads.
-    single_segment = num_regular_worlds == 0
-    world_id = int(0)
-    i = flat_id
-    world_slice_start = int(0)
-    if not single_segment:
-        world_id = flat_id // max_shapes_per_world
-        i = flat_id % max_shapes_per_world
-        j = j % max_shapes_per_world
-        if world_id > 0:
-            world_slice_start = world_slice_ends[world_id - 1]
-    world_slice_end = world_slice_ends[world_id]
-    num_shapes_in_world = world_slice_end - world_slice_start
-
-    if i >= num_shapes_in_world or j >= num_shapes_in_world:
-        return
-    if i >= j:
-        return
-
-    idx_i = world_id * max_shapes_per_world + i
-    idx_j = world_id * max_shapes_per_world + j
-    local_shape1 = sap_sort_index_in[idx_i]
-    local_shape2 = sap_sort_index_in[idx_j]
-    if local_shape1 < 0 or local_shape2 < 0:
-        return
-
-    shape1_tmp = local_shape1
-    shape2_tmp = local_shape2
-    if not single_segment_identity_map:
-        shape1_tmp = world_index_map[world_slice_start + local_shape1]
-        shape2_tmp = world_index_map[world_slice_start + local_shape2]
-    if shape1_tmp == shape2_tmp:
-        return
-
-    shape1 = wp.min(shape1_tmp, shape2_tmp)
-    shape2 = wp.max(shape1_tmp, shape2_tmp)
-
-    col_group1 = collision_group[shape1]
-    col_group2 = collision_group[shape2]
-    process_pair = False
-    if single_segment:
-        process_pair = test_group_pair(col_group1, col_group2)
-    else:
-        world1 = shape_world[shape1]
-        world2 = shape_world[shape2]
-        is_dedicated_minus_one_segment = world_id >= num_regular_worlds
-        if world1 == -1 and world2 == -1 and not is_dedicated_minus_one_segment:
-            process_pair = False
-        else:
-            process_pair = test_world_and_group_pair(world1, world2, col_group1, col_group2)
-
-    if process_pair:
-        _process_single_sap_pair(
-            wp.vec2i(shape1, shape2),
-            shape_bounding_box_lower,
-            shape_bounding_box_upper,
-            shape_gap,
-            shape_displacement,
-            candidate_pair,
-            candidate_pair_count,
-            max_candidate_pair,
-            filter_pairs,
-            num_filter_pairs,
-            shape_body,
-            body_flags,
-            include_static_kinematic_pairs,
-        )
 
 
 @wp.func
@@ -1011,7 +908,7 @@ class BroadPhaseSAP:
         self.sap_cumulative_sum = wp.zeros(total_elements, dtype=wp.int64, device=device)
         self.sap_sweep_mode = wp.zeros(1, dtype=wp.int32, device=device)
 
-        # Segment indices for segmented sort (needed for graph capture)
+        # Segment indices for the multi-world segmented sort
         # [0, max_shapes_per_world, 2*max_shapes_per_world, ..., world_count*max_shapes_per_world]
         segment_indices_np = np.array(
             [i * self.max_shapes_per_world for i in range(self.world_count + 1)], dtype=np.int32
@@ -1193,18 +1090,13 @@ class BroadPhaseSAP:
         if device is None:
             device = shape_lower.device
 
-        # If no gaps provided, pass empty array (kernel will use 0.0 gaps)
         if shape_count < 0 or shape_count > shape_lower.shape[0]:
             raise ValueError(f"shape_count must be in [0, {shape_lower.shape[0]}], got {shape_count}")
+
         if shape_count < 2:
             return
 
-        if shape_gap is None:
-            shape_gap = wp.empty(0, dtype=wp.float32, device=device)
-        if shape_body is None:
-            shape_body = wp.empty(0, dtype=wp.int32, device=device)
-        if body_flags is None:
-            body_flags = wp.empty(0, dtype=wp.int32, device=device)
+        # Warp passes None arrays as zero-sized descriptors to the kernels.
         if shape_displacement is not None and shape_displacement.shape[0] != shape_lower.shape[0]:
             raise ValueError(
                 "shape_displacement length must match the shape bounds "
@@ -1214,9 +1106,9 @@ class BroadPhaseSAP:
             shape_displacement = wp.empty(0, dtype=wp.vec3, device=device)
         displacement_limit = -1.0 if sort_axis_displacement_limit is None else float(sort_axis_displacement_limit)
 
-        # Exclusion filter: empty array and 0 when not provided or empty
+        # Exclusion filter: null array and 0 when not provided or empty
         if filter_pairs is None or filter_pairs.shape[0] == 0:
-            filter_pairs_arr = wp.empty(0, dtype=wp.vec2i, device=device)
+            filter_pairs_arr = None
             n_filter = 0
         else:
             filter_pairs_arr = filter_pairs

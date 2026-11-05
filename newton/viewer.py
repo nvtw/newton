@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 # Import all viewer classes (they handle missing dependencies at instantiation time)
 from ._src.viewer import (
     Layer,
+    Picking,
     ViewerBase,
     ViewerFile,
     ViewerGL,
@@ -21,6 +22,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "Layer",
+    "Picking",
     "ViewerBase",
     "ViewerFile",
     "ViewerGL",

@@ -41,6 +41,7 @@ Layers:
 
 from typing import TYPE_CHECKING
 
+from .picking import Picking
 from .viewer import Layer, ViewerBase
 from .viewer_file import ViewerFile
 from .viewer_gl import ViewerGL
@@ -55,6 +56,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "Layer",
+    "Picking",
     "ViewerBase",
     "ViewerFile",
     "ViewerGL",

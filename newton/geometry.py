@@ -20,6 +20,7 @@ from ._src.geometry import (
     collide_sphere_sphere,
 )
 from ._src.geometry.broad_phase_implicit_tree import BroadPhaseImplicitTree
+from ._src.geometry.deformable_visual import DeformableVisualMesh, DeformableVisuals
 from ._src.geometry.implicit_bvh import (
     ImplicitBvh,
     ImplicitBvhData,
@@ -51,6 +52,8 @@ __all__ = [
     "BroadPhaseExplicit",
     "BroadPhaseImplicitTree",
     "BroadPhaseSAP",
+    "DeformableVisualMesh",
+    "DeformableVisuals",
     "HydroelasticSDF",
     "ImplicitBvh",
     "ImplicitBvhData",

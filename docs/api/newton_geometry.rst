@@ -17,6 +17,8 @@ newton.geometry
    BroadPhaseExplicit
    BroadPhaseImplicitTree
    BroadPhaseSAP
+   DeformableVisualMesh
+   DeformableVisuals
    HydroelasticSDF
    ImplicitBvh
    ImplicitBvhData
