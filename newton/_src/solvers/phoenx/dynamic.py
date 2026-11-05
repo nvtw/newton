@@ -48,6 +48,7 @@ __all__ = [
     "phoenx_add_body",
     "phoenx_add_joint",
     "phoenx_add_shape",
+    "phoenx_body_is_active",
     "phoenx_remove_body",
     "phoenx_remove_joint",
     "phoenx_remove_shape",
@@ -363,6 +364,16 @@ def phoenx_add_body(dyn: DynamicsData, desc: BodyDesc) -> wp.int32:
     bodies.frames_below_threshold[p] = 0
     dyn.body_fresh[p] = 1
     return body
+
+
+@wp.func
+def phoenx_body_is_active(dyn: DynamicsData, body: wp.int32) -> wp.bool:
+    """Whether a reserved body row holds a body that is not being removed."""
+    slot = body - dyn.body_pool.start
+    if slot < 0 or slot >= dyn.body_pool.state.shape[0]:
+        return False
+    state = dyn.body_pool.state[slot]
+    return state == _ACTIVE or state == _ADDED
 
 
 @wp.func

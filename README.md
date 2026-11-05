@@ -1219,6 +1219,17 @@ contact accuracy are still being investigated.
       <br><code>python -m newton.examples phoenx_ragdoll_pile</code>
     </td>
   </tr>
+  <tr>
+    <td align="center" width="33%">
+      <img width="320" src="docs/images/examples/example_phoenx_cube_pile.jpg" alt="PhoenX runtime cube pile">
+      <br><b>Runtime cube spawning</b>
+      <br><code>python -m newton.examples phoenx_cube_pile</code>
+    </td>
+    <td align="center" width="33%">
+    </td>
+    <td align="center" width="33%">
+    </td>
+  </tr>
 </table>
 
 ### Example Options
