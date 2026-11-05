@@ -1391,6 +1391,19 @@ def _compute_per_world_mask_pair_max(
     return max(0, int(pairs.sum()))
 
 
+_DYNAMIC_PAIRS_PER_SHAPE = 16
+"""Default candidate pairs budgeted per shape row in models with reserved runtime shapes."""
+
+
+def _dynamic_max_shapes_per_world(model: Model, dynamic_rows: np.ndarray) -> int:
+    """Bound on one world's colliding shapes: its static shapes, the global ones, and runtime shapes."""
+    sw = model.shape_world.numpy()
+    static = _shape_collide_mask(model, len(sw)) & ~dynamic_rows
+    global_count = int(np.count_nonzero(static & (sw == -1)))
+    world_counts = np.bincount(sw[static & (sw >= 0)], minlength=1)
+    return max(1, int(world_counts.max()) + global_count + model._dynamic_capacity.max_shapes_per_world)
+
+
 def _resolve_shape_pairs_max(model: Model, override: int | None, extra_shape_count: int = 0) -> int:
     """Pick the broad-phase candidate-pair buffer capacity.
 
@@ -2182,6 +2195,22 @@ class CollisionPipeline:
 
         using_expert_components = broad_phase_instance is not None or narrow_phase is not None
 
+        # Rows reserved for runtime shapes hold any primitive or prototype geometry and change world
+        # at runtime, so only SAP with a device-built world map supports them.
+        dynamic = model._dynamic_capacity
+        dynamic_rows = None
+        if dynamic is not None and dynamic.shape_count + len(dynamic.prototype_shapes) > 0:
+            if mode_from_broad_phase is None and broad_phase_instance is None:
+                mode_from_broad_phase = "sap"
+            if mode_from_broad_phase != "sap" or narrow_phase is not None or extra_shape_count:
+                raise ValueError("Models with reserved dynamic shapes require broad_phase='sap'")
+            if body_pair_reduction is not None:
+                raise ValueError("Models with reserved dynamic shapes do not support body-pair reduction")
+            dynamic_rows = np.zeros(model.shape_count, dtype=bool)
+            dynamic_rows[dynamic.shape_start : dynamic.shape_start + dynamic.shape_count] = True
+            dynamic_rows[list(dynamic.prototype_shapes)] = True
+        self._dynamic_rows = dynamic_rows
+
         # Resolve rigid contact capacity with explicit > model > estimated precedence.
         if rigid_contact_max is None:
             model_rigid_contact_max = model.rigid_contact_max
@@ -2389,11 +2418,27 @@ class CollisionPipeline:
             elif self.broad_phase_mode == "sap":
                 if shape_world is None:
                     raise ValueError("model.shape_world is required for broad_phase=SAP")
+                dynamic_bound = None
+                if dynamic_rows is not None:
+                    dynamic_bound = (max(1, model.world_count), _dynamic_max_shapes_per_world(model, dynamic_rows))
                 self.broad_phase = BroadPhaseSAP(
-                    shape_world, shape_flags=shape_flags, sort_type="auto", device=device, **bp_filter_kwargs
+                    shape_world,
+                    shape_flags=shape_flags,
+                    sort_type="auto",
+                    device=device,
+                    dynamic_world_bound=dynamic_bound,
+                    **bp_filter_kwargs,
                 )
                 self.shape_pairs_filtered = None
-                self.shape_pairs_max = _resolve_shape_pairs_max(model, shape_pairs_max, self.extra_shape_count)
+                if dynamic_bound is not None:
+                    # Any world may hold up to the bound, so size by a neighbor budget per shape row
+                    # rather than every world's worst case.
+                    world_count, bound = dynamic_bound
+                    natural = world_count * bound * (bound - 1) // 2
+                    budget = max(4096, _DYNAMIC_PAIRS_PER_SHAPE * model.shape_count)
+                    self.shape_pairs_max = int(shape_pairs_max) if shape_pairs_max is not None else min(natural, budget)
+                else:
+                    self.shape_pairs_max = _resolve_shape_pairs_max(model, shape_pairs_max, self.extra_shape_count)
                 self.shape_pairs_excluded = self._build_excluded_pairs(model)
                 self.shape_pairs_excluded_count = (
                     self.shape_pairs_excluded.shape[0] if self.shape_pairs_excluded is not None else 0
@@ -2435,6 +2480,8 @@ class CollisionPipeline:
                 shape_types = model.shape_type.numpy()
                 shape_count_routed = len(shape_types)
                 route_mask = _shape_collide_mask(model, shape_count_routed)
+                if dynamic_rows is not None:
+                    route_mask = route_mask | dynamic_rows
                 # Shapes that can reach the narrow phase decide which stages it builds.
                 # NXN/SAP pair only shapes that collide with shapes. The explicit list is
                 # authoritative: every listed shape reaches the narrow phase, including
@@ -2475,6 +2522,15 @@ class CollisionPipeline:
                 mesh_mask = route_rows & (route_types == int(GeoType.MESH))
                 heightfield_mask = route_rows & (route_types == int(GeoType.HFIELD))
                 plane_mask = route_rows & (route_types == int(GeoType.PLANE))
+                if dynamic_rows is not None:
+                    # A reserved row can become any primitive or prototype geometry.
+                    dynamic_mask = np.zeros(len(route_types), dtype=bool)
+                    dynamic_mask[:shape_count_routed] = dynamic_rows
+                    prototype_types = shape_types[list(model._dynamic_capacity.prototype_shapes)]
+                    if np.any(prototype_types == int(GeoType.MESH)):
+                        mesh_mask |= dynamic_mask
+                    plane_mask |= dynamic_mask
+                    box_candidate_count += int(np.count_nonzero(dynamic_rows))
                 mesh_sdf_pair_mask = mesh_mask | heightfield_mask
                 planar_sdf_mask = np.zeros(len(route_types), dtype=bool)
                 has_meshes = bool(np.any(mesh_mask))
@@ -2585,7 +2641,7 @@ class CollisionPipeline:
                     int(GeoType.CYLINDER),
                     int(GeoType.CONE),
                 }
-                use_lean_gjk_mpr = not bool(lean_unsupported & set(route_shape_types.tolist()))
+                use_lean_gjk_mpr = dynamic_rows is None and not bool(lean_unsupported & set(route_shape_types.tolist()))
 
                 if max_triangle_pairs is None:
                     # NXN/SAP count from shape masks without materializing the model's lazy pair array.
@@ -2610,7 +2666,8 @@ class CollisionPipeline:
                 max_triangle_pairs = _TRIANGLE_PAIRS_MIN_CAPACITY
 
             compact_sort_config = None
-            if deterministic:
+            # The compact sort assumes fixed per-world shape ranges, which runtime shapes break.
+            if deterministic and dynamic_rows is None:
                 compact_sort_config = _primitive_compact_sort_config(
                     model,
                     extra_shape_count=self.extra_shape_count,
@@ -2659,6 +2716,9 @@ class CollisionPipeline:
                 shape_pairs_host=explicit_pairs_host,
                 variant_options=variant_options,
             )
+            if dynamic_rows is not None:
+                candidate_pair_work_estimate = self.shape_pairs_max
+                has_generic_convex_pairs, generic_convex_pair_work_estimate = True, self.shape_pairs_max
             split_threshold = (
                 _SPLIT_GJK_MPR_LEAN_PAIR_COUNT_THRESHOLD
                 if use_lean_gjk_mpr
@@ -2779,6 +2839,12 @@ class CollisionPipeline:
             self._shape_variant_row = (
                 model._shape_variant_row if has_variant_rows else wp.empty(0, dtype=wp.bool, device=device)
             )
+            # Reserved runtime rows, like empty variant rows, get an empty AABB while their collision
+            # flags are cleared.
+            self._dynamic_world_map_dirty = wp.ones(1, dtype=wp.int32, device=device)
+            if dynamic_rows is not None:
+                empty_rows = dynamic_rows | (model._shape_variant_row.numpy() if has_variant_rows else False)
+                self._shape_variant_row = wp.array(empty_rows, dtype=wp.bool, device=device)
             if self._speculative_enabled:
                 self._shape_linear_velocity = wp.zeros(shape_count, dtype=wp.vec3, device=device)
                 self._shape_angular_velocity = wp.zeros(shape_count, dtype=wp.vec3, device=device)
@@ -3731,6 +3797,8 @@ class CollisionPipeline:
         elif isinstance(self.broad_phase, BroadPhaseSAP | BroadPhaseGrid | BroadPhaseImplicitTree):
             if sort_axis_displacement_limit is not None:
                 broad_phase_speculative_kwargs["sort_axis_displacement_limit"] = sort_axis_displacement_limit
+            if self._dynamic_rows is not None:
+                self.broad_phase.update_world_map(shape_world, self.model.shape_flags, self._dynamic_world_map_dirty)
             self.broad_phase.launch(
                 self.narrow_phase.shape_aabb_lower,
                 self.narrow_phase.shape_aabb_upper,

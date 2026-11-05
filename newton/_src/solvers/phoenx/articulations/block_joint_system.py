@@ -171,6 +171,19 @@ class BlockJointSystem(DirectEqualitySystem):
         correction_groups = {}
         for row, joint in enumerate(self.topology.row_joint):
             cid = int(self._block_mapping[joint])
+            if self.fixed_joint_rows:
+                # Every column owns its whole fixed block, so joints created at runtime only
+                # change the used row count.
+                if cid < 0:
+                    continue
+                local = int(self.topology.row_local[row])
+                indices[cid, local] = row
+                structural[cid] = joint_structural[joint]
+                if local >= self.fixed_row_count[joint]:
+                    continue
+                counts[cid] += 1
+                correction_groups.setdefault(int(joint), []).append(row)
+                continue
             if cid < 0:
                 raise ValueError("Every block joint requires a coloring column")
             if counts[cid] == 6:
@@ -188,7 +201,7 @@ class BlockJointSystem(DirectEqualitySystem):
         self._correction_counts = wp.array(correction_counts, dtype=wp.int32, device=device)
         data = BilateralJointData()
         data.enabled = 1
-        data.row_capacity = 3 if counts.max(initial=0) <= 3 else 6
+        data.row_capacity = 3 if counts.max(initial=0) <= 3 and not self.fixed_joint_rows else 6
         data.row_count = wp.array(counts, dtype=wp.int32, device=device)
         data.row_indices = wp.array(indices, dtype=wp.int32, device=device)
         data.structural_index = wp.array(structural, dtype=wp.int32, device=device)

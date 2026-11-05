@@ -17,7 +17,6 @@ from newton._src.solvers.phoenx.body import (
     MOTION_KINEMATIC,
     MOTION_STATIC,
     BodyContainer,
-    inertia_sym6,
     sym6_from_mat33,
 )
 from newton._src.solvers.phoenx.constraints.constraint_container import (
@@ -48,6 +47,41 @@ __all__ = [
 ]
 
 
+@wp.func
+def write_body_properties(
+    bodies: BodyContainer,
+    slot: wp.int32,
+    inv_mass: wp.float32,
+    inv_inertia: wp.mat33f,
+    com: wp.vec3f,
+    kinematic: wp.bool,
+    world: wp.int32,
+):
+    """Write one slot's static properties; shared by model import and runtime body creation."""
+    bodies.inverse_mass[slot] = inv_mass
+    bodies.inverse_inertia[slot] = inv_inertia
+    # First _update_inertia launch rotates this by current orientation.
+    bodies.inverse_inertia_world[slot] = sym6_from_mat33(inv_inertia)
+    bodies.body_com[slot] = com
+    if kinematic:
+        # Prescribed motion has no impulse response, even when the model
+        # retains physical mass and inertia for this body.
+        bodies.inverse_mass[slot] = 0.0
+        bodies.inverse_inertia[slot] = wp.mat33f(0.0)
+        bodies.inverse_inertia_world[slot] = sym6_from_mat33(wp.mat33f(0.0))
+        bodies.motion_type[slot] = MOTION_KINEMATIC
+        bodies.affected_by_gravity[slot] = 0
+    elif inv_mass == 0.0:
+        bodies.motion_type[slot] = MOTION_STATIC
+        bodies.affected_by_gravity[slot] = 0
+    else:
+        bodies.motion_type[slot] = MOTION_DYNAMIC
+        bodies.affected_by_gravity[slot] = 1
+    bodies.linear_damping[slot] = 1.0
+    bodies.angular_damping[slot] = 1.0
+    bodies.world_id[slot] = wp.max(world, 0)
+
+
 @wp.kernel(enable_backward=False)
 def _init_phoenx_body_container_kernel(
     # Model inputs (length N = model.body_count).
@@ -58,63 +92,25 @@ def _init_phoenx_body_container_kernel(
     body_world: wp.array[wp.int32],
     # Flag bit Newton uses to mark kinematic bodies.
     kinematic_flag: wp.int32,
-    # Outputs (length N + 1; slot 0 is the static world anchor).
-    inv_mass_out: wp.array[wp.float32],
-    inv_inertia_out: wp.array[wp.mat33f],
-    inv_inertia_world_out: wp.array[inertia_sym6],
-    body_com_out: wp.array[wp.vec3f],
-    affected_by_gravity_out: wp.array[wp.int32],
-    motion_type_out: wp.array[wp.int32],
-    world_id_out: wp.array[wp.int32],
-    linear_damping_out: wp.array[wp.float32],
-    angular_damping_out: wp.array[wp.float32],
+    # Output (length N + 1; slot 0 is the static world anchor).
+    bodies: BodyContainer,
 ):
     """One-shot copy of static body properties from Model to PhoenX slots.
     Slot 0 is the static world anchor; slots [1, N+1) mirror Newton body tid-1."""
     tid = wp.tid()
     if tid == 0:
-        zero_mat = wp.mat33f(0.0)
-        inv_mass_out[0] = 0.0
-        inv_inertia_out[0] = zero_mat
-        inv_inertia_world_out[0] = sym6_from_mat33(zero_mat)
-        body_com_out[0] = wp.vec3f(0.0, 0.0, 0.0)
-        affected_by_gravity_out[0] = 0
-        motion_type_out[0] = MOTION_STATIC
-        world_id_out[0] = 0
-        linear_damping_out[0] = 1.0
-        angular_damping_out[0] = 1.0
+        write_body_properties(bodies, 0, 0.0, wp.mat33f(0.0), wp.vec3f(0.0), False, 0)
         return
-
     i = tid - 1
-    inv_mass_out[tid] = body_inv_mass[i]
-    inv_inertia_out[tid] = body_inv_inertia[i]
-    # First _update_inertia launch rotates this by current orientation.
-    inv_inertia_world_out[tid] = sym6_from_mat33(body_inv_inertia[i])
-    body_com_out[tid] = body_com[i]
-    flags = body_flags[i]
-    if (flags & kinematic_flag) != 0:
-        # Prescribed motion has no impulse response, even when the model
-        # retains physical mass and inertia for this body.
-        inv_mass_out[tid] = 0.0
-        inv_inertia_out[tid] = wp.mat33f(0.0)
-        inv_inertia_world_out[tid] = sym6_from_mat33(wp.mat33f(0.0))
-        motion_type_out[tid] = MOTION_KINEMATIC
-        affected_by_gravity_out[tid] = 0
-    elif body_inv_mass[i] == 0.0:
-        motion_type_out[tid] = MOTION_STATIC
-        affected_by_gravity_out[tid] = 0
-    else:
-        motion_type_out[tid] = MOTION_DYNAMIC
-        affected_by_gravity_out[tid] = 1
-
-    linear_damping_out[tid] = 1.0
-    angular_damping_out[tid] = 1.0
-
-    w = body_world[i]
-    if w < 0:
-        world_id_out[tid] = 0
-    else:
-        world_id_out[tid] = w
+    write_body_properties(
+        bodies,
+        tid,
+        body_inv_mass[i],
+        body_inv_inertia[i],
+        body_com[i],
+        (body_flags[i] & kinematic_flag) != 0,
+        body_world[i],
+    )
 
 
 @wp.kernel(enable_backward=False)
@@ -126,23 +122,33 @@ def _import_body_state_kernel(
     body_com: wp.array[wp.vec3f],
     # PhoenX body container (slot index = tid + 1).
     bodies: BodyContainer,
+    # Per-slot flag of bodies created at runtime since the last import (may be empty).
+    fresh: wp.array[wp.int32],
+    consume_fresh: wp.int32,
 ):
     """Unpack Newton ``body_q`` / ``body_qd`` / ``body_f`` into PhoenX SoA slots.
 
     PhoenX stores COM-in-world (adds ``R * body_com`` to Newton's body-origin).
     Kinematic bodies route pose to ``kinematic_target_*`` with valid=1; the next
     step's prepare kernel infers velocity from the (prev, target) delta.
+    Bodies created at runtime keep the pose and velocity they were created with,
+    since ``body_q`` and ``body_qd`` still hold the previous occupant's state.
     """
     tid = wp.tid()
     dst = tid + 1
+    wrench = body_f[tid]
+    bodies.force[dst] = wp.vec3f(wrench[0], wrench[1], wrench[2])
+    bodies.torque[dst] = wp.vec3f(wrench[3], wrench[4], wrench[5])
+    if fresh.shape[0] > 0:
+        if fresh[dst] != 0:
+            if consume_fresh != 0:
+                fresh[dst] = 0
+            return
+
     q = body_q[tid]
     rot = wp.transform_get_rotation(q)
     origin = wp.transform_get_translation(q)
     pose_origin = origin + wp.quat_rotate(rot, body_com[tid])
-
-    wrench = body_f[tid]
-    bodies.force[dst] = wp.vec3f(wrench[0], wrench[1], wrench[2])
-    bodies.torque[dst] = wp.vec3f(wrench[3], wrench[4], wrench[5])
 
     if bodies.motion_type[dst] == MOTION_KINEMATIC:
         bodies.kinematic_target_pos[dst] = pose_origin

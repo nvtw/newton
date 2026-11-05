@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Broad-phase filtering for sleeping PhoenX rigid bodies."""
+"""Broad-phase filtering for sleeping PhoenX rigid bodies and runtime joint pairs."""
 
 from __future__ import annotations
 
@@ -18,9 +18,12 @@ __all__ = [
 
 @wp.struct
 class PhoenXSleepingFilterData:
-    """Data used to suppress pairs between two frozen rigid bodies."""
+    """Data used to suppress pairs between two frozen rigid bodies or two jointed bodies."""
 
     enabled: wp.int32
+    #: Per Newton body, the parent of a runtime joint whose shapes it must not collide with
+    #: (``-2`` for none), or empty.
+    body_filter_parent: wp.array[wp.int32]
     phoenx_body_offset: wp.int32
     shape_body: wp.array[wp.int32]
     body_island_root: wp.array[wp.int32]
@@ -29,12 +32,17 @@ class PhoenXSleepingFilterData:
 
 @wp.func
 def phoenx_sleeping_filter(pair: wp.vec2i, data: PhoenXSleepingFilterData) -> wp.int32:
-    """Return zero when both shapes belong to frozen rigid bodies."""
+    """Return zero when both shapes belong to frozen rigid bodies or to a filtered joint pair."""
 
-    if data.enabled == wp.int32(0):
-        return wp.int32(1)
     body_a = data.shape_body[pair[0]]
     body_b = data.shape_body[pair[1]]
+    if data.body_filter_parent.shape[0] > 0:
+        if body_a >= 0 and data.body_filter_parent[body_a] == body_b:
+            return wp.int32(0)
+        if body_b >= 0 and data.body_filter_parent[body_b] == body_a:
+            return wp.int32(0)
+    if data.enabled == wp.int32(0):
+        return wp.int32(1)
     slot_a = wp.int32(0)
     slot_b = wp.int32(0)
     if body_a >= 0:
@@ -56,11 +64,15 @@ def build_phoenx_sleeping_filter_data(
     body_island_root: wp.array[wp.int32] | None,
     body_motion_type: wp.array[wp.int32] | None,
     device: wp.context.Devicelike,
+    body_filter_parent: wp.array[wp.int32] | None = None,
 ) -> PhoenXSleepingFilterData:
     """Build broad-phase filter data, using inert sentinels when disabled."""
 
     data = PhoenXSleepingFilterData()
     data.enabled = wp.int32(1 if sleeping_enabled else 0)
+    data.body_filter_parent = (
+        body_filter_parent if body_filter_parent is not None else wp.empty(0, dtype=wp.int32, device=device)
+    )
     data.phoenx_body_offset = wp.int32(int(phoenx_body_offset))
     data.shape_body = shape_body if shape_body is not None else wp.zeros(1, dtype=wp.int32, device=device)
     data.body_island_root = (

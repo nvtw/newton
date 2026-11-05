@@ -301,6 +301,26 @@ class _ShapeCollisionFilterPairs(AbstractSet[tuple[int, int]]):
         return self._pairs_array
 
 
+@dataclass(frozen=True)
+class _DynamicCapacity:
+    """Contiguous model rows reserved by :meth:`ModelBuilder.reserve_dynamic_capacity`.
+
+    The rows start inactive. A solver with runtime body creation fills and frees them on the
+    device; every other consumer treats them as ordinary rows.
+    """
+
+    body_start: int
+    body_count: int
+    shape_start: int
+    shape_count: int
+    joint_start: int
+    joint_count: int
+    max_shapes_per_world: int
+    """Bound on the colliding shapes of one world, including global shapes, that sizes broad-phase buffers."""
+    prototype_shapes: tuple[int, ...]
+    """Shapes whose finalized geometry runtime shapes may reference; they never collide themselves."""
+
+
 class Model:
     """
     Represents the static (non-time-varying) definition of a simulation model in Newton.
@@ -1454,6 +1474,8 @@ class Model:
         """Local BVH bounds of each variant shape, built with :attr:`bvh_shape_bounds`."""
         self._variant_copy_cache: tuple[tuple[int, ...], list[wp.Launch]] | None = None
         """Recorded variant shape copies, keyed by their arrays."""
+        self._dynamic_capacity: _DynamicCapacity | None = None
+        """Rows reserved for runtime body, shape, and joint creation, or ``None``."""
 
         self.joint_q: wp.array[wp.float32] | None = None
         """Generalized joint positions [m or rad, depending on joint type] for state initialization, shape [joint_coord_count], float."""

@@ -1,0 +1,1 @@
+Add `ModelBuilder.reserve_dynamic_capacity()` and CUDA-graph-capturable runtime creation and removal of bodies, collision shapes, and D6 joints in `SolverPhoenX`, with SAP world maps rebuilt on the device.

@@ -219,6 +219,7 @@ def build_joint_init_arrays(
     device: wp.context.Devicelike | None = None,
     *,
     reduced_articulations: bool = False,
+    reserved_joints: range = range(0),
 ) -> JointInitArrays:
     """Convert ``model``'s joints to joint constraint init arrays on ``device``.
 
@@ -227,6 +228,8 @@ def build_joint_init_arrays(
         device: Device for the generated Warp arrays.
         reduced_articulations: Whether tree joints are owned by the reduced
             articulation solver instead of maximal-coordinate joint constraint columns.
+        reserved_joints: Disabled placeholder joints that still get a column, so
+            joints created at runtime can take it over.
 
     Raises:
         NotImplementedError: If a non-reduced D6 configuration cannot be
@@ -327,7 +330,7 @@ def build_joint_init_arrays(
             continue
 
         # FREE and disabled joints don't get a constraint column.
-        if not bool(joint_enabled[j]):
+        if not bool(joint_enabled[j]) and j not in reserved_joints:
             continue
         if jtype is newton.JointType.FREE:
             continue

@@ -336,6 +336,56 @@ def _active_dynamic_dofs(
     return tuple(result)
 
 
+def build_fixed_row_topology(
+    model: Model,
+    structural_row_counts: np.ndarray,
+    dynamic_joint_dofs: tuple[tuple[int, ...], ...],
+) -> DirectEqualityTopology:
+    """Give every joint its own block of ``_MAX_ROWS`` rows, row ``joint * _MAX_ROWS + local``.
+
+    Local block solves never factor mechanisms, so rows need no mechanism order. Fixed blocks
+    let joints created at runtime fill their rows in place; unused rows stay zero.
+    """
+    joint_count = int(model.joint_count)
+    row_joint = np.repeat(np.arange(joint_count, dtype=np.int32), _MAX_ROWS)
+    row_local = np.tile(np.arange(_MAX_ROWS, dtype=np.int32), joint_count)
+    row_dynamic = np.zeros(len(row_joint), dtype=bool)
+    row_dof = np.full(len(row_joint), -1, dtype=np.int32)
+    for joint, dofs in enumerate(dynamic_joint_dofs):
+        for index, dof in enumerate(dofs):
+            local = int(structural_row_counts[joint]) + index
+            if local >= _MAX_ROWS:
+                raise ValueError(f"joint {joint} requires more than {_MAX_ROWS} direct rows")
+            row_dynamic[joint * _MAX_ROWS + local] = True
+            row_dof[joint * _MAX_ROWS + local] = dof
+    parent = np.asarray(model.joint_parent.numpy(), dtype=np.int32)[row_joint] + 1
+    child = np.asarray(model.joint_child.numpy(), dtype=np.int32)[row_joint] + 1
+    rows = np.arange(len(row_joint), dtype=np.int32)
+    endpoint_body = np.concatenate((parent, np.where(child != parent, child, 0)))
+    endpoint_row = np.concatenate((rows, rows))
+    keep = endpoint_body > 0
+    order = np.lexsort((endpoint_row[keep], endpoint_body[keep]))
+    body_rows = endpoint_row[keep][order]
+    counts = np.bincount(endpoint_body[keep], minlength=int(model.body_count) + 1)
+    body_row_start = np.concatenate(([0], np.cumsum(counts))).astype(np.int32)
+    return DirectEqualityTopology(
+        joints=np.arange(joint_count, dtype=np.int32),
+        row_joint=row_joint,
+        row_local=row_local,
+        row_dynamic=row_dynamic,
+        row_dof=row_dof,
+        dimensions=(len(row_joint),),
+        permutation=rows,
+        mechanism_row_start=np.asarray([0, len(row_joint)], dtype=np.int32),
+        mechanism_requires_rank_floor=(False,),
+        mechanism_has_repeated_pair=(False,),
+        mechanism_cycle_count=(0,),
+        mechanism_has_cycle=(False,),
+        body_row_start=body_row_start,
+        body_rows=body_rows.astype(np.int32),
+    )
+
+
 def build_direct_equality_topology(
     model: Model,
     *,
@@ -2006,8 +2056,10 @@ class DirectEqualitySystem:
         regularization: float = _FP32_BASE_REGULARIZATION,
         temporal_substeps: int | None = None,
         direct_joint_friction: bool = False,
+        fixed_joint_rows: bool = False,
     ):
         self.model = model
+        self.fixed_joint_rows = bool(fixed_joint_rows)
         self._direct_joint_friction = bool(direct_joint_friction)
         self.bodies = bodies
         self.set_temporal_substeps(temporal_substeps)
@@ -2085,13 +2137,20 @@ class DirectEqualitySystem:
             for joint, dofs in enumerate(dynamic_joint_dofs)
         )
         self.has_bounded_drives = bool(np.any(bounded_drive_joint_mask))
-        self.topology = build_direct_equality_topology(
-            model,
-            excluded_joint_mask=excluded,
-            dynamic_joint_mask=dynamic_joint_mask,
-            dynamic_joint_dofs=dynamic_joint_dofs,
-            structural_row_counts=structural_row_counts,
-        )
+        if self.fixed_joint_rows:
+            # Joints created at runtime may add multi-axis dynamic rows later.
+            self.has_dynamic_rows = True
+            self.has_multi_axis_dynamic_rows = True
+            self.fixed_row_count = structural_row_counts + np.asarray([len(dofs) for dofs in dynamic_joint_dofs])
+            self.topology = build_fixed_row_topology(model, structural_row_counts, dynamic_joint_dofs)
+        else:
+            self.topology = build_direct_equality_topology(
+                model,
+                excluded_joint_mask=excluded,
+                dynamic_joint_mask=dynamic_joint_mask,
+                dynamic_joint_dofs=dynamic_joint_dofs,
+                structural_row_counts=structural_row_counts,
+            )
         self.regularization = float(regularization)
         row_regularization = np.full(len(self.topology.row_joint), self.regularization, dtype=np.float32)
         for mechanism, (needs_rank_floor, repeated_pair, has_cycle) in enumerate(
@@ -2133,12 +2192,16 @@ class DirectEqualitySystem:
         joint_to_structural[self.topology.joints] = np.arange(structural_count, dtype=np.int32)
 
         self.structural_joints = wp.array(self.topology.joints, dtype=wp.int32, device=device)
-        joint_row_start = np.empty(structural_count, dtype=np.int32)
-        joint_row_count = np.empty(structural_count, dtype=np.int32)
-        for structural, joint in enumerate(self.topology.joints):
-            rows = np.flatnonzero(self.topology.row_joint == joint)
-            joint_row_start[structural] = rows[0]
-            joint_row_count[structural] = len(rows)
+        if self.fixed_joint_rows:
+            joint_row_start = np.arange(structural_count, dtype=np.int32) * _MAX_ROWS
+            joint_row_count = np.full(structural_count, _MAX_ROWS, dtype=np.int32)
+        else:
+            joint_row_start = np.empty(structural_count, dtype=np.int32)
+            joint_row_count = np.empty(structural_count, dtype=np.int32)
+            for structural, joint in enumerate(self.topology.joints):
+                rows = np.flatnonzero(self.topology.row_joint == joint)
+                joint_row_start[structural] = rows[0]
+                joint_row_count[structural] = len(rows)
         self.joint_row_start = wp.array(joint_row_start, dtype=wp.int32, device=device)
         self.joint_row_count = wp.array(joint_row_count, dtype=wp.int32, device=device)
         self.constraint_cids = None
@@ -2279,6 +2342,13 @@ class DirectEqualitySystem:
         self.bias_delta = wp.zeros(row_count, dtype=wp.float32, device=device)
         self.bias_velocity = wp.zeros(int(model.body_count) + 1, dtype=wp.spatial_vector, device=device)
         self.solve_active = wp.zeros(1, dtype=wp.int32, device=device)
+        self.row_scale = wp.ones(row_count, dtype=wp.float32, device=device)
+        self._fused_projection = None
+        self._fused_covers_dynamic_bodies = False
+        if self.fixed_joint_rows:
+            # Fixed rows are solved as local blocks; there is no mechanism factor.
+            self.solver = None
+            return
         inverse_mass = np.asarray(model.body_inv_mass.numpy(), dtype=np.float32)
         joint_parent = np.asarray(model.joint_parent.numpy(), dtype=np.int32)
         joint_child = np.asarray(model.joint_child.numpy(), dtype=np.int32)
@@ -2310,11 +2380,8 @@ class DirectEqualitySystem:
         self.matrix_storage = wp.array(symbolic.matrix_storage, dtype=wp.int32, device=device)
         self.diagonal_index = wp.array(symbolic.diagonal_storage, dtype=wp.int32, device=device)
         self.matrix = self.solver.matrix
-        self.row_scale = wp.ones(row_count, dtype=wp.float32, device=device)
         self.max_dimension = max(self.topology.dimensions)
-        self._fused_projection = None
         self._fused_relax_tolerance = _DIRECT_RELAX_RESIDUAL_TOLERANCE
-        self._fused_covers_dynamic_bodies = False
         self._copy_state_sentinel = copy_state_container_zeros(capacity=1, num_nodes=1, device=device)
         solver = self.solver
         if (

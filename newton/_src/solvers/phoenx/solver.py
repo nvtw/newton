@@ -56,6 +56,7 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
 )
 from newton._src.solvers.phoenx.constraints.contact_tgs import allocate_contact_tgs, export_contact_wrenches
 from newton._src.solvers.phoenx.constraints.d6_joint_data import build_d6_inequality_data
+from newton._src.solvers.phoenx.dynamic import PhoenXDynamics
 from newton._src.solvers.phoenx.materials import CombineMode, Material, material_table_from_list
 from newton._src.solvers.phoenx.model_adapter import (
     JointInitArrays,
@@ -145,10 +146,30 @@ def _can_combine_direct_prepare_projection(
     return articulation_mode == "maximal" and contact_friction_model == "point" and not has_velocity_limits
 
 
+_COMBINE_MODES = {
+    "average": CombineMode.AVERAGE,
+    "min": CombineMode.MIN,
+    "multiply": CombineMode.MULTIPLY,
+    "max": CombineMode.MAX,
+}
+
+# Contact pairs budgeted per reserved runtime shape (a few simultaneous neighbors).
+_DYNAMIC_SHAPE_PAIR_BUDGET = 8
+
+
+def _shape_pair_estimate(model) -> int:
+    """Finalized shape contact pairs plus a neighbor budget for reserved runtime shapes."""
+    pair_count = int(getattr(model, "shape_contact_pair_count", 0) or 0)
+    capacity = getattr(model, "_dynamic_capacity", None)
+    if capacity is not None:
+        pair_count += _DYNAMIC_SHAPE_PAIR_BUDGET * capacity.shape_count
+    return pair_count
+
+
 def _estimate_rigid_contact_max_phoenx(model) -> int | None:
     """Tight rigid_contact_max from shape_contact_pair_count * 5 (CPP) * 2 (safety).
     None when pair count is unavailable (caller falls back to Newton's default)."""
-    pair_count = int(getattr(model, "shape_contact_pair_count", 0) or 0)
+    pair_count = _shape_pair_estimate(model)
     if pair_count <= 0:
         return None
 
@@ -161,7 +182,7 @@ def _estimate_rigid_contact_max_phoenx(model) -> int | None:
 
 def _estimate_contact_column_max_phoenx(model: Model, rigid_contact_max: int) -> int:
     """Bound shape-pair contact columns independently from contact points."""
-    pair_count = int(getattr(model, "shape_contact_pair_count", 0) or 0)
+    pair_count = _shape_pair_estimate(model)
     if pair_count <= 0:
         return int(rigid_contact_max)
     return min(int(rigid_contact_max), max(1000, pair_count))
@@ -754,6 +775,17 @@ class SolverPhoenX(SolverBase):
 
         num_bodies_phoenx = int(model.body_count) + 1
         self.bodies: BodyContainer = body_container_zeros(num_bodies_phoenx, device=self.device)
+        # Rows reserved by ModelBuilder.reserve_dynamic_capacity() enable runtime creation.
+        dynamic_capacity = model._dynamic_capacity
+        if dynamic_capacity is not None:
+            if has_deformables:
+                raise ValueError("Runtime body creation does not support deformables")
+            if dynamic_capacity.joint_count and (joint_solver != "block_pgs" or direct_joint_mask is not None):
+                raise ValueError("Runtime joint creation requires joint_mode='maximal_pgs' without direct_joint_mask")
+        self._body_fresh = wp.zeros(
+            num_bodies_phoenx if dynamic_capacity is not None else 0, dtype=wp.int32, device=self.device
+        )
+        self.dynamics: PhoenXDynamics | None = None
 
         # FD/substep-avg readout buffers — always allocated so graph capture
         # has stable refs; only written when the corresponding readout fires.
@@ -788,10 +820,16 @@ class SolverPhoenX(SolverBase):
         ):
             newton.eval_fk(model, model.joint_q, model.joint_qd, model)
 
+        reserved_joints = range(0)
+        if dynamic_capacity is not None:
+            reserved_joints = range(
+                dynamic_capacity.joint_start, dynamic_capacity.joint_start + dynamic_capacity.joint_count
+            )
         self._joint_constraints: JointInitArrays = build_joint_init_arrays(
             model,
             device=self.device,
             reduced_articulations=self._uses_reduced_joint_ownership,
+            reserved_joints=reserved_joints,
         )
         num_joints = self._joint_constraints.num_joint_columns
         num_particles = int(getattr(model, "particle_count", 0) or 0)
@@ -811,6 +849,10 @@ class SolverPhoenX(SolverBase):
         # PhoenX's warm-start path needs contact_matching != "disabled".
         # Auto-attach a sticky pipeline so users don't have to size Contacts.
         self._sleeping_enabled: bool = float(sleeping_velocity_threshold) > 0.0
+        # Runtime joints filter collisions between their bodies in the same broad-phase filter.
+        uses_broad_phase_filter = self._sleeping_enabled or (
+            dynamic_capacity is not None and dynamic_capacity.joint_count > 0
+        )
         if articulation_mode == "maximal_articulated" and self._sleeping_enabled:
             raise NotImplementedError(
                 "maximal_articulated does not yet support sleeping; use maximal_projected or reduced"
@@ -825,7 +867,7 @@ class SolverPhoenX(SolverBase):
             # When sleeping is on we need a broad-phase filter func wired
             # into the pipeline at construction time; force rebuild if
             # the existing pipeline doesn't carry one.
-            if self._sleeping_enabled and not needs_new_cp:
+            if uses_broad_phase_filter and not needs_new_cp:
                 existing_filter = getattr(existing_cp, "_broad_phase_filter_func", None)
                 if existing_filter is None:
                     needs_new_cp = True
@@ -841,7 +883,7 @@ class SolverPhoenX(SolverBase):
                     "contact_matching": PHOENX_CONTACT_MATCHING,
                     "rigid_contact_max": tight_rcm,
                 }
-                if self._sleeping_enabled:
+                if uses_broad_phase_filter:
                     cp_kwargs["broad_phase_filter"] = (
                         phoenx_sleeping_filter,
                         PhoenXSleepingFilterData,
@@ -969,20 +1011,28 @@ class SolverPhoenX(SolverBase):
             contact_chunk_size=contact_chunk_size,
             device=self.device,
         )
+        if dynamic_capacity is not None:
+            if self.world._fused_multiworld_mass_splitting:
+                raise ValueError("Runtime body creation does not support fused multi-world mass splitting")
+            # Reserved slots start static; keep the kinematic kernels for bodies created later.
+            self.world._num_kinematic_bodies = max(1, self.world._num_kinematic_bodies)
 
-        # Bind the rigid broad phase to the live sleeping state.
-        if self._sleeping_enabled and int(model.shape_count) > 0 and not self._has_deformable_collision:
+        # Bind the rigid broad phase to the live sleeping state and runtime joint pairs.
+        self._body_filter_parent = wp.full(max(1, int(model.body_count)), -2, dtype=wp.int32, device=self.device)
+        if uses_broad_phase_filter and int(model.shape_count) > 0 and not self._has_deformable_collision:
             filter_data = build_phoenx_sleeping_filter_data(
-                sleeping_enabled=True,
+                sleeping_enabled=self._sleeping_enabled,
                 phoenx_body_offset=1,
                 shape_body=model.shape_body,
                 body_island_root=self.bodies.island_root,
                 body_motion_type=self.bodies.motion_type,
                 device=self.device,
+                body_filter_parent=self._body_filter_parent if dynamic_capacity is not None else None,
             )
             model._collision_pipeline.set_broad_phase_filter_data(filter_data)
             self._sleeping_filter_data = filter_data
-            self.world._sleeping_filter_data = filter_data
+            if self._sleeping_enabled:
+                self.world._sleeping_filter_data = filter_data
 
         # Seed body pose BEFORE joint init — joint constraint init reads body positions to
         # snapshot body-local anchors. Without this, welds pull child to origin.
@@ -997,6 +1047,8 @@ class SolverPhoenX(SolverBase):
                     zero_wrench,
                     model.body_com,
                     self.bodies,
+                    self._body_fresh,
+                    wp.int32(0),
                 ],
                 device=self.device,
             )
@@ -1104,6 +1156,8 @@ class SolverPhoenX(SolverBase):
             system_options = {}
             if joint_solver == "block_pgs":
                 equality_system_type = BlockJointSystem
+                if reserved_joints:
+                    system_options["fixed_joint_rows"] = True
                 if direct_joint_mask is not None:
                     equality_system_type = MixedJointSystem
                     system_options["exact_joint_mask"] = direct_joint_mask
@@ -1144,6 +1198,15 @@ class SolverPhoenX(SolverBase):
                 self._refresh_direct_joint_ownership()
                 if joint_solver == "block_pgs":
                     self._direct_equality_system.bind_world(self.world, joint_idx_to_cid)
+                if reserved_joints:
+                    # Placeholder columns stay out of the solve until a joint takes them over.
+                    ownership = self.world._joint_pgs_enabled.numpy()
+                    ownership[joint_idx_to_cid[reserved_joints.start : reserved_joints.stop]] = 0
+                    self.world.set_joint_pgs_ownership(ownership)
+                    self.world._joint_pgs_all_disabled = False
+                    d6_data = self.world.constraints.d6
+                    d6_data.enabled = 1
+                    self.world.constraints.d6 = d6_data
 
                 if direct_tree_contact_candidate and self.world.max_contact_columns > 0:
                     direct_joint_mask = self._direct_equality_system.joint_mask
@@ -1204,6 +1267,9 @@ class SolverPhoenX(SolverBase):
 
         self._has_joint_forces = model.joint_dof_count > 0
         self._last_dt: float = 0.0
+        if dynamic_capacity is not None:
+            combine_mode = _COMBINE_MODES[self.friction_combine_mode]
+            self.dynamics = PhoenXDynamics(self, self._collision_pipeline, int(combine_mode))
 
         if solver_scheme == "tgs":
             direct = self._direct_equality_system
@@ -1251,13 +1317,7 @@ class SolverPhoenX(SolverBase):
             if self.model.shape_material_restitution is not None
             else np.zeros_like(mu_np)
         )
-        combine_modes = {
-            "average": CombineMode.AVERAGE,
-            "min": CombineMode.MIN,
-            "multiply": CombineMode.MULTIPLY,
-            "max": CombineMode.MAX,
-        }
-        combine_mode = combine_modes[self.friction_combine_mode]
+        combine_mode = _COMBINE_MODES[self.friction_combine_mode]
         materials = [
             Material(
                 static_friction=float(mu_np[i]),
@@ -1405,7 +1465,7 @@ class SolverPhoenX(SolverBase):
             device=self.device,
         )
 
-    def _import_body_state(self, state_in: State) -> None:
+    def _import_body_state(self, state_in: State, *, consume_fresh: bool = True) -> None:
         """Pull state_in into the PhoenX body container (slot i+1).
         Kinematic bodies go to kinematic_target_*; dynamic/static go direct."""
         n = int(self.model.body_count)
@@ -1420,6 +1480,8 @@ class SolverPhoenX(SolverBase):
                 state_in.body_f,
                 self.model.body_com,
                 self.bodies,
+                self._body_fresh,
+                wp.int32(int(consume_fresh)),
             ],
             device=self.device,
         )
@@ -1595,7 +1657,7 @@ class SolverPhoenX(SolverBase):
         """
         if not self._sleeping_enabled:
             return
-        self._import_body_state(state_in)
+        self._import_body_state(state_in, consume_fresh=False)
         self.world.wake_on_external_input()
 
     def step(
@@ -1641,6 +1703,8 @@ class SolverPhoenX(SolverBase):
             # Alias Model per-DOF arrays (no clone). Matches XPBD/Featherstone.
             control = self.model.control(clone_variables=False)
 
+        if self.dynamics is not None:
+            self.dynamics.commit()
         self._apply_joint_control(control)
         if self._reduced_articulation is None:
             self._accumulate_joint_forces(state_in, control, dt)
@@ -1757,17 +1821,7 @@ class SolverPhoenX(SolverBase):
                 model.body_world,
                 wp.int32(int(BodyFlags.KINEMATIC)),
             ],
-            outputs=[
-                self.bodies.inverse_mass,
-                self.bodies.inverse_inertia,
-                self.bodies.inverse_inertia_world,
-                self.bodies.body_com,
-                self.bodies.affected_by_gravity,
-                self.bodies.motion_type,
-                self.bodies.world_id,
-                self.bodies.linear_damping,
-                self.bodies.angular_damping,
-            ],
+            outputs=[self.bodies],
             device=self.device,
         )
 

@@ -36,6 +36,98 @@ wp.set_module_options({"enable_backward": False})
 
 SAPSortMode = Literal["segmented", "tile", "auto"]
 
+_COLLIDE_SHAPES = wp.constant(wp.int32(1 << 1))  # ShapeFlags.COLLIDE_SHAPES
+
+
+@wp.kernel
+def _world_map_clear_kernel(dirty: wp.array[wp.int32], counts: wp.array[wp.int32]):
+    if dirty[0] != 0:
+        counts[wp.tid()] = 0
+
+
+@wp.kernel
+def _world_map_count_kernel(
+    dirty: wp.array[wp.int32],
+    shape_world: wp.array[wp.int32],
+    shape_flags: wp.array[wp.int32],
+    regular_worlds: int,
+    rank: wp.array[wp.int32],
+    counts: wp.array[wp.int32],
+):
+    shape = wp.tid()
+    if dirty[0] == 0:
+        return
+    world = shape_world[shape]
+    if (shape_flags[shape] & _COLLIDE_SHAPES) == 0 or world >= regular_worlds:
+        rank[shape] = -1
+        return
+    if world < 0:
+        world = regular_worlds  # global shapes share the last bucket
+    rank[shape] = wp.atomic_add(counts, world, 1)
+
+
+@wp.kernel
+def _world_map_slices_kernel(
+    dirty: wp.array[wp.int32],
+    counts: wp.array[wp.int32],
+    regular_worlds: int,
+    bound: int,
+    slice_ends: wp.array[wp.int32],
+    overflow: wp.array[wp.int32],
+):
+    if dirty[0] == 0:
+        return
+    shared = counts[regular_worlds]
+    end = int(0)
+    for world in range(regular_worlds + 1):
+        count = shared
+        if world < regular_worlds:
+            count += counts[world]
+        if count > bound:
+            overflow[0] = 1
+            count = bound
+        end += count
+        slice_ends[world] = end
+
+
+@wp.kernel
+def _world_map_scatter_kernel(
+    dirty: wp.array[wp.int32],
+    shape_world: wp.array[wp.int32],
+    rank: wp.array[wp.int32],
+    counts: wp.array[wp.int32],
+    regular_worlds: int,
+    slice_ends: wp.array[wp.int32],
+    index_map: wp.array[wp.int32],
+):
+    shape = wp.tid()
+    r = rank[shape]
+    if dirty[0] == 0 or r < 0:
+        return
+    world = shape_world[shape]
+    first = world
+    last = world
+    if world < 0:
+        # Each regular world's slice lists its own shapes, then the global ones; the last
+        # segment lists only the global ones.
+        first = 0
+        last = regular_worlds
+    for w in range(first, last + 1):
+        start = int(0)
+        if w > 0:
+            start = slice_ends[w - 1]
+        local = r
+        if world < 0 and w < regular_worlds:
+            local += counts[w]
+        if start + local < slice_ends[w]:
+            index_map[start + local] = shape
+
+
+@wp.kernel
+def _world_map_done_kernel(dirty: wp.array[wp.int32]):
+    dirty[0] = 0
+
+
 _SAP_SWEEP_CHUNK_SIZE = 32
 _SAP_SWEEP_CHUNK_SIZE_WP = wp.constant(wp.int32(_SAP_SWEEP_CHUNK_SIZE))
 _SAP_CHUNKED_MIN_SHAPES = 4096
@@ -763,6 +855,7 @@ class BroadPhaseSAP:
         device: Devicelike | None = None,
         filter_func: Any | None = None,
         filter_data_type: Any | None = None,
+        dynamic_world_bound: tuple[int, int] | None = None,
     ) -> None:
         """Initialize arrays for sweep and prune broad phase collision detection.
 
@@ -795,6 +888,9 @@ class BroadPhaseSAP:
                 Returning ``0`` drops the pair.
             filter_data_type: ``wp.struct`` type for the ``filter_data`` argument
                 forwarded to :meth:`launch`. Required when ``filter_func`` is set.
+            dynamic_world_bound: ``(world_count, max_shapes_per_world)`` for shapes whose flags and
+                worlds change at runtime. The world map is then rebuilt on the device by
+                :meth:`update_world_map` instead of being precomputed, and buffers are sized by the bound.
         """
         if (filter_func is None) != (filter_data_type is None):
             raise ValueError("filter_func and filter_data_type must be provided together")
@@ -851,6 +947,19 @@ class BroadPhaseSAP:
             num_shapes = int(end_idx - start_idx)
             self.max_shapes_per_world = max(self.max_shapes_per_world, num_shapes)
             start_idx = end_idx
+
+        self._dynamic_world_map = dynamic_world_bound is not None
+        if self._dynamic_world_map:
+            regular_worlds, bound = dynamic_world_bound
+            self.num_regular_worlds = int(regular_worlds)
+            self.world_count = self.num_regular_worlds + 1
+            self.max_shapes_per_world = int(bound)
+            self._single_segment_identity_map = False
+            self.world_index_map = wp.zeros(self.world_count * self.max_shapes_per_world, dtype=wp.int32, device=device)
+            self.world_slice_ends = wp.zeros(self.world_count, dtype=wp.int32, device=device)
+            self._world_shape_rank = wp.zeros(len(shape_world_np), dtype=wp.int32, device=device)
+            self._world_shape_counts = wp.zeros(self.world_count, dtype=wp.int32, device=device)
+            self._world_overflow = wp.zeros(1, dtype=wp.int32, device=device)
 
         if self.sort_type == "auto":
             if 64 <= self.max_shapes_per_world <= 512:
@@ -1021,6 +1130,53 @@ class BroadPhaseSAP:
                 device=device,
                 record_tape=False,
             )
+
+    def update_world_map(
+        self,
+        shape_world: wp.array[wp.int32],
+        shape_flags: wp.array[wp.int32],
+        dirty: wp.array[wp.int32],
+    ) -> None:
+        """Rebuild the per-world shape map on the device when ``dirty[0]`` is set, then clear it.
+
+        Only valid with ``dynamic_world_bound``. Every kernel exits immediately while the map is
+        clean, so the call is cheap to keep in a captured graph. A world with more colliding shapes
+        than the bound drops the excess and sets an overflow flag.
+        """
+        n = shape_world.shape[0]
+        device = shape_world.device
+        wp.launch(
+            _world_map_clear_kernel, dim=self.world_count, inputs=[dirty, self._world_shape_counts], device=device
+        )
+        wp.launch(
+            _world_map_count_kernel,
+            dim=n,
+            inputs=[dirty, shape_world, shape_flags, self.num_regular_worlds, self._world_shape_rank],
+            outputs=[self._world_shape_counts],
+            device=device,
+        )
+        wp.launch(
+            _world_map_slices_kernel,
+            dim=1,
+            inputs=[dirty, self._world_shape_counts, self.num_regular_worlds, self.max_shapes_per_world],
+            outputs=[self.world_slice_ends, self._world_overflow],
+            device=device,
+        )
+        wp.launch(
+            _world_map_scatter_kernel,
+            dim=n,
+            inputs=[
+                dirty,
+                shape_world,
+                self._world_shape_rank,
+                self._world_shape_counts,
+                self.num_regular_worlds,
+                self.world_slice_ends,
+            ],
+            outputs=[self.world_index_map],
+            device=device,
+        )
+        wp.launch(_world_map_done_kernel, dim=1, inputs=[dirty], device=device)
 
     def launch(
         self,

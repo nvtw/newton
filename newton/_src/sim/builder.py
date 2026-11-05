@@ -109,7 +109,7 @@ from .graph_coloring import (
     construct_particle_graph,
 )
 from .joint_mimic import _SUPPORTED_JOINT_TYPES
-from .model import Model, _pack_shape_pair_codes
+from .model import Model, _DynamicCapacity, _pack_shape_pair_codes
 from .rod import Rod
 from .shape_contact_pairs import _ShapeContactPairs
 from .tendon import TendonGuide, TendonGuideFlags, TendonGuideType
@@ -2096,6 +2096,8 @@ class ModelBuilder:
         """Optional contact attributes requested via :meth:`request_contact_attributes`."""
         self._requested_state_attributes: set[str] = set()
         """Optional state attributes requested via :meth:`request_state_attributes`."""
+        self._dynamic_capacity: dict[str, Any] | None = None
+        """Rows reserved by :meth:`reserve_dynamic_capacity`, or ``None``."""
 
         # particle-body attachments
         self.attachment_particle_body_body: list[int] = []
@@ -3853,6 +3855,8 @@ class ModelBuilder:
     ) -> None:
         if builder.up_axis != self.up_axis:
             raise ValueError("Cannot add a builder with a different up axis.")
+        if builder._dynamic_capacity is not None:
+            raise ValueError("Reserve dynamic capacity on the final builder, not on merged builders.")
 
         copy_count = len(worlds)
         if len(xforms) != copy_count or len(label_prefixes) != copy_count:
@@ -5442,6 +5446,90 @@ class ModelBuilder:
 
         # Reset to global world
         self._current_world = -1
+
+    def reserve_dynamic_capacity(
+        self,
+        *,
+        bodies: int = 0,
+        shapes: int = 0,
+        joints: int = 0,
+        max_dynamic_shapes_per_world: int | None = None,
+        prototype_shapes: Sequence[int] = (),
+    ) -> None:
+        """Reserve inactive rows that a solver can fill with bodies, shapes, and joints at runtime.
+
+        The rows are appended to the global scope as placeholders: static bodies, non-colliding,
+        invisible shapes, and disabled six-axis D6 joints. A solver that supports runtime creation,
+        such as :class:`~newton.solvers.SolverPhoenX`, overwrites them on the device, which keeps model
+        array sizes and CUDA graphs valid. Call this once, after all worlds have been added.
+
+        .. experimental::
+
+            Runtime body creation may change without a deprecation period.
+
+        Args:
+            bodies: Number of body rows to reserve.
+            shapes: Number of collision shape rows to reserve.
+            joints: Number of joint rows to reserve. Each holds up to six degrees of freedom.
+            max_dynamic_shapes_per_world: Most runtime shapes a single world can hold at once. Sizes
+                the broad-phase buffers. Defaults to ``shapes``.
+            prototype_shapes: Existing collision shapes whose finalized mesh or convex-hull geometry
+                runtime shapes may reference. They serve only as geometry and never collide or render.
+        """
+        if self._dynamic_capacity is not None:
+            raise RuntimeError("reserve_dynamic_capacity() can only be called once")
+        if self.current_world != -1:
+            raise RuntimeError("reserve_dynamic_capacity() must be called outside a world context")
+        for name, count in (("bodies", bodies), ("shapes", shapes), ("joints", joints)):
+            if count < 0:
+                raise ValueError(f"{name} must be non-negative, got {count}")
+        if max_dynamic_shapes_per_world is None:
+            max_dynamic_shapes_per_world = shapes
+        if not 0 <= max_dynamic_shapes_per_world <= shapes:
+            raise ValueError("max_dynamic_shapes_per_world must be between 0 and shapes")
+        if joints and not (bodies or self.body_count):
+            raise ValueError("Reserved joints require at least one body")
+        prototypes = tuple(int(shape) for shape in prototype_shapes)
+        for shape in prototypes:
+            if not 0 <= shape < self.shape_count:
+                raise ValueError(f"Prototype shape {shape} is out of range")
+            if not self.shape_flags[shape] & ShapeFlags.COLLIDE_SHAPES:
+                raise ValueError(f"Prototype shape {shape} must collide with shapes to carry collision data")
+
+        body_start = self.body_count
+        for i in range(bodies):
+            self.add_link(label=f"dynamic_body_{i}")
+        shape_start = self.shape_count
+        cfg = self.ShapeConfig(density=0.0, has_shape_collision=False, has_particle_collision=False, is_visible=False)
+        for i in range(shapes):
+            self.add_shape_sphere(-1, radius=0.0, cfg=cfg, label=f"dynamic_shape_{i}")
+        joint_start = self.joint_count
+        child = body_start if bodies else self.body_count - 1
+        axes = (Axis.X, Axis.Y, Axis.Z)
+        with warnings.catch_warnings():
+            # Placeholders share one child body; they are disabled until filled.
+            warnings.simplefilter("ignore", NewtonWarning)
+            for i in range(joints):
+                self.add_joint(
+                    JointType.D6,
+                    -1,
+                    child,
+                    linear_axes=[self.JointDofConfig(axis=axis) for axis in axes],
+                    angular_axes=[self.JointDofConfig(axis=axis) for axis in axes],
+                    label=f"dynamic_joint_{i}",
+                    collision_filter_parent=False,
+                    enabled=False,
+                )
+        self._dynamic_capacity = {
+            "body_start": body_start,
+            "body_count": bodies,
+            "shape_start": shape_start,
+            "shape_count": shapes,
+            "joint_start": joint_start,
+            "joint_count": joints,
+            "max_shapes_per_world": max_dynamic_shapes_per_world,
+            "prototype_shapes": prototypes,
+        }
 
     def add_world(
         self,
@@ -15144,6 +15232,8 @@ class ModelBuilder:
             m._requested_contact_attributes.update(self._requested_contact_attributes)
             m._requested_state_attributes.update(self._requested_state_attributes)
             m.requires_grad = requires_grad
+            if self._dynamic_capacity is not None:
+                m._dynamic_capacity = _DynamicCapacity(**self._dynamic_capacity)
 
             m.world_count = self.world_count
 
