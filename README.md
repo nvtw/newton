@@ -1226,6 +1226,9 @@ contact accuracy are still being investigated.
       <br><code>python -m newton.examples phoenx_cube_pile</code>
     </td>
     <td align="center" width="33%">
+      <img width="320" src="docs/images/examples/example_phoenx_conveyor.jpg" alt="PhoenX conveyor belts">
+      <br><b>Conveyor belts and scanner gates</b>
+      <br><code>python -m newton.examples phoenx_conveyor</code>
     </td>
     <td align="center" width="33%">
     </td>
