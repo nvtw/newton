@@ -2861,8 +2861,12 @@ class PhoenXWorld:
             self._soft_contact_sentinel = wp.zeros(0, dtype=wp.float32, device=self.device)
         contact_stiffness_src = getattr(contacts, "rigid_contact_stiffness", None)
         contact_damping_src = getattr(contacts, "rigid_contact_damping", None)
-        self._has_soft_contact_pd = (contact_stiffness_src is not None and int(contact_stiffness_src.shape[0]) > 0) or (
-            contact_damping_src is not None and int(contact_damping_src.shape[0]) > 0
+        # Conveyor surface velocities are per-contact overrides too and share this compile axis.
+        surface_velocity_src = getattr(contacts, "rigid_contact_surface_velocity", None)
+        self._has_soft_contact_pd = (
+            (contact_stiffness_src is not None and int(contact_stiffness_src.shape[0]) > 0)
+            or (contact_damping_src is not None and int(contact_damping_src.shape[0]) > 0)
+            or (surface_velocity_src is not None and int(surface_velocity_src.shape[0]) > 0)
         )
         contact_stiffness = contact_stiffness_src if contact_stiffness_src is not None else self._soft_contact_sentinel
         contact_damping = contact_damping_src if contact_damping_src is not None else self._soft_contact_sentinel

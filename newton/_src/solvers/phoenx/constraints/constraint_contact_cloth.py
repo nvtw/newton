@@ -1604,11 +1604,14 @@ def _make_contact_iterate_at(
                         jv_t2 = wp.dot(vel_rel, t2_dir)
                         eff_t1 = cc_get_eff_t1(cc, k)
                         eff_t2 = cc_get_eff_t2(cc, k)
-                        if cc.surface_target.shape[0] > 0 and contacts.rigid_contact_surface_velocity.shape[0] > 0:
-                            # Slip relative to the conveyor surface, shape 1 minus shape 0.
-                            target = cc.surface_target[k]
-                            jv_t1 += target[0]
-                            jv_t2 += target[1]
+                        # Per-contact overrides share the soft-contact compile axis, so other scenes
+                        # compile no conveyor code.
+                        if wp.static(has_soft_contact_pd):
+                            if cc.surface_target.shape[0] > 0 and contacts.rigid_contact_surface_velocity.shape[0] > 0:
+                                # Slip relative to the conveyor surface, shape 1 minus shape 0.
+                                target = cc.surface_target[k]
+                                jv_t1 += target[0]
+                                jv_t2 += target[1]
                     elif not use_patch:
                         jv_t1 = wp.dot(vel_rel, t1_dir)
                         jv_t2 = wp.dot(vel_rel, t2_dir)
