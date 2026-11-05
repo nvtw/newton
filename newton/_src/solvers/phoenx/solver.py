@@ -12,6 +12,7 @@ PhoenX slot 0 is the static world anchor; pass ``substeps=1`` to substep outside
 from __future__ import annotations
 
 import warnings
+from collections.abc import Sequence
 
 import numpy as np
 import warp as wp
@@ -331,6 +332,7 @@ class SolverPhoenX(SolverBase):
         joint_mode: str = "maximal_direct",
         reduced_articulation_path: str = "reference",
         direct_joint_mask: np.ndarray | None = None,
+        tracking_volumes: Sequence[int] | None = None,
     ):
         """Build the PhoenX solver from ``model``.
 
@@ -507,6 +509,14 @@ class SolverPhoenX(SolverBase):
                 the remaining joints stay local blocks inside the sweeps. Use it
                 for long chains, closed linkages and trees with large link mass
                 ratios, which converge poorly as independent blocks.
+            tracking_volumes: Shapes that detect overlaps without a contact response, such as
+                trigger or scanner volumes. The collision pipeline generates their contacts as
+                usual, which is exact for every shape type, but PhoenX builds no constraints from
+                them. Read the overlaps from the :class:`~newton.Contacts` buffer: a contact on a
+                volume overlaps when its separation, the distance between its world points along
+                the normal minus both margins, is at most zero. Runtime shapes become volumes
+                through ``ShapeDesc.tracking_volume``. Volume contacts count against
+                ``rigid_contact_max``.
             reduced_articulation_path: ``"reference"`` uses the established
                 reduced solver. Experimental ``"persistent"`` enables
                 topology-proven cross-phase articulation fusion on CUDA.
@@ -1251,6 +1261,10 @@ class SolverPhoenX(SolverBase):
                 raise RuntimeError("PhoenX deformable contacts require a CollisionPipeline")
             self.world.setup_official_deformable_contacts(model, pipeline)
         self._collision_pipeline = getattr(model, "_collision_pipeline", None)
+        if tracking_volumes is not None or (dynamic_capacity is not None and dynamic_capacity.shape_count):
+            volume_mask = np.zeros(max(1, int(model.shape_count)), dtype=np.int32)
+            volume_mask[np.asarray(tracking_volumes if tracking_volumes is not None else [], dtype=np.int64)] = 1
+            self.world.shape_no_response = wp.array(volume_mask, dtype=wp.int32, device=self.device)
         if self._collision_pipeline is not None and self._collision_pipeline._rigid_contact_surface_velocity:
             # Conveyor surfaces drive the point-friction rows of the canonical contact solve.
             if (

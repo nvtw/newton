@@ -162,6 +162,8 @@ class ShapeDesc:
     prototype: wp.int32
     #: World of a static shape (``body == -1``); a body's shapes take the body's world.
     world: wp.int32
+    #: Detect overlaps without a contact response, as ``SolverPhoenX(tracking_volumes=...)``.
+    tracking_volume: wp.bool
 
 
 @wp.struct
@@ -264,6 +266,7 @@ class DynamicsData:
     shape_pending_flags: wp.array[wp.int32]
     #: PhoenX's own shape -> slot map and material table.
     phoenx_shape_body: wp.array[wp.int32]
+    shape_no_response: wp.array[wp.int32]
     materials: wp.array[MaterialData]
     friction_combine_mode: wp.int32
     world_map_dirty: wp.array[wp.int32]
@@ -515,6 +518,7 @@ def phoenx_add_shape(dyn: DynamicsData, body: wp.int32, desc: ShapeDesc) -> wp.i
     material.restitution_combine_mode = 0
     dyn.materials[shape] = material
     dyn.phoenx_shape_body[shape] = body + 1
+    dyn.shape_no_response[shape] = wp.where(desc.tracking_volume, 1, 0)
     return shape
 
 
@@ -941,6 +945,7 @@ class PhoenXDynamics:
         d.shape_mesh_boundary_start = model._shape_mesh_boundary_start
         d.shape_pending_flags = wp.zeros(max(1, capacity.shape_count), dtype=wp.int32, device=device)
         d.phoenx_shape_body = solver._shape_body
+        d.shape_no_response = world.shape_no_response
         d.materials = world._materials
         d.friction_combine_mode = wp.int32(friction_combine_mode)
         d.world_map_dirty = collision_pipeline._dynamic_world_map_dirty

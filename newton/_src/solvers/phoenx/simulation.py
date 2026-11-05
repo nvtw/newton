@@ -1273,6 +1273,8 @@ class PhoenXWorld:
         # directly to step(). Shape types let the solver keep SDF-specific
         # contact safeguards out of primitive stack contacts.
         self._shape_body_internal: wp.array[wp.int32] | None = None
+        #: Per-shape mask of shapes whose contacts get no response (tracking volumes), or empty.
+        self.shape_no_response: wp.array[wp.int32] = wp.empty(0, dtype=wp.int32, device=self.device)
         self._shape_type_internal: wp.array[wp.int32] | None = None
         # Lazy sentinel for optional per-contact stiffness/damping/friction.
         self._soft_contact_sentinel: wp.array[wp.float32] | None = None
@@ -2921,6 +2923,7 @@ class PhoenXWorld:
             cid_of_contact=self._cid_of_contact_cur,
             num_active_constraints=self._num_active_constraints,
             active_constraint_base=self._contact_offset,
+            shape_no_response=self.shape_no_response,
         )
 
         if self._contact_chunk_scratch is not None:

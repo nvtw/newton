@@ -745,6 +745,14 @@ def _body_pair_filtered(
     return wp.int32(0)
 
 
+@wp.func
+def _no_response(shape_no_response: wp.array[wp.int32], shape_a: wp.int32, shape_b: wp.int32) -> wp.bool:
+    """Whether either shape only reports overlaps (tracking volumes); empty mask means none."""
+    if shape_no_response.shape[0] == 0:
+        return False
+    return shape_no_response[shape_a] != 0 or shape_no_response[shape_b] != 0
+
+
 @wp.kernel(enable_backward=False, grid_stride=False)
 def _mark_valid_shape_pair_runs_kernel(
     rigid_contact_count: wp.array[wp.int32],
@@ -755,6 +763,7 @@ def _mark_valid_shape_pair_runs_kernel(
     num_bodies: wp.int32,
     filter_keys: wp.array[wp.int64],
     filter_count: wp.int32,
+    shape_no_response: wp.array[wp.int32],
     pair_boundary: wp.array[wp.int32],
     cid_of_contact: wp.array[wp.int32],
 ):
@@ -777,6 +786,9 @@ def _mark_valid_shape_pair_runs_kernel(
         ):
             pair_boundary[contact] = wp.int32(0)
             return
+    if _no_response(shape_no_response, shape_a, shape_b):
+        pair_boundary[contact] = wp.int32(0)
+        return
     body_a = shape_filter_id[shape_a]
     body_b = shape_filter_id[shape_b]
     if body_a == body_b:
@@ -902,6 +914,7 @@ def _pair_counts_and_columns_kernel(
     num_bodies: wp.int32,
     filter_keys: wp.array[wp.int64],
     filter_count: wp.int32,
+    shape_no_response: wp.array[wp.int32],
     # out
     pair_count: wp.array[wp.int32],
     pair_columns: wp.array[wp.int32],
@@ -942,6 +955,9 @@ def _pair_counts_and_columns_kernel(
     # pair_columns: 1 iff distinct filter groups + not body-pair-filtered.
     sa = pair_shape_a[tid]
     sb = pair_shape_b[tid]
+    if _no_response(shape_no_response, sa, sb):
+        pair_columns[tid] = wp.int32(0)
+        return
     ba = shape_filter_id[sa]
     bb = shape_filter_id[sb]
     if ba == bb:
@@ -1284,6 +1300,7 @@ def ingest_contacts(
     cid_of_contact: wp.array[wp.int32] | None = None,
     num_active_constraints: wp.array[wp.int32] | None = None,
     active_constraint_base: int = 0,
+    shape_no_response: wp.array[wp.int32] | None = None,
 ) -> None:
     """Materialise contact columns for one step.
 
@@ -1324,6 +1341,8 @@ def ingest_contacts(
         num_active_constraints: Optional output for
             ``active_constraint_base + num_contact_columns``.
         active_constraint_base: Non-contact constraint count.
+        shape_no_response: Optional per-shape mask; contacts touching a set shape
+            get no column, so they report overlaps without a contact response.
     """
     rigid_contact_max = int(contacts.rigid_contact_max)
     if cid_of_contact is None:
@@ -1449,6 +1468,8 @@ def ingest_contacts(
         ingest_friction = contact_friction
 
     filter_id_arr = shape_filter_id if shape_filter_id is not None else shape_body
+    if shape_no_response is None:
+        shape_no_response = wp.empty(0, dtype=wp.int32, device=device)
     if not enable_body_pair_grouping:
         wp.launch(
             kernel=_mark_valid_shape_pair_runs_kernel,
@@ -1462,6 +1483,7 @@ def ingest_contacts(
                 int(num_bodies),
                 filter_keys,
                 int(filter_count),
+                shape_no_response,
             ],
             outputs=[scratch.pair_boundary, cid_of_contact],
             device=device,
@@ -1544,6 +1566,7 @@ def ingest_contacts(
                 int(num_bodies),
                 filter_keys,
                 int(filter_count),
+                shape_no_response,
             ],
             outputs=[scratch.pair_count, scratch.pair_columns],
             device=device,
