@@ -37,6 +37,21 @@ SPAWN_SPEED = 2.0  # initial downward speed [m/s]
 SPOT_SPACING = 0.25  # [m], more than a cube's diagonal (0.173 m)
 SPAWN_RADIUS = 1.6  # [m]
 CLEARANCE = 0.25  # a spot spawns again once its last cube is this far below [m]
+# Saturated display colors, like the OptiX viewer's default palette for model shapes.
+PALETTE = (
+    (0.86, 0.06, 0.02),
+    (0.94, 0.42, 0.01),
+    (0.78, 0.72, 0.01),
+    (0.46, 0.72, 0.01),
+    (0.03, 0.60, 0.12),
+    (0.00, 0.58, 0.38),
+    (0.00, 0.62, 0.68),
+    (0.00, 0.53, 0.88),
+    (0.06, 0.30, 0.88),
+    (0.22, 0.12, 0.78),
+    (0.42, 0.10, 0.76),
+    (0.58, 0.08, 0.68),
+)
 
 
 @wp.kernel
@@ -148,7 +163,7 @@ class Example:
         self.ring = wp.zeros(capacity, dtype=wp.int32)
         self.xforms = wp.zeros(capacity, dtype=wp.transform)
         rng = np.random.default_rng(7)
-        self.colors = wp.array(0.35 + 0.6 * rng.random((capacity, 3)), dtype=wp.vec3)
+        self.colors = wp.array(np.asarray(PALETTE)[rng.integers(0, len(PALETTE), capacity)], dtype=wp.vec3)
 
         viewer.set_model(self.model)
         viewer.set_camera(wp.vec3(6.5, -6.5, 3.5), pitch=-20.0, yaw=135.0)
