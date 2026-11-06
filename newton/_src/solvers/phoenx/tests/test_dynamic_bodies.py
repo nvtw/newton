@@ -15,34 +15,24 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton._src.solvers.phoenx.dynamic import (
-    BodyDesc,
-    DynamicsData,
-    ShapeDesc,
-    joint_desc,
-    phoenx_add_body,
-    phoenx_add_joint,
-    phoenx_add_shape,
-    phoenx_remove_body,
-    phoenx_remove_joint,
-)
+from newton.solvers import phoenx
 
 _HALF = 0.05
 _DT = 1.0 / 60.0
 
 
 @wp.func
-def _add_box(dyn: DynamicsData, position: wp.vec3, world: int) -> int:
-    body_desc = BodyDesc()
+def _add_box(dyn: phoenx.DynamicsData, position: wp.vec3, world: int) -> int:
+    body_desc = phoenx.BodyDesc()
     body_desc.pose = wp.transform(position, wp.quat_identity())
     body_desc.mass = 1.0
     moment = 2.0 / 3.0 * _HALF * _HALF
     body_desc.inertia = wp.mat33(moment, 0.0, 0.0, 0.0, moment, 0.0, 0.0, 0.0, moment)
     body_desc.world = world
-    body = phoenx_add_body(dyn, body_desc)
+    body = phoenx.add_body(dyn, body_desc)
     if body < 0:
         return body
-    shape = ShapeDesc()
+    shape = phoenx.ShapeDesc()
     shape.type = int(newton.GeoType.BOX)
     shape.transform = wp.transform_identity()
     shape.scale = wp.vec3(_HALF)
@@ -51,33 +41,33 @@ def _add_box(dyn: DynamicsData, position: wp.vec3, world: int) -> int:
     shape.collision_group = 1
     shape.flags = int(newton.ShapeFlags.COLLIDE_SHAPES | newton.ShapeFlags.VISIBLE)
     shape.prototype = -1
-    phoenx_add_shape(dyn, body, shape)
+    phoenx.add_shape(dyn, body, shape)
     return body
 
 
 @wp.kernel
-def _spawn_column_kernel(dyn: DynamicsData, x: wp.array[float], z: float, out: wp.array[int]):
+def _spawn_column_kernel(dyn: phoenx.DynamicsData, x: wp.array[float], z: float, out: wp.array[int]):
     """Spawn one box per entry of ``x`` once ``x`` is armed; each launch disarms it."""
     i = wp.tid()
     out[i] = _add_box(dyn, wp.vec3(x[i], 0.0, z), 0)
 
 
 @wp.kernel
-def _spawn_per_world_kernel(dyn: DynamicsData, out: wp.array[int]):
+def _spawn_per_world_kernel(dyn: phoenx.DynamicsData, out: wp.array[int]):
     """One box per world, stacked at one spot; worlds must not collide with each other."""
     i = wp.tid()
     out[i] = _add_box(dyn, wp.vec3(0.0, 0.0, _HALF + 2.0 * _HALF * float(i)), i)
 
 
 @wp.kernel
-def _remove_bodies_kernel(dyn: DynamicsData, bodies: wp.array[int]):
-    phoenx_remove_body(dyn, bodies[wp.tid()])
+def _remove_bodies_kernel(dyn: phoenx.DynamicsData, bodies: wp.array[int]):
+    phoenx.remove_body(dyn, bodies[wp.tid()])
 
 
 @wp.kernel
-def _pendulum_kernel(dyn: DynamicsData, drive_angle: float, out: wp.array[int]):
+def _pendulum_kernel(dyn: phoenx.DynamicsData, drive_angle: float, out: wp.array[int]):
     bob = _add_box(dyn, wp.vec3(0.5, 0.0, 2.0), 0)
-    desc = joint_desc(
+    desc = phoenx.joint_desc(
         -1,
         bob,
         wp.transform(wp.vec3(0.0, 0.0, 2.0), wp.quat_identity()),
@@ -90,17 +80,17 @@ def _pendulum_kernel(dyn: DynamicsData, drive_angle: float, out: wp.array[int]):
         desc.target_ke[0] = 2000.0
         desc.target_kd[0] = 50.0
     out[0] = bob
-    out[1] = phoenx_add_joint(dyn, desc)
+    out[1] = phoenx.add_joint(dyn, desc)
 
 
 @wp.kernel
-def _spawn_hull_kernel(dyn: DynamicsData, prototype: int, scale: float, out: wp.array[int]):
-    body_desc = BodyDesc()
+def _spawn_hull_kernel(dyn: phoenx.DynamicsData, prototype: int, scale: float, out: wp.array[int]):
+    body_desc = phoenx.BodyDesc()
     body_desc.pose = wp.transform(wp.vec3(0.0, 0.0, 0.5), wp.quat_identity())
     body_desc.mass = 1.0
     body_desc.inertia = wp.identity(3, dtype=float) * 0.01
-    body = phoenx_add_body(dyn, body_desc)
-    shape = ShapeDesc()
+    body = phoenx.add_body(dyn, body_desc)
+    shape = phoenx.ShapeDesc()
     shape.type = int(newton.GeoType.CONVEX_MESH)
     shape.transform = wp.transform_identity()
     shape.scale = wp.vec3(scale)
@@ -110,12 +100,12 @@ def _spawn_hull_kernel(dyn: DynamicsData, prototype: int, scale: float, out: wp.
     shape.flags = int(newton.ShapeFlags.COLLIDE_SHAPES | newton.ShapeFlags.VISIBLE)
     shape.prototype = prototype
     out[0] = body
-    out[1] = phoenx_add_shape(dyn, body, shape)
+    out[1] = phoenx.add_shape(dyn, body, shape)
 
 
 @wp.kernel
-def _remove_joint_kernel(dyn: DynamicsData, joints: wp.array[int]):
-    phoenx_remove_joint(dyn, joints[wp.tid()])
+def _remove_joint_kernel(dyn: phoenx.DynamicsData, joints: wp.array[int]):
+    phoenx.remove_joint(dyn, joints[wp.tid()])
 
 
 class _Scene:

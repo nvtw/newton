@@ -22,20 +22,7 @@ import warp as wp
 
 import newton
 import newton.examples
-from newton._src.solvers.phoenx.dynamic import (
-    BodyDesc,
-    DynamicsData,
-    ShapeDesc,
-    joint_desc,
-    phoenx_add_body,
-    phoenx_add_joint,
-    phoenx_add_shape,
-    phoenx_body_is_active,
-    phoenx_joint_wrench,
-    phoenx_remove_body,
-    phoenx_remove_joint,
-)
-from newton.solvers import SolverPhoenX
+from newton.solvers import SolverPhoenX, phoenx
 
 GAP = 14.0  # gorge width [m]
 PLANKS = 32
@@ -84,7 +71,7 @@ def deck_points(gap: float = GAP, planks: int = PLANKS, pitch: float = PITCH) ->
 
 @wp.kernel
 def _director_kernel(
-    dyn: DynamicsData,
+    dyn: phoenx.DynamicsData,
     state: wp.array[wp.int32],
     planks: wp.array[wp.int32],
     hinges: wp.array[wp.int32],
@@ -98,7 +85,7 @@ def _director_kernel(
     if phase == _FAILING and frame - state[1] > REBUILD_DELAY:
         for i in range(PLANKS):
             if planks[i] >= 0:
-                phoenx_remove_body(dyn, planks[i])  # also removes its hinges
+                phoenx.remove_body(dyn, planks[i])  # also removes its hinges
                 planks[i] = -1
         for k in range(PLANKS + 1):
             hinges[k] = -1
@@ -109,18 +96,18 @@ def _director_kernel(
         state[4] = state[4] + 1
     if (phase == _INTACT or phase == _FAILING) and frame % SPAWN_EVERY == 0:
         slot = (frame // SPAWN_EVERY) % LOADS
-        if loads[slot] >= 0 and phoenx_body_is_active(dyn, loads[slot]):
+        if loads[slot] >= 0 and phoenx.is_body_active(dyn, loads[slot]):
             return  # the oldest load is still around
         rng = wp.rand_init(2024, frame)
         boulder = wp.randf(rng) < 0.6
         size = wp.vec3(0.0)
-        desc = BodyDesc()
+        desc = phoenx.BodyDesc()
         desc.pose = wp.transform(
             wp.vec3(wp.randf(rng, -0.4 * GAP, 0.4 * GAP), wp.randf(rng, -0.5, 0.5), DROP_HEIGHT),
             wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), wp.randf(rng, 0.0, 3.14)),
         )
         desc.velocity = wp.spatial_vector(0.0, 0.0, -2.0, 0.0, 0.0, 0.0)
-        shape = ShapeDesc()
+        shape = phoenx.ShapeDesc()
         shape.transform = wp.transform_identity()
         shape.gap = 0.05
         shape.mu = 0.7
@@ -140,29 +127,29 @@ def _director_kernel(
             desc.inertia = wp.identity(3, dtype=float) * (2.0 / 3.0 * desc.mass * h * h)
             shape.type = int(newton.GeoType.BOX)
         shape.scale = size
-        body = phoenx_add_body(dyn, desc)
+        body = phoenx.add_body(dyn, desc)
         if body >= 0:
-            phoenx_add_shape(dyn, body, shape)
+            phoenx.add_shape(dyn, body, shape)
         loads[slot] = body
         load_size[slot] = wp.where(boulder, size, -size)  # negative sizes mark crates
 
 
 @wp.kernel
 def _build_planks_kernel(
-    dyn: DynamicsData, state: wp.array[wp.int32], poses: wp.array[wp.transform], planks: wp.array[wp.int32]
+    dyn: phoenx.DynamicsData, state: wp.array[wp.int32], poses: wp.array[wp.transform], planks: wp.array[wp.int32]
 ):
     i = wp.tid()
     if state[0] != _BUILD:
         return
-    desc = BodyDesc()
+    desc = phoenx.BodyDesc()
     desc.pose = poses[i]
     desc.mass = PLANK_MASS
     hx, hy, hz = PLANK_HX, PLANK_HY, PLANK_HZ
     desc.inertia = wp.mat33(hy * hy + hz * hz, 0.0, 0.0, 0.0, hx * hx + hz * hz, 0.0, 0.0, 0.0, hx * hx + hy * hy)
     desc.inertia = desc.inertia * (PLANK_MASS / 3.0)
-    body = phoenx_add_body(dyn, desc)
+    body = phoenx.add_body(dyn, desc)
     planks[i] = body
-    shape = ShapeDesc()
+    shape = phoenx.ShapeDesc()
     shape.type = int(newton.GeoType.BOX)
     shape.transform = wp.transform_identity()
     shape.scale = wp.vec3(hx, hy, hz)
@@ -171,12 +158,12 @@ def _build_planks_kernel(
     shape.collision_group = -1  # planks never collide with each other
     shape.flags = int(newton.ShapeFlags.COLLIDE_SHAPES)
     shape.prototype = -1
-    phoenx_add_shape(dyn, body, shape)
+    phoenx.add_shape(dyn, body, shape)
 
 
 @wp.kernel
 def _build_hinges_kernel(
-    dyn: DynamicsData,
+    dyn: phoenx.DynamicsData,
     state: wp.array[wp.int32],
     hinge_parent: wp.array[wp.int32],
     hinge_child: wp.array[wp.int32],
@@ -192,10 +179,10 @@ def _build_hinges_kernel(
     parent = wp.int32(-1)
     if hinge_parent[k] >= 0:
         parent = planks[hinge_parent[k]]
-    desc = joint_desc(parent, planks[hinge_child[k]], parent_xform[k], child_xform[k])
+    desc = phoenx.joint_desc(parent, planks[hinge_child[k]], parent_xform[k], child_xform[k])
     desc.angular_axes = wp.mat33(0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0)  # free about the deck's y axis
     desc.angular_count = 1
-    hinges[k] = phoenx_add_joint(dyn, desc)
+    hinges[k] = phoenx.add_joint(dyn, desc)
 
 
 @wp.kernel
@@ -206,7 +193,7 @@ def _finish_build_kernel(state: wp.array[wp.int32]):
 
 @wp.kernel
 def _break_kernel(
-    dyn: DynamicsData,
+    dyn: phoenx.DynamicsData,
     state: wp.array[wp.int32],
     strength: float,
     hinges: wp.array[wp.int32],
@@ -218,11 +205,11 @@ def _break_kernel(
     if hinge < 0:
         load[k] = 0.0
         return
-    force = wp.length(wp.spatial_top(phoenx_joint_wrench(dyn, hinge)))
+    force = wp.length(wp.spatial_top(phoenx.joint_wrench(dyn, hinge)))
     load[k] = load[k] + SMOOTHING * (force - load[k])  # filters solver jitter, keeps sustained loads
     if load[k] <= strength:
         return
-    phoenx_remove_joint(dyn, hinge)
+    phoenx.remove_joint(dyn, hinge)
     hinges[k] = -1
     wp.atomic_add(state, 3, 1)
     if state[0] == _INTACT:
@@ -232,7 +219,7 @@ def _break_kernel(
 
 @wp.kernel
 def _despawn_kernel(
-    dyn: DynamicsData,
+    dyn: phoenx.DynamicsData,
     body_q: wp.array[wp.transform],
     planks: wp.array[wp.int32],
     hinges: wp.array[wp.int32],
@@ -243,22 +230,22 @@ def _despawn_kernel(
     if i < PLANKS:
         body = planks[i]
         if body >= 0 and wp.transform_get_translation(body_q[body])[2] < KILL_DEPTH:
-            phoenx_remove_body(dyn, body)
+            phoenx.remove_body(dyn, body)
             planks[i] = -1
             hinges[i] = -1  # a removed plank takes its hinges along
             hinges[i + 1] = -1
     else:
         slot = i - PLANKS
         body = loads[slot]
-        if body >= 0 and phoenx_body_is_active(dyn, body):
+        if body >= 0 and phoenx.is_body_active(dyn, body):
             if wp.transform_get_translation(body_q[body])[2] < KILL_DEPTH:
-                phoenx_remove_body(dyn, body)
+                phoenx.remove_body(dyn, body)
                 loads[slot] = -1
 
 
 @wp.kernel
 def _instances_kernel(
-    dyn: DynamicsData,
+    dyn: phoenx.DynamicsData,
     body_q: wp.array[wp.transform],
     planks: wp.array[wp.int32],
     loads: wp.array[wp.int32],
@@ -281,7 +268,7 @@ def _instances_kernel(
     crate_xforms[slot] = parked
     size = load_size[slot]
     load_scales[slot] = wp.vec3(wp.abs(size[0]))
-    if body >= 0 and phoenx_body_is_active(dyn, body):
+    if body >= 0 and phoenx.is_body_active(dyn, body):
         if size[0] > 0.0:
             boulder_xforms[slot] = body_q[body]
         else:

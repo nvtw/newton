@@ -5,7 +5,7 @@ import importlib
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from . import mujoco, style3d
+    from . import mujoco, phoenx, style3d
     from .featherstone import SolverFeatherstone
     from .implicit_mpm import SolverImplicitMPM
     from .kamino import SolverKamino
@@ -46,6 +46,7 @@ __all__ = [
     "VolumeBrickGrid",
     "export_state_3d",
     "mujoco",
+    "phoenx",
     "rasterize_obstacles",
     "style3d",
 ]
@@ -74,6 +75,7 @@ _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
     "export_state_3d": (".phoenx.fluid", "export_state_3d"),
     "rasterize_obstacles": (".phoenx.fluid", "rasterize_obstacles"),
     "mujoco": (".mujoco", None),
+    "phoenx": (".phoenx", None),
     "style3d": (".style3d", None),
 }
 

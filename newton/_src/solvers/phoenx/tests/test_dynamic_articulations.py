@@ -16,14 +16,7 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton._src.solvers.phoenx.dynamic import (
-    DynamicsData,
-    phoenx_articulation_body,
-    phoenx_articulation_joint,
-    phoenx_remove_articulation,
-    phoenx_remove_joint,
-    phoenx_spawn_articulation,
-)
+from newton.solvers import phoenx
 
 _DT = 1.0 / 60.0
 _LINK = 0.2  # half length of a chain link along x [m]
@@ -91,13 +84,13 @@ def _hanging_chain_template(links: int = 12) -> newton.ModelBuilder:
 
 
 @wp.kernel
-def _remove_joint_kernel(dyn: DynamicsData, instance: int, index: int):
-    phoenx_remove_joint(dyn, phoenx_articulation_joint(dyn, instance, index))
+def _remove_joint_kernel(dyn: phoenx.DynamicsData, instance: int, index: int):
+    phoenx.remove_joint(dyn, phoenx.articulation_joint(dyn, instance, index))
 
 
 @wp.kernel
 def _spawn_kernel(
-    dyn: DynamicsData,
+    dyn: phoenx.DynamicsData,
     templates: wp.array[int],
     positions: wp.array[wp.vec3],
     velocity: wp.spatial_vector,
@@ -105,18 +98,18 @@ def _spawn_kernel(
 ):
     i = wp.tid()
     pose = wp.transform(positions[i], wp.quat_identity())
-    out[i] = phoenx_spawn_articulation(dyn, templates[i], pose, velocity, 0)
+    out[i] = phoenx.add_articulation(dyn, templates[i], pose, velocity, 0)
 
 
 @wp.kernel
-def _remove_kernel(dyn: DynamicsData, instances: wp.array[int]):
-    phoenx_remove_articulation(dyn, instances[wp.tid()])
+def _remove_kernel(dyn: phoenx.DynamicsData, instances: wp.array[int]):
+    phoenx.remove_articulation(dyn, instances[wp.tid()])
 
 
 @wp.kernel
-def _bodies_kernel(dyn: DynamicsData, instance: int, out: wp.array[int]):
+def _bodies_kernel(dyn: phoenx.DynamicsData, instance: int, out: wp.array[int]):
     i = wp.tid()
-    out[i] = phoenx_articulation_body(dyn, instance, i)
+    out[i] = phoenx.articulation_body(dyn, instance, i)
 
 
 class _Scene:
@@ -274,14 +267,14 @@ def _ragdoll_template() -> newton.ModelBuilder:
 
 
 @wp.kernel
-def _spawn_posed_kernel(dyn: DynamicsData, templates: wp.array[int], x: wp.array[float], out: wp.array[int]):
+def _spawn_posed_kernel(dyn: phoenx.DynamicsData, templates: wp.array[int], x: wp.array[float], out: wp.array[int]):
     i = wp.tid()
     pose = wp.transform(wp.vec3(x[i], 0.0, 1.5), wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), 0.4))
-    out[i] = phoenx_spawn_articulation(dyn, templates[i], pose, wp.spatial_vector(0.0, 0.0, 0.0, 0.0, 0.0, 1.0), 0)
+    out[i] = phoenx.add_articulation(dyn, templates[i], pose, wp.spatial_vector(0.0, 0.0, 0.0, 0.0, 0.0, 1.0), 0)
 
 
 class _ReducedScene:
-    """Generalized-coordinate instance slots stepped as continuations in one captured graph."""
+    """Generalized-coordinate instance slots, stepped like any reduced scene in one captured graph."""
 
     def __init__(self, slots: int, templates):
         builder = newton.ModelBuilder()
@@ -299,18 +292,12 @@ class _ReducedScene:
         self.state_0, self.state_1 = self.model.state(), self.model.state()
         self.control = self.model.control()
         self.contacts = self.model._collision_pipeline.contacts()
-        self._frame(False)  # the first step builds the solver's pose-derived buffers
         with wp.ScopedCapture() as capture:
-            self._frame(True)
+            self.solver.collide(self.state_0, self.contacts)
+            self.solver.step(self.state_0, self.state_1, self.control, self.contacts, _DT)
+            for name in ("body_q", "body_qd", "joint_q", "joint_qd"):
+                wp.copy(getattr(self.state_0, name), getattr(self.state_1, name))
         self.graph = capture.graph
-
-    def _frame(self, continuation: bool):
-        self.solver.collide(self.state_0, self.contacts)
-        self.solver.step(
-            self.state_0, self.state_1, self.control, self.contacts, _DT, state_is_continuation=continuation
-        )
-        for name in ("body_q", "body_qd", "joint_q", "joint_qd"):
-            wp.copy(getattr(self.state_0, name), getattr(self.state_1, name))
 
     def spawn(self, templates, xs) -> np.ndarray:
         out = wp.zeros(len(templates), dtype=int)

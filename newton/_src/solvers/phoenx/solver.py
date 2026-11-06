@@ -57,7 +57,7 @@ from newton._src.solvers.phoenx.constraints.constraint_joint import (
 )
 from newton._src.solvers.phoenx.constraints.contact_tgs import allocate_contact_tgs, export_contact_wrenches
 from newton._src.solvers.phoenx.constraints.d6_joint_data import build_d6_inequality_data
-from newton._src.solvers.phoenx.dynamic import PhoenXDynamics
+from newton._src.solvers.phoenx.dynamic import Dynamics
 from newton._src.solvers.phoenx.materials import CombineMode, Material, material_table_from_list
 from newton._src.solvers.phoenx.model_adapter import (
     JointInitArrays,
@@ -797,7 +797,9 @@ class SolverPhoenX(SolverBase):
         self._body_fresh = wp.zeros(
             num_bodies_phoenx if dynamic_capacity is not None else 0, dtype=wp.int32, device=self.device
         )
-        self.dynamics: PhoenXDynamics | None = None
+        self.dynamics: Dynamics | None = None
+        """Runtime creation state when the model reserves rows with
+        :meth:`~newton.ModelBuilder.reserve_dynamic_capacity`; see :mod:`newton.solvers.phoenx`."""
 
         # FD/substep-avg readout buffers — always allocated so graph capture
         # has stable refs; only written when the corresponding readout fires.
@@ -1317,7 +1319,7 @@ class SolverPhoenX(SolverBase):
                 )
                 self.world._maximal_tree_projector = self._runtime_tree_projector
             combine_mode = _COMBINE_MODES[self.friction_combine_mode]
-            self.dynamics = PhoenXDynamics(self, self._collision_pipeline, int(combine_mode))
+            self.dynamics = Dynamics(self, self._collision_pipeline, int(combine_mode))
 
         if solver_scheme == "tgs":
             direct = self._direct_equality_system
@@ -1752,7 +1754,7 @@ class SolverPhoenX(SolverBase):
             control = self.model.control(clone_variables=False)
 
         if self.dynamics is not None:
-            self.dynamics.commit()
+            self.dynamics._commit()
         self._apply_joint_control(control)
         if self._reduced_articulation is None:
             self._accumulate_joint_forces(state_in, control, dt)

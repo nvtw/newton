@@ -20,16 +20,7 @@ import warp as wp
 
 import newton
 import newton.examples
-from newton._src.solvers.phoenx.dynamic import (
-    BodyDesc,
-    DynamicsData,
-    ShapeDesc,
-    phoenx_add_body,
-    phoenx_add_shape,
-    phoenx_body_is_active,
-    phoenx_remove_body,
-)
-from newton.solvers import SolverPhoenX
+from newton.solvers import SolverPhoenX, phoenx
 
 HALF = 0.05  # cube half-extent [m]
 SPAWN_HEIGHT = 3.5  # [m]
@@ -56,7 +47,7 @@ PALETTE = (
 
 @wp.kernel
 def _spawn_kernel(
-    dyn: DynamicsData,
+    dyn: phoenx.DynamicsData,
     body_q: wp.array[wp.transform],
     spots: wp.array[wp.vec3],
     spot_body: wp.array[wp.int32],
@@ -73,7 +64,7 @@ def _spawn_kernel(
     frame = counters[0]
     spot = (tid + frame * 37) % n  # rotate which spots claim the budget first
     last = spot_body[spot]
-    if last >= 0 and phoenx_body_is_active(dyn, last):
+    if last >= 0 and phoenx.is_body_active(dyn, last):
         if wp.transform_get_translation(body_q[last])[2] > SPAWN_HEIGHT - CLEARANCE:
             return
     if wp.atomic_add(counters, 1, 1) >= budget:
@@ -81,16 +72,16 @@ def _spawn_kernel(
     rng = wp.rand_init(1234, frame * n + spot)
     jitter = wp.vec3(wp.randf(rng, -0.02, 0.02), wp.randf(rng, -0.02, 0.02), 0.0)
     axis = wp.normalize(wp.vec3(wp.randf(rng, -1.0, 1.0), wp.randf(rng, -1.0, 1.0), wp.randf(rng, -1.0, 1.0)))
-    body_desc = BodyDesc()
+    body_desc = phoenx.BodyDesc()
     body_desc.pose = wp.transform(spots[spot] + jitter, wp.quat_from_axis_angle(axis, wp.randf(rng, 0.0, 3.14)))
     body_desc.velocity = wp.spatial_vector(0.0, 0.0, -SPAWN_SPEED, 0.0, 0.0, 0.0)
     body_desc.mass = 1.0
     moment = 2.0 / 3.0 * HALF * HALF
     body_desc.inertia = wp.mat33(moment, 0.0, 0.0, 0.0, moment, 0.0, 0.0, 0.0, moment)
-    body = phoenx_add_body(dyn, body_desc)
+    body = phoenx.add_body(dyn, body_desc)
     if body < 0:
         return
-    shape = ShapeDesc()
+    shape = phoenx.ShapeDesc()
     shape.type = int(newton.GeoType.BOX)
     shape.transform = wp.transform_identity()
     shape.scale = wp.vec3(HALF)
@@ -99,16 +90,16 @@ def _spawn_kernel(
     shape.collision_group = 1
     shape.flags = int(newton.ShapeFlags.COLLIDE_SHAPES)
     shape.prototype = -1
-    phoenx_add_shape(dyn, body, shape)
+    phoenx.add_shape(dyn, body, shape)
     spot_body[spot] = body
     ring[wp.atomic_add(counters, 2, 1) % ring.shape[0]] = body
 
 
 @wp.kernel
-def _retire_kernel(dyn: DynamicsData, target: int, counters: wp.array[wp.int32], ring: wp.array[wp.int32]):
+def _retire_kernel(dyn: phoenx.DynamicsData, target: int, counters: wp.array[wp.int32], ring: wp.array[wp.int32]):
     """Remove the oldest cubes beyond ``target`` and advance the frame."""
     while counters[2] - counters[3] > target:
-        phoenx_remove_body(dyn, ring[counters[3] % ring.shape[0]])
+        phoenx.remove_body(dyn, ring[counters[3] % ring.shape[0]])
         counters[3] = counters[3] + 1
     counters[0] = counters[0] + 1
     counters[1] = 0
@@ -116,12 +107,12 @@ def _retire_kernel(dyn: DynamicsData, target: int, counters: wp.array[wp.int32],
 
 @wp.kernel
 def _cube_xforms_kernel(
-    dyn: DynamicsData, body_q: wp.array[wp.transform], body_start: int, xforms: wp.array[wp.transform]
+    dyn: phoenx.DynamicsData, body_q: wp.array[wp.transform], body_start: int, xforms: wp.array[wp.transform]
 ):
     """Instance transforms of every reserved cube; unused rows are parked below the ground."""
     slot = wp.tid()
     body = body_start + slot
-    if phoenx_body_is_active(dyn, body):
+    if phoenx.is_body_active(dyn, body):
         xforms[slot] = body_q[body]
     else:
         xforms[slot] = wp.transform(wp.vec3(0.0, 0.0, -1000.0), wp.quat_identity())

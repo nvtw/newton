@@ -22,16 +22,7 @@ import warp as wp
 
 import newton
 import newton.examples
-from newton._src.solvers.phoenx.dynamic import (
-    BodyDesc,
-    DynamicsData,
-    ShapeDesc,
-    phoenx_add_body,
-    phoenx_add_shape,
-    phoenx_body_is_active,
-    phoenx_remove_body,
-)
-from newton.solvers import SolverPhoenX
+from newton.solvers import SolverPhoenX, phoenx
 
 BELT_WIDTH = 4.0  # [m]
 BELT_THICKNESS = 0.2  # [m]
@@ -69,7 +60,7 @@ def _box_mesh(center, half_extents, velocity):
 
 @wp.kernel
 def _spawn_kernel(
-    dyn: DynamicsData,
+    dyn: phoenx.DynamicsData,
     body_q: wp.array[wp.transform],
     lanes: wp.array[wp.vec3],
     lane_body: wp.array[wp.int32],
@@ -84,14 +75,14 @@ def _spawn_kernel(
     lane = wp.tid()
     origin = lanes[lane]
     last = lane_body[lane]
-    if last >= 0 and phoenx_body_is_active(dyn, last):
+    if last >= 0 and phoenx.is_body_active(dyn, last):
         if wp.length(wp.transform_get_translation(body_q[last]) - origin) < SPAWN_CLEARANCE:
             return
     rng = wp.rand_init(4242, frame[0] * lanes.shape[0] + lane)
     kind = wp.int32(wp.randi(rng, 0, half_extents.shape[0]))
     h = half_extents[kind]
     mass = PACKET_DENSITY * 8.0 * h[0] * h[1] * h[2]
-    body_desc = BodyDesc()
+    body_desc = phoenx.BodyDesc()
     body_desc.pose = wp.transform(
         origin + wp.vec3(0.0, 0.0, h[2]), wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), wp.randf(rng, -0.4, 0.4))
     )
@@ -100,10 +91,10 @@ def _spawn_kernel(
     body_desc.inertia = wp.diag(
         mass / 3.0 * wp.vec3(h[1] * h[1] + h[2] * h[2], h[0] * h[0] + h[2] * h[2], h[0] * h[0] + h[1] * h[1])
     )
-    body = phoenx_add_body(dyn, body_desc)
+    body = phoenx.add_body(dyn, body_desc)
     if body < 0:
         return
-    shape = ShapeDesc()
+    shape = phoenx.ShapeDesc()
     shape.type = int(newton.GeoType.BOX)
     shape.transform = wp.transform_identity()
     shape.scale = h
@@ -112,7 +103,7 @@ def _spawn_kernel(
     shape.collision_group = 1
     shape.flags = int(newton.ShapeFlags.COLLIDE_SHAPES)
     shape.prototype = -1
-    phoenx_add_shape(dyn, body, shape)
+    phoenx.add_shape(dyn, body, shape)
     lane_body[lane] = body
     slot = body - body_start
     packet_kind[slot] = kind
@@ -122,7 +113,7 @@ def _spawn_kernel(
 
 @wp.kernel
 def _scan_kernel(
-    dyn: DynamicsData,
+    dyn: phoenx.DynamicsData,
     count: wp.array[wp.int32],
     shape0: wp.array[wp.int32],
     shape1: wp.array[wp.int32],
@@ -167,7 +158,7 @@ def _scan_kernel(
         return
     if volume == SINK:
         if wp.atomic_cas(packet_claim, slot, 0, 1) == 0:
-            phoenx_remove_body(dyn, body)
+            phoenx.remove_body(dyn, body)
     elif wp.atomic_max(packet_gate, slot, volume) < volume:
         wp.atomic_add(gate_count, volume, 1)
 
@@ -179,7 +170,7 @@ def _advance_frame_kernel(frame: wp.array[wp.int32]):
 
 @wp.kernel
 def _packet_instances_kernel(
-    dyn: DynamicsData,
+    dyn: phoenx.DynamicsData,
     body_q: wp.array[wp.transform],
     body_start: int,
     packet_kind: wp.array[wp.int32],
@@ -193,7 +184,7 @@ def _packet_instances_kernel(
     slot = wp.tid()
     body = body_start + slot
     xforms[slot] = wp.transform(wp.vec3(0.0, 0.0, -1000.0), wp.quat_identity())
-    if phoenx_body_is_active(dyn, body) and packet_kind[slot] == kind:
+    if phoenx.is_body_active(dyn, body) and packet_kind[slot] == kind:
         xforms[slot] = body_q[body]
     gate = packet_gate[slot]
     colors[slot] = wp.vec3(0.92)

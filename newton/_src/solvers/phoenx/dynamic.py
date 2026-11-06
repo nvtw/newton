@@ -4,11 +4,11 @@
 
 :meth:`ModelBuilder.reserve_dynamic_capacity` reserves inactive model rows. This module hands
 them out from device code: each kind of row has a slot pool with a per-slot state, a compact
-list of active slots, and a list of free slots that :func:`phoenx_add_body` and friends pop.
+list of active slots, and a list of free slots that :func:`add_body` and friends pop.
 
 Everything runs on the device, so a CUDA graph can capture creation and removal along with the
 simulation. Changes are staged by the ``wp.func`` API and applied by
-:meth:`PhoenXDynamics.commit` at the start of :meth:`SolverPhoenX.step`:
+:meth:`Dynamics.commit` at the start of :meth:`SolverPhoenX.step`:
 
 * Added rows become active. Their shapes collide from the next collision pass on, because that
   pass reads the pose the step exports.
@@ -41,24 +41,26 @@ from .materials import MaterialData
 
 __all__ = [
     "BodyDesc",
+    "Dynamics",
     "DynamicsData",
     "JointDesc",
-    "PhoenXDynamics",
     "ShapeDesc",
+    "add_articulation",
+    "add_body",
+    "add_joint",
+    "add_shape",
+    "articulation_body",
+    "articulation_joint",
+    "body_desc",
+    "is_articulation_active",
+    "is_body_active",
     "joint_desc",
-    "phoenx_add_body",
-    "phoenx_add_joint",
-    "phoenx_add_shape",
-    "phoenx_articulation_body",
-    "phoenx_articulation_is_active",
-    "phoenx_articulation_joint",
-    "phoenx_body_is_active",
-    "phoenx_joint_wrench",
-    "phoenx_remove_articulation",
-    "phoenx_remove_body",
-    "phoenx_remove_joint",
-    "phoenx_remove_shape",
-    "phoenx_spawn_articulation",
+    "joint_wrench",
+    "remove_articulation",
+    "remove_body",
+    "remove_joint",
+    "remove_shape",
+    "shape_desc",
 ]
 
 # Slot states.
@@ -71,6 +73,8 @@ _QUARANTINE = wp.constant(4)
 _KINEMATIC = wp.constant(int(BodyFlags.KINEMATIC))
 _VELOCITY_LEVEL = wp.constant(ACCESS_MODE_VELOCITY_LEVEL)
 _COLLIDE_FLAGS = wp.constant((1 << 1) | (1 << 2))  # ShapeFlags.COLLIDE_SHAPES | COLLIDE_PARTICLES
+_COLLIDE_SHAPES = wp.constant(1 << 1)
+_VISIBLE = wp.constant(1 << 0)
 
 _PLANE = wp.constant(int(GeoType.PLANE))
 _SPHERE = wp.constant(int(GeoType.SPHERE))
@@ -127,7 +131,7 @@ def _pool_release(pool: SlotPool, row: wp.int32) -> wp.bool:
 
 @wp.struct
 class BodyDesc:
-    """Rigid body for :func:`phoenx_add_body`. Mass properties are not derived from shapes."""
+    """Rigid body for :func:`add_body`; start from :func:`body_desc`. Shapes do not add mass."""
 
     #: Body origin in the world frame.
     pose: wp.transform
@@ -147,11 +151,11 @@ class BodyDesc:
 
 @wp.struct
 class ShapeDesc:
-    """Collision shape for :func:`phoenx_add_shape`.
+    """Collision shape for :func:`add_shape`; start from :func:`shape_desc`.
 
-    Primitive types are complete as given. ``CONVEX_MESH`` and ``MESH`` take their geometry from
-    ``prototype``, a shape listed in ``prototype_shapes`` of the reservation, rescaled to ``scale``;
-    meshes with SDFs keep the prototype's scale.
+    ``CONVEX_MESH`` and ``MESH`` shapes take their geometry from ``prototype``, one of the
+    ``prototype_shapes`` given to :meth:`~newton.ModelBuilder.reserve_dynamic_capacity`, rescaled
+    to ``scale``; meshes with SDFs keep the prototype's scale.
     """
 
     type: wp.int32
@@ -175,7 +179,7 @@ class ShapeDesc:
 
 @wp.struct
 class JointDesc:
-    """Joint for :func:`phoenx_add_joint`, a D6 joint that also covers the common joint types.
+    """Joint for :func:`add_joint`, a D6 joint that also covers the common joint types.
 
     The listed axes are free; every other direction is locked. Per-axis arrays index the free
     axes, linear ones first. Start from :func:`joint_desc`, which leaves every listed axis
@@ -208,6 +212,31 @@ class JointDesc:
     target_kd: vec6f
     #: Whether shapes of the parent and child bodies collide.
     collide_parent: wp.bool
+
+
+@wp.func
+def body_desc(pose: wp.transform, mass: wp.float32, inertia: wp.mat33) -> BodyDesc:
+    """A body at rest in world 0 with its center of mass at the body origin."""
+    d = BodyDesc()
+    d.pose = pose
+    d.mass = mass
+    d.inertia = inertia
+    return d
+
+
+@wp.func
+def shape_desc(geo_type: wp.int32, scale: wp.vec3) -> ShapeDesc:
+    """A colliding, visible shape at its body's origin with :class:`~newton.ModelBuilder.ShapeConfig` defaults."""
+    d = ShapeDesc()
+    d.type = geo_type
+    d.transform = wp.transform_identity()
+    d.scale = scale
+    d.gap = 0.1
+    d.mu = 1.0
+    d.collision_group = 1
+    d.flags = _COLLIDE_SHAPES | _VISIBLE
+    d.prototype = -1
+    return d
 
 
 @wp.func
@@ -279,7 +308,7 @@ class ReducedSlots:
 
 @wp.struct
 class DynamicsData:
-    """Everything the device API writes. Pass it to user kernels as ``solver.dynamics.data``."""
+    """Device handle of the runtime-creation functions; pass ``solver.dynamics.data`` to kernels."""
 
     body_pool: SlotPool
     shape_pool: SlotPool
@@ -388,7 +417,7 @@ class DynamicsData:
     articulation_template: wp.array[wp.int32]
     articulation_bodies: wp.array2d[wp.int32]
     articulation_joints: wp.array2d[wp.int32]
-    #: World wrench of every constraint column on its second body; see :func:`phoenx_joint_wrench`.
+    #: World wrench of every constraint column on its second body; see :func:`joint_wrench`.
     constraint_wrench: wp.array[wp.spatial_vector]
 
     #: Exact joint-tree solve of each instance; ``tree.body_count`` is zero for instances without one.
@@ -422,10 +451,10 @@ def _drop_tree(dyn: DynamicsData, owners: wp.array[wp.int32], slot: wp.int32):
 
 
 @wp.func
-def phoenx_add_body(dyn: DynamicsData, desc: BodyDesc) -> wp.int32:
-    """Create a body from a reserved row; returns its model body index, or ``-1`` when full.
+def add_body(dyn: DynamicsData, desc: BodyDesc) -> wp.int32:
+    """Add a body; returns its model body index, or ``-1`` when the reserved rows are used up.
 
-    The body is simulated from the next :meth:`SolverPhoenX.step` on.
+    The body is simulated from the next :meth:`~newton.solvers.SolverPhoenX.step` on.
     """
     slot = _pool_alloc(dyn.body_pool)
     if slot < 0 or desc.world < 0 or desc.world >= dyn.world_count:
@@ -485,7 +514,7 @@ def _write_body(dyn: DynamicsData, body: wp.int32, desc: BodyDesc):
 
 
 @wp.func
-def phoenx_body_is_active(dyn: DynamicsData, body: wp.int32) -> wp.bool:
+def is_body_active(dyn: DynamicsData, body: wp.int32) -> wp.bool:
     """Whether a reserved body row holds a body that is not being removed."""
     slot = body - dyn.body_pool.start
     if slot < 0 or slot >= dyn.body_pool.state.shape[0]:
@@ -495,8 +524,8 @@ def phoenx_body_is_active(dyn: DynamicsData, body: wp.int32) -> wp.bool:
 
 
 @wp.func
-def phoenx_remove_body(dyn: DynamicsData, body: wp.int32) -> wp.bool:
-    """Remove a runtime body together with its shapes at the next commit; ``False`` if not removable."""
+def remove_body(dyn: DynamicsData, body: wp.int32) -> wp.bool:
+    """Remove a runtime body with its shapes and joints at the next :meth:`~newton.solvers.SolverPhoenX.step`; ``False`` if not removable."""
     if _pool_release(dyn.body_pool, body):
         _drop_tree(dyn, dyn.body_articulation, body - dyn.body_pool.start)
         return True
@@ -558,10 +587,10 @@ def _primitive_bounds(geo: wp.int32, s: wp.vec3):
 
 
 @wp.func
-def phoenx_add_shape(dyn: DynamicsData, body: wp.int32, desc: ShapeDesc) -> wp.int32:
-    """Create a collision shape on ``body`` (``-1`` for static); returns its model shape index or ``-1``.
+def add_shape(dyn: DynamicsData, body: wp.int32, desc: ShapeDesc) -> wp.int32:
+    """Add a collision shape to ``body``, or a static one for ``-1``; returns its model shape index or ``-1``.
 
-    The shape collides from the first collision pass after the next commit.
+    The shape collides from the first collision pass after the next :meth:`~newton.solvers.SolverPhoenX.step`.
     """
     geo = desc.type
     proto = desc.prototype
@@ -639,8 +668,8 @@ def phoenx_add_shape(dyn: DynamicsData, body: wp.int32, desc: ShapeDesc) -> wp.i
 
 
 @wp.func
-def phoenx_remove_shape(dyn: DynamicsData, shape: wp.int32) -> wp.bool:
-    """Remove a runtime shape at the next commit; ``False`` if not removable."""
+def remove_shape(dyn: DynamicsData, shape: wp.int32) -> wp.bool:
+    """Remove a runtime shape at the next :meth:`~newton.solvers.SolverPhoenX.step`; ``False`` if not removable."""
     if _pool_release(dyn.shape_pool, shape):
         return True
     wp.atomic_add(dyn.error_count, 0, 1)
@@ -688,12 +717,11 @@ def _axes_valid(axes: wp.mat33, count: wp.int32) -> wp.bool:
 
 
 @wp.func
-def phoenx_add_joint(dyn: DynamicsData, desc: JointDesc) -> wp.int32:
-    """Create a joint from a reserved row; returns its model joint index or ``-1``.
+def add_joint(dyn: DynamicsData, desc: JointDesc) -> wp.int32:
+    """Add a joint; returns its model joint index, or ``-1`` when rows are used up or ``desc`` is invalid.
 
-    The joint is solved from the next :meth:`SolverPhoenX.step` on. Drives and armature become
-    local joint rows; limits, speed caps, and friction become D6 inequality rows. Effort limits
-    are not enforced.
+    The joint is solved from the next :meth:`~newton.solvers.SolverPhoenX.step` on and requires ``joint_mode="maximal_pgs"``. Drive
+    targets come from :class:`~newton.Control` at the joint's rows. Effort limits are not enforced.
     """
     n_lin = desc.linear_count
     n_free = n_lin + desc.angular_count
@@ -830,8 +858,8 @@ def phoenx_add_joint(dyn: DynamicsData, desc: JointDesc) -> wp.int32:
 
 
 @wp.func
-def phoenx_remove_joint(dyn: DynamicsData, joint: wp.int32) -> wp.bool:
-    """Remove a runtime joint at the next commit; ``False`` if not removable."""
+def remove_joint(dyn: DynamicsData, joint: wp.int32) -> wp.bool:
+    """Remove a runtime joint at the next :meth:`~newton.solvers.SolverPhoenX.step`; ``False`` if not removable."""
     if _pool_release(dyn.joint_pool, joint):
         _drop_tree(dyn, dyn.joint_articulation, joint - dyn.joint_pool.start)
         return True
@@ -840,11 +868,11 @@ def phoenx_remove_joint(dyn: DynamicsData, joint: wp.int32) -> wp.bool:
 
 
 @wp.func
-def phoenx_joint_wrench(dyn: DynamicsData, joint: wp.int32) -> wp.spatial_vector:
-    """Force and torque [N, N·m] that ``joint`` applies to its child body, in world frame.
+def joint_wrench(dyn: DynamicsData, joint: wp.int32) -> wp.spatial_vector:
+    """World-frame force and torque [N, N·m] that ``joint`` applies to its child body.
 
-    Averaged over the last substep of the step before the latest
-    :meth:`PhoenXDynamics.update_joint_wrenches`; zero for joints that are not solved.
+    Valid for any model joint, as of the latest :meth:`Dynamics.update_joint_wrenches`; it averages
+    the last substep of the step before.
     """
     return dyn.constraint_wrench[dyn.joint_cid[joint]]
 
@@ -863,16 +891,23 @@ def _remove_articulation_rows(dyn: DynamicsData, instance: wp.int32):
 
 
 @wp.func
-def phoenx_spawn_articulation(
+def add_articulation(
     dyn: DynamicsData, template: wp.int32, pose: wp.transform, velocity: wp.spatial_vector, world: wp.int32
 ) -> wp.int32:
-    """Spawn an articulation template; returns the instance index, or ``-1`` when rows run out.
+    """Add an instance of an articulation template; returns its index, or ``-1`` when rows run out.
 
-    The template's first body is placed at ``pose`` and the others keep their template offsets.
-    Every body moves rigidly with ``velocity``: linear velocity at the origin of ``pose`` and
-    angular velocity [m/s, rad/s], world frame. The instance is simulated from the next
-    :meth:`SolverPhoenX.step` on; drive targets come from ``Control`` at the rows of
-    :func:`phoenx_articulation_joint`.
+    The instance is simulated from the next :meth:`~newton.solvers.SolverPhoenX.step` on, in the coordinates chosen by
+    ``articulation_coordinates`` in :meth:`~newton.ModelBuilder.reserve_dynamic_capacity`. Its
+    joints start at their template coordinates; drive targets come from :class:`~newton.Control`
+    at the rows of :func:`articulation_joint`.
+
+    Args:
+        dyn: ``solver.dynamics.data``.
+        template: Index into the reservation's ``articulation_templates``.
+        pose: World pose of the template's first body; the other bodies keep their offsets.
+        velocity: Rigid motion of the whole instance: linear velocity at the origin of ``pose``
+            and angular velocity [m/s, rad/s], world frame.
+        world: World index of the instance.
     """
     if template < 0 or template >= dyn.template_body_start.shape[0] - 1:
         wp.atomic_add(dyn.error_count, 0, 1)
@@ -905,7 +940,7 @@ def phoenx_spawn_articulation(
         com = wp.transform_point(bdesc.pose, bdesc.com)
         bdesc.velocity = wp.spatial_vector(linear + wp.cross(angular, com - origin), angular)
         bdesc.world = world
-        body = phoenx_add_body(dyn, bdesc)
+        body = add_body(dyn, bdesc)
         dyn.articulation_bodies[instance, i - b0] = body
         ok = ok and body >= 0
     if ok:
@@ -913,7 +948,7 @@ def phoenx_spawn_articulation(
             sdesc = dyn.template_shapes[i]
             sdesc.collision_group = _ARTICULATION_GROUP - instance  # no collisions within an instance
             body = dyn.articulation_bodies[instance, dyn.template_shape_body[i]]
-            ok = ok and phoenx_add_shape(dyn, body, sdesc) >= 0
+            ok = ok and add_shape(dyn, body, sdesc) >= 0
     if ok:
         j0 = dyn.template_joint_start[template]
         for i in range(j0, dyn.template_joint_start[template + 1]):
@@ -923,7 +958,7 @@ def phoenx_spawn_articulation(
             else:
                 jdesc.parent_xform = pose * jdesc.parent_xform
             jdesc.child = dyn.articulation_bodies[instance, jdesc.child]
-            joint = phoenx_add_joint(dyn, jdesc)
+            joint = add_joint(dyn, jdesc)
             dyn.articulation_joints[instance, i - j0] = joint
             ok = ok and joint >= 0
     if not ok:
@@ -964,8 +999,12 @@ def _write_tree(dyn: DynamicsData, template: wp.int32, instance: wp.int32, lanes
 
 
 @wp.func
-def phoenx_remove_articulation(dyn: DynamicsData, instance: wp.int32) -> wp.bool:
-    """Remove an articulation instance with all its bodies, shapes, and joints at the next commit."""
+def remove_articulation(dyn: DynamicsData, instance: wp.int32) -> wp.bool:
+    """Remove an instance with all its bodies, shapes, and joints at the next :meth:`~newton.solvers.SolverPhoenX.step`.
+
+    Instances in reduced coordinates can only be removed as a whole. Removing a body or joint of an
+    instance in maximal coordinates keeps the rest, solved as independent joints.
+    """
     if not _pool_release(dyn.articulation_pool, instance):
         wp.atomic_add(dyn.error_count, 0, 1)
         return False
@@ -1174,7 +1213,7 @@ def _spawn_reduced(
     for i in range(dyn.template_shape_start[template], dyn.template_shape_start[template + 1]):
         sdesc = dyn.template_shapes[i]
         sdesc.collision_group = tree_group
-        shape = phoenx_add_shape(dyn, dyn.articulation_bodies[instance, dyn.template_shape_body[i]], sdesc)
+        shape = add_shape(dyn, dyn.articulation_bodies[instance, dyn.template_shape_body[i]], sdesc)
         slots.instance_shapes[instance, i - dyn.template_shape_start[template]] = shape
         ok = ok and shape >= 0
     return ok
@@ -1232,8 +1271,8 @@ def _write_slot_topology(
 
 
 @wp.func
-def phoenx_articulation_is_active(dyn: DynamicsData, instance: wp.int32) -> wp.bool:
-    """Whether ``instance`` holds an articulation that is not being removed."""
+def is_articulation_active(dyn: DynamicsData, instance: wp.int32) -> wp.bool:
+    """Whether ``instance`` is an articulation that is not being removed."""
     if instance < 0 or instance >= dyn.articulation_pool.state.shape[0]:
         return False
     state = dyn.articulation_pool.state[instance]
@@ -1241,14 +1280,14 @@ def phoenx_articulation_is_active(dyn: DynamicsData, instance: wp.int32) -> wp.b
 
 
 @wp.func
-def phoenx_articulation_body(dyn: DynamicsData, instance: wp.int32, index: wp.int32) -> wp.int32:
-    """Model body of template body ``index`` in ``instance``, or ``-1``."""
+def articulation_body(dyn: DynamicsData, instance: wp.int32, index: wp.int32) -> wp.int32:
+    """Model body of ``instance`` that template body ``index`` became, or ``-1``."""
     return dyn.articulation_bodies[instance, index]
 
 
 @wp.func
-def phoenx_articulation_joint(dyn: DynamicsData, instance: wp.int32, index: wp.int32) -> wp.int32:
-    """Model joint of template joint ``index`` (free root joints excluded) in ``instance``, or ``-1``."""
+def articulation_joint(dyn: DynamicsData, instance: wp.int32, index: wp.int32) -> wp.int32:
+    """Model joint of ``instance`` that template joint ``index`` became, or ``-1``; free root joints are not counted."""
     return dyn.articulation_joints[instance, index]
 
 
@@ -1454,11 +1493,10 @@ class _HostPool:
         )
 
 
-class PhoenXDynamics:
-    """Runtime creation state of a :class:`SolverPhoenX`; exposed as ``solver.dynamics``.
+class Dynamics:
+    """Runtime creation state of a :class:`~newton.solvers.SolverPhoenX`, exposed as ``solver.dynamics``.
 
-    Pass :attr:`data` to kernels that call :func:`phoenx_add_body`, :func:`phoenx_add_shape`,
-    and the removal functions.
+    Pass :attr:`data` to kernels that call the ``add_*`` and ``remove_*`` functions.
     """
 
     def __init__(self, solver, collision_pipeline, friction_combine_mode: int):
@@ -1521,8 +1559,8 @@ class PhoenXDynamics:
         d.constraints = world.constraints
         d.joint_pgs_enabled = world._joint_pgs_enabled
         d.body_filter_parent = solver._body_filter_parent
+        d.joint_cid = solver._joint_constraints.joint_idx_to_cid
         if capacity.joint_count or capacity.slot_size:
-            d.joint_cid = solver._joint_constraints.joint_idx_to_cid
             for name in (
                 "joint_type",
                 "joint_parent",
@@ -1568,7 +1606,7 @@ class PhoenXDynamics:
         d.constraint_wrench = wp.zeros(max(1, world.num_constraints), dtype=wp.spatial_vector, device=device)
         self._init_articulations(d, capacity.articulation_templates, device)
         self.data = d
-        self.empty_slots()
+        self._empty_slots()
 
         # Prototypes only carry geometry; they never collide or render.
         prototypes = list(capacity.prototype_shapes)
@@ -1744,7 +1782,7 @@ class PhoenXDynamics:
             slots.cache_rows = contacts.packed_previous_row_body.shape[0] // contacts.articulation_count
         return slots
 
-    def empty_slots(self) -> None:
+    def _empty_slots(self) -> None:
         """Detach every reduced instance slot; runs once the dynamics data is complete."""
         if self.capacity.slot_size:
             wp.launch(
@@ -1755,16 +1793,16 @@ class PhoenXDynamics:
             )
 
     def update_joint_wrenches(self) -> None:
-        """Refresh the joint reactions read by :func:`phoenx_joint_wrench`; call after a step."""
+        """Refresh the joint reactions read by :func:`joint_wrench`; call after a step, capturable."""
         self._world.gather_constraint_wrenches(self.data.constraint_wrench)
 
     @property
     def error_count(self) -> wp.array[wp.int32]:
-        """Device counter of failed requests since construction."""
+        """Device counter of failed ``add_*`` and ``remove_*`` requests since construction."""
         return self.data.error_count
 
-    def commit(self) -> None:
-        """Apply staged additions and removals; captured by :meth:`SolverPhoenX.step`."""
+    def _commit(self) -> None:
+        """Apply staged additions and removals at the start of a step."""
         device = self.data.error_count.device
         if self.articulations.capacity:
             wp.launch(

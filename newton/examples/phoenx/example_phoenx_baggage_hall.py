@@ -27,16 +27,7 @@ import warp as wp
 
 import newton
 import newton.examples
-from newton._src.solvers.phoenx.dynamic import (
-    BodyDesc,
-    DynamicsData,
-    ShapeDesc,
-    phoenx_add_body,
-    phoenx_add_shape,
-    phoenx_body_is_active,
-    phoenx_remove_body,
-)
-from newton.solvers import SolverPhoenX
+from newton.solvers import SolverPhoenX, phoenx
 
 LINES = 8
 FLIGHTS = 8  # per line: one counter, diverter, chute, and cart each
@@ -131,7 +122,7 @@ def _box(builder, center, half_extents, cfg, color=None):
 
 @wp.kernel
 def _spawn_kernel(
-    dyn: DynamicsData,
+    dyn: phoenx.DynamicsData,
     body_q: wp.array[wp.transform],
     counters: wp.array[wp.vec3],
     counter_body: wp.array[wp.int32],
@@ -148,7 +139,7 @@ def _spawn_kernel(
     counter = wp.tid()
     origin = counters[counter]
     last = counter_body[counter]
-    if last >= 0 and phoenx_body_is_active(dyn, last):
+    if last >= 0 and phoenx.is_body_active(dyn, last):
         if wp.length(wp.transform_get_translation(body_q[last]) - origin) < SPAWN_CLEARANCE:
             return
     if dyn.body_pool.counts[0] >= MAX_LIVE:
@@ -159,7 +150,7 @@ def _spawn_kernel(
     kind = wp.int32(wp.randi(rng, 0, half_extents.shape[0]))
     h = half_extents[kind]
     mass = CASE_DENSITY * 8.0 * h[0] * h[1] * h[2]
-    body_desc = BodyDesc()
+    body_desc = phoenx.BodyDesc()
     body_desc.pose = wp.transform(
         origin + wp.vec3(0.0, 0.0, h[2]), wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), wp.randf(rng, -0.3, 0.3))
     )
@@ -168,10 +159,10 @@ def _spawn_kernel(
     body_desc.inertia = wp.diag(
         mass / 3.0 * wp.vec3(h[1] * h[1] + h[2] * h[2], h[0] * h[0] + h[2] * h[2], h[0] * h[0] + h[1] * h[1])
     )
-    body = phoenx_add_body(dyn, body_desc)
+    body = phoenx.add_body(dyn, body_desc)
     if body < 0:
         return
-    shape = ShapeDesc()
+    shape = phoenx.ShapeDesc()
     shape.type = int(newton.GeoType.BOX)
     shape.transform = wp.transform_identity()
     shape.scale = h
@@ -180,7 +171,7 @@ def _spawn_kernel(
     shape.collision_group = 1
     shape.flags = int(newton.ShapeFlags.COLLIDE_SHAPES)
     shape.prototype = -1
-    phoenx_add_shape(dyn, body, shape)
+    phoenx.add_shape(dyn, body, shape)
     counter_body[counter] = body
     slot = body - body_start
     case_kind[slot] = kind
@@ -192,14 +183,14 @@ def _spawn_kernel(
 
 
 @wp.func
-def _remove_case(dyn: DynamicsData, body: wp.int32, slot: wp.int32, case_claimed: wp.array[wp.int32]):
+def _remove_case(dyn: phoenx.DynamicsData, body: wp.int32, slot: wp.int32, case_claimed: wp.array[wp.int32]):
     if wp.atomic_cas(case_claimed, slot, 0, 1) == 0:
-        phoenx_remove_body(dyn, body)
+        phoenx.remove_body(dyn, body)
 
 
 @wp.kernel
 def _scan_kernel(
-    dyn: DynamicsData,
+    dyn: phoenx.DynamicsData,
     count: wp.array[wp.int32],
     shape0: wp.array[wp.int32],
     shape1: wp.array[wp.int32],
@@ -265,7 +256,7 @@ def _scan_kernel(
 
 @wp.kernel
 def _pusher_kernel(
-    dyn: DynamicsData,
+    dyn: phoenx.DynamicsData,
     body_q: wp.array[wp.transform],
     body_qd: wp.array[wp.spatial_vector],
     body_start: int,
@@ -279,7 +270,7 @@ def _pusher_kernel(
     """
     slot = wp.tid()
     body = body_start + slot
-    if not phoenx_body_is_active(dyn, body):
+    if not phoenx.is_body_active(dyn, body):
         return
     p = wp.transform_get_translation(body_q[body])
     line = wp.round(p[1] / LINE_SPACING)
@@ -336,7 +327,7 @@ def _advance_frame_kernel(frame: wp.array[wp.int32]):
 
 @wp.kernel
 def _case_instances_kernel(
-    dyn: DynamicsData,
+    dyn: phoenx.DynamicsData,
     body_q: wp.array[wp.transform],
     body_start: int,
     case_kind: wp.array[wp.int32],
@@ -352,7 +343,7 @@ def _case_instances_kernel(
     body = body_start + slot
     xforms[slot] = body_q[body]
     scales[slot] = wp.vec3(0.0)
-    if phoenx_body_is_active(dyn, body):
+    if phoenx.is_body_active(dyn, body):
         scales[slot] = half_extents[case_kind[slot]]
     shade = 0.75 + 0.25 * float(slot % 5) / 4.0
     colors[slot] = flight_colors[case_flight[slot] % FLIGHTS] * shade

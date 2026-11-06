@@ -1,0 +1,1 @@
+Expose the PhoenX runtime creation API as `newton.solvers.phoenx`, with `add_*`/`remove_*` device functions for bodies, shapes, joints, and articulations and `body_desc()`/`shape_desc()` helpers with working defaults. Runtime reduced articulations no longer require `state_is_continuation=True`.

@@ -4226,6 +4226,20 @@ class ReducedPhoenXArticulation:
         self.state = model.state()
         self.control = model.control(clone_variables=True)
         self._kinematics_current = False
+        # Rows imported from the caller's state; runtime instance slots, if any, follow them.
+        capacity = getattr(model, "_dynamic_capacity", None)
+        if capacity is not None and capacity.slot_size:
+            self._imported_rows = (
+                int(model.joint_q_start.numpy()[capacity.slot_joint_start]),
+                int(model.joint_qd_start.numpy()[capacity.slot_joint_start]),
+                capacity.slot_body_start,
+            )
+        else:
+            self._imported_rows = (
+                int(model.joint_coord_count),
+                int(model.joint_dof_count),
+                int(model.body_count),
+            )
 
         articulation_start = model.articulation_start.numpy()
         articulation_end = model.articulation_end.numpy()
@@ -4361,10 +4375,11 @@ class ReducedPhoenXArticulation:
     ) -> None:
         """Import common generalized state and controls into stable graph buffers."""
         # A continuation keeps the pose-derived buffers published by the preceding step. Runtime
-        # spawns change topology between steps, so their scenes rebuild them every step from the
-        # current PhoenX body poses, which spawns write directly.
+        # instance slots, the last model rows, change topology between steps and own their state:
+        # their scenes rebuild the buffers every step from the PhoenX body poses, which spawns
+        # write, and import only the rows before the slots.
         self._kinematics_current = state_is_continuation and not self.system.runtime_slots
-        if state_is_continuation and self.system.runtime_slots:
+        if self.system.runtime_slots:
             wp.launch(
                 _phoenx_body_poses_kernel,
                 dim=int(self.model.body_count),
@@ -4373,12 +4388,19 @@ class ReducedPhoenXArticulation:
                 device=self.model.device,
             )
         if not state_is_continuation:
-            wp.copy(self.state.joint_q, state.joint_q)
-            wp.copy(self.state.joint_qd, state.joint_qd)
-            if state_kinematics_valid:
-                wp.copy(self.state.body_q, state.body_q)
-                wp.copy(self.state.body_qd, state.body_qd)
-            else:
+            q_end, qd_end, body_end = self._imported_rows
+            for dest, src, count in (
+                (self.state.joint_q, state.joint_q, q_end),
+                (self.state.joint_qd, state.joint_qd, qd_end),
+                *(
+                    ((self.state.body_q, state.body_q, body_end), (self.state.body_qd, state.body_qd, body_end))
+                    if state_kinematics_valid
+                    else ()
+                ),
+            ):
+                if count > 0:  # a zero count would copy everything
+                    wp.copy(dest, src, count=count)
+            if not state_kinematics_valid:
                 eval_fk(self.model, self.state.joint_q, self.state.joint_qd, self.state)
                 self.sync_bodies()
         wp.copy(self.state.body_f, state.body_f)

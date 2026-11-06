@@ -5459,41 +5459,38 @@ class ModelBuilder:
         articulation_templates: Sequence[ModelBuilder] = (),
         articulation_coordinates: str = "maximal",
     ) -> None:
-        """Reserve inactive rows that a solver can fill with bodies, shapes, and joints at runtime.
+        """Reserve rows that a solver can fill with bodies, shapes, joints, and articulations at runtime.
 
-        The rows are appended to the global scope as placeholders: static bodies, non-colliding,
-        invisible shapes, and disabled six-axis D6 joints. A solver that supports runtime creation,
-        such as :class:`~newton.solvers.SolverPhoenX`, overwrites them on the device, which keeps model
-        array sizes and CUDA graphs valid. Call this once, after all worlds have been added.
+        The rows are appended as inactive placeholders, so model array sizes and CUDA graphs stay
+        valid while :class:`~newton.solvers.SolverPhoenX` fills and frees them from device code
+        through :mod:`newton.solvers.phoenx`. A removed row can be reused one step after the step
+        that removes it. Call this once, after all worlds have been added.
 
-        Articulation templates are builders whose bodies, shapes, and joints can be spawned as a
-        whole at runtime. All templates share the reserved body, shape, and joint rows, so any mix
-        of them fits as long as the rows last. A template is posed relative to its first body, its
-        free root joint is dropped, and the links of one spawned instance do not collide with each
-        other.
-
-        With ``articulation_coordinates="reduced"``, instances are solved in generalized
-        coordinates instead. Each of the ``articulations`` instance slots is then reserved as an
-        articulation of its own, sized for the largest template; any template fits any slot. Only
-        shapes come from the reserved shape rows, and templates must be joint trees.
+        Articulation templates are builders that are added as a whole: posed relative to their
+        first body, without their free root joint, and without collisions between their own links.
+        With ``articulation_coordinates="maximal"`` (``joint_mode="maximal_pgs"``), instances draw
+        on the reserved body and joint rows, which all templates share. With ``"reduced"``
+        (``joint_mode="reduced"``), each of the ``articulations`` slots is reserved as an
+        articulation sized for the largest template, and templates must be joint trees. Shapes
+        always come from the reserved shape rows.
 
         .. experimental::
 
-            Runtime body creation may change without a deprecation period.
+            Runtime creation may change without a deprecation period.
 
         Args:
-            bodies: Number of body rows to reserve.
-            shapes: Number of collision shape rows to reserve.
-            joints: Number of joint rows to reserve. Each holds up to six degrees of freedom.
-            max_dynamic_shapes_per_world: Most runtime shapes a single world can hold at once. Sizes
-                the broad-phase buffers. Defaults to ``shapes``.
-            prototype_shapes: Existing collision shapes whose finalized mesh or convex-hull geometry
-                runtime shapes may reference. They serve only as geometry and never collide or render.
+            bodies: Body rows to reserve.
+            shapes: Collision shape rows to reserve.
+            joints: Joint rows to reserve, each with up to six degrees of freedom.
+            max_dynamic_shapes_per_world: Most runtime shapes one world holds at once; sizes the
+                broad-phase buffers. Defaults to ``shapes``.
+            prototype_shapes: Collision shapes whose mesh or convex-hull geometry runtime shapes may
+                reuse. They only provide geometry and neither collide nor render.
             articulations: Most articulation instances alive at once.
-            articulation_templates: Builders spawnable as whole articulations; template ``i`` is
-                spawned by index ``i``. Supports fixed, revolute, prismatic, ball, and D6 joints.
-            articulation_coordinates: ``"maximal"`` builds instances from the reserved body and
-                joint rows; ``"reduced"`` reserves generalized-coordinate instance slots.
+            articulation_templates: Builders added by index with
+                :func:`newton.solvers.phoenx.add_articulation`. Supports fixed, revolute, prismatic,
+                ball, and D6 joints.
+            articulation_coordinates: ``"maximal"`` or ``"reduced"`` coordinates for instances.
         """
         if self._dynamic_capacity is not None:
             raise RuntimeError("reserve_dynamic_capacity() can only be called once")

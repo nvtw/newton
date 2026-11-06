@@ -19,15 +19,8 @@ import warp as wp
 
 import newton
 import newton.examples
-from newton._src.solvers.phoenx.dynamic import (
-    DynamicsData,
-    phoenx_articulation_body,
-    phoenx_articulation_is_active,
-    phoenx_remove_articulation,
-    phoenx_spawn_articulation,
-)
 from newton.examples.phoenx.ragdoll_pile_scene import BODIES, JOINTS
-from newton.solvers import SolverPhoenX
+from newton.solvers import SolverPhoenX, phoenx
 
 STEPS = 8  # staircase steps
 STEP_RISE, STEP_RUN = 0.35, 0.8  # [m]
@@ -119,7 +112,7 @@ TEMPLATE_BODIES = tuple(t.body_count for t in TEMPLATES)
 
 @wp.kernel
 def _spawn_kernel(
-    dyn: DynamicsData,
+    dyn: phoenx.DynamicsData,
     rate: int,
     template_bodies: wp.array[wp.int32],
     counters: wp.array[wp.int32],
@@ -141,7 +134,7 @@ def _spawn_kernel(
     spin = wp.spatial_vector(
         wp.randf(rng, -0.5, 0.5), 0.0, -1.0, wp.randf(rng, -2.0, 2.0), wp.randf(rng, -2.0, 2.0), 0.0
     )
-    instance = phoenx_spawn_articulation(dyn, template, pose, spin, 0)
+    instance = phoenx.add_articulation(dyn, template, pose, spin, 0)
     if instance < 0:
         return
     slot = wp.atomic_add(counters, 1, 1) % ring.shape[0]
@@ -152,7 +145,7 @@ def _spawn_kernel(
 
 @wp.kernel
 def _retire_kernel(
-    dyn: DynamicsData,
+    dyn: phoenx.DynamicsData,
     budget: int,
     template_bodies: wp.array[wp.int32],
     counters: wp.array[wp.int32],
@@ -162,7 +155,7 @@ def _retire_kernel(
     """Remove the oldest articulations while the live bodies exceed ``budget``, then advance the frame."""
     while counters[3] > budget and counters[2] < counters[1]:
         slot = counters[2] % ring.shape[0]
-        phoenx_remove_articulation(dyn, ring[slot])
+        phoenx.remove_articulation(dyn, ring[slot])
         counters[3] = counters[3] - template_bodies[ring_template[slot]]
         counters[2] = counters[2] + 1
     counters[0] = counters[0] + 1
@@ -170,7 +163,7 @@ def _retire_kernel(
 
 @wp.kernel
 def _shape_xforms_kernel(
-    dyn: DynamicsData,
+    dyn: phoenx.DynamicsData,
     body_q: wp.array[wp.transform],
     template: int,
     body: int,
@@ -180,8 +173,8 @@ def _shape_xforms_kernel(
     """Instance transforms of one template shape; other instances are parked out of sight."""
     instance = wp.tid()
     xforms[instance] = wp.transform(wp.vec3(0.0, 0.0, -1000.0), wp.quat_identity())
-    if phoenx_articulation_is_active(dyn, instance) and dyn.articulation_template[instance] == template:
-        b = phoenx_articulation_body(dyn, instance, body)
+    if phoenx.is_articulation_active(dyn, instance) and dyn.articulation_template[instance] == template:
+        b = phoenx.articulation_body(dyn, instance, body)
         if b >= 0:
             xforms[instance] = body_q[b] * local
 
@@ -274,8 +267,8 @@ class Example:
         self.state_0.clear_forces()
         self.viewer.apply_forces(self.state_0)
         self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.frame_dt)
-        wp.copy(self.state_0.body_q, self.state_1.body_q)
-        wp.copy(self.state_0.body_qd, self.state_1.body_qd)
+        for name in ("body_q", "body_qd", "joint_q", "joint_qd"):
+            wp.copy(getattr(self.state_0, name), getattr(self.state_1, name))
 
     def step(self):
         if self.graph is not None:
@@ -297,12 +290,17 @@ class Example:
             self.viewer.log_shapes(name, geo, scale, xforms, color)
         self.viewer.end_frame()
 
+    def live_rows(self) -> tuple[np.ndarray, np.ndarray]:
+        """Model bodies and joints of the live articulations."""
+        dyn = self.solver.dynamics
+        live = np.flatnonzero(dyn.articulations.data.state.numpy() == 1)
+        bodies, joints = dyn.data.articulation_bodies.numpy()[live], dyn.data.articulation_joints.numpy()[live]
+        return bodies[bodies >= 0], joints[joints >= 0]
+
     def joint_gaps(self) -> np.ndarray:
         """Opening of every joint of the live articulations [m]."""
         q = self.state_0.body_q.numpy()
-        live = self.solver.dynamics.joints.data.state.numpy()
-        start = self.model._dynamic_capacity.joint_start
-        joints = start + np.flatnonzero(live == 1)
+        joints = self.live_rows()[1]
         parent, child = self.model.joint_parent.numpy()[joints], self.model.joint_child.numpy()[joints]
         xp, xc = self.model.joint_X_p.numpy()[joints], self.model.joint_X_c.numpy()[joints]
         gaps = []
@@ -316,8 +314,7 @@ class Example:
         """Every second, check finite state and closed joints."""
         if round(self.sim_time / self.frame_dt) % 60 != 0:
             return
-        live = self.solver.dynamics.bodies.data.state.numpy()
-        bodies = self.model._dynamic_capacity.body_start + np.flatnonzero(live == 1)
+        bodies = self.live_rows()[0]
         assert np.isfinite(self.state_0.body_q.numpy()[bodies]).all(), "nonfinite body pose"
         gaps = self.joint_gaps()
         if gaps.size:

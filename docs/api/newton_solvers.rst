@@ -22,12 +22,14 @@ https://newton-physics.github.io/newton/stable/solvers/index.html.
 
    newton_solvers_experimental
    newton_solvers_mujoco
+   newton_solvers_phoenx
    newton_solvers_style3d
 
 .. rubric:: Submodules
 
 - :doc:`newton.solvers.experimental <newton_solvers_experimental>`
 - :doc:`newton.solvers.mujoco <newton_solvers_mujoco>`
+- :doc:`newton.solvers.phoenx <newton_solvers_phoenx>`
 - :doc:`newton.solvers.style3d <newton_solvers_style3d>`
 
 .. rubric:: Classes
@@ -37,10 +39,9 @@ https://newton-physics.github.io/newton/stable/solvers/index.html.
    :nosignatures:
 
    KPMFR2D
-   KPMFR3D
    KPMFR2DConfig
+   KPMFR3D
    KPMFR3DConfig
-   VolumeBrickGrid
    SolverBase
    SolverFeatherstone
    SolverImplicitMPM
@@ -52,12 +53,13 @@ https://newton-physics.github.io/newton/stable/solvers/index.html.
    SolverStyle3D
    SolverVBD
    SolverXPBD
+   VolumeBrickGrid
 
 .. rubric:: Functions
 
 .. autosummary::
    :toctree: _generated
-   :nosignatures:
+   :signatures: long
 
    export_state_3d
    rasterize_obstacles
