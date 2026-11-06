@@ -1,0 +1,1 @@
+Solve PhoenX contacts on non-tree ``maximal_direct`` mechanisms with an ordered manifold sweep through exact constrained body responses. It keeps the fixed point of the previous point-ordered sweep and is about 4.9x faster on the Caterpillar without color groups. No API changes.

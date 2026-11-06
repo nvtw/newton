@@ -193,6 +193,58 @@ Also enabling it for prepare and relax cut the minimum bicycle rear-wheel speed
 from 16.5 to 3.5 rad/s; on the LLT/PCR modules it was neutral and widened the
 chain pin gap (0.06 -> 0.23 mm). Both were rejected.
 
+## Direct-mechanism contact sweep (2026-11-06)
+
+Contacts on non-tree `maximal_direct` mechanisms are solved through the exact
+constrained mobility (`DirectContactResponse`). The Caterpillar (three
+floating mechanisms of 39/46/46 bodies, 220/230/230 rows, 107 manifolds,
+about 2,250 points) forms one contact-connected component, so the previous
+point-ordered sweep ran on lane 0 of one block: 114.7 ms of 146 ms GPU time
+per frame (5 x 2 substeps, 2 iterations, 1 relax), plus 11.5 ms of serial
+warm start.
+
+The sweep now visits manifolds in schedule order on one warp per component:
+
+- Per-step manifold records (bodies, twist slots, basis slots, ranges).
+- Exact 6x6 constrained body-to-body responses per basis slot, computed with
+  the endpoint basis solves; a manifold wrench is pushed to every mechanism
+  body, whose twists live in shared memory (body velocities in place above
+  40 KB).
+- The points of one manifold relax in parallel with Tonge splitting of the
+  pair's exact mobility (normal, soft terms and friction metric scaled by the
+  point count). The split update vanishes exactly when the unsplit
+  Gauss-Seidel update does, so the fixed point is unchanged.
+- Friction is solved in the tangent-block eigenframe precomputed in float64;
+  the serial sweep never takes the float64 path (that fallback cost about 30%
+  of the sweep).
+- The warm start is linear: per-manifold wrenches, a per-step sorted endpoint
+  list summed per basis slot in schedule order, one push per body.
+- The biased sweep reuses the response computed by the substep's warm start.
+
+RTX PRO 6000 Blackwell, solo GPU, 300 captured frames per trial, two A/B rounds:
+
+| Configuration | Before | After |
+| --- | --- | --- |
+| Caterpillar, no color groups or contact chunks (exact path) | 140.3 ms | 28.8 ms |
+| Caterpillar example default (color groups) | 13.76 ms | 13.76 ms |
+| Bike transmission (unaffected) | 12.52 ms | 12.52 ms |
+
+Settled chassis drift and mean link speed (5-12 s) on the exact path: 0.11
+cm/s and 0.0096 m/s with the manifold sweep versus 0.23 cm/s and 0.0137 m/s
+with the point-ordered sweep at 2 iterations; 0.07 versus 0.13 cm/s at 4
+iterations. The grouped default drifts 3.2 cm/s (0.091 m/s). Joint errors
+stay at 1.5e-5 m and 0.0017 degrees.
+
+Rejected for the color-grouped default: enabling the exact response there
+costs 28.2 ms/frame versus 13.76 ms. GPU time per frame: sweeps 10.5 ms (about
+3 us per manifold, latency-bound single warp), response `compute()` 3 ms,
+the extra joint-bias LLT solve 1.6 ms, while removing the colored contact
+sweeps saves only 2.95 ms. Any Gauss-Seidel order across manifolds of one
+mechanism is a serial chain; a point-by-point shuffle chain measured
+205 ns/point (≥ 9 ms/frame for 2,250 points). Jacobi across manifolds with
+uniform splitting 1 or 2 diverged; splitting by manifolds per mechanism
+sank through parts.
+
 ## Batched humanoid comparison
 
 Measured 2026-08-04 on an RTX PRO 6000 Blackwell with 20,000 worlds,

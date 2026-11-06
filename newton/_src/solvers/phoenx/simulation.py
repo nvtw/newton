@@ -18,8 +18,6 @@ from newton._src.solvers.phoenx.adapter_kernels import (
 )
 from newton._src.solvers.phoenx.articulations.direct_contact_gs import (
     DirectContactRunSchedule,
-    iterate_direct_contact_runs_kernel,
-    warm_start_direct_contact_runs_kernel,
 )
 from newton._src.solvers.phoenx.articulations.direct_contact_response import DirectContactResponse
 from newton._src.solvers.phoenx.articulations.maximal_contact_gs import (
@@ -729,6 +727,7 @@ class PhoenXWorld:
         self._direct_contact_response: DirectContactResponse | None = None
         self._direct_contact_schedule: DirectContactRunSchedule | None = None
         self._direct_tree_contacts = False
+        self._direct_contact_response_current = False
         self._direct_factor_pending = False
         # SolverPhoenX enables reuse only for eligible static exact rows.
         self._reuse_exact_relax_factor = False
@@ -3961,23 +3960,9 @@ class PhoenXWorld:
         schedule = self._direct_contact_schedule
         if response is not None and schedule is not None:
             response.compute(self._contact_container)
-            wp.launch_tiled(
-                warm_start_direct_contact_runs_kernel,
-                dim=schedule.section_end.size,
-                block_dim=64,
-                inputs=[
-                    schedule.islands.set_sizes,
-                    schedule.islands.set_sizes_compact,
-                    schedule.islands.num_sets,
-                    response.data,
-                    self.bodies,
-                    self._contact_cols,
-                    self._contact_container,
-                    schedule.columns,
-                    schedule.section_end,
-                ],
-                device=self.device,
-            )
+            # The biased sweep of this substep reuses this response.
+            self._direct_contact_response_current = True
+            schedule.warm_start(self.bodies, self._contact_container)
         response = self._maximal_contact_response
         schedule = self._maximal_contact_schedule
         projector = self._maximal_tree_projector
@@ -4094,34 +4079,22 @@ class PhoenXWorld:
         schedule = self._direct_contact_schedule
         if not self._contact_input_active_this_step or response is None or schedule is None:
             return
-        if refresh_mobility:
+        if refresh_mobility and not self._direct_contact_response_current:
             response.compute(self._contact_container)
+        self._direct_contact_response_current = False
         iterations = self.solver_iterations if use_bias else self._active_velocity_iterations
         direct = getattr(self, "_direct_equality_system", None)
         if iterations > 0:
             if use_bias and direct is not None:
                 direct.compute_bias_velocity()
                 direct.apply_bias_velocity(-1.0)
-            wp.launch_tiled(
-                iterate_direct_contact_runs_kernel,
-                dim=schedule.section_end.size,
-                block_dim=64,
-                inputs=[
-                    schedule.islands.set_sizes,
-                    schedule.islands.set_sizes_compact,
-                    schedule.islands.num_sets,
-                    response.data,
-                    self.bodies,
-                    self._contact_cols,
-                    self._contact_container,
-                    wp.float32(1.0 / self.substep_dt),
-                    wp.float32(self.sor_boost),
-                    schedule.columns,
-                    schedule.section_end,
-                    wp.int32(iterations),
-                    wp.bool(use_bias),
-                ],
-                device=self.device,
+            schedule.solve(
+                self.bodies,
+                self._contact_container,
+                1.0 / self.substep_dt,
+                self.sor_boost,
+                iterations=iterations,
+                use_bias=use_bias,
             )
             if use_bias and direct is not None:
                 direct.apply_bias_velocity(1.0)

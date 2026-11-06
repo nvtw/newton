@@ -10,12 +10,11 @@ import numpy as np
 import warp as wp
 
 from newton._src.solvers.phoenx.articulations.direct_contact_gs import (
+    _accumulate_direct_contact_row_impulses_kernel,
     _fill_direct_contact_rhs_tasks_kernel,
-    _row_correction_from_wrenches,
 )
 from newton._src.solvers.phoenx.articulations.direct_contact_response import (
     DirectContactResponse,
-    DirectContactResponseData,
     _build_grouped_endpoint_equality_rhs_kernel,
 )
 from newton._src.solvers.phoenx.articulations.fixed_pattern_llt import FixedPatternPanelLLT
@@ -37,24 +36,6 @@ def _initialize_contacts(contacts: ContactContainer):
     cc_set_tangent1(contacts, contact, wp.vec3(1.0, 0.0, 0.0))
     cc_set_r0(contacts, contact, wp.vec3(0.1, 0.2, -0.15))
     cc_set_r1(contacts, contact, wp.vec3(-0.15, 0.12, -0.13))
-
-
-@wp.kernel(enable_backward=False)
-def _evaluate_deferred_coefficients(response: DirectContactResponseData, coefficients: wp.array2d[wp.float32]):
-    column, row = wp.tid()
-    mechanism = wp.int32(0)
-    local_row = row
-    if row >= wp.int32(3):
-        mechanism = wp.int32(1)
-        local_row = row - wp.int32(3)
-    coefficients[column, row] = _row_correction_from_wrenches(
-        response,
-        mechanism,
-        column,
-        local_row,
-        wp.spatial_vector(0.3, -0.4, 0.7, 0.2, 0.5, -0.8),
-        wp.spatial_vector(-0.3, 0.4, -0.7, -0.1, 0.6, 0.2),
-    )
 
 
 def _fixture(device, *, unconstrained_bodies=0):
@@ -130,7 +111,17 @@ def _fixture(device, *, unconstrained_bodies=0):
         row_wrench1=array(wrench1, wp.spatial_vector),
         row_scale=array(np.ones(9)),
         accumulated_impulse=wp.zeros(9, device=device),
+        dense_inverse_mass=inverse,
+        dense_jacobian=jacobian,
     )
+
+
+def _dense_constrained_mobility(direct):
+    """Return the 30x30 body-space mobility constrained by both chains."""
+    inverse = direct.dense_inverse_mass
+    jacobian = direct.dense_jacobian
+    reaction = np.linalg.solve(jacobian @ inverse @ jacobian.T, jacobian @ inverse)
+    return inverse - inverse @ jacobian.T @ reaction
 
 
 def _compute_response(response, contacts, device):
@@ -218,12 +209,72 @@ class TestDirectBodyResponse(unittest.TestCase):
                     getattr(legacy.data, field).numpy().view(np.uint32),
                     err_msg=field,
                 )
-            coefficients = []
-            for response in (shared, legacy):
-                output = wp.zeros((8, 9), device=self.device)
-                wp.launch(_evaluate_deferred_coefficients, (8, 9), [response.data, output], device=self.device)
-                coefficients.append(output.numpy())
-            np.testing.assert_array_equal(coefficients[0].view(np.uint32), coefficients[1].view(np.uint32))
+            # Body responses are indexed by basis slot: per body when shared,
+            # per column endpoint otherwise. Both must agree bitwise.
+            slots = []
+            body_basis_item = shared.data.body_basis_item.numpy()
+            for column, pair in enumerate(pairs):
+                for endpoint, body in enumerate(pair):
+                    if mechanisms[body] >= 0:
+                        slots.append((body, int(body_basis_item[body]) // 2, 2 * column + endpoint))
+            shared_response = shared.data.body_response.numpy()
+            legacy_response = legacy.data.body_response.numpy()
+            for _, shared_slot, legacy_slot in slots:
+                np.testing.assert_array_equal(
+                    shared_response[shared_slot].view(np.uint32), legacy_response[legacy_slot].view(np.uint32)
+                )
+            # Each block is the exact constrained twist response of a mechanism
+            # body to the six unit wrenches of the basis body.
+            mobility = _dense_constrained_mobility(direct)
+            mechanism_bodies = {0: (1, 2), 1: (3, 4, 5)}
+            for source, shared_slot, _ in slots:
+                for local, target in enumerate(mechanism_bodies[int(mechanisms[source])]):
+                    expected = mobility[6 * (target - 1) : 6 * target, 6 * (source - 1) : 6 * source]
+                    np.testing.assert_allclose(
+                        shared_response[shared_slot, local].T, expected, rtol=2.0e-5, atol=2.0e-6
+                    )
+
+    def test_row_impulses_match_dense_reactions(self):
+        """Accumulate the joint reactions of pushed manifold wrenches exactly."""
+        with wp.ScopedDevice(self.device):
+            direct = _fixture(self.device)
+            response = DirectContactResponse(direct, 8, 8)
+            contacts = contact_container_zeros(8, device=self.device)
+            response.column_mechanism0.assign(np.asarray([0, 1] + [-1] * 6, dtype=np.int32))
+            response.column_body0.assign(np.asarray([2, 4] + [0] * 6, dtype=np.int32))
+            response.column_mechanism1.assign(np.asarray([1, 1] + [-1] * 6, dtype=np.int32))
+            response.column_body1.assign(np.asarray([3, 5] + [0] * 6, dtype=np.int32))
+            wp.launch(
+                _fill_direct_contact_rhs_tasks_kernel,
+                8,
+                [response.data, response.contact_batch.task_mechanism, response.contact_batch.task_item],
+                device=self.device,
+            )
+            direct.solver.compute()
+            _compute_response(response, contacts, self.device)
+            wrenches = {
+                2: np.asarray([0.3, -0.4, 0.7, 0.2, 0.5, -0.8]),
+                3: np.asarray([-0.3, 0.4, -0.7, -0.1, 0.6, 0.2]),
+                4: np.asarray([0.1, 0.2, -0.3, 0.05, -0.15, 0.25]),
+                5: np.asarray([-0.2, 0.1, 0.4, -0.3, 0.0, 0.1]),
+            }
+            basis_wrench = np.zeros((response.basis_slot_capacity, 6), dtype=np.float32)
+            body_basis_item = response.data.body_basis_item.numpy()
+            stacked = np.zeros(30)
+            for body, wrench in wrenches.items():
+                basis_wrench[body_basis_item[body] // 2] = wrench
+                stacked[6 * (body - 1) : 6 * body] = wrench
+            direct.accumulated_impulse.zero_()
+            wp.launch(
+                _accumulate_direct_contact_row_impulses_kernel,
+                9,
+                [response.data, wp.array(basis_wrench, dtype=wp.spatial_vector), response.basis_slot_capacity],
+                device=self.device,
+            )
+            inverse = direct.dense_inverse_mass
+            jacobian = direct.dense_jacobian
+            expected = -np.linalg.solve(jacobian @ inverse @ jacobian.T, jacobian @ inverse @ stacked)
+            np.testing.assert_allclose(direct.accumulated_impulse.numpy(), expected, rtol=2.0e-5, atol=2.0e-6)
 
     def test_sparse_and_zero_contact_activation(self):
         """Skip inactive tasks and clear paired bases before solving."""

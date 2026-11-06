@@ -728,11 +728,18 @@ class TestDirectJointTypes(unittest.TestCase):
                 matrix[local_row, local_column] = matrix_storage[address]
                 matrix[local_column, local_row] = matrix_storage[address]
         column = int(response.contact_column.numpy()[contact])
+        contact_bodies = (int(response.contact_body0.numpy()[contact]), int(response.contact_body1.numpy()[contact]))
+        body_basis_item = response.data.body_basis_item.numpy()
         rhs_storage = response.contact_batch.rhs.numpy()
-        basis_rhs = np.empty((dimension, 12), dtype=np.float64)
+        basis_rhs = np.zeros((dimension, 12), dtype=np.float64)
         for endpoint in range(2):
+            first_item = 4 * column + 2 * endpoint
+            if response.shared_body_basis:
+                first_item = int(body_basis_item[contact_bodies[endpoint]])
+                if first_item < 0:
+                    continue
             for half in range(2):
-                item = 4 * column + 2 * endpoint + half
+                item = first_item + half
                 workspace_offset = item * response.contact_batch.item_workspace_stride
                 basis_rhs[:, 6 * endpoint + 3 * half : 6 * endpoint + 3 * (half + 1)] = np.stack(
                     [

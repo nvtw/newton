@@ -4,7 +4,7 @@
 import inspect
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock
 
 import warp as wp
 
@@ -105,33 +105,47 @@ class TestPhoenXAutoPerformancePolicy(unittest.TestCase):
         self.assertFalse(PhoenXWorld._can_reuse_direct_relax_tangent(world, direct))
 
     def test_direct_contact_sweeps_share_one_launch(self) -> None:
-        """Keep sequential direct-contact iterations inside one component launch."""
-        response = SimpleNamespace(
-            data=object(),
-            compute=lambda _contacts: None,
-        )
-        schedule = SimpleNamespace(
-            columns=object(),
-            section_end=SimpleNamespace(size=7),
-            islands=SimpleNamespace(set_sizes=object(), set_sizes_compact=object(), num_sets=object()),
-        )
+        """Run all biased direct-contact iterations in one ordered sweep call."""
+        response = SimpleNamespace(compute=Mock())
+        schedule = SimpleNamespace(solve=Mock())
         world = SimpleNamespace(
             _contact_input_active_this_step=True,
             _direct_contact_response=response,
             _direct_contact_schedule=schedule,
+            _direct_contact_response_current=False,
             _contact_container=object(),
-            _contact_cols=object(),
             bodies=object(),
             solver_iterations=3,
             velocity_iterations=1,
             substep_dt=0.01,
             sor_boost=1.0,
-            device=wp.get_preferred_device(),
         )
-        with patch.object(wp, "launch_tiled") as launch:
-            PhoenXWorld._solve_direct_contacts(world, use_bias=True, refresh_mobility=True)
-        launch.assert_called_once()
-        self.assertEqual(int(launch.call_args.kwargs["inputs"][-2]), 3)
+        PhoenXWorld._solve_direct_contacts(world, use_bias=True, refresh_mobility=True)
+        schedule.solve.assert_called_once()
+        self.assertEqual(schedule.solve.call_args.kwargs["iterations"], 3)
+        self.assertTrue(schedule.solve.call_args.kwargs["use_bias"])
+        response.compute.assert_called_once()
+
+    def test_direct_contact_response_reused_after_warm_start(self) -> None:
+        """Reuse the warm start's mobility for the biased sweep of the same substep."""
+        response = SimpleNamespace(compute=Mock())
+        schedule = SimpleNamespace(solve=Mock())
+        world = SimpleNamespace(
+            _contact_input_active_this_step=True,
+            _direct_contact_response=response,
+            _direct_contact_schedule=schedule,
+            _direct_contact_response_current=True,
+            _contact_container=object(),
+            bodies=object(),
+            solver_iterations=2,
+            substep_dt=0.01,
+            sor_boost=1.0,
+        )
+        PhoenXWorld._solve_direct_contacts(world, use_bias=True, refresh_mobility=True)
+        response.compute.assert_not_called()
+        self.assertFalse(world._direct_contact_response_current)
+        PhoenXWorld._solve_direct_contacts(world, use_bias=True, refresh_mobility=True)
+        response.compute.assert_called_once()
 
     def test_explicit_overrides_are_preserved(self):
         self.assertEqual(self._resolve(step_layout="multi_world"), "multi_world")
