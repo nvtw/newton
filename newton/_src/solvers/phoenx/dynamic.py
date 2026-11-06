@@ -48,10 +48,16 @@ __all__ = [
     "phoenx_add_body",
     "phoenx_add_joint",
     "phoenx_add_shape",
+    "phoenx_articulation_body",
+    "phoenx_articulation_is_active",
+    "phoenx_articulation_joint",
     "phoenx_body_is_active",
+    "phoenx_joint_wrench",
+    "phoenx_remove_articulation",
     "phoenx_remove_body",
     "phoenx_remove_joint",
     "phoenx_remove_shape",
+    "phoenx_spawn_articulation",
 ]
 
 # Slot states.
@@ -312,6 +318,25 @@ class DynamicsData:
     joint_pgs_enabled: wp.array[wp.int32]
     #: Per model body, the joint parent whose shapes it must not collide with.
     body_filter_parent: wp.array[wp.int32]
+
+    #: Runtime articulation instances and their templates, laid out per template by ``*_start``.
+    articulation_pool: SlotPool
+    template_body_start: wp.array[wp.int32]
+    template_shape_start: wp.array[wp.int32]
+    template_joint_start: wp.array[wp.int32]
+    #: Template bodies posed relative to the template's first body.
+    template_bodies: wp.array[BodyDesc]
+    template_shapes: wp.array[ShapeDesc]
+    #: Template-local body of each template shape.
+    template_shape_body: wp.array[wp.int32]
+    #: Template joints whose parent and child are template-local bodies (``-1`` is the world).
+    template_joints: wp.array[JointDesc]
+    #: Template, model bodies, and model joints of each instance; ``-1`` past the template's size.
+    articulation_template: wp.array[wp.int32]
+    articulation_bodies: wp.array2d[wp.int32]
+    articulation_joints: wp.array2d[wp.int32]
+    #: World wrench of every constraint column on its second body; see :func:`phoenx_joint_wrench`.
+    constraint_wrench: wp.array[wp.spatial_vector]
 
 
 @wp.func
@@ -720,6 +745,122 @@ def phoenx_remove_joint(dyn: DynamicsData, joint: wp.int32) -> wp.bool:
     return False
 
 
+@wp.func
+def phoenx_joint_wrench(dyn: DynamicsData, joint: wp.int32) -> wp.spatial_vector:
+    """Force and torque [N, N·m] that ``joint`` applies to its child body, in world frame.
+
+    Averaged over the last substep of the step before the latest
+    :meth:`PhoenXDynamics.update_joint_wrenches`; zero for joints that are not solved.
+    """
+    return dyn.constraint_wrench[dyn.joint_cid[joint]]
+
+
+_ARTICULATION_GROUP = wp.constant(-(1 << 24))  # first per-instance negative collision group
+
+
+@wp.func
+def _remove_articulation_rows(dyn: DynamicsData, instance: wp.int32):
+    for i in range(dyn.articulation_bodies.shape[1]):
+        body = dyn.articulation_bodies[instance, i]
+        if body >= 0:
+            _pool_release(dyn.body_pool, body)  # its shapes and joints follow at the commit
+
+
+@wp.func
+def phoenx_spawn_articulation(
+    dyn: DynamicsData, template: wp.int32, pose: wp.transform, velocity: wp.spatial_vector, world: wp.int32
+) -> wp.int32:
+    """Spawn an articulation template; returns the instance index, or ``-1`` when rows run out.
+
+    The template's first body is placed at ``pose`` and the others keep their template offsets.
+    Every body moves rigidly with ``velocity``: linear velocity at the origin of ``pose`` and
+    angular velocity [m/s, rad/s], world frame. The instance is simulated from the next
+    :meth:`SolverPhoenX.step` on; drive targets come from ``Control`` at the rows of
+    :func:`phoenx_articulation_joint`.
+    """
+    if template < 0 or template >= dyn.template_body_start.shape[0] - 1:
+        wp.atomic_add(dyn.error_count, 0, 1)
+        return -1
+    instance = _pool_alloc(dyn.articulation_pool)
+    if instance < 0:
+        wp.atomic_add(dyn.error_count, 0, 1)
+        return -1
+    dyn.articulation_template[instance] = template
+    for i in range(dyn.articulation_bodies.shape[1]):
+        dyn.articulation_bodies[instance, i] = -1
+    for i in range(dyn.articulation_joints.shape[1]):
+        dyn.articulation_joints[instance, i] = -1
+
+    ok = wp.bool(True)
+    origin = wp.transform_get_translation(pose)
+    linear = wp.spatial_top(velocity)
+    angular = wp.spatial_bottom(velocity)
+    b0 = dyn.template_body_start[template]
+    for i in range(b0, dyn.template_body_start[template + 1]):
+        bdesc = dyn.template_bodies[i]
+        bdesc.pose = pose * bdesc.pose
+        com = wp.transform_point(bdesc.pose, bdesc.com)
+        bdesc.velocity = wp.spatial_vector(linear + wp.cross(angular, com - origin), angular)
+        bdesc.world = world
+        body = phoenx_add_body(dyn, bdesc)
+        dyn.articulation_bodies[instance, i - b0] = body
+        ok = ok and body >= 0
+    if ok:
+        for i in range(dyn.template_shape_start[template], dyn.template_shape_start[template + 1]):
+            sdesc = dyn.template_shapes[i]
+            sdesc.collision_group = _ARTICULATION_GROUP - instance  # no collisions within an instance
+            body = dyn.articulation_bodies[instance, dyn.template_shape_body[i]]
+            ok = ok and phoenx_add_shape(dyn, body, sdesc) >= 0
+    if ok:
+        j0 = dyn.template_joint_start[template]
+        for i in range(j0, dyn.template_joint_start[template + 1]):
+            jdesc = dyn.template_joints[i]
+            if jdesc.parent >= 0:
+                jdesc.parent = dyn.articulation_bodies[instance, jdesc.parent]
+            else:
+                jdesc.parent_xform = pose * jdesc.parent_xform
+            jdesc.child = dyn.articulation_bodies[instance, jdesc.child]
+            joint = phoenx_add_joint(dyn, jdesc)
+            dyn.articulation_joints[instance, i - j0] = joint
+            ok = ok and joint >= 0
+    if not ok:
+        _remove_articulation_rows(dyn, instance)
+        _pool_release(dyn.articulation_pool, instance)
+        return -1
+    return instance
+
+
+@wp.func
+def phoenx_remove_articulation(dyn: DynamicsData, instance: wp.int32) -> wp.bool:
+    """Remove an articulation instance with all its bodies, shapes, and joints at the next commit."""
+    if not _pool_release(dyn.articulation_pool, instance):
+        wp.atomic_add(dyn.error_count, 0, 1)
+        return False
+    _remove_articulation_rows(dyn, instance)
+    return True
+
+
+@wp.func
+def phoenx_articulation_is_active(dyn: DynamicsData, instance: wp.int32) -> wp.bool:
+    """Whether ``instance`` holds an articulation that is not being removed."""
+    if instance < 0 or instance >= dyn.articulation_pool.state.shape[0]:
+        return False
+    state = dyn.articulation_pool.state[instance]
+    return state == _ACTIVE or state == _ADDED
+
+
+@wp.func
+def phoenx_articulation_body(dyn: DynamicsData, instance: wp.int32, index: wp.int32) -> wp.int32:
+    """Model body of template body ``index`` in ``instance``, or ``-1``."""
+    return dyn.articulation_bodies[instance, index]
+
+
+@wp.func
+def phoenx_articulation_joint(dyn: DynamicsData, instance: wp.int32, index: wp.int32) -> wp.int32:
+    """Model joint of template joint ``index`` (free root joints excluded) in ``instance``, or ``-1``."""
+    return dyn.articulation_joints[instance, index]
+
+
 # ---------------------------------------------------------------------------
 # Commit
 # ---------------------------------------------------------------------------
@@ -825,6 +966,11 @@ def _wake_orphaned_islands_kernel(dyn: DynamicsData):
 
 
 @wp.kernel(enable_backward=False)
+def _commit_articulations_kernel(pool: SlotPool, active: wp.array[wp.int32], free: wp.array[wp.int32]):
+    _resolve(pool.state, wp.tid(), active, free)
+
+
+@wp.kernel(enable_backward=False)
 def _commit_shapes_kernel(dyn: DynamicsData, active: wp.array[wp.int32], free: wp.array[wp.int32]):
     slot = wp.tid()
     old = _resolve(dyn.shape_pool.state, slot, active, free)
@@ -904,6 +1050,7 @@ class PhoenXDynamics:
         self.bodies = _HostPool(capacity.body_start, capacity.body_count, device)
         self.shapes = _HostPool(capacity.shape_start, capacity.shape_count, device)
         self.joints = _HostPool(capacity.joint_start, capacity.joint_count, device)
+        self.articulations = _HostPool(0, capacity.articulation_count, device)
         self._sleeping = solver._sleeping_enabled
         world = solver.world
 
@@ -996,6 +1143,9 @@ class PhoenXDynamics:
                 "coordinate_revolutions",
             ):
                 setattr(d, name, getattr(rows, name))
+        self._world = world
+        d.constraint_wrench = wp.zeros(max(1, world.num_constraints), dtype=wp.spatial_vector, device=device)
+        self._init_articulations(d, capacity.articulation_templates, device)
         self.data = d
 
         # Prototypes only carry geometry; they never collide or render.
@@ -1006,6 +1156,64 @@ class PhoenXDynamics:
             model.shape_flags.assign(flags)
             d.world_map_dirty.fill_(1)
 
+    def _init_articulations(self, d: DynamicsData, templates, device) -> None:
+        d.articulation_pool = self.articulations.data
+        bodies, shapes, shape_body, joints = [], [], [], []
+        starts = ([0], [0], [0])
+        for template in templates:
+            for b in template["bodies"]:
+                desc = BodyDesc()
+                desc.pose = b["pose"]
+                desc.mass = b["mass"]
+                desc.com = b["com"]
+                desc.inertia = b["inertia"]
+                desc.flags = b["flags"]
+                bodies.append(desc)
+            for s in template["shapes"]:
+                desc = ShapeDesc()
+                for name in ("type", "transform", "scale", "margin", "gap", "mu", "restitution", "flags", "prototype"):
+                    setattr(desc, name, s[name])
+                shapes.append(desc)
+                shape_body.append(s["body"])
+            for j in template["joints"]:
+                n_lin, n_ang = j["linear_count"], j["angular_count"]
+                desc = JointDesc()
+                for name in ("parent", "child", "parent_xform", "child_xform", "linear_count", "angular_count"):
+                    setattr(desc, name, j[name])
+                axes = [np.asarray(a, dtype=np.float32) for a in j["axes"]]
+                desc.linear_axes = wp.mat33(
+                    *np.vstack(axes[:n_lin] + [np.eye(3, dtype=np.float32)[k] for k in range(n_lin, 3)]).ravel()
+                )
+                desc.angular_axes = wp.mat33(
+                    *np.vstack(axes[n_lin:] + [np.eye(3, dtype=np.float32)[k] for k in range(n_ang, 3)]).ravel()
+                )
+                pad = [0.0] * (6 - n_lin - n_ang)
+                desc.limit_lower = vec6f(*j["limit_lower"], *pad)
+                desc.limit_upper = vec6f(*j["limit_upper"], *pad)
+                for name in ("velocity_limit", "friction", "armature", "damping", "target_ke", "target_kd"):
+                    setattr(desc, name, vec6f(*j[name], *pad))
+                desc.target_mode = vec6i(*j["target_mode"], *[0] * len(pad))
+                joints.append(desc)
+            for start, items in zip(starts, (bodies, shapes, joints), strict=True):
+                start.append(len(items))
+        d.template_body_start, d.template_shape_start, d.template_joint_start = (
+            wp.array(start, dtype=wp.int32, device=device) for start in starts
+        )
+        d.template_bodies = wp.array(bodies or [BodyDesc()], dtype=BodyDesc, device=device)
+        d.template_shapes = wp.array(shapes or [ShapeDesc()], dtype=ShapeDesc, device=device)
+        d.template_shape_body = wp.array(shape_body or [0], dtype=wp.int32, device=device)
+        d.template_joints = wp.array(joints or [JointDesc()], dtype=JointDesc, device=device)
+        count = max(1, self.articulations.capacity)
+        max_bodies = max([len(t["bodies"]) for t in templates] + [1])
+        max_joints = max([len(t["joints"]) for t in templates] + [1])
+        d.articulation_template = wp.full(count, -1, dtype=wp.int32, device=device)
+        d.articulation_bodies = wp.full((count, max_bodies), -1, dtype=wp.int32, device=device)
+        d.articulation_joints = wp.full((count, max_joints), -1, dtype=wp.int32, device=device)
+
+    def update_joint_wrenches(self) -> None:
+        """Refresh the joint reactions read by :func:`phoenx_joint_wrench`; call after a step."""
+        self._world.gather_constraint_wrenches(self.data.constraint_wrench)
+
     @property
     def error_count(self) -> wp.array[wp.int32]:
         """Device counter of failed requests since construction."""
@@ -1014,6 +1222,14 @@ class PhoenXDynamics:
     def commit(self) -> None:
         """Apply staged additions and removals; captured by :meth:`SolverPhoenX.step`."""
         device = self.data.error_count.device
+        if self.articulations.capacity:
+            wp.launch(
+                _commit_articulations_kernel,
+                dim=self.articulations.capacity,
+                inputs=[self.data.articulation_pool, self.articulations.active, self.articulations.free],
+                device=device,
+            )
+            self.articulations.rebuild_lists()
         # Cascades read the removed bodies before their commit quarantines them.
         if self.shapes.capacity:
             wp.launch(_cascade_shapes_kernel, dim=self.shapes.capacity, inputs=[self.data], device=device)

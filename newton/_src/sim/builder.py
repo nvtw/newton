@@ -5455,6 +5455,8 @@ class ModelBuilder:
         joints: int = 0,
         max_dynamic_shapes_per_world: int | None = None,
         prototype_shapes: Sequence[int] = (),
+        articulations: int = 0,
+        articulation_templates: Sequence[ModelBuilder] = (),
     ) -> None:
         """Reserve inactive rows that a solver can fill with bodies, shapes, and joints at runtime.
 
@@ -5462,6 +5464,12 @@ class ModelBuilder:
         invisible shapes, and disabled six-axis D6 joints. A solver that supports runtime creation,
         such as :class:`~newton.solvers.SolverPhoenX`, overwrites them on the device, which keeps model
         array sizes and CUDA graphs valid. Call this once, after all worlds have been added.
+
+        Articulation templates are builders whose bodies, shapes, and joints can be spawned as a
+        whole at runtime. All templates share the reserved body, shape, and joint rows, so any mix
+        of them fits as long as the rows last. A template is posed relative to its first body, its
+        free root joint is dropped, and the links of one spawned instance do not collide with each
+        other.
 
         .. experimental::
 
@@ -5475,6 +5483,9 @@ class ModelBuilder:
                 the broad-phase buffers. Defaults to ``shapes``.
             prototype_shapes: Existing collision shapes whose finalized mesh or convex-hull geometry
                 runtime shapes may reference. They serve only as geometry and never collide or render.
+            articulations: Most articulation instances alive at once.
+            articulation_templates: Builders spawnable as whole articulations; template ``i`` is
+                spawned by index ``i``. Supports fixed, revolute, prismatic, ball, and D6 joints.
         """
         if self._dynamic_capacity is not None:
             raise RuntimeError("reserve_dynamic_capacity() can only be called once")
@@ -5495,6 +5506,17 @@ class ModelBuilder:
                 raise ValueError(f"Prototype shape {shape} is out of range")
             if not self.shape_flags[shape] & ShapeFlags.COLLIDE_SHAPES:
                 raise ValueError(f"Prototype shape {shape} must collide with shapes to carry collision data")
+        if articulations < 0:
+            raise ValueError(f"articulations must be non-negative, got {articulations}")
+        if articulation_templates and not articulations:
+            raise ValueError("articulation_templates require articulations > 0")
+        templates = []
+        for template in articulation_templates:
+            data, mesh_prototypes = self._articulation_template(template)
+            if len(data["bodies"]) > bodies or len(data["shapes"]) > shapes or len(data["joints"]) > joints:
+                raise ValueError("An articulation template needs more bodies, shapes, or joints than reserved")
+            prototypes += tuple(mesh_prototypes)
+            templates.append(data)
 
         body_start = self.body_count
         for i in range(bodies):
@@ -5529,7 +5551,116 @@ class ModelBuilder:
             "joint_count": joints,
             "max_shapes_per_world": max_dynamic_shapes_per_world,
             "prototype_shapes": prototypes,
+            "articulation_count": articulations,
+            "articulation_templates": tuple(templates),
         }
+
+    def _articulation_template(self, template: ModelBuilder) -> tuple[dict[str, list], list[int]]:
+        """Describe ``template`` relative to its first body for runtime spawning.
+
+        Mesh and convex-hull shapes are added to this builder as geometry prototypes. Returns the
+        description and the added prototype shapes.
+        """
+        if template.body_count == 0:
+            raise ValueError("An articulation template needs at least one body")
+        if template.particle_count:
+            raise ValueError("Articulation templates cannot contain particles")
+        root_inv = wp.transform_inverse(wp.transform(*template.body_q[0]))
+        bodies = []
+        for b in range(template.body_count):
+            bodies.append(
+                {
+                    "pose": root_inv * wp.transform(*template.body_q[b]),
+                    "mass": float(template.body_mass[b]),
+                    "com": wp.vec3(template.body_com[b]),
+                    "inertia": wp.mat33(template.body_inertia[b]),
+                    "flags": int(template.body_flags[b]),
+                }
+            )
+        shapes, prototypes = [], []
+        for s in range(template.shape_count):
+            flags = int(template.shape_flags[s])
+            body = int(template.shape_body[s])
+            if body < 0 or not flags & (ShapeFlags.COLLIDE_SHAPES | ShapeFlags.VISIBLE):
+                continue
+            geo = int(template.shape_type[s])
+            prototype = -1
+            if geo in (GeoType.MESH, GeoType.CONVEX_MESH):
+                cfg = self.ShapeConfig(density=0.0, is_visible=False, margin=float(template.shape_margin[s]))
+                prototype = self.add_shape(
+                    body=-1,
+                    type=geo,
+                    scale=template.shape_scale[s],
+                    src=template.shape_source[s],
+                    cfg=cfg,
+                    label=f"articulation_template_geometry_{len(prototypes)}",
+                )
+                prototypes.append(prototype)
+            elif geo not in (
+                GeoType.SPHERE,
+                GeoType.CAPSULE,
+                GeoType.BOX,
+                GeoType.CYLINDER,
+                GeoType.CONE,
+                GeoType.ELLIPSOID,
+            ):
+                raise ValueError(f"Articulation template shape type {GeoType(geo).name} is not supported")
+            shapes.append(
+                {
+                    "body": body,
+                    "type": geo,
+                    "transform": wp.transform(*template.shape_transform[s]),
+                    "scale": wp.vec3(template.shape_scale[s]),
+                    "margin": float(template.shape_margin[s]),
+                    "gap": float(template.shape_gap[s]),
+                    "mu": float(template.shape_material_mu[s]),
+                    "restitution": float(template.shape_material_restitution[s]),
+                    "flags": flags,
+                    "prototype": prototype,
+                }
+            )
+        joints = []
+        for j in range(template.joint_count):
+            joint_type = int(template.joint_type[j])
+            if joint_type == JointType.FREE:
+                if template.joint_parent[j] != -1:
+                    raise ValueError("Articulation templates support free joints only at the root")
+                continue
+            if joint_type not in (
+                JointType.FIXED,
+                JointType.REVOLUTE,
+                JointType.PRISMATIC,
+                JointType.BALL,
+                JointType.D6,
+            ):
+                raise ValueError(f"Articulation template joint type {JointType(joint_type).name} is not supported")
+            n_lin, n_ang = (int(v) for v in template.joint_dof_dim[j])
+            start = int(template.joint_qd_start[j])
+            dofs = range(start, start + n_lin + n_ang)
+            parent_xform = wp.transform(*template.joint_X_p[j])
+            if template.joint_parent[j] == -1:
+                parent_xform = root_inv * parent_xform  # anchored joints follow the spawn pose
+            joints.append(
+                {
+                    "parent": int(template.joint_parent[j]),
+                    "child": int(template.joint_child[j]),
+                    "parent_xform": parent_xform,
+                    "child_xform": wp.transform(*template.joint_X_c[j]),
+                    "linear_count": n_lin,
+                    "angular_count": n_ang,
+                    "axes": [wp.vec3(template.joint_axis[d]) for d in dofs],
+                    "limit_lower": [float(template.joint_limit_lower[d]) for d in dofs],
+                    "limit_upper": [float(template.joint_limit_upper[d]) for d in dofs],
+                    "velocity_limit": [float(template.joint_velocity_limit[d]) for d in dofs],
+                    "friction": [float(template.joint_friction[d]) for d in dofs],
+                    "armature": [float(template.joint_armature[d]) for d in dofs],
+                    "damping": [float(template.joint_damping[d]) for d in dofs],
+                    "target_mode": [int(template.joint_target_mode[d]) for d in dofs],
+                    "target_ke": [float(template.joint_target_ke[d]) for d in dofs],
+                    "target_kd": [float(template.joint_target_kd[d]) for d in dofs],
+                }
+            )
+        return {"bodies": bodies, "shapes": shapes, "joints": joints}, prototypes
 
     def add_world(
         self,

@@ -1,0 +1,1 @@
+Add `phoenx_spawn_articulation()` and related device functions to spawn and remove whole articulations at runtime in `SolverPhoenX`; templates passed to `ModelBuilder.reserve_dynamic_capacity(articulation_templates=...)` share one pool of reserved rows. Add `phoenx_joint_wrench()` to read joint reaction forces in kernels.

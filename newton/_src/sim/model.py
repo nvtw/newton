@@ -319,6 +319,10 @@ class _DynamicCapacity:
     """Bound on the colliding shapes of one world, including global shapes, that sizes broad-phase buffers."""
     prototype_shapes: tuple[int, ...]
     """Shapes whose finalized geometry runtime shapes may reference; they never collide themselves."""
+    articulation_count: int = 0
+    """Most runtime articulation instances alive at once."""
+    articulation_templates: tuple[dict, ...] = ()
+    """Spawnable articulations, as described by ``ModelBuilder._articulation_template``."""
 
 
 class Model:
