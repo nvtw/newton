@@ -147,6 +147,11 @@ class BlockJointSystem(DirectEqualitySystem):
     """
 
     @property
+    def fuses_copy_average(self) -> bool:
+        """Block sweeps never average mass-splitting copies; the dispatcher keeps its own average."""
+        return False
+
+    @property
     def requires_global_projection(self):
         """Whether finite drive bounds need corrections on the original body state."""
         return self.has_bounded_drives

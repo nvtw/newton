@@ -86,23 +86,38 @@ class TestPhoenXAutoPerformancePolicy(unittest.TestCase):
         MultiWorldDispatcher(world).solve(wp.float32(1.0))
         self.assertEqual(events[:5], ["factor", "prepare", "warm", ("solve", False), ("bounds", False)])
 
-    def test_direct_relax_tangent_reuse_requires_one_safe_sweep(self) -> None:
-        """Reuse the D6 tangent only for one unconstrained local relaxation sweep."""
+    def test_direct_relax_always_refreshes_integrated_geometry(self) -> None:
+        """Relaxation re-prepares the direct system even for one unconstrained sweep.
+
+        Integration moves centers of mass, so reusing the biased solve's levers would apply
+        paired impulses at stale world points and create angular momentum.
+        """
+        direct = SimpleNamespace(
+            enabled=True,
+            has_bounded_drives=False,
+            supports_async_factor=True,
+            refresh_geometry=Mock(),
+            prepare_matrix=Mock(),
+            factor_async=Mock(),
+            prepare_and_factor=Mock(),
+        )
         world = SimpleNamespace(
             _active_velocity_iterations=1,
+            _contact_input_active_this_step=False,
+            num_particles=0,
+            _contact_patch_enabled=False,
+            _direct_equality_system=direct,
             mass_splitting_enabled=True,
             _regular_pgs_active_this_step=True,
             _combine_direct_prepare_projection=True,
             _direct_contact_response=None,
             _maximal_contact_response=None,
+            _direct_factor_pending=False,
+            _direct_tree_contacts=False,
         )
-        direct = SimpleNamespace(has_bounded_drives=False)
-        self.assertTrue(PhoenXWorld._can_reuse_direct_relax_tangent(world, direct))
-        world._active_velocity_iterations = 2
-        self.assertFalse(PhoenXWorld._can_reuse_direct_relax_tangent(world, direct))
-        world._active_velocity_iterations = 1
-        direct.has_bounded_drives = True
-        self.assertFalse(PhoenXWorld._can_reuse_direct_relax_tangent(world, direct))
+        PhoenXWorld._refresh_owned_relax_geometry(world, wp.float32(1.0))
+        direct.refresh_geometry.assert_called_once()
+        direct.factor_async.assert_called_once()
 
     def test_direct_contact_sweeps_share_one_launch(self) -> None:
         """Run all biased direct-contact iterations in one ordered sweep call."""
