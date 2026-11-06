@@ -185,7 +185,6 @@ def build_scene(*, sdf_resolution=128, motor_off=False, track_pin_friction=TRACK
 class Example:
     """Run the full-scale excavator and its two articulated track loops."""
 
-    color_group_size = 2
     overlap_simulation_render = True
 
     def __init__(self, viewer, args):
@@ -194,8 +193,6 @@ class Example:
         self.frame_dt = 1.0 / 60.0
         if args.substeps < 1 or args.iterations < 1:
             raise ValueError("substeps and iterations must be positive")
-        if args.contact_chunk_size < 0:
-            raise ValueError("contact chunk size must be nonnegative")
         if args.track_pin_friction < 0.0:
             raise ValueError("track pin friction must be nonnegative")
         self.model = build_scene(
@@ -223,9 +220,11 @@ class Example:
             solver_iterations=args.iterations,
             velocity_iterations=1,
             parallel_contact_prepare=self.model.device.is_cuda,
-            contact_chunk_size=args.contact_chunk_size,
+            # Exact mechanism contact responses keep the idle machine at rest;
+            # color groups are about twice as fast but let it creep slowly.
+            contact_chunk_size=64 if args.fast_contacts else 0,
             mass_splitting=True,
-            mass_splitting_color_group_size=self.color_group_size,
+            mass_splitting_color_group_size=2 if args.fast_contacts else 0,
             mass_splitting_batch_size=2,
             max_colored_partitions=8,
         )
@@ -392,7 +391,11 @@ class Example:
             default="edge",
             help="SDF contact generation: edge sampling or cached importance sampling.",
         )
-        parser.add_argument("--contact-chunk-size", type=int, default=64)
+        parser.add_argument(
+            "--fast-contacts",
+            action="store_true",
+            help="Solve mechanism contacts in color groups: about twice as fast, but the idle machine creeps.",
+        )
         parser.add_argument("--iterations", type=int, default=2, help="Solver iterations per physics substep.")
         parser.add_argument("--substeps", type=int, default=5, help="Physics substeps per 120 Hz contact refresh.")
         parser.add_argument(
