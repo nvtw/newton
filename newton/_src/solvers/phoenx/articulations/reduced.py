@@ -3580,10 +3580,15 @@ class ReducedArticulationSystem:
         # Deep small trees also benefit from replacing many tiny depth launches
         # with a cooperative walk. Keep the established path for shallow small
         # batches; this changes scheduling only, never the current-pose operator.
+        # Runtime instance slots rewrite their topology on the device, which only the
+        # cooperative walk reads; the per-depth launches use host-built joint lists.
+        capacity = getattr(model, "_dynamic_capacity", None)
+        self.runtime_slots = bool(capacity is not None and capacity.slot_size)
         self.use_warp_factor = bool(
             self.device.is_cuda
             and (
-                model.articulation_count >= _WARP_FACTOR_MIN_ARTICULATIONS
+                self.runtime_slots
+                or model.articulation_count >= _WARP_FACTOR_MIN_ARTICULATIONS
                 or len(self.factor_depth_ranges) >= _WARP_FACTOR_MIN_DEPTH_LEVELS
             )
         )
@@ -3635,6 +3640,12 @@ class ReducedArticulationSystem:
                 joint_parent_lane_np[joint] = joint_depth_lane_np[body_joint_np[parent]]
         self.advance_joint_parent_lane = wp.array(joint_parent_lane_np, device=self.device)
         max_articulation_breadth = int(np.max(np.diff(articulation_depth_start_np, axis=1)))
+        if self.runtime_slots:
+            # Slots are placeholder chains; size the depth lanes for the widest template level.
+            for template in capacity.articulation_templates:
+                max_articulation_breadth = max(
+                    max_articulation_breadth, int(np.bincount(template["tree"]["depth"]).max())
+                )
         self.use_warp_advance = bool(self.device.is_cuda and max_articulation_breadth <= 32)
         if max_articulation_breadth <= 8:
             self.advance_tile_width = 8
@@ -4180,6 +4191,15 @@ def _get_reduced_model(model: Model) -> Model:
     return reduced_model
 
 
+@wp.kernel(enable_backward=False)
+def _phoenx_body_poses_kernel(bodies: BodyContainer, body_com: wp.array[wp.vec3], body_q: wp.array[wp.transform]):
+    """Body origin poses from the PhoenX body centers of mass."""
+    body = wp.tid()
+    rotation = bodies.orientation[body + wp.int32(1)]
+    position = bodies.position[body + wp.int32(1)] - wp.quat_rotate(rotation, body_com[body])
+    body_q[body] = wp.transform(position, rotation)
+
+
 class ReducedPhoenXArticulation:
     """Graph-stable bridge between common Newton articulation state and PhoenX bodies."""
 
@@ -4201,6 +4221,8 @@ class ReducedPhoenXArticulation:
         self.model = model
         self.bodies = bodies
         self.system = ReducedArticulationSystem(model)
+        if self.system.runtime_slots and (execution_path != "reference" or not model.device.is_cuda):
+            raise ValueError("runtime reduced articulations require CUDA and the reference execution path")
         self.state = model.state()
         self.control = model.control(clone_variables=True)
         self._kinematics_current = False
@@ -4338,8 +4360,18 @@ class ReducedPhoenXArticulation:
         state_kinematics_valid: bool = False,
     ) -> None:
         """Import common generalized state and controls into stable graph buffers."""
-        # A continuation keeps the pose-derived buffers published by the preceding step.
-        self._kinematics_current = state_is_continuation
+        # A continuation keeps the pose-derived buffers published by the preceding step. Runtime
+        # spawns change topology between steps, so their scenes rebuild them every step from the
+        # current PhoenX body poses, which spawns write directly.
+        self._kinematics_current = state_is_continuation and not self.system.runtime_slots
+        if state_is_continuation and self.system.runtime_slots:
+            wp.launch(
+                _phoenx_body_poses_kernel,
+                dim=int(self.model.body_count),
+                inputs=[self.bodies, self.model.body_com],
+                outputs=[self.state.body_q],
+                device=self.model.device,
+            )
         if not state_is_continuation:
             wp.copy(self.state.joint_q, state.joint_q)
             wp.copy(self.state.joint_qd, state.joint_qd)

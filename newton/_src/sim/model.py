@@ -323,6 +323,12 @@ class _DynamicCapacity:
     """Most runtime articulation instances alive at once."""
     articulation_templates: tuple[dict, ...] = ()
     """Spawnable articulations, as described by ``ModelBuilder._articulation_template``."""
+    articulation_coordinates: str = "maximal"
+    """``"reduced"`` when instances occupy the reduced-coordinate slots below."""
+    slot_size: int = 0
+    """Bodies and joints of every reduced instance slot; slot ``s`` starts ``s * slot_size`` rows in."""
+    slot_body_start: int = 0
+    slot_joint_start: int = 0
 
 
 class Model:

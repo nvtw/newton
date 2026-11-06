@@ -1,0 +1,1 @@
+Spawn runtime articulations in reduced (generalized) coordinates in `SolverPhoenX` with `reserve_dynamic_capacity(articulation_coordinates="reduced")`: instance slots sized for the largest template are shared by all templates and rewrite the reduced solver's topology tables on the device.

@@ -792,6 +792,8 @@ class SolverPhoenX(SolverBase):
                 raise ValueError("Runtime body creation does not support deformables")
             if dynamic_capacity.joint_count and (joint_solver != "block_pgs" or direct_joint_mask is not None):
                 raise ValueError("Runtime joint creation requires joint_mode='maximal_pgs' without direct_joint_mask")
+            if dynamic_capacity.slot_size and articulation_mode != "reduced":
+                raise ValueError("Reduced articulation slots require joint_mode='reduced'")
         self._body_fresh = wp.zeros(
             num_bodies_phoenx if dynamic_capacity is not None else 0, dtype=wp.int32, device=self.device
         )
@@ -1302,6 +1304,7 @@ class SolverPhoenX(SolverBase):
             # block sweeps, which local joint blocks alone converge to only slowly.
             if (
                 dynamic_capacity.joint_count
+                and not dynamic_capacity.slot_size
                 and self.world._maximal_tree_projector is None
                 and any(t.get("tree") and t["joints"] for t in dynamic_capacity.articulation_templates)
             ):

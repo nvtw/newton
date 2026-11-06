@@ -255,5 +255,153 @@ class TestDynamicArticulations(unittest.TestCase):
         self.assertEqual(int(scene.dyn.error_count.numpy()[0]), 0)
 
 
+def _ragdoll_template() -> newton.ModelBuilder:
+    """Torso with four ball-jointed limbs one level below the root."""
+    builder = newton.ModelBuilder()
+    torso = builder.add_link()
+    builder.add_shape_box(torso, hx=0.15, hy=0.1, hz=0.25)
+    for k, (x, z) in enumerate(((0.25, 0.1), (-0.25, 0.1), (0.1, -0.45), (-0.1, -0.45))):
+        limb = builder.add_link(xform=wp.transform(wp.vec3(x, 0.0, z), wp.quat_identity()))
+        builder.add_shape_box(limb, hx=0.05, hy=0.05, hz=0.15)
+        anchor = wp.vec3(x, 0.0, z + (0.15 if k >= 2 else 0.0))
+        builder.add_joint_ball(
+            torso,
+            limb,
+            parent_xform=wp.transform(anchor, wp.quat_identity()),
+            child_xform=wp.transform(anchor - wp.vec3(x, 0.0, z), wp.quat_identity()),
+        )
+    return builder
+
+
+@wp.kernel
+def _spawn_posed_kernel(dyn: DynamicsData, templates: wp.array[int], x: wp.array[float], out: wp.array[int]):
+    i = wp.tid()
+    pose = wp.transform(wp.vec3(x[i], 0.0, 1.5), wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), 0.4))
+    out[i] = phoenx_spawn_articulation(dyn, templates[i], pose, wp.spatial_vector(0.0, 0.0, 0.0, 0.0, 0.0, 1.0), 0)
+
+
+class _ReducedScene:
+    """Generalized-coordinate instance slots stepped as continuations in one captured graph."""
+
+    def __init__(self, slots: int, templates):
+        builder = newton.ModelBuilder()
+        builder.add_ground_plane()
+        builder.reserve_dynamic_capacity(
+            shapes=slots * 16,
+            articulations=slots,
+            articulation_templates=templates,
+            articulation_coordinates="reduced",
+        )
+        self.model = builder.finalize()
+        self.capacity = self.model._dynamic_capacity
+        self.solver = newton.solvers.SolverPhoenX(self.model, joint_mode="reduced", substeps=4, solver_iterations=4)
+        self.dyn = self.solver.dynamics
+        self.state_0, self.state_1 = self.model.state(), self.model.state()
+        self.control = self.model.control()
+        self.contacts = self.model._collision_pipeline.contacts()
+        self._frame(False)  # the first step builds the solver's pose-derived buffers
+        with wp.ScopedCapture() as capture:
+            self._frame(True)
+        self.graph = capture.graph
+
+    def _frame(self, continuation: bool):
+        self.solver.collide(self.state_0, self.contacts)
+        self.solver.step(
+            self.state_0, self.state_1, self.control, self.contacts, _DT, state_is_continuation=continuation
+        )
+        for name in ("body_q", "body_qd", "joint_q", "joint_qd"):
+            wp.copy(getattr(self.state_0, name), getattr(self.state_1, name))
+
+    def spawn(self, templates, xs) -> np.ndarray:
+        out = wp.zeros(len(templates), dtype=int)
+        wp.launch(
+            _spawn_posed_kernel,
+            dim=len(templates),
+            inputs=[self.dyn.data, wp.array(templates, dtype=int), wp.array(xs, dtype=float), out],
+        )
+        return out.numpy()
+
+    def run(self, frames: int):
+        for _ in range(frames):
+            wp.capture_launch(self.graph)
+
+    def joint_gap(self) -> float:
+        """Largest joint opening of the live instances [m]."""
+        q = self.state_0.body_q.numpy()
+        reduced = self.solver._reduced_articulation.bodies.reduced
+        starts, ends = reduced.articulation_start.numpy(), reduced.articulation_end.numpy()
+        parent, child = self.model.joint_parent.numpy(), self.model.joint_child.numpy()
+        xp, xc = self.model.joint_X_p.numpy(), self.model.joint_X_c.numpy()
+        worst = 0.0
+        for a in range(len(ends)):
+            for j in range(starts[a] + 1, ends[a]):
+                pa = wp.transform_point(wp.transform(*q[parent[j]].tolist()), wp.vec3(*xp[j][:3]))
+                pb = wp.transform_point(wp.transform(*q[child[j]].tolist()), wp.vec3(*xc[j][:3]))
+                worst = max(worst, float(np.linalg.norm(np.asarray(pa) - np.asarray(pb))))
+        return worst
+
+    def slot_bodies(self, slot: int) -> np.ndarray:
+        start = self.capacity.slot_body_start + slot * self.capacity.slot_size
+        return self.state_0.body_q.numpy()[start : start + self.capacity.slot_size]
+
+
+@unittest.skipUnless(wp.is_cuda_available(), "runtime creation tests require CUDA graph capture")
+class TestReducedRuntimeArticulations(unittest.TestCase):
+    def test_spawned_trees_fall_and_rest_with_exact_joints(self):
+        scene = _ReducedScene(3, [_ragdoll_template(), _chain_template(), _spider_template()])
+        instances = scene.spawn([0, 1, 2], [-3.0, 0.0, 3.0])
+        np.testing.assert_array_equal(instances, [0, 1, 2])
+        scene.run(150)
+        for slot, bodies in enumerate((5, 4, 9)):
+            q = scene.slot_bodies(slot)[:bodies]
+            self.assertTrue(np.isfinite(q).all())
+            self.assertLess(float(q[:, 2].max()), 0.6, f"slot {slot} did not come to rest on the ground")
+            self.assertGreater(float(q[:, 2].min()), 0.0, f"slot {slot} sank through the ground")
+        self.assertLess(scene.joint_gap(), 1.0e-4)  # generalized coordinates keep joints closed exactly
+        self.assertEqual(int(scene.dyn.error_count.numpy()[0]), 0)
+
+    def test_slots_are_reused_by_other_templates(self):
+        # Two slots sized for the spider; a spider fills one exactly.
+        scene = _ReducedScene(2, [_ragdoll_template(), _spider_template()])
+        scene.spawn([1, 0], [-2.0, 2.0])
+        scene.run(40)
+        wp.launch(_remove_kernel, dim=2, inputs=[scene.dyn.data, wp.array([0, 1], dtype=int)])
+        scene.run(2)  # the slots pass quarantine
+        parked = scene.slot_bodies(0).copy()
+        scene.run(10)
+        np.testing.assert_allclose(scene.slot_bodies(0), parked)  # empty slots are inert
+        np.testing.assert_array_equal(scene.spawn([0, 1], [-2.0, 2.0]), [0, 1])
+        scene.run(120)
+        for slot in range(2):
+            self.assertTrue(np.isfinite(scene.slot_bodies(slot)).all())
+        self.assertLess(scene.joint_gap(), 1.0e-4)
+        self.assertEqual(int(scene.dyn.error_count.numpy()[0]), 0)
+
+
+def _spider_template() -> newton.ModelBuilder:
+    """A hub with three two-segment legs on hinges: nine bodies, depth three."""
+    builder = newton.ModelBuilder()
+    hub = builder.add_link()
+    builder.add_shape_sphere(hub, radius=0.12)
+    for k in range(4):
+        yaw = wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), 0.5 * wp.pi * k)
+        out = wp.quat_rotate(yaw, wp.vec3(1.0, 0.0, 0.0))
+        parent, base = hub, 0.12
+        for segment in range(2):
+            body = builder.add_link(xform=wp.transform(out * (base + 0.12), yaw))
+            builder.add_shape_box(body, hx=0.1, hy=0.03, hz=0.03)
+            builder.add_joint_revolute(
+                parent,
+                body,
+                parent_xform=wp.transform(
+                    out * base if segment == 0 else wp.vec3(0.12, 0.0, 0.0), yaw if segment == 0 else wp.quat_identity()
+                ),
+                child_xform=wp.transform(wp.vec3(-0.12, 0.0, 0.0), wp.quat_identity()),
+                axis=newton.Axis.Y,
+            )
+            parent, base = body, base + 0.24
+    return builder
+
+
 if __name__ == "__main__":
     unittest.main()
