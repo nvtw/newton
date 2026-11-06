@@ -910,7 +910,7 @@ class MaximalTreeProjector:
             device=self.model.device,
         )
 
-    def project(self, *, use_bias: bool) -> None:
+    def project(self, *, use_bias: bool, idt: float | None = None) -> None:
         """Project body twists and publish the recovered joint reactions."""
         wp.launch(
             _gather_maximal_tree_kernel,

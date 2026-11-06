@@ -17,6 +17,7 @@ from newton._src.solvers.phoenx.constraints.constraint_container import Constrai
 from newton._src.solvers.phoenx.model_adapter import _is_locked_dof
 
 _WARP_SIZE = 32
+_RUNTIME_POSITION_BIAS = 0.2  # joint error fraction closed per substep by runtime trees
 
 
 @wp.func
@@ -45,6 +46,9 @@ def _set_motion_column(
 
 @wp.struct
 class GeneralMaximalTreeProjectorData:
+    #: Fraction of the joint position error the biased projection closes per substep; zero keeps
+    #: drift correction to the prepare-time joint rows.
+    position_bias: wp.float32
     body_count: wp.array[wp.int32]
     max_depth: wp.array[wp.int32]
     floating_root: wp.array[wp.int32]
@@ -83,6 +87,7 @@ def _gather_general_maximal_tree_thread(
     joint_limit_upper: wp.array[wp.float32],
     bodies: BodyContainer,
     data: GeneralMaximalTreeProjectorData,
+    idt: wp.float32,
 ):
     articulation = tid // wp.int32(_WARP_SIZE)
     lane = tid - articulation * wp.int32(_WARP_SIZE)
@@ -148,10 +153,38 @@ def _gather_general_maximal_tree_thread(
                     joint_motion = _set_motion_column(joint_motion, dof_count, linear_axis, angular_axis)
                     dof_count += wp.int32(1)
 
+        if data.position_bias > wp.float32(0.0):
+            # Target the joint velocity that closes a fraction of the anchor gap and frame
+            # misalignment; components along free axes are absorbed by the joint motion.
+            rate = data.position_bias * idt
+            gap = (bodies.position[body] + r_child) - (bodies.position[parent] + r_parent)
+            child_frame = child_orientation * wp.transform_get_rotation(joint_x_c[joint])
+            relative = child_frame * wp.quat_inverse(axis_rotation)
+            if relative[3] < wp.float32(0.0):
+                relative = -relative
+            imaginary = wp.vec3f(relative[0], relative[1], relative[2])
+            sin_half = wp.length(imaginary)
+            rotation = wp.vec3f(0.0)  # rotation vector of the frame misalignment
+            if sin_half > wp.float32(1.0e-8):
+                rotation = imaginary * (wp.float32(2.0) * wp.atan2(sin_half, relative[3]) / sin_half)
+            angular_offset = -rate * rotation
+            linear_offset = -rate * gap - wp.cross(angular_offset, r_child)
+            data.affine_offset[articulation, lane] = wp.spatial_vectorf(
+                linear_offset[0],
+                linear_offset[1],
+                linear_offset[2],
+                angular_offset[0],
+                angular_offset[1],
+                angular_offset[2],
+            )
+        else:
+            data.affine_offset[articulation, lane] = wp.spatial_vectorf(0.0)
+    else:
+        data.affine_offset[articulation, lane] = wp.spatial_vectorf(0.0)
+
     data.dof_count[articulation, lane] = dof_count
     data.transform[articulation, lane] = joint_transform
     data.motion[articulation, lane] = joint_motion
-    data.affine_offset[articulation, lane] = wp.spatial_vectorf(0.0)
 
 
 @wp.func
@@ -326,6 +359,7 @@ def _project_general_maximal_tree_fused_kernel(
     constraints: ConstraintContainer,
     bodies: BodyContainer,
     data: GeneralMaximalTreeProjectorData,
+    idt: wp.float32,
 ):
     tid = wp.tid()
     _gather_general_maximal_tree_thread(
@@ -341,6 +375,7 @@ def _project_general_maximal_tree_fused_kernel(
         joint_limit_upper,
         bodies,
         data,
+        idt,
     )
     _sync_warp()
     _project_general_maximal_tree_thread(tid, data)
@@ -521,6 +556,7 @@ class GeneralMaximalTreeProjector:
 
         device = model.device
         data = GeneralMaximalTreeProjectorData()
+        data.position_bias = 0.0
         data.body_count = wp.array(body_count, device=device)
         data.max_depth = wp.array(max_depth, device=device)
         data.floating_root = wp.array(floating_root, device=device)
@@ -545,8 +581,44 @@ class GeneralMaximalTreeProjector:
         data.reaction = wp.empty(shape, dtype=wp.spatial_vectorf, device=device)
         self.data = data
 
-    def project(self, *, use_bias: bool) -> None:
-        """Project body twists and publish recovered native-joint reactions."""
+    @classmethod
+    def for_runtime_articulations(
+        cls,
+        model: Model,
+        constraints: ConstraintContainer,
+        bodies: BodyContainer,
+        joint_to_cid: wp.array[wp.int32],
+        capacity: int,
+    ) -> GeneralMaximalTreeProjector:
+        """Projector with ``capacity`` empty trees that runtime articulation spawns fill on the device."""
+        self = cls.__new__(cls)
+        self.model = model
+        self.constraints = constraints
+        self.bodies = bodies
+        self.joint_to_cid = joint_to_cid
+        self.articulation_count = capacity
+        self.launch_dim = capacity * _WARP_SIZE
+        device = model.device
+        shape = (capacity, _WARP_SIZE)
+        data = GeneralMaximalTreeProjectorData()
+        data.position_bias = _RUNTIME_POSITION_BIAS
+        data.body_count = wp.zeros(capacity, dtype=wp.int32, device=device)
+        data.max_depth = wp.zeros(capacity, dtype=wp.int32, device=device)
+        data.floating_root = wp.zeros(capacity, dtype=wp.int32, device=device)
+        data.child_start = wp.zeros((capacity, _WARP_SIZE + 1), dtype=wp.int32, device=device)
+        for name in ("joint_index", "body_slot", "depth", "parent", "child_index"):
+            setattr(data, name, wp.full(shape, -1, dtype=wp.int32, device=device))
+        data.dof_count = wp.zeros(shape, dtype=wp.int32, device=device)
+        for name in ("transform", "motion", "mass", "articulated", "parent_articulated"):
+            setattr(data, name, wp.zeros(shape, dtype=wp.spatial_matrixf, device=device))
+        for name in ("affine_offset", "velocity_in", "bias", "parent_bias", "velocity_out", "reaction"):
+            setattr(data, name, wp.zeros(shape, dtype=wp.spatial_vectorf, device=device))
+        data.inverse_d = wp.zeros(shape, dtype=wp.mat33f, device=device)
+        self.data = data
+        return self
+
+    def project(self, *, use_bias: bool, idt: float | None = None) -> None:
+        """Project body twists and publish recovered native-joint reactions; ``idt`` is the inverse substep [1/s]."""
         wp.launch(
             _project_general_maximal_tree_fused_kernel,
             dim=self.launch_dim,
@@ -565,6 +637,7 @@ class GeneralMaximalTreeProjector:
                 self.constraints,
                 self.bodies,
                 self.data,
+                wp.float32(idt or 0.0),
             ],
             device=self.model.device,
         )

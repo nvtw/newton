@@ -19,7 +19,9 @@ import newton
 from newton._src.solvers.phoenx.dynamic import (
     DynamicsData,
     phoenx_articulation_body,
+    phoenx_articulation_joint,
     phoenx_remove_articulation,
+    phoenx_remove_joint,
     phoenx_spawn_articulation,
 )
 
@@ -66,6 +68,33 @@ def _pendulum_template() -> newton.ModelBuilder:
     return builder
 
 
+def _hanging_chain_template(links: int = 12) -> newton.ModelBuilder:
+    """Chain hinged to the world with a last link 50 times heavier than the others."""
+    builder = newton.ModelBuilder()
+    previous = -1
+    for i in range(links):
+        body = builder.add_link(xform=wp.transform(wp.vec3(2.0 * _LINK * i + _LINK, 0.0, 0.0), wp.quat_identity()))
+        density = 1000.0 * (50.0 if i == links - 1 else 1.0)
+        builder.add_shape_box(
+            body, hx=0.9 * _LINK, hy=0.03, hz=0.03, cfg=newton.ModelBuilder.ShapeConfig(density=density)
+        )
+        anchor = wp.vec3(0.0, 0.0, 0.0) if previous < 0 else wp.vec3(_LINK, 0.0, 0.0)
+        builder.add_joint_revolute(
+            previous,
+            body,
+            parent_xform=wp.transform(anchor, wp.quat_identity()),
+            child_xform=wp.transform(wp.vec3(-_LINK, 0.0, 0.0), wp.quat_identity()),
+            axis=newton.Axis.Y,
+        )
+        previous = body
+    return builder
+
+
+@wp.kernel
+def _remove_joint_kernel(dyn: DynamicsData, instance: int, index: int):
+    phoenx_remove_joint(dyn, phoenx_articulation_joint(dyn, instance, index))
+
+
 @wp.kernel
 def _spawn_kernel(
     dyn: DynamicsData,
@@ -91,7 +120,7 @@ def _bodies_kernel(dyn: DynamicsData, instance: int, out: wp.array[int]):
 
 
 class _Scene:
-    def __init__(self, bodies: int, shapes: int, joints: int, articulations: int):
+    def __init__(self, bodies: int, shapes: int, joints: int, articulations: int, templates=None):
         builder = newton.ModelBuilder()
         builder.add_ground_plane()
         builder.reserve_dynamic_capacity(
@@ -99,11 +128,11 @@ class _Scene:
             shapes=shapes,
             joints=joints,
             articulations=articulations,
-            articulation_templates=[_chain_template(), _pendulum_template()],
+            articulation_templates=templates or [_chain_template(), _pendulum_template()],
         )
         self.model = builder.finalize()
         self.solver = newton.solvers.SolverPhoenX(
-            self.model, joint_mode="maximal_pgs", step_layout="single_world", substeps=8, solver_iterations=8
+            self.model, joint_mode="maximal_pgs", step_layout="single_world", substeps=4, solver_iterations=4
         )
         self.dyn = self.solver.dynamics
         self.state_0, self.state_1 = self.model.state(), self.model.state()
@@ -199,6 +228,31 @@ class TestDynamicArticulations(unittest.TestCase):
         anchor = wp.transform_point(wp.transform(*q.tolist()), wp.vec3(-0.5, 0.0, 0.0))
         np.testing.assert_allclose(np.asarray(anchor), pivot, atol=5.0e-3)
         self.assertLess(float(q[2]), pivot[2] - 0.3)  # swung down
+
+    def test_spawned_trees_are_solved_exactly(self):
+        # Local joint blocks open the hinges of this whipping chain by about 10 cm.
+        scene = _Scene(bodies=12, shapes=12, joints=12, articulations=1, templates=[_hanging_chain_template()])
+        instance = scene.spawn([0], [(_LINK, 0.0, 4.0)])[0]
+        links = scene.bodies(instance, 12)
+        worst = 0.0
+        for _ in range(120):
+            scene.run(1)
+            q = scene.state_0.body_q.numpy()
+            worst = max(worst, *(_hinge_gap(q, a, b) for a, b in itertools.pairwise(links)))
+        self.assertLess(worst, 0.03)
+
+    def test_removing_a_tree_joint_falls_back_to_local_blocks(self):
+        scene = _Scene(bodies=12, shapes=12, joints=12, articulations=1, templates=[_hanging_chain_template()])
+        instance = scene.spawn([0], [(_LINK, 0.0, 4.0)])[0]
+        scene.run(20)
+        self.assertEqual(int(scene.solver.dynamics.data.tree.body_count.numpy()[instance]), 12)
+        wp.launch(_remove_joint_kernel, dim=1, inputs=[scene.dyn.data, int(instance), 6])
+        self.assertEqual(int(scene.solver.dynamics.data.tree.body_count.numpy()[instance]), 0)
+        scene.run(60)
+        q = scene.state_0.body_q.numpy()[scene.bodies(instance, 12)]
+        self.assertTrue(np.isfinite(q).all())
+        self.assertLess(float(q[-1, 2]), 1.0)  # the lower half fell
+        self.assertEqual(int(scene.dyn.error_count.numpy()[0]), 0)
 
 
 if __name__ == "__main__":

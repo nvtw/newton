@@ -1296,7 +1296,23 @@ class SolverPhoenX(SolverBase):
 
         self._has_joint_forces = model.joint_dof_count > 0
         self._last_dt: float = 0.0
+        self._runtime_tree_projector: GeneralMaximalTreeProjector | None = None
         if dynamic_capacity is not None:
+            # Spawned articulation trees get the exact mass-metric joint projection after the
+            # block sweeps, which local joint blocks alone converge to only slowly.
+            if (
+                dynamic_capacity.joint_count
+                and self.world._maximal_tree_projector is None
+                and any(t.get("tree") and t["joints"] for t in dynamic_capacity.articulation_templates)
+            ):
+                self._runtime_tree_projector = GeneralMaximalTreeProjector.for_runtime_articulations(
+                    model,
+                    self._constraints,
+                    self.bodies,
+                    self._joint_constraints.joint_idx_to_cid,
+                    dynamic_capacity.articulation_count,
+                )
+                self.world._maximal_tree_projector = self._runtime_tree_projector
             combine_mode = _COMBINE_MODES[self.friction_combine_mode]
             self.dynamics = PhoenXDynamics(self, self._collision_pipeline, int(combine_mode))
 

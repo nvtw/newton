@@ -5660,7 +5660,61 @@ class ModelBuilder:
                     "target_kd": [float(template.joint_target_kd[d]) for d in dofs],
                 }
             )
-        return {"bodies": bodies, "shapes": shapes, "joints": joints}, prototypes
+        data = {"bodies": bodies, "shapes": shapes, "joints": joints}
+        data["tree"] = self._articulation_template_tree(data)
+        return data, prototypes
+
+    @staticmethod
+    def _articulation_template_tree(data: dict[str, list]) -> dict[str, list] | None:
+        """Lane layout of a template that a solver can solve as an exact joint tree, or ``None``.
+
+        Qualifying templates are trees rooted at their first body, free or jointed to the world,
+        with at most 32 bodies of positive mass, at most three free axes per joint, and armature
+        only on single-axis angular joints. Lanes list bodies parent first.
+        """
+        bodies, joints = data["bodies"], data["joints"]
+        if len(bodies) > 32 or any(b["mass"] <= 0.0 for b in bodies):
+            return None
+        parent_joint = {}
+        for j, joint in enumerate(joints):
+            child = joint["child"]
+            free = joint["linear_count"] + joint["angular_count"]
+            single_angle = joint["linear_count"] == 0 and joint["angular_count"] == 1
+            if child in parent_joint or free > 3 or (not single_angle and any(a > 0.0 for a in joint["armature"])):
+                return None
+            parent_joint[child] = j
+        root_joint = parent_joint.get(0, -1)
+        if root_joint >= 0 and joints[root_joint]["parent"] != -1:
+            return None
+        children = [[] for _ in bodies]
+        for child, j in parent_joint.items():
+            parent = joints[j]["parent"]
+            if child != 0:
+                if parent < 0:
+                    return None  # a second world joint closes a loop through the world
+                children[parent].append(child)
+        lanes, depth, parent_lane, lane_of = [0], [0], [-1], {0: 0}
+        for lane_body in lanes:
+            for child in children[lane_body]:
+                lane_of[child] = len(lanes)
+                lanes.append(child)
+                depth.append(depth[lane_of[lane_body]] + 1)
+                parent_lane.append(lane_of[lane_body])
+        if len(lanes) != len(bodies):
+            return None  # disconnected bodies or loops
+        child_start, child_index = [0], []
+        for lane_body in lanes:
+            child_index.extend(lane_of[c] for c in children[lane_body])
+            child_start.append(len(child_index))
+        return {
+            "body": lanes,
+            "joint": [parent_joint.get(b, -1) for b in lanes],
+            "depth": depth,
+            "parent": parent_lane,
+            "child_start": child_start,
+            "child_index": child_index,
+            "floating": root_joint < 0,
+        }
 
     def add_world(
         self,

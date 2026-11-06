@@ -28,6 +28,7 @@ from ...geometry.types import GeoType
 from ...sim.enums import BodyFlags, JointTargetMode, JointType
 from .access_mode import ACCESS_MODE_VELOCITY_LEVEL
 from .adapter_kernels import write_body_properties
+from .articulations.maximal_projector_general import GeneralMaximalTreeProjectorData
 from .body import BodyContainer, sym6_from_mat33
 from .constraints.constraint_container import (
     CONSTRAINT_BODY1_OFFSET,
@@ -338,6 +339,33 @@ class DynamicsData:
     #: World wrench of every constraint column on its second body; see :func:`phoenx_joint_wrench`.
     constraint_wrench: wp.array[wp.spatial_vector]
 
+    #: Exact joint-tree solve of each instance; ``tree.body_count`` is zero for instances without one.
+    tree: GeneralMaximalTreeProjectorData
+    #: Per template: tree lanes (zero when it is not solved as a tree), root kind, and depth.
+    template_tree_count: wp.array[wp.int32]
+    template_tree_floating: wp.array[wp.int32]
+    template_tree_max_depth: wp.array[wp.int32]
+    #: Per template and lane: template body, template joint, depth, parent lane, and children.
+    template_tree_body: wp.array2d[wp.int32]
+    template_tree_joint: wp.array2d[wp.int32]
+    template_tree_depth: wp.array2d[wp.int32]
+    template_tree_parent: wp.array2d[wp.int32]
+    template_tree_child_start: wp.array2d[wp.int32]
+    template_tree_child_index: wp.array2d[wp.int32]
+    #: Instance owning each reserved body and joint slot, or ``-1``.
+    body_articulation: wp.array[wp.int32]
+    joint_articulation: wp.array[wp.int32]
+
+
+@wp.func
+def _drop_tree(dyn: DynamicsData, owners: wp.array[wp.int32], slot: wp.int32):
+    """Stop solving the tree of the instance owning ``slot`` exactly; its rows fall back to local blocks."""
+    if owners.shape[0] > slot:
+        instance = owners[slot]
+        if instance >= 0:
+            dyn.tree.body_count[instance] = 0
+            owners[slot] = -1
+
 
 @wp.func
 def phoenx_add_body(dyn: DynamicsData, desc: BodyDesc) -> wp.int32:
@@ -352,6 +380,8 @@ def phoenx_add_body(dyn: DynamicsData, desc: BodyDesc) -> wp.int32:
             dyn.body_pool.state[slot] = _REMOVED
         return -1
     body = dyn.body_pool.start + slot
+    if dyn.body_articulation.shape[0] > slot:
+        dyn.body_articulation[slot] = -1
     inv_mass = wp.float32(0.0)
     inv_inertia = wp.mat33(0.0)
     if desc.mass > 0.0:
@@ -408,6 +438,7 @@ def phoenx_body_is_active(dyn: DynamicsData, body: wp.int32) -> wp.bool:
 def phoenx_remove_body(dyn: DynamicsData, body: wp.int32) -> wp.bool:
     """Remove a runtime body together with its shapes at the next commit; ``False`` if not removable."""
     if _pool_release(dyn.body_pool, body):
+        _drop_tree(dyn, dyn.body_articulation, body - dyn.body_pool.start)
         return True
     wp.atomic_add(dyn.error_count, 0, 1)
     return False
@@ -620,6 +651,8 @@ def phoenx_add_joint(dyn: DynamicsData, desc: JointDesc) -> wp.int32:
         wp.atomic_add(dyn.error_count, 0, 1)
         return -1
     joint = dyn.joint_pool.start + slot
+    if dyn.joint_articulation.shape[0] > slot:
+        dyn.joint_articulation[slot] = -1
     cid = dyn.joint_cid[joint]
     qd = dyn.joint_qd_start[joint]
     target_q = dyn.joint_target_q_start[joint]
@@ -740,6 +773,7 @@ def phoenx_add_joint(dyn: DynamicsData, desc: JointDesc) -> wp.int32:
 def phoenx_remove_joint(dyn: DynamicsData, joint: wp.int32) -> wp.bool:
     """Remove a runtime joint at the next commit; ``False`` if not removable."""
     if _pool_release(dyn.joint_pool, joint):
+        _drop_tree(dyn, dyn.joint_articulation, joint - dyn.joint_pool.start)
         return True
     wp.atomic_add(dyn.error_count, 0, 1)
     return False
@@ -760,6 +794,8 @@ _ARTICULATION_GROUP = wp.constant(-(1 << 24))  # first per-instance negative col
 
 @wp.func
 def _remove_articulation_rows(dyn: DynamicsData, instance: wp.int32):
+    if dyn.tree.body_count.shape[0] > instance:
+        dyn.tree.body_count[instance] = 0
     for i in range(dyn.articulation_bodies.shape[1]):
         body = dyn.articulation_bodies[instance, i]
         if body >= 0:
@@ -827,7 +863,37 @@ def phoenx_spawn_articulation(
         _remove_articulation_rows(dyn, instance)
         _pool_release(dyn.articulation_pool, instance)
         return -1
+    lanes = dyn.template_tree_count[template]
+    if lanes > 0 and dyn.tree.body_count.shape[0] > instance:
+        _write_tree(dyn, template, instance, lanes)
     return instance
+
+
+@wp.func
+def _write_tree(dyn: DynamicsData, template: wp.int32, instance: wp.int32, lanes: wp.int32):
+    """Lay out an instance's tree for the exact projection from its template's lane table."""
+    tree = dyn.tree
+    for lane in range(32):
+        body = wp.int32(-1)
+        joint = wp.int32(-1)
+        if lane < lanes:
+            body = dyn.articulation_bodies[instance, dyn.template_tree_body[template, lane]]
+            local_joint = dyn.template_tree_joint[template, lane]
+            if local_joint >= 0:
+                joint = dyn.articulation_joints[instance, local_joint]
+                dyn.joint_articulation[joint - dyn.joint_pool.start] = instance
+            dyn.body_articulation[body - dyn.body_pool.start] = instance
+            body += 1  # PhoenX body slot
+        tree.body_slot[instance, lane] = body
+        tree.joint_index[instance, lane] = joint
+        tree.depth[instance, lane] = dyn.template_tree_depth[template, lane]
+        tree.parent[instance, lane] = dyn.template_tree_parent[template, lane]
+        tree.child_index[instance, lane] = dyn.template_tree_child_index[template, lane]
+    for lane in range(33):
+        tree.child_start[instance, lane] = dyn.template_tree_child_start[template, lane]
+    tree.floating_root[instance] = dyn.template_tree_floating[template]
+    tree.max_depth[instance] = dyn.template_tree_max_depth[template]
+    tree.body_count[instance] = lanes
 
 
 @wp.func
@@ -1144,6 +1210,7 @@ class PhoenXDynamics:
             ):
                 setattr(d, name, getattr(rows, name))
         self._world = world
+        self._solver = solver
         d.constraint_wrench = wp.zeros(max(1, world.num_constraints), dtype=wp.spatial_vector, device=device)
         self._init_articulations(d, capacity.articulation_templates, device)
         self.data = d
@@ -1209,6 +1276,51 @@ class PhoenXDynamics:
         d.articulation_template = wp.full(count, -1, dtype=wp.int32, device=device)
         d.articulation_bodies = wp.full((count, max_bodies), -1, dtype=wp.int32, device=device)
         d.articulation_joints = wp.full((count, max_joints), -1, dtype=wp.int32, device=device)
+
+        # Exact joint trees, when the solver brings a runtime projector.
+        projector = getattr(self._solver, "_runtime_tree_projector", None)
+        lanes = (len(templates), 32)
+        tree_count, floating, max_depth = (np.zeros(len(templates), dtype=np.int32) for _ in range(3))
+        tree_body, tree_joint, depth, parent, child_index = (np.full(lanes, -1, dtype=np.int32) for _ in range(5))
+        child_start = np.zeros((len(templates), 33), dtype=np.int32)
+        for t, template in enumerate(templates):
+            tree = template.get("tree")
+            if projector is None or tree is None or not template["joints"]:
+                continue
+            n = len(tree["body"])
+            tree_count[t] = n
+            floating[t] = int(tree["floating"])
+            max_depth[t] = max(tree["depth"])
+            tree_body[t, :n] = tree["body"]
+            tree_joint[t, :n] = tree["joint"]
+            depth[t, :n] = tree["depth"]
+            parent[t, :n] = tree["parent"]
+            child_start[t, : n + 1] = tree["child_start"]
+            child_start[t, n + 1 :] = tree["child_start"][-1]
+            child_index[t, : len(tree["child_index"])] = tree["child_index"]
+        rows = max(1, len(templates))
+        pad = lambda a: np.concatenate([a, np.zeros((rows - len(a), *a.shape[1:]), a.dtype)])  # noqa: E731
+        d.template_tree_count, d.template_tree_floating, d.template_tree_max_depth = (
+            wp.array(pad(a), dtype=wp.int32, device=device) for a in (tree_count, floating, max_depth)
+        )
+        (
+            d.template_tree_body,
+            d.template_tree_joint,
+            d.template_tree_depth,
+            d.template_tree_parent,
+            d.template_tree_child_start,
+            d.template_tree_child_index,
+        ) = (
+            wp.array(pad(a), dtype=wp.int32, device=device)
+            for a in (tree_body, tree_joint, depth, parent, child_start, child_index)
+        )
+        if projector is not None:
+            d.tree = projector.data
+        else:
+            d.tree = GeneralMaximalTreeProjectorData()
+            d.tree.body_count = wp.zeros(0, dtype=wp.int32, device=device)
+        d.body_articulation = wp.full(max(1, self.bodies.capacity), -1, dtype=wp.int32, device=device)
+        d.joint_articulation = wp.full(max(1, self.joints.capacity), -1, dtype=wp.int32, device=device)
 
     def update_joint_wrenches(self) -> None:
         """Refresh the joint reactions read by :func:`phoenx_joint_wrench`; call after a step."""
