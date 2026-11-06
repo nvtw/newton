@@ -260,6 +260,29 @@ class TestDynamicBodies(unittest.TestCase):
         with self.assertRaises(ValueError):
             newton.solvers.SolverPhoenX(model, joint_mode="maximal_direct")
 
+    def test_runtime_body_falls_in_a_reduced_articulation_scene(self):
+        """Reduced scenes still integrate runtime bodies, whose rows start static."""
+        builder = newton.ModelBuilder()
+        builder.add_ground_plane()
+        link = builder.add_link(xform=wp.transform(wp.vec3(3.0, 0.0, 0.2), wp.quat_identity()))
+        builder.add_shape_box(link, hx=0.2, hy=0.2, hz=0.2)
+        builder.add_articulation([builder.add_joint_free(link)])
+        builder.reserve_dynamic_capacity(bodies=1, shapes=1)
+        model = builder.finalize()
+        solver = newton.solvers.SolverPhoenX(model, joint_mode="reduced")
+        bodies = wp.zeros(1, dtype=int)
+        wp.launch(_spawn_column_kernel, dim=1, inputs=[solver.dynamics.data, wp.array([0.0], dtype=float), 2.0, bodies])
+        state_0, state_1, control = model.state(), model.state(), model.control()
+        contacts = model._collision_pipeline.contacts()
+        with wp.ScopedCapture() as capture:
+            solver.collide(state_0, contacts)
+            solver.step(state_0, state_1, control, contacts, _DT)
+            for name in ("body_q", "body_qd", "joint_q", "joint_qd"):
+                wp.copy(getattr(state_0, name), getattr(state_1, name))
+        for _ in range(90):
+            wp.capture_launch(capture.graph)
+        np.testing.assert_allclose(state_0.body_q.numpy()[bodies.numpy()[0]][2], _HALF, atol=5.0e-3)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -113,8 +113,8 @@ def _fallback_world_block_dim(world_count: int, sm_count: int) -> int:
 def _fallback_impossible_from_model_pairs(model: Model) -> tuple[bool, bool, bool, bool]:
     """Prove whether model-generated rigid pairs can require fallback."""
     capacity = getattr(model, "_dynamic_capacity", None)
-    if capacity is not None and capacity.slot_size:
-        return False, False, False, False  # runtime shapes on articulation slots defeat the proof
+    if capacity is not None and capacity.shape_count:
+        return False, False, False, False  # runtime shapes create pairs the model never listed
     pairs_array = getattr(model, "shape_contact_pairs", None)
     if pairs_array is None or model.shape_body is None:
         return False, False, False, False

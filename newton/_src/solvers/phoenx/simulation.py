@@ -1187,6 +1187,7 @@ class PhoenXWorld:
         # Contact state split across two narrow containers:
         # ContactContainer: keyed by contact index k (warm-start, prev lambdas).
         # ContactColumnContainer: keyed by local cid (column header).
+        self._contact_body_entries = None  # gathered warm start, allocated last when eligible
         if self.max_contact_columns > 0:
             self._contact_container: ContactContainer = contact_container_zeros(
                 self.rigid_contact_max, device=self.device
@@ -1216,7 +1217,6 @@ class PhoenXWorld:
                 if self._colored_contact_rows
                 else self._contact_container
             )
-            self._contact_body_entries = None
             if self._colored_contact_rows:
                 self._contact_row_counts = wp.zeros(self._constraint_capacity, dtype=wp.int32, device=self.device)
                 self._contact_row_offsets = wp.zeros(self._constraint_capacity, dtype=wp.int32, device=self.device)

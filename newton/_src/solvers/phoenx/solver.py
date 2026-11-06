@@ -933,7 +933,7 @@ class SolverPhoenX(SolverBase):
             # buffers into one internal PGS row space.
             rigid_contact_max = rigid_contact_capacity + soft_contact_capacity + self_contact_capacity
         else:
-            rigid_contact_max = int(model.rigid_contact_max)
+            rigid_contact_max = int(model.rigid_contact_max or 0)  # None for a model without shapes
 
         gravity_tuples = [tuple(float(x) for x in row) for row in gravity_np]
         if len(gravity_tuples) == 1:
@@ -1147,6 +1147,9 @@ class SolverPhoenX(SolverBase):
                         if owned and cid >= 0:
                             joint_pgs_enabled[cid] = 0
                 self.world.set_reduced_articulation(self._reduced_articulation, joint_pgs_enabled)
+                if dynamic_capacity is not None and dynamic_capacity.body_count:
+                    # Reserved rows are static until filled; runtime bodies need gravity and integration.
+                    self.world._has_maximal_dynamic_bodies = True
 
         self._direct_equality_system: DirectEqualitySystem | None = None
         # The experimental maximal tree projector already owns structural tree

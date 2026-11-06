@@ -202,7 +202,7 @@ def _compare_compact_transformed_inertia_kernel(
 
 
 def _make_mixed_tree_builder():
-    builder = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Z)
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
     root = builder.add_link(mass=2.0)
     slider = builder.add_link(mass=1.5)
     ball = builder.add_link(mass=1.0)
@@ -237,7 +237,7 @@ def _make_mixed_tree(device):
 
 
 def _make_branched_tree(device):
-    builder = newton.ModelBuilder(gravity=-9.2, up_axis=newton.Axis.Z)
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, -9.2), up_axis=newton.Axis.Z)
     root = builder.add_link(mass=3.0)
     left = builder.add_link(mass=1.5)
     left_tip = builder.add_link(mass=0.8)
@@ -282,7 +282,7 @@ def _make_branched_tree(device):
 
 def _make_wide_tree(device, child_count):
     cfg = newton.ModelBuilder.ShapeConfig(density=500.0, collision_group=0)
-    builder = newton.ModelBuilder(gravity=-9.2, up_axis=newton.Axis.Z)
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, -9.2), up_axis=newton.Axis.Z)
     root = builder.add_link()
     builder.add_shape_box(root, hx=0.12, hy=0.1, hz=0.08, cfg=cfg)
     joints = [builder.add_joint_revolute(parent=-1, child=root, axis=newton.Axis.Z)]
@@ -310,7 +310,7 @@ def _make_four_bar_builder():
     coupler_length = 1.0
     angle = np.pi / 3.0
     cfg = newton.ModelBuilder.ShapeConfig(density=500.0)
-    builder = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Y)
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Y)
     crank = builder.add_link()
     coupler = builder.add_link()
     rocker = builder.add_link()
@@ -365,7 +365,7 @@ def _make_contact_four_bar_loop(device):
 
 def _make_four_bar_fleet(device, world_count):
     blueprint, _loop_joint = _make_four_bar_builder()
-    builder = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Y)
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Y)
     builder.replicate(blueprint, world_count=world_count)
     model = builder.finalize(device=device)
     loop_joints = np.flatnonzero(model.joint_articulation.numpy() < 0)
@@ -383,13 +383,13 @@ def _make_four_bar_clusters(device, *, worlds, articulations_per_world, loop_cop
             child_xform=blueprint.joint_X_c[loop_joint],
         )
         blueprint.joint_articulation[duplicate] = -1
-    cluster = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Y)
+    cluster = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Y)
     for articulation in range(articulations_per_world):
         cluster.add_builder(
             blueprint,
             xform=wp.transform(wp.vec3(0.0, 2.0 * articulation, 0.0), wp.quat_identity()),
         )
-    builder = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Y)
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Y)
     if worlds == 1:
         builder.add_builder(cluster)
     else:
@@ -400,7 +400,7 @@ def _make_four_bar_clusters(device, *, worlds, articulations_per_world, loop_cop
 
 
 def _make_d6_universal_tree(device):
-    builder = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Z)
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
     newton.solvers.SolverMuJoCo.register_custom_attributes(builder)
     body = builder.add_link(mass=1.0, inertia=((0.1, 0.0, 0.0), (0.0, 0.1, 0.0), (0.0, 0.0, 0.1)))
     builder.add_shape_box(body, hx=0.1, hy=0.1, hz=0.1, cfg=newton.ModelBuilder.ShapeConfig(density=0.0))
@@ -424,7 +424,7 @@ def _make_d6_universal_tree(device):
 
 
 def _make_cylindrical_d6_tree(device):
-    builder = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Z)
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
     body = builder.add_link(mass=1.0)
     builder.add_shape_box(body, hx=0.1, hy=0.1, hz=0.1)
     joint = builder.add_joint_d6(
@@ -438,7 +438,7 @@ def _make_cylindrical_d6_tree(device):
 
 
 def _make_floating_mixed_tree(device):
-    builder = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Z)
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
     root = builder.add_link(mass=2.0)
     slider = builder.add_link(mass=1.4)
     ball = builder.add_link(mass=0.9)
@@ -471,7 +471,7 @@ def _make_floating_mixed_tree(device):
 
 
 def _make_floating_tree_builder():
-    builder = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Z)
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
     root = builder.add_link(mass=2.0)
     child = builder.add_link(mass=1.0)
     builder.add_shape_box(root, hx=0.25, hy=0.15, hz=0.1)
@@ -520,7 +520,7 @@ def _make_undeclared_floating_tree(device, *, declare_root_only=False):
 
 def _make_driven_floating_tree(device):
     """Free-root two-hinge chain with position drives on both hinges."""
-    builder = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Z)
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
     root = builder.add_link(mass=2.0)
     mid = builder.add_link(mass=1.0)
     tip = builder.add_link(mass=0.5)
@@ -554,7 +554,7 @@ def _make_driven_floating_tree(device):
 
 def _make_translated_floating_pair(device, translation=4096.0):
     blueprint = _make_floating_tree_builder()
-    builder = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Z)
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
     builder.add_builder(blueprint)
     builder.add_builder(
         blueprint,
@@ -565,7 +565,7 @@ def _make_translated_floating_pair(device, translation=4096.0):
 
 def _make_contact_floating_tree_cluster(device, *, worlds=1, articulations_per_world=2, articulation_spacing=1.5):
     blueprint = _make_floating_tree_builder()
-    cluster = newton.ModelBuilder(gravity=-9.81, up_axis=newton.Axis.Z)
+    cluster = newton.ModelBuilder(gravity=(0.0, 0.0, -9.81), up_axis=newton.Axis.Z)
     for articulation in range(articulations_per_world):
         cluster.add_builder(
             blueprint,
@@ -575,7 +575,7 @@ def _make_contact_floating_tree_cluster(device, *, worlds=1, articulations_per_w
             ),
         )
     cluster.add_ground_plane(cfg=newton.ModelBuilder.ShapeConfig(collision_group=-1, mu=0.7, restitution=0.0))
-    builder = newton.ModelBuilder(gravity=-9.81, up_axis=newton.Axis.Z)
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, -9.81), up_axis=newton.Axis.Z)
     if worlds == 1:
         builder.add_builder(cluster)
     else:
@@ -584,7 +584,7 @@ def _make_contact_floating_tree_cluster(device, *, worlds=1, articulations_per_w
 
 
 def _make_descendant_free_distance(device, joint_type, *, parent_kinematic=True):
-    builder = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Y)
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Y)
     base = builder.add_link(is_kinematic=parent_kinematic, mass=1.0)
     child = builder.add_link(mass=1.0)
     builder.add_shape_sphere(base, radius=0.1)
@@ -636,7 +636,7 @@ def _make_floating_triangle_loop(device):
     length = 1.0
     angle = 2.0 * np.pi / 3.0
     cfg = newton.ModelBuilder.ShapeConfig(density=200.0)
-    builder = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Z)
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
     body0 = builder.add_link()
     body1 = builder.add_link()
     body2 = builder.add_link()
@@ -673,7 +673,7 @@ def _make_floating_triangle_loop(device):
 
 
 def _make_free_body_loop_builder(joint_type):
-    builder = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Z)
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
     body = builder.add_link()
     builder.add_shape_box(body, hx=0.2, hy=0.15, hz=0.1)
     tree_joint = builder.add_joint_free(parent=-1, child=body)
@@ -694,7 +694,7 @@ def _make_free_body_loop(device, joint_type):
 
 def _make_free_body_loop_cluster(device, joint_type, articulation_count):
     blueprint = _make_free_body_loop_builder(joint_type)
-    builder = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Z)
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
     for articulation in range(articulation_count):
         builder.add_builder(
             blueprint,
@@ -704,7 +704,7 @@ def _make_free_body_loop_cluster(device, joint_type, articulation_count):
 
 
 def _make_contact_momentum_model(device, *, with_cloth=False, cloth_contact=False):
-    builder = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Z)
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
     root = builder.add_link(mass=1.0)
     child = builder.add_link(mass=0.5)
     collider = builder.add_link(mass=1.0)
@@ -739,7 +739,7 @@ def _make_contact_momentum_model(device, *, with_cloth=False, cloth_contact=Fals
 
 
 def _make_dense_articulation_contact_chain(device, articulation_count=48):
-    builder = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Z)
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
     shape_cfg = newton.ModelBuilder.ShapeConfig(mu=0.0, restitution=0.0)
     for index in range(articulation_count):
         body = builder.add_link(mass=1.0)
@@ -751,7 +751,7 @@ def _make_dense_articulation_contact_chain(device, articulation_count=48):
 
 
 def _make_high_degree_articulation_star(device, satellite_count=72):
-    builder = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Z)
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
     shape_cfg = newton.ModelBuilder.ShapeConfig(density=1.0, mu=0.0, restitution=0.0)
     center = builder.add_link(mass=2.0)
     builder.add_shape_sphere(center, radius=1.0, cfg=shape_cfg)
@@ -770,7 +770,7 @@ def _make_high_degree_articulation_star(device, satellite_count=72):
 
 
 def _make_large_contact_articulation(device, ball_joint_count=20):
-    builder = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Z)
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
     shape_cfg = newton.ModelBuilder.ShapeConfig(mu=0.0, restitution=0.0)
     root = builder.add_link(mass=2.0)
     builder.add_shape_sphere(root, radius=0.2, cfg=shape_cfg)
@@ -795,7 +795,7 @@ def _make_large_contact_articulation(device, ball_joint_count=20):
 
 
 def _make_contact_overflow_model(device, contact_count=_POINTS_PER_PAGE + 8):
-    builder = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Z)
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
     body = builder.add_link(mass=2.0)
     shape_cfg = newton.ModelBuilder.ShapeConfig(mu=0.6, restitution=0.0)
     width = 6
@@ -816,7 +816,7 @@ def _make_contact_overflow_model(device, contact_count=_POINTS_PER_PAGE + 8):
 
 
 def _make_grounded_articulation_cluster(device, *, worlds=3, articulations_per_world=2):
-    cluster = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Z)
+    cluster = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
     for articulation in range(articulations_per_world):
         body = cluster.add_link(mass=1.0)
         shape_cfg = newton.ModelBuilder.ShapeConfig(
@@ -829,13 +829,13 @@ def _make_grounded_articulation_cluster(device, *, worlds=3, articulations_per_w
         cluster.add_articulation([joint])
         cluster.joint_q[-7:] = [float(articulation), 0.0, 0.19, 0.0, 0.0, 0.0, 1.0]
     cluster.add_ground_plane(cfg=newton.ModelBuilder.ShapeConfig(collision_group=-1))
-    builder = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Z)
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
     builder.replicate(cluster, world_count=worlds)
     return builder.finalize(device=device)
 
 
 def _make_mixed_reduced_maximal_ground_model(device, *, worlds=1, interacting=False):
-    blueprint = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Z)
+    blueprint = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
     shape_cfg = newton.ModelBuilder.ShapeConfig(mu=0.0, restitution=0.0)
     reduced_x = -0.19 if interacting else -1.0
     maximal_x = 0.19 if interacting else 1.0
@@ -852,13 +852,13 @@ def _make_mixed_reduced_maximal_ground_model(device, *, worlds=1, interacting=Fa
     blueprint.add_ground_plane(cfg=newton.ModelBuilder.ShapeConfig(collision_group=-1))
     if worlds == 1:
         return blueprint.finalize(device=device)
-    builder = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Z)
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
     builder.replicate(blueprint, world_count=worlds)
     return builder.finalize(device=device)
 
 
 def _make_self_contact_model(device, worlds=1):
-    blueprint = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Z)
+    blueprint = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
     root = blueprint.add_link(mass=2.0)
     middle = blueprint.add_link(mass=1.0)
     tip = blueprint.add_link(mass=1.5)
@@ -881,7 +881,7 @@ def _make_self_contact_model(device, worlds=1):
     blueprint.add_articulation([free_joint, middle_joint, tip_joint])
     if worlds == 1:
         return blueprint.finalize(device=device)
-    builder = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Z)
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
     builder.replicate(blueprint, world_count=worlds)
     return builder.finalize(device=device)
 
@@ -1280,7 +1280,7 @@ class TestReducedArticulation(unittest.TestCase):
         # _WARP_FACTOR_MIN_ARTICULATIONS; replicate a floating tree past it.
         articulation_count = 40
         blueprint = _make_floating_tree_builder()
-        builder = newton.ModelBuilder(gravity=-9.81, up_axis=newton.Axis.Z)
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, -9.81), up_axis=newton.Axis.Z)
         for articulation in range(articulation_count):
             builder.add_builder(
                 blueprint,
@@ -1335,7 +1335,7 @@ class TestReducedArticulation(unittest.TestCase):
         if not device.is_cuda:
             self.skipTest("register introspection requires a CUDA device")
         try:
-            from cuda.bindings import driver as _drv  # optional, guarded
+            from cuda.bindings import driver as _drv  # noqa: PLC0415 (optional, guarded)
 
             _num_regs_attr = _drv.CUfunction_attribute.CU_FUNC_ATTRIBUTE_NUM_REGS
         except Exception:
@@ -1558,7 +1558,7 @@ class TestReducedArticulation(unittest.TestCase):
         if not device.is_cuda:
             self.skipTest("reduced articulation tests require CUDA graph capture")
 
-        builder = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Z)
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
         body = builder.add_link(mass=1.0, inertia=wp.mat33(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0))
         joint = builder.add_joint_free(parent=-1, child=body)
         builder.add_articulation([joint])
@@ -3095,12 +3095,15 @@ class TestReducedArticulation(unittest.TestCase):
                     block.row_count,
                     block.row_body,
                     block.row_wrench,
+                    block.row_body_pair,
+                    block.row_wrench_pair,
                     block.point_contact,
                     solver.world._contact_container,
                     block.max_page_count,
                     block.page_index,
                     wp.bool(True),
                     block.packed_previous_row_body,
+                    block.packed_previous_row_body_pair,
                 ],
                 outputs=[
                     block.packed_jacobian,
@@ -3220,6 +3223,7 @@ class TestReducedArticulation(unittest.TestCase):
                 reference_previous_row_body = wp.full(
                     block.packed_previous_row_body.shape, -1, dtype=wp.int32, device=device
                 )
+                reference_previous_row_body_pair = wp.full_like(reference_previous_row_body, value=-1)
                 reference_kernel = _get_build_packed_rows_kernel(True)
 
                 with wp.ScopedCapture(device=device) as capture:
@@ -3236,12 +3240,15 @@ class TestReducedArticulation(unittest.TestCase):
                             block.row_count,
                             block.row_body,
                             block.row_wrench,
+                            block.row_body_pair,
+                            block.row_wrench_pair,
                             block.point_contact,
                             solver.world._contact_container,
                             block.max_page_count,
                             block.page_index,
                             wp.bool(True),
                             reference_previous_row_body,
+                            reference_previous_row_body_pair,
                         ],
                         outputs=[
                             reference_jacobian,
@@ -3785,7 +3792,7 @@ class TestReducedArticulation(unittest.TestCase):
             self.skipTest("reduced articulation tests require CUDA graph capture")
 
         world_count = 8
-        builder = newton.ModelBuilder(gravity=0.0, up_axis=newton.Axis.Z)
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
         builder.replicate(_make_mixed_tree_builder(), world_count=world_count)
         model = builder.finalize(device=device)
         state_phoenx = model.state()
@@ -4026,7 +4033,8 @@ class TestReducedArticulation(unittest.TestCase):
             block.solve = original_solve
         wp.capture_launch(capture.graph)
 
-        self.assertEqual(prepare_flags, [True, False, False, False, True, False])
+        # Biased solves follow the stride; each relax follows integration and always re-prepares.
+        self.assertEqual(prepare_flags, [True, True, False, True, True, True])
         self.assertTrue(np.isfinite(output.joint_q.numpy()).all())
         self.assertTrue(np.isfinite(output.joint_qd.numpy()).all())
 
@@ -4124,6 +4132,7 @@ class TestReducedArticulation(unittest.TestCase):
         newton.eval_fk(model, state.joint_q, state.joint_qd, state)
         solver = newton.solvers.SolverPhoenX(
             model,
+            enable_body_pair_grouping=False,  # keep one contact point per sphere
             joint_mode="reduced",
             substeps=1,
             solver_iterations=8,
@@ -4144,7 +4153,8 @@ class TestReducedArticulation(unittest.TestCase):
         self.assertTrue(block._skip_fallback_coloring)
         self.assertTrue(block._schedule_already_grouped)
         self.assertEqual(int(block.max_page_count.numpy()[0]), 1)
-        self.assertEqual(int(block.page_index.numpy()[0]), 0)
+        # The page loop leaves its cursor one past the last solved page.
+        self.assertEqual(int(block.page_index.numpy()[0]), 1)
         self.assertTrue(np.isfinite(output.joint_qd.numpy()).all())
         self.assertGreater(float(output.joint_qd.numpy()[2]), -0.2)
 
@@ -4209,6 +4219,7 @@ class TestReducedArticulation(unittest.TestCase):
         newton.eval_fk(model, state.joint_q, state.joint_qd, state)
         solver = newton.solvers.SolverPhoenX(
             model,
+            enable_body_pair_grouping=False,  # keep one contact point per sphere
             joint_mode="reduced",
             substeps=1,
             solver_iterations=8,
@@ -4283,6 +4294,7 @@ class TestReducedArticulation(unittest.TestCase):
 
         separate = newton.solvers.SolverPhoenX(
             model,
+            enable_body_pair_grouping=False,  # keep one contact point per sphere
             joint_mode="reduced",
             substeps=1,
             solver_iterations=8,
@@ -4290,6 +4302,7 @@ class TestReducedArticulation(unittest.TestCase):
         )
         fused = newton.solvers.SolverPhoenX(
             model,
+            enable_body_pair_grouping=False,  # keep one contact point per sphere
             joint_mode="reduced",
             substeps=1,
             solver_iterations=8,
@@ -4350,6 +4363,7 @@ class TestReducedArticulation(unittest.TestCase):
 
         reference = newton.solvers.SolverPhoenX(
             model,
+            enable_body_pair_grouping=False,  # keep one contact point per sphere
             joint_mode="reduced",
             reduced_articulation_path="reference",
             substeps=2,
@@ -4358,6 +4372,7 @@ class TestReducedArticulation(unittest.TestCase):
         )
         persistent = newton.solvers.SolverPhoenX(
             model,
+            enable_body_pair_grouping=False,  # keep one contact point per sphere
             joint_mode="reduced",
             reduced_articulation_path="persistent",
             substeps=2,

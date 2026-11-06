@@ -334,7 +334,7 @@ class TestSensorIMU(unittest.TestCase):
         mass, radius = 1.0, 0.05
         omega_z = 5.0  # rad/s
 
-        builder = newton.ModelBuilder(gravity=0.0)  # no gravity to keep linear acc clean
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))  # no gravity to keep linear acc clean
         ixx = 0.4 * mass * radius * radius
         body = builder.add_body(
             xform=wp.transform((0.0, 0.0, 0.0), wp.quat_identity()),
