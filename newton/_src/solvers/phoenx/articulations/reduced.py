@@ -45,6 +45,11 @@ from newton._src.solvers.phoenx.constraints.contact_container import ContactCont
 from newton._src.solvers.semi_implicit.kernels_body import joint_force
 
 _MAX_JOINT_DOF = 6
+# A tree takes the linearly implicit velocity-product step once any link turns
+# faster than this many radians per step. The explicit step's energy error grows
+# about 30 (|omega| dt)^4 per step for a thin link spinning about its long axis
+# (measured), about 0.3%/s at 0.025 and 2%/s at this bound with 240 Hz steps.
+_IMPLICIT_SPIN_STEP = wp.constant(0.04)
 _WARP_FACTOR_MIN_ARTICULATIONS = 32
 _WARP_FACTOR_MIN_DEPTH_LEVELS = 8
 _vec6 = wp.types.vector(length=6, dtype=wp.float32)
@@ -165,6 +170,208 @@ def _invert_spd(matrix: _mat66, size: wp.int32) -> _mat66:
                 if wp.int32(row) < size:
                     inverse[row, column] = solution[row]
     return inverse
+
+
+@wp.func
+def _guard_pivot(value: wp.float32) -> wp.float32:
+    if wp.abs(value) < wp.float32(1.0e-20):
+        return wp.where(value < wp.float32(0.0), wp.float32(-1.0e-20), wp.float32(1.0e-20))
+    return value
+
+
+@wp.func
+def _invert_general(matrix: _mat66, size: wp.int32) -> _mat66:
+    """Invert the leading ``size`` block by Gauss-Jordan with partial pivoting."""
+    work = matrix
+    inverse = _mat66(0.0)
+    for row in range(_MAX_JOINT_DOF):
+        inverse[row, row] = wp.float32(1.0)
+    for column in range(_MAX_JOINT_DOF):
+        if wp.int32(column) < size:
+            pivot = wp.int32(column)
+            pivot_magnitude = wp.abs(work[column, column])
+            for row in range(column + 1, _MAX_JOINT_DOF):
+                if wp.int32(row) < size and wp.abs(work[row, column]) > pivot_magnitude:
+                    pivot = wp.int32(row)
+                    pivot_magnitude = wp.abs(work[row, column])
+            # Swap through unrolled selects so every index stays compile-time.
+            for row in range(column + 1, _MAX_JOINT_DOF):
+                if wp.int32(row) == pivot:
+                    for entry in range(_MAX_JOINT_DOF):
+                        swap = work[column, entry]
+                        work[column, entry] = work[row, entry]
+                        work[row, entry] = swap
+                        swap = inverse[column, entry]
+                        inverse[column, entry] = inverse[row, entry]
+                        inverse[row, entry] = swap
+            scale = wp.float32(1.0) / _guard_pivot(work[column, column])
+            for entry in range(_MAX_JOINT_DOF):
+                work[column, entry] = work[column, entry] * scale
+                inverse[column, entry] = inverse[column, entry] * scale
+            for row in range(_MAX_JOINT_DOF):
+                if row != column and wp.int32(row) < size:
+                    factor = work[row, column]
+                    for entry in range(_MAX_JOINT_DOF):
+                        work[row, entry] = work[row, entry] - factor * work[column, entry]
+                        inverse[row, entry] = inverse[row, entry] - factor * inverse[column, entry]
+    return inverse
+
+
+@wp.func
+def _scaled_gyroscopic_jacobian(
+    inertia: wp.spatial_matrix,
+    velocity: wp.spatial_vector,
+    dt: wp.float32,
+) -> wp.spatial_matrix:
+    """Return ``dt * d(v x* I v)/dv`` for one body's spatial inertia.
+
+    The velocity-product wrench ``v x* (I v)`` is bilinear, so its Jacobian is
+    ``dv x* (I v) + v x* (I dv)``.
+    """
+    momentum = inertia * velocity
+    result = wp.spatial_matrix()
+    for column in range(6):
+        unit = wp.spatial_vector()
+        unit[column] = wp.float32(1.0)
+        inertia_column = wp.spatial_vector()
+        for row in range(6):
+            inertia_column[row] = inertia[row, column]
+        derivative = spatial_cross_dual(unit, momentum) + spatial_cross_dual(velocity, inertia_column)
+        for row in range(6):
+            result[row, column] = dt * derivative[row]
+    return result
+
+
+@wp.func
+def _transport_velocity_block(
+    velocity_block: wp.spatial_matrix,
+    coriolis_block: wp.spatial_matrix,
+    joint_twist: wp.spatial_vector,
+    dt: wp.float32,
+) -> wp.spatial_matrix:
+    """Return ``A_v - dt A_c crm(S qd)``, the velocity block of ``A X``."""
+    result = velocity_block
+    for row in range(6):
+        force = wp.spatial_vector()
+        for column in range(6):
+            force[column] = coriolis_block[row, column]
+        # (A crm(w))[row, :] = -(w x* A[row, :])
+        transported = spatial_cross_dual(joint_twist, force)
+        for column in range(6):
+            result[row, column] = result[row, column] + dt * transported[column]
+    return result
+
+
+@wp.func
+def _factor_implicit_joint(
+    velocity_block: wp.spatial_matrix,
+    coriolis_block: wp.spatial_matrix,
+    joint_twist: wp.spatial_vector,
+    dt: wp.float32,
+    dof_start: wp.int32,
+    dof_count: wp.int32,
+    parent_velocity: wp.spatial_vector,
+    joint_s: wp.array[wp.spatial_vector],
+    factor_diagonal: wp.array[wp.float32],
+    reduced_force: _vec6,
+    reduce: wp.bool,
+    joint_w_velocity: wp.array[wp.spatial_vector],
+    joint_w_coriolis: wp.array[wp.spatial_vector],
+    joint_d_inv: wp.array2d[wp.float32],
+):
+    """Factor one joint of the linearized implicit velocity-product operator.
+
+    Each body carries the pair ``s = (dv, e)`` of the velocity change ``dv``
+    and ``e = dv + dt dc`` with the linearized Coriolis acceleration ``dc``.
+    A child follows ``s = X s_parent + [S; S~] x`` with ``S~ = S + dt v_parent x S``
+    and ``X = [[1, 0], [-dt (S qd) x, 1]]``, while joint rows project the body
+    force ``A s = A_v dv + A_c e`` with ``S``. With ``U = A_v S + A_c S~`` and
+    ``W = (A X)^T S`` this stores ``W`` and ``D^-1 = (S^T U + diag)^-1`` for the
+    forward pass and returns the bias ``U D^-1 u`` propagated to the parent
+    together with both blocks of ``A X - U D^-1 W^T``.
+    """
+    propagated = wp.spatial_vector()
+    transported = _transport_velocity_block(velocity_block, coriolis_block, joint_twist, dt)
+    reduced_velocity = transported
+    reduced_coriolis = coriolis_block
+    if dof_count == wp.int32(1):
+        s = joint_s[dof_start]
+        u = velocity_block * s + coriolis_block * (s + dt * spatial_cross(parent_velocity, s))
+        w_velocity = wp.transpose(transported) * s
+        w_coriolis = wp.transpose(coriolis_block) * s
+        joint_w_velocity[dof_start] = w_velocity
+        joint_w_coriolis[dof_start] = w_coriolis
+        d_inv_scalar = wp.float32(1.0) / _guard_pivot(wp.dot(s, u) + factor_diagonal[dof_start])
+        joint_d_inv[dof_start, 0] = d_inv_scalar
+        propagated = u * (d_inv_scalar * reduced_force[0])
+        if reduce:
+            gain_vector = u * d_inv_scalar
+            for row in range(6):
+                for column in range(6):
+                    reduced_velocity[row, column] = (
+                        reduced_velocity[row, column] - gain_vector[row] * w_velocity[column]
+                    )
+                    reduced_coriolis[row, column] = (
+                        reduced_coriolis[row, column] - gain_vector[row] * w_coriolis[column]
+                    )
+    elif dof_count > wp.int32(1):
+        u_columns = _mat66(0.0)
+        wv_columns = _mat66(0.0)
+        wc_columns = _mat66(0.0)
+        d = _mat66(0.0)
+        transposed_velocity = wp.transpose(transported)
+        transposed_coriolis = wp.transpose(coriolis_block)
+        for column in range(_MAX_JOINT_DOF):
+            if wp.int32(column) < dof_count:
+                dof = dof_start + wp.int32(column)
+                s = joint_s[dof]
+                u = velocity_block * s + coriolis_block * (s + dt * spatial_cross(parent_velocity, s))
+                w_velocity = transposed_velocity * s
+                w_coriolis = transposed_coriolis * s
+                joint_w_velocity[dof] = w_velocity
+                joint_w_coriolis[dof] = w_coriolis
+                for row in range(6):
+                    u_columns[row, column] = u[row]
+                    wv_columns[row, column] = w_velocity[row]
+                    wc_columns[row, column] = w_coriolis[row]
+        for row in range(_MAX_JOINT_DOF):
+            if wp.int32(row) < dof_count:
+                s = joint_s[dof_start + wp.int32(row)]
+                for column in range(_MAX_JOINT_DOF):
+                    if wp.int32(column) < dof_count:
+                        value = wp.float32(0.0)
+                        for entry in range(6):
+                            value += s[entry] * u_columns[entry, column]
+                        d[row, column] = value
+                d[row, row] += factor_diagonal[dof_start + wp.int32(row)]
+        d_inv = _invert_general(d, dof_count)
+        d_inv_u = _vec6(0.0)
+        for row in range(_MAX_JOINT_DOF):
+            if wp.int32(row) < dof_count:
+                for column in range(_MAX_JOINT_DOF):
+                    joint_d_inv[dof_start + wp.int32(row), column] = d_inv[row, column]
+                    if wp.int32(column) < dof_count:
+                        d_inv_u[row] += d_inv[row, column] * reduced_force[column]
+        for entry in range(6):
+            value = wp.float32(0.0)
+            for column in range(_MAX_JOINT_DOF):
+                if wp.int32(column) < dof_count:
+                    value += u_columns[entry, column] * d_inv_u[column]
+            propagated[entry] = value
+        if reduce:
+            # K = U D^-1, then A X - K W^T for both blocks.
+            gain = u_columns * d_inv
+            for row in range(6):
+                for column in range(6):
+                    correction_velocity = wp.float32(0.0)
+                    correction_coriolis = wp.float32(0.0)
+                    for dof in range(_MAX_JOINT_DOF):
+                        if wp.int32(dof) < dof_count:
+                            correction_velocity += gain[row, dof] * wv_columns[column, dof]
+                            correction_coriolis += gain[row, dof] * wc_columns[column, dof]
+                    reduced_velocity[row, column] = reduced_velocity[row, column] - correction_velocity
+                    reduced_coriolis[row, column] = reduced_coriolis[row, column] - correction_coriolis
+    return propagated, reduced_velocity, reduced_coriolis
 
 
 @wp.kernel(enable_backward=False)
@@ -676,16 +883,6 @@ def _compute_reduced_impulse_response_kernel(
 @wp.func_native(
     """
 #if defined(__CUDA_ARCH__)
-    __syncwarp();
-#endif
-"""
-)
-def _sync_reduced_warp(): ...
-
-
-@wp.func_native(
-    """
-#if defined(__CUDA_ARCH__)
     __syncwarp(mask);
 #endif
 """
@@ -700,7 +897,7 @@ def _sync_reduced_group(mask: wp.uint32): ...
     for (int offset = width >> 1; offset > 0; offset >>= 1) {
         result += __shfl_down_sync(mask, result, offset, width);
     }
-    return result;
+    return __shfl_sync(mask, result, 0, width);
 #else
     return value;
 #endif
@@ -710,24 +907,41 @@ def _sum_reduced_group_float(
     value: wp.float32,
     width: wp.int32,
     mask: wp.uint32,
-) -> wp.float32: ...
+) -> wp.float32:
+    """Sum a value over one articulation's lane group and broadcast the total."""
+    ...
 
 
 @wp.func_native(
     """
 #if defined(__CUDA_ARCH__)
-    return __shfl_sync(mask, value, source_lane, width);
+    float result = value;
+    for (int offset = width >> 1; offset > 0; offset >>= 1) {
+        result = fmaxf(result, __shfl_down_sync(mask, result, offset, width));
+    }
+    return __shfl_sync(mask, result, 0, width);
 #else
     return value;
 #endif
 """
 )
-def _shuffle_reduced_float(
+def _max_reduced_group_float(
     value: wp.float32,
-    source_lane: wp.int32,
     width: wp.int32,
     mask: wp.uint32,
-) -> wp.float32: ...
+) -> wp.float32:
+    """Maximize a value over one articulation's lane group and broadcast the result."""
+    ...
+
+
+@wp.func
+def _sum_reduced_group_vec4(value: wp.vec4, width: wp.int32, mask: wp.uint32) -> wp.vec4:
+    return wp.vec4(
+        _sum_reduced_group_float(value[0], width, mask),
+        _sum_reduced_group_float(value[1], width, mask),
+        _sum_reduced_group_float(value[2], width, mask),
+        _sum_reduced_group_float(value[3], width, mask),
+    )
 
 
 @wp.func_native(
@@ -1094,273 +1308,104 @@ _factor_reduced_singledof_warp_kernel = _FACTOR_REDUCED_WARP_KERNELS[True, 32]
 
 
 @wp.func
-def _articulation_system_com_local(
-    start: wp.int32,
-    end: wp.int32,
-    joint_child: wp.array[wp.int32],
-    body_mass: wp.array[wp.float32],
-    body_q_com: wp.array[wp.transform],
-) -> wp.vec3:
-    weighted_position = wp.vec3(0.0)
-    total_mass = wp.float32(0.0)
-    for joint in range(start, end):
-        body = joint_child[joint]
-        mass = body_mass[body]
-        weighted_position += mass * wp.transform_get_translation(body_q_com[body])
-        total_mass += mass
-    if total_mass > wp.float32(0.0):
-        return weighted_position / total_mass
-    return wp.vec3(0.0)
+def _boost_root_coordinates(
+    root_joint: wp.int32,
+    joint_qd_start: wp.array[wp.int32],
+    joint_x_p: wp.array[wp.transform],
+    joint_s: wp.array[wp.spatial_vector],
+    boost: wp.vec3,
+    joint_qd_internal: wp.array[wp.float32],
+    joint_qd_public: wp.array[wp.float32],
+):
+    """Add a uniform translation to a floating root's internal and public rates.
+
+    FREE and DISTANCE roots map their first three rates to orthonormal pure
+    translations, so the boost projects onto those columns exactly.
+    """
+    dof_start = joint_qd_start[root_joint]
+    for axis in range(3):
+        dof = dof_start + wp.int32(axis)
+        joint_qd_internal[dof] += wp.dot(wp.spatial_top(joint_s[dof]), boost)
+    boost_parent = wp.quat_rotate_inv(wp.transform_get_rotation(joint_x_p[root_joint]), boost)
+    joint_qd_public[dof_start] += boost_parent[0]
+    joint_qd_public[dof_start + wp.int32(1)] += boost_parent[1]
+    joint_qd_public[dof_start + wp.int32(2)] += boost_parent[2]
 
 
 @wp.func
-def _articulation_momentum_about_local_origin(
+def _transport_root_twist(root_twist: wp.spatial_vector, dt: wp.float32) -> wp.spatial_vector:
+    """Return a root COM twist re-referenced to the COM it advected to over ``dt``."""
+    omega = wp.spatial_bottom(root_twist)
+    linear = wp.spatial_top(root_twist)
+    return wp.spatial_vector(linear + dt * wp.cross(omega, linear), omega)
+
+
+@wp.func
+def _carry_floating_root_twist(
+    joint_qd: wp.array[wp.float32],
+    dof_start: wp.int32,
+    root_twist: wp.spatial_vector,
+    dt: wp.float32,
+) -> wp.spatial_vector:
+    """Re-reference an integrated floating root's twist to its new pose.
+
+    ABA advances spatial twists about the fixed articulation origin, the root
+    COM at the factored pose. Integration moves that point and the joint
+    anchor by their own velocity times ``dt`` and the next pose re-centers on
+    them, so the unchanged spatial twist field reads ``dt * omega x v`` more
+    there. Dropping that term rotates a spinning body's linear momentum.
+
+    Updates the internal anchor-point velocity in place and returns the root
+    twist about the new origin.
+    """
+    anchor_linear = wp.vec3(joint_qd[dof_start], joint_qd[dof_start + wp.int32(1)], joint_qd[dof_start + wp.int32(2)])
+    anchor_omega = wp.vec3(
+        joint_qd[dof_start + wp.int32(3)], joint_qd[dof_start + wp.int32(4)], joint_qd[dof_start + wp.int32(5)]
+    )
+    anchor_linear += dt * wp.cross(anchor_omega, anchor_linear)
+    joint_qd[dof_start] = anchor_linear[0]
+    joint_qd[dof_start + wp.int32(1)] = anchor_linear[1]
+    joint_qd[dof_start + wp.int32(2)] = anchor_linear[2]
+    return _transport_root_twist(root_twist, dt)
+
+
+@wp.func
+def _articulation_linear_momentum(
     start: wp.int32,
     end: wp.int32,
     joint_child: wp.array[wp.int32],
     body_mass: wp.array[wp.float32],
-    body_inertia: wp.array[wp.mat33],
-    body_q_com: wp.array[wp.transform],
-    origin: wp.vec3,
     bodies: BodyContainer,
-) -> wp.spatial_vector:
-    linear_momentum = wp.vec3(0.0)
-    angular_momentum = wp.vec3(0.0)
-    for joint in range(start, end):
-        body = joint_child[joint]
-        slot = body + wp.int32(1)
-        mass = body_mass[body]
-        velocity = bodies.velocity[slot]
-        omega = bodies.angular_velocity[slot]
-        rotation = bodies.orientation[slot]
-        body_omega = wp.quat_rotate_inv(rotation, omega)
-        spin = wp.quat_rotate(rotation, body_inertia[body] * body_omega)
-        momentum = mass * velocity
-        position = wp.transform_get_translation(body_q_com[body])
-        linear_momentum += momentum
-        angular_momentum += spin + wp.cross(position - origin, momentum)
-    return wp.spatial_vector(linear_momentum, angular_momentum)
-
-
-@wp.kernel(enable_backward=False)
-def _capture_reduced_momentum_kernel(
-    articulation_start: wp.array[wp.int32],
-    articulation_end: wp.array[wp.int32],
-    joint_child: wp.array[wp.int32],
-    body_mass: wp.array[wp.float32],
-    body_inertia: wp.array[wp.mat33],
-    bodies: BodyContainer,
-    momentum: wp.array[wp.spatial_vector],
-):
-    articulation = wp.tid()
-    start = articulation_start[articulation]
-    end = articulation_end[articulation]
-    origin = _articulation_system_com_local(start, end, joint_child, body_mass, bodies.reduced.body_q_com)
-    momentum[articulation] = _articulation_momentum_about_local_origin(
-        start,
-        end,
-        joint_child,
-        body_mass,
-        body_inertia,
-        bodies.reduced.body_q_com,
-        origin,
-        bodies,
-    )
-
-
-@wp.kernel(enable_backward=False, module="reduced_momentum_capture")
-def _capture_reduced_momentum_warp_kernel(
-    articulation_start: wp.array[wp.int32],
-    articulation_end: wp.array[wp.int32],
-    joint_child: wp.array[wp.int32],
-    body_mass: wp.array[wp.float32],
-    body_inertia: wp.array[wp.mat33],
-    bodies: BodyContainer,
-    momentum_out: wp.array[wp.spatial_vector],
-):
-    articulation, lane = wp.tid()
-    start = articulation_start[articulation]
-    end = articulation_end[articulation]
-    body_q_com = bodies.reduced.body_q_com
-
-    local_mass = wp.float32(0.0)
-    local_weighted_x = wp.float32(0.0)
-    local_weighted_y = wp.float32(0.0)
-    local_weighted_z = wp.float32(0.0)
-    joint = start + lane
-    while joint < end:
-        body = joint_child[joint]
-        mass = body_mass[body]
-        position = wp.transform_get_translation(body_q_com[body])
-        local_mass += mass
-        local_weighted_x += mass * position[0]
-        local_weighted_y += mass * position[1]
-        local_weighted_z += mass * position[2]
-        joint += wp.int32(32)
-
-    total_mass = wp.tile_sum(wp.tile(local_mass))[0]
-    weighted_position = wp.vec3(
-        wp.tile_sum(wp.tile(local_weighted_x))[0],
-        wp.tile_sum(wp.tile(local_weighted_y))[0],
-        wp.tile_sum(wp.tile(local_weighted_z))[0],
-    )
-    origin = wp.vec3(0.0)
-    if total_mass > wp.float32(0.0):
-        origin = weighted_position / total_mass
-
-    local_linear_x = wp.float32(0.0)
-    local_linear_y = wp.float32(0.0)
-    local_linear_z = wp.float32(0.0)
-    local_angular_x = wp.float32(0.0)
-    local_angular_y = wp.float32(0.0)
-    local_angular_z = wp.float32(0.0)
-    joint = start + lane
-    while joint < end:
-        body = joint_child[joint]
-        slot = body + wp.int32(1)
-        mass = body_mass[body]
-        velocity = bodies.velocity[slot]
-        omega = bodies.angular_velocity[slot]
-        q_com = body_q_com[body]
-        position = wp.transform_get_translation(q_com)
-        rotation = wp.transform_get_rotation(q_com)
-        body_omega = wp.quat_rotate_inv(rotation, omega)
-        spin = wp.quat_rotate(rotation, body_inertia[body] * body_omega)
-        linear = mass * velocity
-        angular = spin + wp.cross(position - origin, linear)
-        local_linear_x += linear[0]
-        local_linear_y += linear[1]
-        local_linear_z += linear[2]
-        local_angular_x += angular[0]
-        local_angular_y += angular[1]
-        local_angular_z += angular[2]
-        joint += wp.int32(32)
-
-    momentum = wp.spatial_vector(
-        wp.tile_sum(wp.tile(local_linear_x))[0],
-        wp.tile_sum(wp.tile(local_linear_y))[0],
-        wp.tile_sum(wp.tile(local_linear_z))[0],
-        wp.tile_sum(wp.tile(local_angular_x))[0],
-        wp.tile_sum(wp.tile(local_angular_y))[0],
-        wp.tile_sum(wp.tile(local_angular_z))[0],
-    )
-    if lane == wp.int32(0):
-        momentum_out[articulation] = momentum
-
-
-@wp.kernel(enable_backward=False)
-def _restore_reduced_momentum_kernel(
-    articulation_start: wp.array[wp.int32],
-    articulation_end: wp.array[wp.int32],
-    joint_type: wp.array[wp.int32],
-    joint_child: wp.array[wp.int32],
-    joint_qd_start: wp.array[wp.int32],
-    joint_x_p: wp.array[wp.transform],
-    body_mass: wp.array[wp.float32],
-    body_inertia: wp.array[wp.mat33],
-    target_momentum: wp.array[wp.spatial_vector],
-    joint_s_projection: wp.array[wp.spatial_vector],
-    bodies: BodyContainer,
-    joint_qd_internal: wp.array[wp.float32],
-    joint_qd_public: wp.array[wp.float32],
-    body_qd_public: wp.array[wp.spatial_vector],
-):
-    """Restore momentum through the floating-base rigid-motion subspace."""
-    articulation = wp.tid()
-    start = articulation_start[articulation]
-    end = articulation_end[articulation]
-    root_type = joint_type[start]
-    if root_type != JointType.FREE and root_type != JointType.DISTANCE:
-        return
-
-    body_q_com = bodies.reduced.body_q_com
-    origin = _articulation_system_com_local(start, end, joint_child, body_mass, body_q_com)
-    current = _articulation_momentum_about_local_origin(
-        start,
-        end,
-        joint_child,
-        body_mass,
-        body_inertia,
-        body_q_com,
-        origin,
-        bodies,
-    )
-    residual = target_momentum[articulation] - current
-
-    # At the system COM, rigid translation and rotation decouple. Assemble
-    # the ordinary physical inertia directly so spatial-coordinate translation
-    # conventions cannot leak into the correction.
+) -> wp.vec4:
+    """Return the tree's linear momentum and total mass from published COM velocities."""
+    momentum = wp.vec3(0.0)
     total_mass = wp.float32(0.0)
-    inertia_com = wp.mat33(0.0)
-    identity = wp.mat33(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
     for joint in range(start, end):
         body = joint_child[joint]
         mass = body_mass[body]
-        q_com = body_q_com[body]
-        rotation = wp.quat_to_matrix(wp.transform_get_rotation(q_com))
-        offset = wp.transform_get_translation(q_com) - origin
-        inertia_com += rotation * body_inertia[body] * wp.transpose(rotation)
-        inertia_com += mass * (wp.dot(offset, offset) * identity - wp.outer(offset, offset))
+        momentum += mass * bodies.velocity[body + wp.int32(1)]
         total_mass += mass
-    delta_v_origin = wp.spatial_top(residual) / total_mass
-    delta_omega = wp.inverse(inertia_com) * wp.spatial_bottom(residual)
-
-    root = joint_child[start]
-    for joint in range(start, end):
-        body = joint_child[joint]
-        slot = body + wp.int32(1)
-        position = wp.transform_get_translation(body_q_com[body])
-        delta_v = delta_v_origin + wp.cross(delta_omega, position - origin)
-        bodies.velocity[slot] += delta_v
-        bodies.angular_velocity[slot] += delta_omega
-        body_qd_public[body] = wp.spatial_vector(bodies.velocity[slot], bodies.angular_velocity[slot])
-
-    # Keep the authoritative reduced velocity consistent with the physical
-    # body correction. The floating-root subspace is six-dimensional but may
-    # be rotated/shifted, so solve its small Gram system instead of assuming
-    # canonical component ordering.
-    dof_start = joint_qd_start[start]
-    dof_end = joint_qd_start[start + wp.int32(1)]
-    dof_count = dof_end - dof_start
-    current_root_twist = wp.spatial_vector()
-    for dof in range(dof_start, dof_end):
-        current_root_twist += joint_s_projection[dof] * joint_qd_internal[dof]
-    root_slot = root + wp.int32(1)
-    corrected_root_twist = wp.spatial_vector(bodies.velocity[root_slot], bodies.angular_velocity[root_slot])
-    root_twist_delta = corrected_root_twist - current_root_twist
-    gram = _mat66(0.0)
-    projected = _vec6(0.0)
-    for row in range(_MAX_JOINT_DOF):
-        if wp.int32(row) < dof_count:
-            s_row = joint_s_projection[dof_start + wp.int32(row)]
-            projected[row] = wp.dot(s_row, root_twist_delta)
-            for column in range(_MAX_JOINT_DOF):
-                if wp.int32(column) < dof_count:
-                    gram[row, column] = wp.dot(s_row, joint_s_projection[dof_start + wp.int32(column)])
-    inverse_gram = _invert_spd(gram, dof_count)
-    for row in range(_MAX_JOINT_DOF):
-        if wp.int32(row) < dof_count:
-            delta_qd = wp.float32(0.0)
-            for column in range(_MAX_JOINT_DOF):
-                if wp.int32(column) < dof_count:
-                    delta_qd += inverse_gram[row, column] * projected[column]
-            joint_qd_internal[dof_start + wp.int32(row)] += delta_qd
-
-    # Newton exposes FREE/DISTANCE linear speeds at the child COM in the
-    # parent-joint frame, not in the world-origin integrator basis.
-    q_parent = wp.transform_get_rotation(joint_x_p[start])
-    delta_v_joint = wp.quat_rotate_inv(q_parent, wp.spatial_top(root_twist_delta))
-    delta_omega_joint = wp.quat_rotate_inv(q_parent, wp.spatial_bottom(root_twist_delta))
-    joint_qd_public[dof_start] += delta_v_joint[0]
-    joint_qd_public[dof_start + wp.int32(1)] += delta_v_joint[1]
-    joint_qd_public[dof_start + wp.int32(2)] += delta_v_joint[2]
-    joint_qd_public[dof_start + wp.int32(3)] += delta_omega_joint[0]
-    joint_qd_public[dof_start + wp.int32(4)] += delta_omega_joint[1]
-    joint_qd_public[dof_start + wp.int32(5)] += delta_omega_joint[2]
+    return wp.vec4(momentum[0], momentum[1], momentum[2], total_mass)
 
 
-@wp.kernel(enable_backward=False, module="reduced_momentum")
-def _restore_reduced_momentum_warp_kernel(
+@wp.kernel(enable_backward=False)
+def _capture_reduced_linear_momentum_kernel(
+    articulation_start: wp.array[wp.int32],
+    articulation_end: wp.array[wp.int32],
+    joint_child: wp.array[wp.int32],
+    body_mass: wp.array[wp.float32],
+    bodies: BodyContainer,
+    target_momentum: wp.array[wp.vec3],
+):
+    articulation = wp.tid()
+    momentum = _articulation_linear_momentum(
+        articulation_start[articulation], articulation_end[articulation], joint_child, body_mass, bodies
+    )
+    target_momentum[articulation] = wp.vec3(momentum[0], momentum[1], momentum[2])
+
+
+@wp.kernel(enable_backward=False)
+def _boost_reduced_linear_momentum_kernel(
     articulation_start: wp.array[wp.int32],
     articulation_end: wp.array[wp.int32],
     joint_type: wp.array[wp.int32],
@@ -1368,171 +1413,32 @@ def _restore_reduced_momentum_warp_kernel(
     joint_qd_start: wp.array[wp.int32],
     joint_x_p: wp.array[wp.transform],
     body_mass: wp.array[wp.float32],
-    body_inertia: wp.array[wp.mat33],
-    target_momentum: wp.array[wp.spatial_vector],
-    joint_s_projection: wp.array[wp.spatial_vector],
+    target_momentum: wp.array[wp.vec3],
+    joint_s_publish: wp.array[wp.spatial_vector],
     bodies: BodyContainer,
     joint_qd_internal: wp.array[wp.float32],
     joint_qd_public: wp.array[wp.float32],
     body_qd_public: wp.array[wp.spatial_vector],
 ):
-    # Restore floating-base momentum with one deterministic warp per tree.
-    articulation, lane = wp.tid()
+    """Restore a floating tree's linear momentum with a uniform Galilean boost."""
+    articulation = wp.tid()
     start = articulation_start[articulation]
     end = articulation_end[articulation]
     root_type = joint_type[start]
     if root_type != JointType.FREE and root_type != JointType.DISTANCE:
         return
-
-    body_q_com = bodies.reduced.body_q_com
-    local_mass = wp.float32(0.0)
-    local_weighted_x = wp.float32(0.0)
-    local_weighted_y = wp.float32(0.0)
-    local_weighted_z = wp.float32(0.0)
-    joint = start + lane
-    while joint < end:
-        body = joint_child[joint]
-        mass = body_mass[body]
-        position = wp.transform_get_translation(body_q_com[body])
-        local_mass += mass
-        local_weighted_x += mass * position[0]
-        local_weighted_y += mass * position[1]
-        local_weighted_z += mass * position[2]
-        joint += wp.int32(32)
-
-    total_mass = wp.tile_sum(wp.tile(local_mass))[0]
-    origin = wp.vec3(
-        wp.tile_sum(wp.tile(local_weighted_x))[0] / total_mass,
-        wp.tile_sum(wp.tile(local_weighted_y))[0] / total_mass,
-        wp.tile_sum(wp.tile(local_weighted_z))[0] / total_mass,
-    )
-
-    local_linear_x = wp.float32(0.0)
-    local_linear_y = wp.float32(0.0)
-    local_linear_z = wp.float32(0.0)
-    local_angular_x = wp.float32(0.0)
-    local_angular_y = wp.float32(0.0)
-    local_angular_z = wp.float32(0.0)
-    local_inertia_xx = wp.float32(0.0)
-    local_inertia_xy = wp.float32(0.0)
-    local_inertia_xz = wp.float32(0.0)
-    local_inertia_yy = wp.float32(0.0)
-    local_inertia_yz = wp.float32(0.0)
-    local_inertia_zz = wp.float32(0.0)
-    identity = wp.mat33(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
-
-    joint = start + lane
-    while joint < end:
+    current = _articulation_linear_momentum(start, end, joint_child, body_mass, bodies)
+    if current[3] <= wp.float32(0.0):
+        return
+    boost = (target_momentum[articulation] - wp.vec3(current[0], current[1], current[2])) / current[3]
+    for joint in range(start, end):
         body = joint_child[joint]
         slot = body + wp.int32(1)
-        mass = body_mass[body]
-        velocity = bodies.velocity[slot]
-        omega = bodies.angular_velocity[slot]
-        q_com = body_q_com[body]
-        position = wp.transform_get_translation(q_com)
-        rotation_quat = wp.transform_get_rotation(q_com)
-        body_omega = wp.quat_rotate_inv(rotation_quat, omega)
-        spin = wp.quat_rotate(rotation_quat, body_inertia[body] * body_omega)
-        momentum = mass * velocity
-        angular = spin + wp.cross(position - origin, momentum)
-        local_linear_x += momentum[0]
-        local_linear_y += momentum[1]
-        local_linear_z += momentum[2]
-        local_angular_x += angular[0]
-        local_angular_y += angular[1]
-        local_angular_z += angular[2]
-
-        rotation = wp.quat_to_matrix(rotation_quat)
-        offset = position - origin
-        inertia = rotation * body_inertia[body] * wp.transpose(rotation)
-        inertia += mass * (wp.dot(offset, offset) * identity - wp.outer(offset, offset))
-        local_inertia_xx += inertia[0, 0]
-        local_inertia_xy += inertia[0, 1]
-        local_inertia_xz += inertia[0, 2]
-        local_inertia_yy += inertia[1, 1]
-        local_inertia_yz += inertia[1, 2]
-        local_inertia_zz += inertia[2, 2]
-        joint += wp.int32(32)
-
-    current = wp.spatial_vector(
-        wp.tile_sum(wp.tile(local_linear_x))[0],
-        wp.tile_sum(wp.tile(local_linear_y))[0],
-        wp.tile_sum(wp.tile(local_linear_z))[0],
-        wp.tile_sum(wp.tile(local_angular_x))[0],
-        wp.tile_sum(wp.tile(local_angular_y))[0],
-        wp.tile_sum(wp.tile(local_angular_z))[0],
-    )
-    residual = target_momentum[articulation] - current
-    inertia_xx = wp.tile_sum(wp.tile(local_inertia_xx))[0]
-    inertia_xy = wp.tile_sum(wp.tile(local_inertia_xy))[0]
-    inertia_xz = wp.tile_sum(wp.tile(local_inertia_xz))[0]
-    inertia_yy = wp.tile_sum(wp.tile(local_inertia_yy))[0]
-    inertia_yz = wp.tile_sum(wp.tile(local_inertia_yz))[0]
-    inertia_zz = wp.tile_sum(wp.tile(local_inertia_zz))[0]
-    inertia_com = wp.mat33(
-        inertia_xx,
-        inertia_xy,
-        inertia_xz,
-        inertia_xy,
-        inertia_yy,
-        inertia_yz,
-        inertia_xz,
-        inertia_yz,
-        inertia_zz,
-    )
-    delta_v_origin = wp.spatial_top(residual) / total_mass
-    delta_omega = wp.inverse(inertia_com) * wp.spatial_bottom(residual)
-
-    joint = start + lane
-    while joint < end:
-        body = joint_child[joint]
-        slot = body + wp.int32(1)
-        position = wp.transform_get_translation(body_q_com[body])
-        delta_v = delta_v_origin + wp.cross(delta_omega, position - origin)
-        bodies.velocity[slot] += delta_v
-        bodies.angular_velocity[slot] += delta_omega
+        bodies.velocity[slot] = bodies.velocity[slot] + boost
         body_qd_public[body] = wp.spatial_vector(bodies.velocity[slot], bodies.angular_velocity[slot])
-        joint += wp.int32(32)
-    _sync_reduced_warp()
-
-    if lane == wp.int32(0):
-        root = joint_child[start]
-        dof_start = joint_qd_start[start]
-        dof_end = joint_qd_start[start + wp.int32(1)]
-        dof_count = dof_end - dof_start
-        current_root_twist = wp.spatial_vector()
-        for dof in range(dof_start, dof_end):
-            current_root_twist += joint_s_projection[dof] * joint_qd_internal[dof]
-        root_slot = root + wp.int32(1)
-        corrected_root_twist = wp.spatial_vector(bodies.velocity[root_slot], bodies.angular_velocity[root_slot])
-        root_twist_delta = corrected_root_twist - current_root_twist
-        gram = _mat66(0.0)
-        projected = _vec6(0.0)
-        for row in range(_MAX_JOINT_DOF):
-            if wp.int32(row) < dof_count:
-                s_row = joint_s_projection[dof_start + wp.int32(row)]
-                projected[row] = wp.dot(s_row, root_twist_delta)
-                for column in range(_MAX_JOINT_DOF):
-                    if wp.int32(column) < dof_count:
-                        gram[row, column] = wp.dot(s_row, joint_s_projection[dof_start + wp.int32(column)])
-        inverse_gram = _invert_spd(gram, dof_count)
-        for row in range(_MAX_JOINT_DOF):
-            if wp.int32(row) < dof_count:
-                delta_qd = wp.float32(0.0)
-                for column in range(_MAX_JOINT_DOF):
-                    if wp.int32(column) < dof_count:
-                        delta_qd += inverse_gram[row, column] * projected[column]
-                joint_qd_internal[dof_start + wp.int32(row)] += delta_qd
-
-        q_parent = wp.transform_get_rotation(joint_x_p[start])
-        delta_v_joint = wp.quat_rotate_inv(q_parent, wp.spatial_top(root_twist_delta))
-        delta_omega_joint = wp.quat_rotate_inv(q_parent, wp.spatial_bottom(root_twist_delta))
-        joint_qd_public[dof_start] += delta_v_joint[0]
-        joint_qd_public[dof_start + wp.int32(1)] += delta_v_joint[1]
-        joint_qd_public[dof_start + wp.int32(2)] += delta_v_joint[2]
-        joint_qd_public[dof_start + wp.int32(3)] += delta_omega_joint[0]
-        joint_qd_public[dof_start + wp.int32(4)] += delta_omega_joint[1]
-        joint_qd_public[dof_start + wp.int32(5)] += delta_omega_joint[2]
+    _boost_root_coordinates(
+        start, joint_qd_start, joint_x_p, joint_s_publish, boost, joint_qd_internal, joint_qd_public
+    )
 
 
 @wp.kernel(enable_backward=False)
@@ -1571,6 +1477,9 @@ def _finish_reduced_articulations_kernel(
         if kind == JointType.FREE or kind == JointType.DISTANCE:
             slot = child + wp.int32(1)
             child_twist = wp.spatial_vector(bodies.velocity[slot], bodies.angular_velocity[slot])
+            if parent < wp.int32(0):
+                # Move the root COM with its re-referenced velocity, see _carry_floating_root_twist.
+                child_twist = _transport_root_twist(child_twist, dt)
             new_body_q = integrate_body_pose_from_com_twist(body_q[child], body_com[child], child_twist, dt)
             parent_anchor = joint_x_p[joint]
             if parent >= wp.int32(0):
@@ -1629,6 +1538,7 @@ def _finish_reduced_articulations_kernel(
             root_twist = wp.spatial_vector()
             for dof in range(dof_start, dof_end):
                 root_twist += data.joint_s[dof] * joint_qd_local[dof]
+            root_twist = _carry_floating_root_twist(joint_qd_local, dof_start, root_twist, dt)
             parent_rotation = wp.transform_get_rotation(joint_x_p[joint])
             velocity_parent = wp.quat_rotate_inv(parent_rotation, wp.spatial_top(root_twist))
             omega_parent = wp.quat_rotate_inv(parent_rotation, wp.spatial_bottom(root_twist))
@@ -1760,14 +1670,13 @@ def _finish_and_publish_reduced_warp_device(
     joint_axis: wp.array[wp.vec3],
     joint_dof_dim: wp.array2d[wp.int32],
     body_com: wp.array[wp.vec3],
-    body_mass: wp.array[wp.float32],
-    body_inertia: wp.array[wp.mat33],
-    target_momentum: wp.array[wp.spatial_vector],
     body_x_com: wp.array[wp.transform],
     zero_generalized_acceleration: wp.array[wp.float32],
     dt: wp.float32,
     update_configuration: wp.bool,
-    restore_momentum: wp.bool,
+    body_mass: wp.array[wp.float32],
+    target_linear_momentum: wp.vec3,
+    restore_linear_momentum: wp.bool,
     joint_qd_public: wp.array[wp.float32],
     body_q: wp.array[wp.transform],
     bodies: BodyContainer,
@@ -1801,6 +1710,9 @@ def _finish_and_publish_reduced_warp_device(
                 if kind == JointType.FREE or kind == JointType.DISTANCE:
                     slot = child + wp.int32(1)
                     child_twist = wp.spatial_vector(bodies.velocity[slot], bodies.angular_velocity[slot])
+                    if parent < wp.int32(0):
+                        # Move the root COM with its re-referenced velocity, see _carry_floating_root_twist.
+                        child_twist = _transport_root_twist(child_twist, dt)
                     new_body_q = integrate_body_pose_from_com_twist(body_q[child], body_com[child], child_twist, dt)
                     parent_anchor = joint_x_p[joint]
                     if parent >= wp.int32(0):
@@ -1865,6 +1777,8 @@ def _finish_and_publish_reduced_warp_device(
                 root_twist = wp.spatial_vector()
                 for dof in range(dof_start, dof_end):
                     root_twist += data.joint_s[dof] * joint_qd_local[dof]
+                if update_configuration:
+                    root_twist = _carry_floating_root_twist(joint_qd_local, dof_start, root_twist, dt)
                 parent_rotation = wp.transform_get_rotation(joint_x_p[joint])
                 velocity_parent = wp.quat_rotate_inv(parent_rotation, wp.spatial_top(root_twist))
                 omega_parent = wp.quat_rotate_inv(parent_rotation, wp.spatial_bottom(root_twist))
@@ -2010,171 +1924,38 @@ def _finish_and_publish_reduced_warp_device(
             index += tile_width
         _sync_reduced_group(group_mask)
 
-    start = data.articulation_start[articulation]
-    end = data.articulation_end[articulation]
-    if restore_momentum and (joint_type[start] == JointType.FREE or joint_type[start] == JointType.DISTANCE):
-        local_mass = wp.float32(0.0)
-        local_weighted_x = wp.float32(0.0)
-        local_weighted_y = wp.float32(0.0)
-        local_weighted_z = wp.float32(0.0)
-        joint = start + lane
-        while joint < end:
-            body = joint_child[joint]
+    tree_start = articulation_depth_start[articulation, 0]
+    tree_end = articulation_depth_start[articulation, max_depth + wp.int32(1)]
+    root_kind = wp.int32(JointType.FIXED)
+    if tree_end > tree_start:
+        root_kind = joint_type[articulation_depth_joint[tree_start]]
+    if (
+        update_configuration
+        and restore_linear_momentum
+        and (root_kind == JointType.FREE or root_kind == JointType.DISTANCE)
+    ):
+        root_joint = articulation_depth_joint[tree_start]
+        local = wp.vec4(0.0)
+        index = tree_start + lane
+        while index < tree_end:
+            body = joint_child[articulation_depth_joint[index]]
             mass = body_mass[body]
-            position = wp.transform_get_translation(body_q_com[body])
-            local_mass += mass
-            local_weighted_x += mass * position[0]
-            local_weighted_y += mass * position[1]
-            local_weighted_z += mass * position[2]
-            joint += tile_width
-        total_mass = _sum_reduced_group_float(local_mass, tile_width, group_mask)
-        weighted_x = _sum_reduced_group_float(local_weighted_x, tile_width, group_mask)
-        weighted_y = _sum_reduced_group_float(local_weighted_y, tile_width, group_mask)
-        weighted_z = _sum_reduced_group_float(local_weighted_z, tile_width, group_mask)
-        total_mass = _shuffle_reduced_float(total_mass, wp.int32(0), tile_width, group_mask)
-        weighted_x = _shuffle_reduced_float(weighted_x, wp.int32(0), tile_width, group_mask)
-        weighted_y = _shuffle_reduced_float(weighted_y, wp.int32(0), tile_width, group_mask)
-        weighted_z = _shuffle_reduced_float(weighted_z, wp.int32(0), tile_width, group_mask)
-        origin = wp.vec3(weighted_x, weighted_y, weighted_z) / total_mass
-
-        local_linear_x = wp.float32(0.0)
-        local_linear_y = wp.float32(0.0)
-        local_linear_z = wp.float32(0.0)
-        local_angular_x = wp.float32(0.0)
-        local_angular_y = wp.float32(0.0)
-        local_angular_z = wp.float32(0.0)
-        local_inertia_xx = wp.float32(0.0)
-        local_inertia_xy = wp.float32(0.0)
-        local_inertia_xz = wp.float32(0.0)
-        local_inertia_yy = wp.float32(0.0)
-        local_inertia_yz = wp.float32(0.0)
-        local_inertia_zz = wp.float32(0.0)
-        identity = wp.mat33(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
-        joint = start + lane
-        while joint < end:
-            body = joint_child[joint]
-            mass = body_mass[body]
-            q_com = body_q_com[body]
-            position = wp.transform_get_translation(q_com)
-            rotation_quat = wp.transform_get_rotation(q_com)
-            slot = body + wp.int32(1)
-            twist = wp.spatial_vector(bodies.velocity[slot], bodies.angular_velocity[slot])
-            velocity = wp.spatial_top(twist)
-            omega = wp.spatial_bottom(twist)
-            body_omega = wp.quat_rotate_inv(rotation_quat, omega)
-            spin = wp.quat_rotate(rotation_quat, body_inertia[body] * body_omega)
-            linear = mass * velocity
-            angular = spin + wp.cross(position - origin, linear)
-            local_linear_x += linear[0]
-            local_linear_y += linear[1]
-            local_linear_z += linear[2]
-            local_angular_x += angular[0]
-            local_angular_y += angular[1]
-            local_angular_z += angular[2]
-            rotation_matrix = wp.quat_to_matrix(rotation_quat)
-            offset = position - origin
-            inertia = rotation_matrix * body_inertia[body] * wp.transpose(rotation_matrix)
-            inertia += mass * (wp.dot(offset, offset) * identity - wp.outer(offset, offset))
-            local_inertia_xx += inertia[0, 0]
-            local_inertia_xy += inertia[0, 1]
-            local_inertia_xz += inertia[0, 2]
-            local_inertia_yy += inertia[1, 1]
-            local_inertia_yz += inertia[1, 2]
-            local_inertia_zz += inertia[2, 2]
-            joint += tile_width
-
-        linear_x = _sum_reduced_group_float(local_linear_x, tile_width, group_mask)
-        linear_y = _sum_reduced_group_float(local_linear_y, tile_width, group_mask)
-        linear_z = _sum_reduced_group_float(local_linear_z, tile_width, group_mask)
-        angular_x = _sum_reduced_group_float(local_angular_x, tile_width, group_mask)
-        angular_y = _sum_reduced_group_float(local_angular_y, tile_width, group_mask)
-        angular_z = _sum_reduced_group_float(local_angular_z, tile_width, group_mask)
-        inertia_xx = _sum_reduced_group_float(local_inertia_xx, tile_width, group_mask)
-        inertia_xy = _sum_reduced_group_float(local_inertia_xy, tile_width, group_mask)
-        inertia_xz = _sum_reduced_group_float(local_inertia_xz, tile_width, group_mask)
-        inertia_yy = _sum_reduced_group_float(local_inertia_yy, tile_width, group_mask)
-        inertia_yz = _sum_reduced_group_float(local_inertia_yz, tile_width, group_mask)
-        inertia_zz = _sum_reduced_group_float(local_inertia_zz, tile_width, group_mask)
-        linear_x = _shuffle_reduced_float(linear_x, wp.int32(0), tile_width, group_mask)
-        linear_y = _shuffle_reduced_float(linear_y, wp.int32(0), tile_width, group_mask)
-        linear_z = _shuffle_reduced_float(linear_z, wp.int32(0), tile_width, group_mask)
-        angular_x = _shuffle_reduced_float(angular_x, wp.int32(0), tile_width, group_mask)
-        angular_y = _shuffle_reduced_float(angular_y, wp.int32(0), tile_width, group_mask)
-        angular_z = _shuffle_reduced_float(angular_z, wp.int32(0), tile_width, group_mask)
-        inertia_xx = _shuffle_reduced_float(inertia_xx, wp.int32(0), tile_width, group_mask)
-        inertia_xy = _shuffle_reduced_float(inertia_xy, wp.int32(0), tile_width, group_mask)
-        inertia_xz = _shuffle_reduced_float(inertia_xz, wp.int32(0), tile_width, group_mask)
-        inertia_yy = _shuffle_reduced_float(inertia_yy, wp.int32(0), tile_width, group_mask)
-        inertia_yz = _shuffle_reduced_float(inertia_yz, wp.int32(0), tile_width, group_mask)
-        inertia_zz = _shuffle_reduced_float(inertia_zz, wp.int32(0), tile_width, group_mask)
-        current = wp.spatial_vector(linear_x, linear_y, linear_z, angular_x, angular_y, angular_z)
-        residual = target_momentum[articulation] - current
-        inertia_com = wp.mat33(
-            inertia_xx,
-            inertia_xy,
-            inertia_xz,
-            inertia_xy,
-            inertia_yy,
-            inertia_yz,
-            inertia_xz,
-            inertia_yz,
-            inertia_zz,
-        )
-        delta_v_origin = wp.spatial_top(residual) / total_mass
-        delta_omega = wp.inverse(inertia_com) * wp.spatial_bottom(residual)
-
-        joint = start + lane
-        while joint < end:
-            body = joint_child[joint]
-            position = wp.transform_get_translation(body_q_com[body])
-            delta_v = delta_v_origin + wp.cross(delta_omega, position - origin)
-            slot = body + wp.int32(1)
-            corrected = wp.spatial_vector(
-                bodies.velocity[slot] + delta_v,
-                bodies.angular_velocity[slot] + delta_omega,
-            )
-            bodies.velocity[slot] = wp.spatial_top(corrected)
-            bodies.angular_velocity[slot] = wp.spatial_bottom(corrected)
-            joint += tile_width
+            momentum = mass * bodies.velocity[body + wp.int32(1)]
+            local += wp.vec4(momentum[0], momentum[1], momentum[2], mass)
+            index += tile_width
+        total = _sum_reduced_group_vec4(local, tile_width, group_mask)
+        if total[3] > wp.float32(0.0):
+            boost = (target_linear_momentum - wp.vec3(total[0], total[1], total[2])) / total[3]
+            index = tree_start + lane
+            while index < tree_end:
+                slot = joint_child[articulation_depth_joint[index]] + wp.int32(1)
+                bodies.velocity[slot] = bodies.velocity[slot] + boost
+                index += tile_width
+            if lane == wp.int32(0):
+                _boost_root_coordinates(
+                    root_joint, joint_qd_start, joint_x_p, joint_s_publish, boost, joint_qd_local, joint_qd_public
+                )
         _sync_reduced_group(group_mask)
-
-        if lane == wp.int32(0):
-            root = joint_child[start]
-            root_slot = root + wp.int32(1)
-            dof_start = joint_qd_start[start]
-            dof_end = joint_qd_start[start + wp.int32(1)]
-            dof_count = dof_end - dof_start
-            current_root_twist = wp.spatial_vector()
-            for dof in range(dof_start, dof_end):
-                current_root_twist += joint_s_publish[dof] * joint_qd_local[dof]
-            corrected_root_twist = wp.spatial_vector(bodies.velocity[root_slot], bodies.angular_velocity[root_slot])
-            root_twist_delta = corrected_root_twist - current_root_twist
-            gram = _mat66(0.0)
-            projected = _vec6(0.0)
-            for row in range(_MAX_JOINT_DOF):
-                if wp.int32(row) < dof_count:
-                    s_row = joint_s_publish[dof_start + wp.int32(row)]
-                    projected[row] = wp.dot(s_row, root_twist_delta)
-                    for column in range(_MAX_JOINT_DOF):
-                        if wp.int32(column) < dof_count:
-                            gram[row, column] = wp.dot(s_row, joint_s_publish[dof_start + wp.int32(column)])
-            inverse_gram = _invert_spd(gram, dof_count)
-            for row in range(_MAX_JOINT_DOF):
-                if wp.int32(row) < dof_count:
-                    delta_qd = wp.float32(0.0)
-                    for column in range(_MAX_JOINT_DOF):
-                        if wp.int32(column) < dof_count:
-                            delta_qd += inverse_gram[row, column] * projected[column]
-                    joint_qd_local[dof_start + wp.int32(row)] += delta_qd
-            q_parent = wp.transform_get_rotation(joint_x_p[start])
-            delta_v_joint = wp.quat_rotate_inv(q_parent, wp.spatial_top(root_twist_delta))
-            delta_omega_joint = wp.quat_rotate_inv(q_parent, wp.spatial_bottom(root_twist_delta))
-            joint_qd_public[dof_start] += delta_v_joint[0]
-            joint_qd_public[dof_start + wp.int32(1)] += delta_v_joint[1]
-            joint_qd_public[dof_start + wp.int32(2)] += delta_v_joint[2]
-            joint_qd_public[dof_start + wp.int32(3)] += delta_omega_joint[0]
-            joint_qd_public[dof_start + wp.int32(4)] += delta_omega_joint[1]
-            joint_qd_public[dof_start + wp.int32(5)] += delta_omega_joint[2]
 
 
 @wp.kernel(enable_backward=False, module="reduced_publish", grid_stride=False)
@@ -2197,14 +1978,13 @@ def _finish_and_publish_reduced_warp_kernel(
     joint_axis: wp.array[wp.vec3],
     joint_dof_dim: wp.array2d[wp.int32],
     body_com: wp.array[wp.vec3],
-    body_mass: wp.array[wp.float32],
-    body_inertia: wp.array[wp.mat33],
-    target_momentum: wp.array[wp.spatial_vector],
     body_x_com: wp.array[wp.transform],
     zero_generalized_acceleration: wp.array[wp.float32],
     dt: wp.float32,
     update_configuration: wp.bool,
-    restore_momentum: wp.bool,
+    body_mass: wp.array[wp.float32],
+    target_linear_momentum: wp.array[wp.vec3],
+    restore_linear_momentum: wp.bool,
     joint_qd_public: wp.array[wp.float32],
     body_q: wp.array[wp.transform],
     bodies: BodyContainer,
@@ -2215,6 +1995,10 @@ def _finish_and_publish_reduced_warp_kernel(
     joint_s_publish: wp.array[wp.spatial_vector],
     body_qd: wp.array[wp.spatial_vector],
 ):
+    articulation = wp.tid() // tile_width
+    target = wp.vec3(0.0)
+    if restore_linear_momentum and articulation < articulation_count:
+        target = target_linear_momentum[articulation]
     _finish_and_publish_reduced_warp_device(
         wp.tid(),
         articulation_count,
@@ -2235,14 +2019,13 @@ def _finish_and_publish_reduced_warp_kernel(
         joint_axis,
         joint_dof_dim,
         body_com,
-        body_mass,
-        body_inertia,
-        target_momentum,
         body_x_com,
         zero_generalized_acceleration,
         dt,
         update_configuration,
-        restore_momentum,
+        body_mass,
+        target,
+        restore_linear_momentum,
         joint_qd_public,
         body_q,
         bodies,
@@ -2364,6 +2147,7 @@ def _advance_reduced_articulations_kernel(
     dt: wp.float32,
     include_external: wp.bool,
     include_coriolis: wp.bool,
+    joint_factor_diagonal: wp.array[wp.float32],
     body_velocity: wp.array[wp.spatial_vector],
     body_coriolis: wp.array[wp.spatial_vector],
     body_bias: wp.array[wp.spatial_vector],
@@ -2374,11 +2158,26 @@ def _advance_reduced_articulations_kernel(
     generalized_acceleration: wp.array[wp.float32],
     public_body_qd: wp.array[wp.spatial_vector],
     bodies: BodyContainer,
+    body_implicit_velocity: wp.array[wp.spatial_matrix],
+    body_implicit_coriolis: wp.array[wp.spatial_matrix],
+    body_implicit_twist: wp.array[wp.spatial_vector],
+    body_implicit_parent_velocity: wp.array[wp.spatial_vector],
+    joint_implicit_w_velocity: wp.array[wp.spatial_vector],
+    joint_implicit_w_coriolis: wp.array[wp.spatial_vector],
+    joint_implicit_d_inv: wp.array2d[wp.float32],
 ):
-    """Advance unconstrained ABA dynamics and publish all link velocities."""
+    """Advance unconstrained ABA dynamics and publish all link velocities.
+
+    With ``include_coriolis``, a tree whose fastest link exceeds
+    ``_IMPLICIT_SPIN_STEP`` radians per step takes a linearly implicit step:
+    the explicit bias stays on the right-hand side and the update solves
+    ``(M + dt dC/dqd) qdd = tau - C`` through a non-symmetric ABA pass, see
+    :func:`_factor_implicit_joint`. Slower trees keep the explicit step.
+    """
     articulation = wp.tid()
     start = articulation_start[articulation]
     end = articulation_end[articulation]
+    max_rate = wp.float32(0.0)
 
     for joint in range(start, end):
         parent = joint_parent[joint]
@@ -2400,6 +2199,11 @@ def _advance_reduced_articulations_kernel(
         bias = wp.spatial_vector()
         if include_coriolis:
             bias += inertia * coriolis + spatial_cross_dual(velocity, inertia * velocity)
+            body_implicit_velocity[child] = _scaled_gyroscopic_jacobian(inertia, velocity, dt)
+            body_implicit_coriolis[child] = inertia
+            body_implicit_twist[child] = joint_velocity
+            body_implicit_parent_velocity[child] = parent_velocity
+            max_rate = wp.max(max_rate, wp.length(wp.spatial_bottom(velocity)))
         if include_external:
             gravity_force = body_mass[child] * gravity[wp.max(body_world[child], wp.int32(0))]
             gravity_wrench = wp.spatial_vector(gravity_force, wp.cross(x_com, gravity_force))
@@ -2448,6 +2252,8 @@ def _advance_reduced_articulations_kernel(
         if parent >= wp.int32(0):
             body_bias[parent] = body_bias[parent] + subtree_bias
 
+    # Same per-tree integrator choice as the warp advance.
+    use_implicit = include_coriolis and max_rate * dt > _IMPLICIT_SPIN_STEP
     for joint in range(start, end):
         child = joint_child[joint]
         body_work[child] = wp.spatial_vector()
@@ -2468,15 +2274,37 @@ def _advance_reduced_articulations_kernel(
                 dof = dof_start + wp.int32(row)
                 reduced_force[row] = generalized_rhs[dof] - wp.dot(joint_s[dof], p)
                 joint_work[dof] = reduced_force[row]
-        for row in range(_MAX_JOINT_DOF):
-            if wp.int32(row) < dof_count:
-                for column in range(_MAX_JOINT_DOF):
-                    if wp.int32(column) < dof_count:
-                        d_inv_u[row] += joint_d_inv[dof_start + wp.int32(row), column] * reduced_force[column]
         propagated = p
-        for column in range(_MAX_JOINT_DOF):
-            if wp.int32(column) < dof_count:
-                propagated += joint_u_matrix[dof_start + wp.int32(column)] * d_inv_u[column]
+        if use_implicit:
+            delta, reduced_velocity, reduced_coriolis = _factor_implicit_joint(
+                body_implicit_velocity[child],
+                body_implicit_coriolis[child],
+                body_implicit_twist[child],
+                dt,
+                dof_start,
+                dof_count,
+                body_implicit_parent_velocity[child],
+                joint_s,
+                joint_factor_diagonal,
+                reduced_force,
+                parent >= wp.int32(0),
+                joint_implicit_w_velocity,
+                joint_implicit_w_coriolis,
+                joint_implicit_d_inv,
+            )
+            propagated += delta
+            if parent >= wp.int32(0):
+                body_implicit_velocity[parent] = body_implicit_velocity[parent] + reduced_velocity
+                body_implicit_coriolis[parent] = body_implicit_coriolis[parent] + reduced_coriolis
+        else:
+            for row in range(_MAX_JOINT_DOF):
+                if wp.int32(row) < dof_count:
+                    for column in range(_MAX_JOINT_DOF):
+                        if wp.int32(column) < dof_count:
+                            d_inv_u[row] += joint_d_inv[dof_start + wp.int32(row), column] * reduced_force[column]
+            for column in range(_MAX_JOINT_DOF):
+                if wp.int32(column) < dof_count:
+                    propagated += joint_u_matrix[dof_start + wp.int32(column)] * d_inv_u[column]
         if parent >= wp.int32(0):
             body_work[parent] = body_work[parent] + propagated
 
@@ -2487,27 +2315,50 @@ def _advance_reduced_articulations_kernel(
         dof_end = joint_qd_start[joint + wp.int32(1)]
         dof_count = dof_end - dof_start
         parent_acceleration = wp.spatial_vector()
+        # Implicit passes also carry e = dv + dt dc, reusing the Coriolis scratch.
+        parent_transport = wp.spatial_vector()
         if parent >= wp.int32(0):
             parent_acceleration = body_acceleration[parent]
+            if use_implicit:
+                parent_transport = body_coriolis[parent]
         rhs = _vec6(0.0)
         qdd = _vec6(0.0)
         for row in range(_MAX_JOINT_DOF):
             if wp.int32(row) < dof_count:
                 dof = dof_start + wp.int32(row)
-                rhs[row] = joint_work[dof] - wp.dot(joint_u_matrix[dof], parent_acceleration)
+                if use_implicit:
+                    rhs[row] = (
+                        joint_work[dof]
+                        - wp.dot(joint_implicit_w_velocity[dof], parent_acceleration)
+                        - wp.dot(joint_implicit_w_coriolis[dof], parent_transport)
+                    )
+                else:
+                    rhs[row] = joint_work[dof] - wp.dot(joint_u_matrix[dof], parent_acceleration)
         for row in range(_MAX_JOINT_DOF):
             if wp.int32(row) < dof_count:
                 for column in range(_MAX_JOINT_DOF):
                     if wp.int32(column) < dof_count:
-                        qdd[row] += joint_d_inv[dof_start + wp.int32(row), column] * rhs[column]
+                        if use_implicit:
+                            qdd[row] += joint_implicit_d_inv[dof_start + wp.int32(row), column] * rhs[column]
+                        else:
+                            qdd[row] += joint_d_inv[dof_start + wp.int32(row), column] * rhs[column]
         child_acceleration = parent_acceleration
+        child_transport = parent_transport
+        if use_implicit:
+            child_transport -= dt * spatial_cross(body_implicit_twist[child], parent_acceleration)
         for row in range(_MAX_JOINT_DOF):
             if wp.int32(row) < dof_count:
                 dof = dof_start + wp.int32(row)
                 generalized_acceleration[dof] = qdd[row]
                 joint_qd[dof] += qdd[row] * dt
                 child_acceleration += joint_s[dof] * qdd[row]
+                if use_implicit:
+                    child_transport += (
+                        joint_s[dof] + dt * spatial_cross(body_implicit_parent_velocity[child], joint_s[dof])
+                    ) * qdd[row]
         body_acceleration[child] = child_acceleration
+        if use_implicit:
+            body_coriolis[child] = child_transport
 
     # The configuration is unchanged, so the factored motion subspaces
     # directly reconstruct twists about each articulation origin.
@@ -2536,13 +2387,12 @@ def _make_advance_reduced_articulations_warp_ops(
     *,
     include_external: bool,
     include_coriolis: bool,
-    capture_momentum: bool,
     fuse_publish: bool = False,
     static_tile_width: int = 0,
 ):
     suffix = "_publish" if fuse_publish else ""
     module = wp.get_module(
-        f"reduced_advance_{int(include_external)}_{int(include_coriolis)}_{int(capture_momentum)}_{static_tile_width}{suffix}"
+        f"reduced_advance_{int(include_external)}_{int(include_coriolis)}_{static_tile_width}{suffix}"
     )
 
     @wp.func
@@ -2583,56 +2433,30 @@ def _make_advance_reduced_articulations_warp_ops(
         generalized_acceleration: wp.array[wp.float32],
         public_body_qd: wp.array[wp.spatial_vector],
         bodies: BodyContainer,
-        captured_momentum: wp.array[wp.spatial_vector],
-    ):
+        joint_factor_diagonal: wp.array[wp.float32],
+        body_implicit_velocity: wp.array[wp.spatial_matrix],
+        body_implicit_coriolis: wp.array[wp.spatial_matrix],
+        body_implicit_twist: wp.array[wp.spatial_vector],
+        body_implicit_parent_velocity: wp.array[wp.spatial_vector],
+        joint_implicit_w_velocity: wp.array[wp.spatial_vector],
+        joint_implicit_w_coriolis: wp.array[wp.spatial_vector],
+        joint_implicit_d_inv: wp.array2d[wp.float32],
+    ) -> wp.vec3:
+        """Advance one tree; with ``include_coriolis`` also return its incoming linear momentum."""
         if wp.static(static_tile_width > 0):
             tile_width = wp.int32(static_tile_width)
         articulation = thread // tile_width
         lane = thread - articulation * tile_width
         if articulation >= articulation_count:
-            return
+            return wp.vec3(0.0)
         warp_lane = thread & wp.int32(31)
         group = warp_lane // tile_width
         group_mask = wp.uint32(4294967295)
         if tile_width < wp.int32(32):
             group_mask = ((wp.uint32(1) << wp.uint32(tile_width)) - wp.uint32(1)) << wp.uint32(group * tile_width)
 
-        data = bodies.reduced
-        start = data.articulation_start[articulation]
-        end = data.articulation_end[articulation]
-        momentum_origin = wp.vec3(0.0)
-        if wp.static(capture_momentum):
-            local_mass = wp.float32(0.0)
-            local_weighted_x = wp.float32(0.0)
-            local_weighted_y = wp.float32(0.0)
-            local_weighted_z = wp.float32(0.0)
-            joint_index = start + lane
-            while joint_index < end:
-                body = joint_child[joint_index]
-                mass = body_mass[body]
-                position = wp.transform_get_translation(body_q_com[body])
-                local_mass += mass
-                local_weighted_x += mass * position[0]
-                local_weighted_y += mass * position[1]
-                local_weighted_z += mass * position[2]
-                joint_index += tile_width
-            total_mass = _sum_reduced_group_float(local_mass, tile_width, group_mask)
-            weighted_x = _sum_reduced_group_float(local_weighted_x, tile_width, group_mask)
-            weighted_y = _sum_reduced_group_float(local_weighted_y, tile_width, group_mask)
-            weighted_z = _sum_reduced_group_float(local_weighted_z, tile_width, group_mask)
-            total_mass = _shuffle_reduced_float(total_mass, wp.int32(0), tile_width, group_mask)
-            weighted_x = _shuffle_reduced_float(weighted_x, wp.int32(0), tile_width, group_mask)
-            weighted_y = _shuffle_reduced_float(weighted_y, wp.int32(0), tile_width, group_mask)
-            weighted_z = _shuffle_reduced_float(weighted_z, wp.int32(0), tile_width, group_mask)
-            if total_mass > wp.float32(0.0):
-                momentum_origin = wp.vec3(weighted_x, weighted_y, weighted_z) / total_mass
-
-        local_momentum_x = wp.float32(0.0)
-        local_momentum_y = wp.float32(0.0)
-        local_momentum_z = wp.float32(0.0)
-        local_angular_x = wp.float32(0.0)
-        local_angular_y = wp.float32(0.0)
-        local_angular_z = wp.float32(0.0)
+        local_momentum = wp.vec3(0.0)
+        local_rate = wp.float32(0.0)
         previous_velocity = wp.spatial_vector()
         previous_coriolis = wp.spatial_vector()
         for depth in range(max_depth + wp.int32(1)):
@@ -2660,20 +2484,14 @@ def _make_advance_reduced_articulations_warp_ops(
                 inertia = _unpack_symmetric_mat66(body_inertia[child])
                 x_com = wp.transform_get_translation(body_q_com[child])
                 bias = wp.spatial_vector()
-                spatial_momentum = wp.spatial_vector()
-                if wp.static(include_coriolis or capture_momentum):
-                    spatial_momentum = inertia * velocity
+                bias_slot = child
+                if wp.static(fuse_publish and static_tile_width > 0):
+                    bias_slot = index
                 if wp.static(include_coriolis):
+                    spatial_momentum = inertia * velocity
+                    local_momentum += wp.spatial_top(spatial_momentum)
                     bias += inertia * coriolis + spatial_cross_dual(velocity, spatial_momentum)
-                if wp.static(capture_momentum):
-                    linear = wp.spatial_top(spatial_momentum)
-                    angular = wp.spatial_bottom(spatial_momentum) - wp.cross(momentum_origin, linear)
-                    local_momentum_x += linear[0]
-                    local_momentum_y += linear[1]
-                    local_momentum_z += linear[2]
-                    local_angular_x += angular[0]
-                    local_angular_y += angular[1]
-                    local_angular_z += angular[2]
+                    local_rate = wp.max(local_rate, wp.length(wp.spatial_bottom(velocity)))
                 if wp.static(include_external):
                     gravity_force = body_mass[child] * gravity[wp.max(body_world[child], wp.int32(0))]
                     gravity_wrench = wp.spatial_vector(gravity_force, wp.cross(x_com, gravity_force))
@@ -2702,25 +2520,49 @@ def _make_advance_reduced_articulations_warp_ops(
                 # External-only passes also omit Coriolis scratch so CUDA can remove both recurrences.
                 if wp.static(include_coriolis):
                     body_coriolis[child] = coriolis
-                bias_slot = child
-                if wp.static(fuse_publish and static_tile_width > 0):
-                    bias_slot = index
                 body_bias[bias_slot] = bias
             previous_velocity = velocity
             previous_coriolis = coriolis
             _sync_reduced_group(group_mask)
 
-        if wp.static(capture_momentum):
-            linear_x = _sum_reduced_group_float(local_momentum_x, tile_width, group_mask)
-            linear_y = _sum_reduced_group_float(local_momentum_y, tile_width, group_mask)
-            linear_z = _sum_reduced_group_float(local_momentum_z, tile_width, group_mask)
-            angular_x = _sum_reduced_group_float(local_angular_x, tile_width, group_mask)
-            angular_y = _sum_reduced_group_float(local_angular_y, tile_width, group_mask)
-            angular_z = _sum_reduced_group_float(local_angular_z, tile_width, group_mask)
-            if lane == wp.int32(0):
-                captured_momentum[articulation] = wp.spatial_vector(
-                    linear_x, linear_y, linear_z, angular_x, angular_y, angular_z
-                )
+        incoming_momentum = wp.vec3(0.0)
+        use_implicit = wp.bool(False)
+        if wp.static(include_coriolis):
+            total = _sum_reduced_group_vec4(
+                wp.vec4(local_momentum[0], local_momentum[1], local_momentum[2], wp.float32(0.0)),
+                tile_width,
+                group_mask,
+            )
+            incoming_momentum = wp.vec3(total[0], total[1], total[2])
+            # The explicit step's energy error grows like (omega dt)^2 per step. Every
+            # lane sees the same group maximum, so the branch is uniform per tree.
+            use_implicit = _max_reduced_group_float(local_rate, tile_width, group_mask) * dt > _IMPLICIT_SPIN_STEP
+            if use_implicit:
+                # Only spinning trees pay a second walk that records the linearization point.
+                previous_velocity = wp.spatial_vector()
+                for depth in range(max_depth + wp.int32(1)):
+                    index = articulation_depth_start[articulation, depth] + lane
+                    depth_end = articulation_depth_start[articulation, depth + wp.int32(1)]
+                    active = index < depth_end
+                    joint = wp.int32(-1)
+                    parent_lane = wp.int32(0)
+                    if active:
+                        joint = articulation_depth_joint[index]
+                        parent_lane = joint_parent_lane[joint]
+                    parent_velocity = _shuffle_reduced_spatial(previous_velocity, parent_lane, tile_width, group_mask)
+                    velocity = wp.spatial_vector()
+                    if active:
+                        joint_velocity = wp.spatial_vector()
+                        for dof in range(joint_qd_start[joint], joint_qd_start[joint + wp.int32(1)]):
+                            joint_velocity += joint_s[dof] * joint_qd[dof]
+                        velocity = parent_velocity + joint_velocity
+                        twist_slot = joint_child[joint]
+                        if wp.static(fuse_publish and static_tile_width > 0):
+                            twist_slot = index
+                        body_implicit_twist[twist_slot] = joint_velocity
+                        body_implicit_parent_velocity[twist_slot] = parent_velocity
+                    previous_velocity = velocity
+                    _sync_reduced_group(group_mask)
 
         # Bias and articulated-force propagation only depend on the completed child
         # depth, so one reverse traversal can advance both recurrences.
@@ -2736,12 +2578,24 @@ def _make_advance_reduced_articulations_warp_ops(
                     body_slot = index
                 subtree_bias = body_bias[body_slot]
                 p = wp.spatial_vector()
+                velocity_block = wp.spatial_matrix()
+                coriolis_block = wp.spatial_matrix()
+                joint_twist = wp.spatial_vector()
+                parent_twist = wp.spatial_vector()
+                if use_implicit:
+                    joint_twist = body_implicit_twist[body_slot]
+                    parent_twist = body_implicit_parent_velocity[body_slot]
+                    coriolis_block = _unpack_symmetric_mat66(body_inertia[child])
+                    velocity_block = _scaled_gyroscopic_jacobian(coriolis_block, parent_twist + joint_twist, dt)
                 for child_index in range(child_start[joint], child_start[joint + wp.int32(1)]):
                     descendant_slot = child_joint[child_index]
                     if wp.static(not (fuse_publish and static_tile_width > 0)):
                         descendant_slot = joint_child[descendant_slot]
                     subtree_bias += body_bias[descendant_slot]
                     p += body_work[descendant_slot]
+                    if use_implicit:
+                        velocity_block += body_implicit_velocity[descendant_slot]
+                        coriolis_block += body_implicit_coriolis[descendant_slot]
                 dof_start = joint_qd_start[joint]
                 dof_end = joint_qd_start[joint + wp.int32(1)]
                 dof_count = dof_end - dof_start
@@ -2769,15 +2623,41 @@ def _make_advance_reduced_articulations_warp_ops(
                         # dirties response workspaces before the next solve.
                         reduced_force[row] = dof_rhs - wp.dot(joint_s[dof], p)
                         joint_work[dof] = reduced_force[row]
-                for row in range(_MAX_JOINT_DOF):
-                    if wp.int32(row) < dof_count:
-                        for column in range(_MAX_JOINT_DOF):
-                            if wp.int32(column) < dof_count:
-                                d_inv_u[row] += joint_d_inv[dof_start + wp.int32(row), column] * reduced_force[column]
                 propagated = p
-                for column in range(_MAX_JOINT_DOF):
-                    if wp.int32(column) < dof_count:
-                        propagated += joint_u_matrix[dof_start + wp.int32(column)] * d_inv_u[column]
+                if use_implicit:
+                    # Linearly implicit velocity-product step: factor M + dt dC/dqd here.
+                    has_parent = joint_parent[joint] >= wp.int32(0)
+                    delta, reduced_velocity, reduced_coriolis = _factor_implicit_joint(
+                        velocity_block,
+                        coriolis_block,
+                        joint_twist,
+                        dt,
+                        dof_start,
+                        dof_count,
+                        parent_twist,
+                        joint_s,
+                        joint_factor_diagonal,
+                        reduced_force,
+                        has_parent,
+                        joint_implicit_w_velocity,
+                        joint_implicit_w_coriolis,
+                        joint_implicit_d_inv,
+                    )
+                    propagated += delta
+                    if has_parent:
+                        body_implicit_velocity[body_slot] = reduced_velocity
+                        body_implicit_coriolis[body_slot] = reduced_coriolis
+                else:
+                    for row in range(_MAX_JOINT_DOF):
+                        if wp.int32(row) < dof_count:
+                            for column in range(_MAX_JOINT_DOF):
+                                if wp.int32(column) < dof_count:
+                                    d_inv_u[row] += (
+                                        joint_d_inv[dof_start + wp.int32(row), column] * reduced_force[column]
+                                    )
+                    for column in range(_MAX_JOINT_DOF):
+                        if wp.int32(column) < dof_count:
+                            propagated += joint_u_matrix[dof_start + wp.int32(column)] * d_inv_u[column]
                 body_bias[body_slot] = subtree_bias
                 body_work[body_slot] = propagated
                 index += tile_width
@@ -2786,6 +2666,7 @@ def _make_advance_reduced_articulations_warp_ops(
         # Each depth assigns at most one joint per lane, so parent recurrences can
         # stay in the warp instead of round-tripping through response workspaces.
         previous_acceleration = wp.spatial_vector()
+        previous_transport = wp.spatial_vector()
         previous_twist = wp.spatial_vector()
         for depth in range(max_depth + wp.int32(1)):
             index = articulation_depth_start[articulation, depth] + lane
@@ -2797,8 +2678,12 @@ def _make_advance_reduced_articulations_warp_ops(
                 joint = articulation_depth_joint[index]
                 parent_lane = joint_parent_lane[joint]
             parent_acceleration = _shuffle_reduced_spatial(previous_acceleration, parent_lane, tile_width, group_mask)
+            parent_transport = wp.spatial_vector()
+            if use_implicit:
+                parent_transport = _shuffle_reduced_spatial(previous_transport, parent_lane, tile_width, group_mask)
             twist = _shuffle_reduced_spatial(previous_twist, parent_lane, tile_width, group_mask)
             child_acceleration = wp.spatial_vector()
+            child_transport = wp.spatial_vector()
             if active:
                 child = joint_child[joint]
                 dof_start = joint_qd_start[joint]
@@ -2809,18 +2694,41 @@ def _make_advance_reduced_articulations_warp_ops(
                 for row in range(_MAX_JOINT_DOF):
                     if wp.int32(row) < dof_count:
                         dof = dof_start + wp.int32(row)
-                        rhs[row] = joint_work[dof] - wp.dot(joint_u_matrix[dof], parent_acceleration)
+                        if use_implicit:
+                            rhs[row] = (
+                                joint_work[dof]
+                                - wp.dot(joint_implicit_w_velocity[dof], parent_acceleration)
+                                - wp.dot(joint_implicit_w_coriolis[dof], parent_transport)
+                            )
+                        else:
+                            rhs[row] = joint_work[dof] - wp.dot(joint_u_matrix[dof], parent_acceleration)
                 for row in range(_MAX_JOINT_DOF):
                     if wp.int32(row) < dof_count:
                         for column in range(_MAX_JOINT_DOF):
                             if wp.int32(column) < dof_count:
-                                qdd[row] += joint_d_inv[dof_start + wp.int32(row), column] * rhs[column]
+                                if use_implicit:
+                                    qdd[row] += joint_implicit_d_inv[dof_start + wp.int32(row), column] * rhs[column]
+                                else:
+                                    qdd[row] += joint_d_inv[dof_start + wp.int32(row), column] * rhs[column]
                 child_acceleration = parent_acceleration
+                implicit_parent = wp.spatial_vector()
+                if use_implicit:
+                    implicit_slot = child
+                    if wp.static(fuse_publish and static_tile_width > 0):
+                        implicit_slot = index
+                    implicit_parent = body_implicit_parent_velocity[implicit_slot]
+                    child_transport = parent_transport - dt * spatial_cross(
+                        body_implicit_twist[implicit_slot], parent_acceleration
+                    )
                 for row in range(_MAX_JOINT_DOF):
                     if wp.int32(row) < dof_count:
                         dof = dof_start + wp.int32(row)
                         joint_qd[dof] += qdd[row] * dt
                         child_acceleration += joint_s[dof] * qdd[row]
+                        if use_implicit:
+                            child_transport += (joint_s[dof] + dt * spatial_cross(implicit_parent, joint_s[dof])) * qdd[
+                                row
+                            ]
                         twist += joint_s[dof] * joint_qd[dof]
                 body_velocity[child] = twist
                 omega = wp.spatial_bottom(twist)
@@ -2830,8 +2738,10 @@ def _make_advance_reduced_articulations_warp_ops(
                 bodies.velocity[slot] = velocity_com
                 bodies.angular_velocity[slot] = omega
             previous_acceleration = child_acceleration
+            previous_transport = child_transport
             previous_twist = twist
             _sync_reduced_group(group_mask)
+        return incoming_momentum
 
     @wp.kernel(enable_backward=False, module=module)
     def _advance_reduced_articulations_warp_kernel(
@@ -2870,7 +2780,14 @@ def _make_advance_reduced_articulations_warp_ops(
         generalized_acceleration: wp.array[wp.float32],
         public_body_qd: wp.array[wp.spatial_vector],
         bodies: BodyContainer,
-        captured_momentum: wp.array[wp.spatial_vector],
+        joint_factor_diagonal: wp.array[wp.float32],
+        body_implicit_velocity: wp.array[wp.spatial_matrix],
+        body_implicit_coriolis: wp.array[wp.spatial_matrix],
+        body_implicit_twist: wp.array[wp.spatial_vector],
+        body_implicit_parent_velocity: wp.array[wp.spatial_vector],
+        joint_implicit_w_velocity: wp.array[wp.spatial_vector],
+        joint_implicit_w_coriolis: wp.array[wp.spatial_vector],
+        joint_implicit_d_inv: wp.array2d[wp.float32],
     ):
         _advance_reduced_articulations_warp_device(
             wp.tid(),
@@ -2909,7 +2826,14 @@ def _make_advance_reduced_articulations_warp_ops(
             generalized_acceleration,
             public_body_qd,
             bodies,
-            captured_momentum,
+            joint_factor_diagonal,
+            body_implicit_velocity,
+            body_implicit_coriolis,
+            body_implicit_twist,
+            body_implicit_parent_velocity,
+            joint_implicit_w_velocity,
+            joint_implicit_w_coriolis,
+            joint_implicit_d_inv,
         )
 
     if not fuse_publish:
@@ -2936,7 +2860,6 @@ def _make_advance_reduced_articulations_warp_ops(
         joint_dof_dim: wp.array2d[wp.int32],
         body_com: wp.array[wp.vec3],
         body_mass: wp.array[wp.float32],
-        body_inertia: wp.array[wp.mat33],
         body_world: wp.array[wp.int32],
         gravity: wp.array[wp.vec3],
         body_x_com: wp.array[wp.transform],
@@ -2963,7 +2886,14 @@ def _make_advance_reduced_articulations_warp_ops(
         body_q: wp.array[wp.transform],
         public_body_qd: wp.array[wp.spatial_vector],
         bodies: BodyContainer,
-        captured_momentum: wp.array[wp.spatial_vector],
+        joint_factor_diagonal: wp.array[wp.float32],
+        body_implicit_velocity: wp.array[wp.spatial_matrix],
+        body_implicit_coriolis: wp.array[wp.spatial_matrix],
+        body_implicit_twist: wp.array[wp.spatial_vector],
+        body_implicit_parent_velocity: wp.array[wp.spatial_vector],
+        joint_implicit_w_velocity: wp.array[wp.spatial_vector],
+        joint_implicit_w_coriolis: wp.array[wp.spatial_vector],
+        joint_implicit_d_inv: wp.array2d[wp.float32],
         articulation_origin: wp.array[wp.vec3],
         body_q_local: wp.array[wp.transform],
         body_q_com: wp.array[wp.transform],
@@ -2977,7 +2907,7 @@ def _make_advance_reduced_articulations_warp_ops(
         if articulation >= articulation_count:
             return
 
-        _advance_reduced_articulations_warp_device(
+        target_linear_momentum = _advance_reduced_articulations_warp_device(
             thread,
             articulation_count,
             tile_width,
@@ -3014,11 +2944,16 @@ def _make_advance_reduced_articulations_warp_ops(
             generalized_acceleration,
             public_body_qd,
             bodies,
-            captured_momentum,
+            joint_factor_diagonal,
+            body_implicit_velocity,
+            body_implicit_coriolis,
+            body_implicit_twist,
+            body_implicit_parent_velocity,
+            joint_implicit_w_velocity,
+            joint_implicit_w_coriolis,
+            joint_implicit_d_inv,
         )
 
-        # Momentum restoration happens after integration, so the authoritative
-        # velocity is also the uncorrected integration velocity here.
         _finish_and_publish_reduced_warp_device(
             thread,
             articulation_count,
@@ -3039,13 +2974,12 @@ def _make_advance_reduced_articulations_warp_ops(
             joint_axis,
             joint_dof_dim,
             body_com,
-            body_mass,
-            body_inertia,
-            captured_momentum,
             body_x_com,
             zero_generalized_acceleration,
             dt,
             wp.bool(True),
+            body_mass,
+            target_linear_momentum,
             wp.bool(True),
             joint_qd_public,
             body_q,
@@ -3065,14 +2999,12 @@ def _make_advance_reduced_articulations_warp_kernel(
     *,
     include_external: bool,
     include_coriolis: bool,
-    capture_momentum: bool,
     fuse_publish: bool = False,
     static_tile_width: int = 0,
 ):
     return _make_advance_reduced_articulations_warp_ops(
         include_external=include_external,
         include_coriolis=include_coriolis,
-        capture_momentum=capture_momentum,
         fuse_publish=fuse_publish,
         static_tile_width=static_tile_width,
     )[1]
@@ -3082,7 +3014,7 @@ def _make_advance_reduced_articulations_warp_kernel(
 def _make_biased_contact_advance_publish_kernel(max_dofs: int):
     solve_device = _SOLVE_GENERALIZED_CONTACT_TILE_DEVICES[max_dofs]
     advance_device = _make_advance_reduced_articulations_warp_ops(
-        include_external=False, include_coriolis=True, capture_momentum=True, fuse_publish=True
+        include_external=False, include_coriolis=True, fuse_publish=True
     )[0]
     module = wp.get_module(f"reduced_contact_bias_advance_publish_{max_dofs}")
 
@@ -3125,7 +3057,6 @@ def _make_biased_contact_advance_publish_kernel(max_dofs: int):
         joint_dof_dim: wp.array2d[wp.int32],
         body_com: wp.array[wp.vec3],
         body_mass: wp.array[wp.float32],
-        body_inertia: wp.array[wp.mat33],
         body_world: wp.array[wp.int32],
         gravity: wp.array[wp.vec3],
         body_x_com: wp.array[wp.transform],
@@ -3152,7 +3083,14 @@ def _make_biased_contact_advance_publish_kernel(max_dofs: int):
         joint_qd_public: wp.array[wp.float32],
         body_q: wp.array[wp.transform],
         public_body_qd: wp.array[wp.spatial_vector],
-        captured_momentum: wp.array[wp.spatial_vector],
+        joint_factor_diagonal: wp.array[wp.float32],
+        body_implicit_velocity: wp.array[wp.spatial_matrix],
+        body_implicit_coriolis: wp.array[wp.spatial_matrix],
+        body_implicit_twist: wp.array[wp.spatial_vector],
+        body_implicit_parent_velocity: wp.array[wp.spatial_vector],
+        joint_implicit_w_velocity: wp.array[wp.spatial_vector],
+        joint_implicit_w_coriolis: wp.array[wp.spatial_vector],
+        joint_implicit_d_inv: wp.array2d[wp.float32],
         articulation_origin: wp.array[wp.vec3],
         body_q_local: wp.array[wp.transform],
         body_q_com: wp.array[wp.transform],
@@ -3194,7 +3132,7 @@ def _make_biased_contact_advance_publish_kernel(max_dofs: int):
             return
 
         thread = articulation * wp.int32(32) + lane
-        advance_device(
+        target_linear_momentum = advance_device(
             thread,
             articulation_count,
             wp.int32(32),
@@ -3231,7 +3169,14 @@ def _make_biased_contact_advance_publish_kernel(max_dofs: int):
             generalized_acceleration,
             public_body_qd,
             bodies,
-            captured_momentum,
+            joint_factor_diagonal,
+            body_implicit_velocity,
+            body_implicit_coriolis,
+            body_implicit_twist,
+            body_implicit_parent_velocity,
+            joint_implicit_w_velocity,
+            joint_implicit_w_coriolis,
+            joint_implicit_d_inv,
         )
         for depth in range(max_depth + wp.int32(1)):
             index = articulation_depth_start[articulation, depth] + lane
@@ -3262,13 +3207,12 @@ def _make_biased_contact_advance_publish_kernel(max_dofs: int):
             joint_axis,
             joint_dof_dim,
             body_com,
-            body_mass,
-            body_inertia,
-            captured_momentum,
             body_x_com,
             zero_generalized_acceleration,
             dt,
             wp.bool(True),
+            body_mass,
+            target_linear_momentum,
             wp.bool(True),
             joint_qd_public,
             body_q,
@@ -3331,8 +3275,6 @@ def _make_relax_and_publish_reduced_contacts_kernel(max_dofs: int):
         joint_dof_dim: wp.array2d[wp.int32],
         body_com: wp.array[wp.vec3],
         body_mass: wp.array[wp.float32],
-        body_inertia: wp.array[wp.mat33],
-        target_momentum: wp.array[wp.spatial_vector],
         body_x_com: wp.array[wp.transform],
         zero_generalized_acceleration: wp.array[wp.float32],
         joint_qd_public: wp.array[wp.float32],
@@ -3412,13 +3354,12 @@ def _make_relax_and_publish_reduced_contacts_kernel(max_dofs: int):
                 joint_axis,
                 joint_dof_dim,
                 body_com,
-                body_mass,
-                body_inertia,
-                target_momentum,
                 body_x_com,
                 zero_generalized_acceleration,
                 wp.float32(0.0),
                 wp.bool(False),
+                body_mass,
+                wp.vec3(0.0),
                 wp.bool(False),
                 joint_qd_public,
                 body_q,
@@ -3665,11 +3606,16 @@ class ReducedArticulationSystem:
         self.generalized_rhs = wp.empty(dof_count, dtype=wp.float32, device=self.device)
         self.impulse_response = wp.zeros((body_count, 6), dtype=wp.spatial_vector, device=self.device)
         self.deferred_wrench = wp.zeros(body_count, dtype=wp.spatial_vector, device=self.device)
-        self.target_world_momentum = wp.zeros(
-            int(model.articulation_count),
-            dtype=wp.spatial_vector,
-            device=self.device,
-        )
+        # Scratch for the linearly implicit velocity-product step, whose
+        # non-symmetric operator is factored inside the advance itself.
+        self.target_linear_momentum = wp.zeros(articulation_count, dtype=wp.vec3, device=self.device)
+        self.body_implicit_velocity = wp.zeros(body_count, dtype=wp.spatial_matrix, device=self.device)
+        self.body_implicit_coriolis = wp.zeros(body_count, dtype=wp.spatial_matrix, device=self.device)
+        self.body_implicit_twist = wp.zeros(body_count, dtype=wp.spatial_vector, device=self.device)
+        self.body_implicit_parent_velocity = wp.zeros(body_count, dtype=wp.spatial_vector, device=self.device)
+        self.joint_implicit_w_velocity = wp.zeros(dof_count, dtype=wp.spatial_vector, device=self.device)
+        self.joint_implicit_w_coriolis = wp.zeros(dof_count, dtype=wp.spatial_vector, device=self.device)
+        self.joint_implicit_d_inv = wp.zeros((max(1, dof_count), 6), dtype=wp.float32, device=self.device)
 
         self.refresh_inertial_properties()
 
@@ -3941,9 +3887,13 @@ class ReducedArticulationSystem:
         *,
         include_external: bool,
         include_coriolis: bool,
-        capture_momentum: bool = False,
     ) -> None:
-        """Apply one split ABA velocity update and publish link twists."""
+        """Apply one split ABA velocity update and publish link twists.
+
+        With ``include_coriolis``, trees spinning faster than
+        ``_IMPLICIT_SPIN_STEP`` radians per step integrate the velocity-product
+        (Coriolis and gyroscopic) bias linearly implicitly.
+        """
         advance_inputs = [
             self.model.joint_type,
             self.model.joint_parent,
@@ -3975,6 +3925,15 @@ class ReducedArticulationSystem:
             state.body_qd,
             bodies,
         ]
+        implicit_outputs = [
+            self.body_implicit_velocity,
+            self.body_implicit_coriolis,
+            self.body_implicit_twist,
+            self.body_implicit_parent_velocity,
+            self.joint_implicit_w_velocity,
+            self.joint_implicit_w_coriolis,
+            self.joint_implicit_d_inv,
+        ]
         if self.use_warp_advance:
             articulation_count = int(self.model.articulation_count)
             tile_width = self.advance_tile_width
@@ -3982,7 +3941,6 @@ class ReducedArticulationSystem:
             advance_kernel = _make_advance_reduced_articulations_warp_kernel(
                 include_external=include_external,
                 include_coriolis=include_coriolis,
-                capture_momentum=capture_momentum,
             )
             wp.launch(
                 advance_kernel,
@@ -3999,7 +3957,7 @@ class ReducedArticulationSystem:
                     self.factor_child_joint,
                     *advance_inputs,
                 ],
-                outputs=[*advance_outputs, self.target_world_momentum],
+                outputs=[*advance_outputs, self.joint_factor_diagonal, *implicit_outputs],
                 device=self.device,
             )
         else:
@@ -4012,8 +3970,9 @@ class ReducedArticulationSystem:
                     *advance_inputs,
                     wp.bool(include_external),
                     wp.bool(include_coriolis),
+                    self.joint_factor_diagonal,
                 ],
-                outputs=advance_outputs,
+                outputs=[*advance_outputs, *implicit_outputs],
                 device=self.device,
             )
 
@@ -4415,7 +4374,7 @@ class ReducedPhoenXArticulation:
         dt: float,
         *,
         update_configuration: bool = True,
-        restore_momentum: bool = False,
+        restore_linear_momentum: bool = False,
     ) -> None:
         if update_configuration or not self.system.use_warp_publish:
             wp.copy(self.system.joint_qd_integrator, self.system.joint_qd_internal)
@@ -4446,14 +4405,13 @@ class ReducedPhoenXArticulation:
                     self.model.joint_axis,
                     self.model.joint_dof_dim,
                     self.model.body_com,
-                    self.model.body_mass,
-                    self.model.body_inertia,
-                    self.system.target_world_momentum,
                     self.system.body_x_com,
                     self.system.zero_generalized_force,
                     wp.float32(dt),
                     wp.bool(update_configuration),
-                    wp.bool(restore_momentum),
+                    self.model.body_mass,
+                    self.system.target_linear_momentum,
+                    wp.bool(restore_linear_momentum),
                 ],
                 outputs=[
                     self.state.joint_qd,
@@ -4521,6 +4479,25 @@ class ReducedPhoenXArticulation:
                 outputs=[self.system.joint_s_publish, self.state.body_qd],
                 device=self.model.device,
             )
+            if update_configuration and restore_linear_momentum:
+                wp.launch(
+                    _boost_reduced_linear_momentum_kernel,
+                    dim=int(self.model.articulation_count),
+                    inputs=[
+                        self.model.articulation_start,
+                        self.model.articulation_end,
+                        self.model.joint_type,
+                        self.model.joint_child,
+                        self.model.joint_qd_start,
+                        self.model.joint_X_p,
+                        self.model.body_mass,
+                        self.system.target_linear_momentum,
+                        self.system.joint_s_publish,
+                        self.bodies,
+                    ],
+                    outputs=[self.system.joint_qd_internal, self.state.joint_qd, self.state.body_qd],
+                    device=self.model.device,
+                )
 
     def _advance_and_publish_fused(self, dt: float) -> None:
         articulation_count = int(self.model.articulation_count)
@@ -4529,7 +4506,6 @@ class ReducedPhoenXArticulation:
         kernel = _make_advance_reduced_articulations_warp_kernel(
             include_external=False,
             include_coriolis=True,
-            capture_momentum=True,
             fuse_publish=True,
             static_tile_width=tile_width,
         )
@@ -4557,7 +4533,6 @@ class ReducedPhoenXArticulation:
                 self.model.joint_dof_dim,
                 self.model.body_com,
                 self.model.body_mass,
-                self.model.body_inertia,
                 self.model.body_world,
                 self.model.gravity,
                 self.system.body_x_com,
@@ -4584,7 +4559,14 @@ class ReducedPhoenXArticulation:
                 self.state.body_q,
                 self.state.body_qd,
                 self.bodies,
-                self.system.target_world_momentum,
+                self.system.joint_factor_diagonal,
+                self.system.body_implicit_velocity,
+                self.system.body_implicit_coriolis,
+                self.system.body_implicit_twist,
+                self.system.body_implicit_parent_velocity,
+                self.system.joint_implicit_w_velocity,
+                self.system.joint_implicit_w_coriolis,
+                self.system.joint_implicit_d_inv,
                 self.system.articulation_origin,
                 self.system.body_q_local,
                 self.system.body_q_com,
@@ -4649,7 +4631,6 @@ class ReducedPhoenXArticulation:
                 self.model.joint_dof_dim,
                 self.model.body_com,
                 self.model.body_mass,
-                self.model.body_inertia,
                 self.model.body_world,
                 self.model.gravity,
                 self.system.body_x_com,
@@ -4676,7 +4657,14 @@ class ReducedPhoenXArticulation:
                 self.state.joint_qd,
                 self.state.body_q,
                 self.state.body_qd,
-                self.system.target_world_momentum,
+                self.system.joint_factor_diagonal,
+                self.system.body_implicit_velocity,
+                self.system.body_implicit_coriolis,
+                self.system.body_implicit_twist,
+                self.system.body_implicit_parent_velocity,
+                self.system.joint_implicit_w_velocity,
+                self.system.joint_implicit_w_coriolis,
+                self.system.joint_implicit_d_inv,
                 self.system.articulation_origin,
                 self.system.body_q_local,
                 self.system.body_q_com,
@@ -4743,8 +4731,6 @@ class ReducedPhoenXArticulation:
                 self.model.joint_dof_dim,
                 self.model.body_com,
                 self.model.body_mass,
-                self.model.body_inertia,
-                self.system.target_world_momentum,
                 self.system.body_x_com,
                 self.system.zero_generalized_force,
                 self.state.joint_qd,
@@ -4768,7 +4754,17 @@ class ReducedPhoenXArticulation:
         self._publish_state(0.0, update_configuration=False)
 
     def end_substep(self, dt: float, *, split_dynamics: bool) -> None:
-        """Apply post-impulse Coriolis dynamics, integrate, and conserve momentum."""
+        """Apply the post-impulse velocity-product step and integrate.
+
+        Each tree picks the explicit or linearly implicit step from its own
+        fastest link rate, see :func:`_advance_reduced_articulations_kernel`.
+
+        Floating trees also get their incoming linear momentum back through a
+        uniform boost. The reduced update conserves it only to first order in
+        ``dt``, and fast internal spin otherwise turns that drift into spurious
+        center-of-mass motion. A boost leaves every angular velocity, joint
+        rate, and the angular momentum about the center of mass unchanged.
+        """
         self._kinematics_current = True
         if self.execution_path == "persistent" and split_dynamics:
             wp.capture_if(
@@ -4785,33 +4781,19 @@ class ReducedPhoenXArticulation:
         ):
             self._advance_and_publish_fused(dt)
             return
-        capture_inputs = [
-            self.model.articulation_start,
-            self.model.articulation_end,
-            self.model.joint_child,
-            self.model.body_mass,
-            self.model.body_inertia,
-            self.bodies,
-        ]
-        fused_capture = self.model.device.is_cuda and self.system.use_warp_advance and split_dynamics
-        if not fused_capture:
-            if self.model.device.is_cuda:
-                wp.launch_tiled(
-                    _capture_reduced_momentum_warp_kernel,
-                    dim=[int(self.model.articulation_count)],
-                    inputs=capture_inputs,
-                    outputs=[self.system.target_world_momentum],
-                    block_dim=32,
-                    device=self.model.device,
-                )
-            else:
-                wp.launch(
-                    _capture_reduced_momentum_kernel,
-                    dim=int(self.model.articulation_count),
-                    inputs=capture_inputs,
-                    outputs=[self.system.target_world_momentum],
-                    device=self.model.device,
-                )
+        wp.launch(
+            _capture_reduced_linear_momentum_kernel,
+            dim=int(self.model.articulation_count),
+            inputs=[
+                self.model.articulation_start,
+                self.model.articulation_end,
+                self.model.joint_child,
+                self.model.body_mass,
+                self.bodies,
+            ],
+            outputs=[self.system.target_linear_momentum],
+            device=self.model.device,
+        )
         if split_dynamics:
             self.system.advance(
                 self.state,
@@ -4820,44 +4802,8 @@ class ReducedPhoenXArticulation:
                 dt,
                 include_external=False,
                 include_coriolis=True,
-                capture_momentum=fused_capture,
             )
-
-        fused_restore = self.model.device.is_cuda and self.system.use_warp_publish
-        self._publish_state(dt, restore_momentum=fused_restore)
-        if fused_restore:
-            return
-        restore_inputs = [
-            self.model.articulation_start,
-            self.model.articulation_end,
-            self.model.joint_type,
-            self.model.joint_child,
-            self.model.joint_qd_start,
-            self.model.joint_X_p,
-            self.model.body_mass,
-            self.model.body_inertia,
-            self.system.target_world_momentum,
-            self.system.joint_s_publish,
-            self.bodies,
-        ]
-        restore_outputs = [self.system.joint_qd_internal, self.state.joint_qd, self.state.body_qd]
-        if self.model.device.is_cuda:
-            wp.launch_tiled(
-                _restore_reduced_momentum_warp_kernel,
-                dim=[int(self.model.articulation_count)],
-                inputs=restore_inputs,
-                outputs=restore_outputs,
-                block_dim=32,
-                device=self.model.device,
-            )
-        else:
-            wp.launch(
-                _restore_reduced_momentum_kernel,
-                dim=int(self.model.articulation_count),
-                inputs=restore_inputs,
-                outputs=restore_outputs,
-                device=self.model.device,
-            )
+        self._publish_state(dt, restore_linear_momentum=True)
 
     def sync_bodies(self) -> None:
         """Write reduced link pose and COM twist into PhoenX body storage."""

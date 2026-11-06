@@ -30,7 +30,6 @@ from newton._src.solvers.phoenx.articulations.maximal_projector import (
 from newton._src.solvers.phoenx.articulations.maximal_projector_general import GeneralMaximalTreeProjector
 from newton._src.solvers.phoenx.articulations.reduced import (
     ReducedArticulationSystem,
-    _capture_reduced_momentum_warp_kernel,
     _factor_reduced_singledof_warp_kernel,
     _factor_reduced_warp_kernel,
     _pack_transformed_body_inertia,
@@ -3448,63 +3447,6 @@ class TestReducedArticulation(unittest.TestCase):
         np.testing.assert_allclose(momentum_after, momentum_before, rtol=0.0, atol=1.0e-5)
         self.assertGreater(float(np.linalg.norm(bridge.state.joint_qd.numpy())), 1.0e-4)
 
-    def test_fused_advance_momentum_matches_standalone_capture_under_graph_capture(self):
-        device = wp.get_preferred_device()
-        if not device.is_cuda:
-            self.skipTest("reduced articulation tests require CUDA graph capture")
-
-        model = _make_branched_tree(device)
-        state = model.state()
-        state.joint_qd.assign(np.linspace(-0.45, 0.55, int(model.joint_dof_count), dtype=np.float32))
-        newton.eval_fk(model, state.joint_q, state.joint_qd, state)
-        control = model.control()
-        solver = newton.solvers.SolverPhoenX(
-            model,
-            joint_mode="reduced",
-            substeps=1,
-            solver_iterations=1,
-            velocity_iterations=0,
-        )
-        bridge = solver._reduced_articulation
-        reference = wp.zeros(int(model.articulation_count), dtype=wp.spatial_vector, device=device)
-        dt = 1.0 / 240.0
-
-        with wp.ScopedCapture(device=device) as capture:
-            bridge.import_step(state, control)
-            bridge.begin_substep(dt, split_dynamics=True)
-            wp.launch_tiled(
-                _capture_reduced_momentum_warp_kernel,
-                dim=[int(model.articulation_count)],
-                inputs=[
-                    model.articulation_start,
-                    model.articulation_end,
-                    model.joint_child,
-                    model.body_mass,
-                    model.body_inertia,
-                    solver.bodies,
-                ],
-                outputs=[reference],
-                block_dim=32,
-                device=device,
-            )
-            bridge.system.advance(
-                bridge.state,
-                control,
-                solver.bodies,
-                dt,
-                include_external=False,
-                include_coriolis=True,
-                capture_momentum=True,
-            )
-        wp.capture_launch(capture.graph)
-
-        np.testing.assert_allclose(
-            bridge.system.target_world_momentum.numpy(),
-            reference.numpy(),
-            rtol=2.0e-6,
-            atol=2.0e-6,
-        )
-
     def test_valid_kinematics_import_matches_fk_import_under_graph_capture(self):
         device = wp.get_preferred_device()
         if not device.is_cuda:
@@ -4852,6 +4794,199 @@ class TestReducedArticulationPairContacts(unittest.TestCase):
         qd = state_0.body_qd.numpy()
         self.assertGreater(qd[:6, 2].mean(), qd[6:, 2].mean() - 0.05)
         self.assertTrue(np.isfinite(qd).all())
+
+
+_CAPSULE_PITCH = 2.0 * (0.07 + 0.045)
+
+
+def _make_capsule_ball_chain(device, links, *, tilt=0.0, qd=()):
+    """Weightless free-root chain of thin capsules along their local x axis, joined by ball joints."""
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
+    cfg = newton.ModelBuilder.ShapeConfig(density=400.0)
+    cfg.collision_group = -7
+    capsule_x = wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), 0.5 * wp.pi)
+    rotation = wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), tilt)
+    joints = []
+    previous = -1
+    for i in range(links):
+        body = builder.add_link(
+            xform=wp.transform(
+                wp.vec3(0.0, 0.0, 2.0) + wp.quat_rotate(rotation, wp.vec3(_CAPSULE_PITCH * i, 0.0, 0.0)), rotation
+            )
+        )
+        builder.add_shape_capsule(
+            body, xform=wp.transform(wp.vec3(0.0), capsule_x), radius=0.045, half_height=0.07, cfg=cfg
+        )
+        if previous < 0:
+            joints.append(builder.add_joint_free(body))
+        else:
+            joints.append(
+                builder.add_joint_ball(
+                    previous,
+                    body,
+                    parent_xform=wp.transform(wp.vec3(0.5 * _CAPSULE_PITCH, 0.0, 0.0), wp.quat_identity()),
+                    child_xform=wp.transform(wp.vec3(-0.5 * _CAPSULE_PITCH, 0.0, 0.0), wp.quat_identity()),
+                )
+            )
+        previous = body
+    builder.add_articulation(joints)
+    for dof, value in qd:
+        builder.joint_qd[dof] = value
+    return builder.finalize(device=device)
+
+
+def _run_reduced_frames(model, state0, state1, frames, *, dt=1.0 / 60.0, substeps=4):
+    """Advance ``frames`` (even) graph-captured frames and return the final state."""
+    solver = newton.solvers.SolverPhoenX(model, joint_mode="reduced", substeps=substeps, solver_iterations=4)
+    with wp.ScopedCapture(device=model.device) as capture:
+        solver.step(state0, state1, None, None, dt)
+        solver.step(state1, state0, None, None, dt)
+    for _ in range(frames // 2):
+        wp.capture_launch(capture.graph)
+    return state0
+
+
+def _link_axial_spin(state):
+    """Return each link's angular velocity along its long (local x) axis."""
+    body_q = state.body_q.numpy()
+    body_qd = state.body_qd.numpy()
+    spins = []
+    for transform, twist in zip(body_q, body_qd, strict=True):
+        axis = np.asarray(wp.quat_rotate(wp.quat(*transform[3:]), wp.vec3(1.0, 0.0, 0.0)))
+        spins.append(float(np.dot(twist[3:], axis)))
+    return np.asarray(spins)
+
+
+class TestReducedVelocityProductStep(unittest.TestCase):
+    """The implicit velocity-product step keeps fast spin stable and physical."""
+
+    def setUp(self):
+        self.device = wp.get_preferred_device()
+        if not self.device.is_cuda:
+            self.skipTest("reduced articulation tests require CUDA graph capture")
+
+    def _initial_states(self, model):
+        state0, state1 = model.state(), model.state()
+        for state in (state0, state1):
+            newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+        return state0, state1
+
+    def test_fast_axial_spin_of_ball_chain_tip_stays_finite_without_energy_growth(self):
+        # The tip spins at 60 rad/s about its long axis (omega * dt = 0.25 per substep).
+        # An explicit velocity-product step pumps energy into the chain until it overflows.
+        model = _make_capsule_ball_chain(self.device, 3, qd=((9, 60.0), (10, 3.0)))
+        state0, state1 = self._initial_states(model)
+        initial_energy = _kinetic_energy(model, state0)
+        initial_momentum = _total_momentum(model, state0)
+
+        state = _run_reduced_frames(model, state0, state1, 90)
+
+        self.assertTrue(np.isfinite(state.joint_qd.numpy()).all())
+        self.assertTrue(np.isfinite(state.body_q.numpy()).all())
+        energy_ratio = _kinetic_energy(model, state) / initial_energy
+        self.assertLess(energy_ratio, 1.05)
+        self.assertGreater(energy_ratio, 0.9)
+        momentum = _total_momentum(model, state)
+        np.testing.assert_allclose(momentum[:3], initial_momentum[:3], atol=1.0e-3)
+        # The tip keeps spinning about its own axis.
+        self.assertGreater(_link_axial_spin(state)[-1], 58.0)
+
+    def test_spinning_translating_free_body_keeps_momentum_energy_and_axial_spin(self):
+        # A capsule spins about its symmetry axis while tumbling and translating. Euler's
+        # equations keep the axial spin constant, and the COM must move in a straight line.
+        model = _make_capsule_ball_chain(
+            self.device, 1, qd=((0, 1.0), (1, 0.5), (2, 0.0), (3, 30.0), (4, 2.0), (5, 1.0))
+        )
+        state0, state1 = self._initial_states(model)
+        initial_energy = _kinetic_energy(model, state0)
+        initial_momentum = _total_momentum(model, state0)
+        initial_position = state0.body_q.numpy()[0, :3].copy()
+        frames = 120
+
+        state = _run_reduced_frames(model, state0, state1, frames)
+
+        momentum = _total_momentum(model, state)
+        np.testing.assert_allclose(momentum[:3], initial_momentum[:3], atol=1.0e-4)
+        energy_ratio = _kinetic_energy(model, state) / initial_energy
+        self.assertLess(energy_ratio, 1.0 + 1.0e-3)
+        self.assertGreater(energy_ratio, 0.98)
+        self.assertAlmostEqual(_link_axial_spin(state)[0], 30.0, delta=0.05)
+        velocity = initial_momentum[:3] / float(model.body_mass.numpy()[0])
+        expected_position = initial_position + velocity * frames / 60.0
+        np.testing.assert_allclose(state.body_q.numpy()[0, :3], expected_position, atol=2.0e-3)
+
+    def test_tilted_two_link_whirl_keeps_each_link_axial_spin(self):
+        # A straight two-link chain tilted by 0.3 rad whirls rigidly about world z.
+        # Each link's spin about its own axis stays -spin * sin(tilt) for all time.
+        tilt = 0.3
+        spin = 3.0
+        model = _make_capsule_ball_chain(self.device, 2, tilt=tilt, qd=((5, spin),))
+        state0, state1 = self._initial_states(model)
+        initial_energy = _kinetic_energy(model, state0)
+        initial_momentum = _total_momentum(model, state0)
+
+        state = _run_reduced_frames(model, state0, state1, 120)
+
+        np.testing.assert_allclose(_link_axial_spin(state), -spin * np.sin(tilt), atol=5.0e-3)
+        momentum = _total_momentum(model, state)
+        np.testing.assert_allclose(momentum[:3], initial_momentum[:3], atol=1.0e-4)
+        self.assertLess(abs(_kinetic_energy(model, state) / initial_energy - 1.0), 1.0e-2)
+
+    def _velocity_step_matches_explicit_dynamics(self, scale):
+        """Return whether one end-of-substep advance equals ``dt * M^-1 (-C)`` for scaled rates."""
+        model = _make_capsule_ball_chain(
+            self.device, 4, tilt=0.2, qd=((3, 0.3 * scale), (5, 0.2 * scale), (7, 0.4 * scale), (12, 0.5 * scale))
+        )
+        state = model.state()
+        newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+        control = model.control()
+        solver = newton.solvers.SolverPhoenX(model, joint_mode="reduced", substeps=1, solver_iterations=1)
+        bridge = solver._reduced_articulation
+        system = bridge.system
+        dt = 1.0 / 240.0
+        with wp.ScopedCapture(device=self.device) as capture:
+            explicit_qdd = wp.clone(system.forward_dynamics(state, control))
+            before = wp.clone(system.joint_qd_internal)
+            system.advance(state, control, solver.bodies, dt, include_external=False, include_coriolis=True)
+        wp.capture_launch(capture.graph)
+        step_qdd = (system.joint_qd_internal.numpy() - before.numpy()) / dt
+        expected = explicit_qdd.numpy()
+        return np.allclose(step_qdd, expected, rtol=1.0e-3, atol=1.0e-3 * np.abs(expected).max())
+
+    def test_slow_tree_keeps_explicit_step_and_fast_tree_switches_to_implicit(self):
+        # Slow trees (|omega| dt well below the bound) keep the explicit ABA step, so ordinary
+        # robots pay nothing; fast spin switches the whole tree to the implicit operator.
+        self.assertTrue(self._velocity_step_matches_explicit_dynamics(1.0))
+        self.assertFalse(self._velocity_step_matches_explicit_dynamics(40.0))
+
+    def test_implicit_step_matches_across_execution_paths(self):
+        # Serial kernels, the fused warp advance+publish, and the persistent path
+        # must apply the same implicit step, root re-referencing, and momentum boost.
+        model = _make_capsule_ball_chain(self.device, 4, tilt=0.2, qd=((3, 0.4), (5, 2.0), (12, 25.0), (13, 2.0)))
+        results = []
+        for path in ("serial", "reference", "persistent"):
+            state0, state1 = self._initial_states(model)
+            solver = newton.solvers.SolverPhoenX(
+                model,
+                joint_mode="reduced",
+                substeps=4,
+                solver_iterations=4,
+                reduced_articulation_path="persistent" if path == "persistent" else "reference",
+            )
+            if path == "serial":
+                system = solver._reduced_articulation.system
+                system.use_warp_advance = False
+                system.use_warp_kinematics = False
+                system.use_warp_publish = False
+            with wp.ScopedCapture(device=self.device) as capture:
+                solver.step(state0, state1, None, None, 1.0 / 60.0)
+                solver.step(state1, state0, None, None, 1.0 / 60.0)
+            for _ in range(5):
+                wp.capture_launch(capture.graph)
+            results.append((state0.joint_qd.numpy(), state0.body_q.numpy(), state0.body_qd.numpy()))
+        for other in results[1:]:
+            for reference, value in zip(results[0], other, strict=True):
+                np.testing.assert_allclose(value, reference, rtol=1.0e-4, atol=1.0e-4)
 
 
 if __name__ == "__main__":
