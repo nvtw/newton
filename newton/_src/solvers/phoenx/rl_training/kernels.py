@@ -130,6 +130,24 @@ def _sigmoid(x: wp.float32) -> wp.float32:
     return wp.float32(1.0) / (wp.float32(1.0) + wp.exp(-x))
 
 
+@wp.func_native("""
+return fmaf(a, b, c);
+""")
+def _fma(a: wp.float32, b: wp.float32, c: wp.float32) -> wp.float32: ...
+
+
+@wp.func
+def _mingru_blend(previous: wp.float32, gate: wp.float32, candidate: wp.float32) -> wp.float32:
+    """Gated recurrence, fused explicitly so every MinGRU kernel rounds it identically."""
+    return _fma(gate, candidate - previous, previous)
+
+
+@wp.func
+def _mingru_output(proj: wp.float32, recurrent: wp.float32, x: wp.float32) -> wp.float32:
+    """Highway output ``proj * recurrent + (1 - proj) * x`` with one explicit rounding order."""
+    return _fma(proj, recurrent - x, x)
+
+
 @wp.func
 def _mingru_hidden_candidate(x: wp.float32) -> wp.float32:
     if x >= wp.float32(0.0):
@@ -285,11 +303,11 @@ def mingru_step_kernel(
     prev = state[layer, row, hidden]
     candidate = _mingru_hidden_candidate(hidden_pre)
     gate = _sigmoid(gate_pre)
-    recurrent = prev + gate * (candidate - prev)
+    recurrent = _mingru_blend(prev, gate, candidate)
     state[layer, row, hidden] = recurrent
     proj = _sigmoid(proj_pre)
     x_val = x[row, hidden]
-    out[row, hidden] = proj * recurrent + (wp.float32(1.0) - proj) * x_val
+    out[row, hidden] = _mingru_output(proj, recurrent, x_val)
 
 
 @wp.kernel
@@ -308,10 +326,10 @@ def mingru_step_readonly_kernel(
     prev = state[layer, row, hidden]
     candidate = _mingru_hidden_candidate(hidden_pre)
     gate = _sigmoid(gate_pre)
-    recurrent = prev + gate * (candidate - prev)
+    recurrent = _mingru_blend(prev, gate, candidate)
     proj = _sigmoid(proj_pre)
     x_val = x[row, hidden]
-    out[row, hidden] = proj * recurrent + (wp.float32(1.0) - proj) * x_val
+    out[row, hidden] = _mingru_output(proj, recurrent, x_val)
 
 
 @wp.kernel
@@ -337,11 +355,11 @@ def mingru_sequence_forward_kernel(
         proj_pre = combined[row, wp.int32(2) * hidden_dim + hidden]
         candidate = _mingru_hidden_candidate(hidden_pre)
         gate = _sigmoid(gate_pre)
-        recurrent = recurrent + gate * (candidate - recurrent)
+        recurrent = _mingru_blend(recurrent, gate, candidate)
         recurrent_out[row, hidden] = recurrent
         proj = _sigmoid(proj_pre)
         x_val = x[row, hidden]
-        out[row, hidden] = proj * recurrent + (wp.float32(1.0) - proj) * x_val
+        out[row, hidden] = _mingru_output(proj, recurrent, x_val)
 
 
 @wp.kernel
@@ -369,11 +387,11 @@ def mingru_sequence_forward_initial_kernel(
         proj_pre = combined[row, wp.int32(2) * hidden_dim + hidden]
         candidate = _mingru_hidden_candidate(hidden_pre)
         gate = _sigmoid(gate_pre)
-        recurrent = recurrent + gate * (candidate - recurrent)
+        recurrent = _mingru_blend(recurrent, gate, candidate)
         recurrent_out[row, hidden] = recurrent
         proj = _sigmoid(proj_pre)
         x_val = x[row, hidden]
-        out[row, hidden] = proj * recurrent + (wp.float32(1.0) - proj) * x_val
+        out[row, hidden] = _mingru_output(proj, recurrent, x_val)
 
 
 @wp.kernel(module="unique")
@@ -404,13 +422,13 @@ def mingru_sequence_forward_checkpoint_kernel(
         proj_pre = wp.float32(combined[row, wp.int32(2) * hidden_dim + hidden])
         candidate = _mingru_hidden_candidate(hidden_pre)
         gate = _sigmoid(gate_pre)
-        recurrent = recurrent + gate * (candidate - recurrent)
+        recurrent = _mingru_blend(recurrent, gate, candidate)
         if (step + wp.int32(1)) % wp.int32(4) == wp.int32(0) or step == num_steps - wp.int32(1):
             checkpoint_row = (step // wp.int32(4)) * num_envs + env
             recurrent_checkpoints[checkpoint_row, hidden] = recurrent
         proj = _sigmoid(proj_pre)
         x_val = x[row, hidden]
-        out[row, hidden] = proj * recurrent + (wp.float32(1.0) - proj) * x_val
+        out[row, hidden] = _mingru_output(proj, recurrent, x_val)
 
 
 @wp.kernel(module="unique")
@@ -457,7 +475,7 @@ def mingru_sequence_backward_checkpoint_kernel(
                 gate_pre = wp.float32(combined[row, hidden_dim + hidden])
                 candidate = _mingru_hidden_candidate(hidden_pre)
                 gate = _sigmoid(gate_pre)
-                recurrent_value = recurrent_value + gate * (candidate - recurrent_value)
+                recurrent_value = _mingru_blend(recurrent_value, gate, candidate)
                 recurrent_values[offset] = recurrent_value
                 candidate_values[offset] = candidate
                 gate_values[offset] = gate
