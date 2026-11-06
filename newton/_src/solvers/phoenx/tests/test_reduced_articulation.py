@@ -849,7 +849,7 @@ def _make_mixed_reduced_maximal_ground_model(device, *, worlds=1, interacting=Fa
     free_joint = blueprint.add_joint_free(parent=-1, child=reduced_body)
     blueprint.add_articulation([free_joint])
     blueprint.joint_q[-7:] = [reduced_x, 0.0, 0.19, 0.0, 0.0, 0.0, 1.0]
-    blueprint.add_ground_plane(cfg=newton.ModelBuilder.ShapeConfig(collision_group=-1))
+    blueprint.add_ground_plane(cfg=newton.ModelBuilder.ShapeConfig(mu=0.0, restitution=0.0, collision_group=-1))
     if worlds == 1:
         return blueprint.finalize(device=device)
     builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
@@ -864,7 +864,11 @@ def _make_self_contact_model(device, worlds=1):
     tip = blueprint.add_link(mass=1.5)
     shape_cfg = newton.ModelBuilder.ShapeConfig(mu=0.0, restitution=0.0)
     blueprint.add_shape_sphere(root, radius=0.2, cfg=shape_cfg)
-    blueprint.add_shape_sphere(tip, radius=0.2, cfg=shape_cfg)
+    # Offset the tip sphere so the joints can move along the contact normal.
+    # A collinear layout leaves the row singular and its impulse rounding noise.
+    blueprint.add_shape_sphere(
+        tip, xform=wp.transform(wp.vec3(0.0, 0.1, 0.0), wp.quat_identity()), radius=0.2, cfg=shape_cfg
+    )
     free_joint = blueprint.add_joint_free(parent=-1, child=root)
     middle_joint = blueprint.add_joint_revolute(
         parent=root,
@@ -3889,7 +3893,11 @@ class TestReducedArticulation(unittest.TestCase):
         np.testing.assert_allclose(output.body_qd.numpy(), fk_state.body_qd.numpy(), atol=2.0e-5)
 
     def test_packed_self_contact_matches_world_serial_fallback_under_graph_capture(self):
-        """Match packed two-link self-contact to the serial fallback exactly."""
+        """Match packed two-link self-contact to the serial fallback.
+
+        Both paths solve the same rows in different floating-point order, so
+        they agree to rounding rather than bitwise.
+        """
 
         device = wp.get_preferred_device()
         if not device.is_cuda:
@@ -3944,10 +3952,18 @@ class TestReducedArticulation(unittest.TestCase):
         self.assertEqual(int(serial_sections[model.articulation_count - 1]), 0)
         self.assertEqual(int(colored_block.fallback_count.numpy()[0]), 0)
         self.assertEqual(int(serial_block.fallback_count.numpy()[0]), 0)
-        np.testing.assert_array_equal(output_serial.joint_q.numpy(), output_colored.joint_q.numpy())
-        np.testing.assert_array_equal(output_serial.joint_qd.numpy(), output_colored.joint_qd.numpy())
-        np.testing.assert_array_equal(output_serial.body_q.numpy(), output_colored.body_q.numpy())
-        np.testing.assert_array_equal(output_serial.body_qd.numpy(), output_colored.body_qd.numpy())
+        contact_count = int(contacts_colored.rigid_contact_count.numpy()[0])
+        normal_impulse_colored = solver_colored.world._contact_container.impulses.numpy()[0, :contact_count]
+        normal_impulse_serial = solver_serial.world._contact_container.impulses.numpy()[0, :contact_count]
+        # A loaded contact keeps the comparison meaningful.
+        self.assertGreater(float(normal_impulse_serial.max()), 0.1)
+        np.testing.assert_allclose(normal_impulse_colored, normal_impulse_serial, rtol=1.0e-4, atol=1.0e-6)
+        np.testing.assert_allclose(output_serial.joint_q.numpy(), output_colored.joint_q.numpy(), rtol=0.0, atol=1.0e-6)
+        np.testing.assert_allclose(
+            output_serial.joint_qd.numpy(), output_colored.joint_qd.numpy(), rtol=0.0, atol=2.0e-5
+        )
+        np.testing.assert_allclose(output_serial.body_q.numpy(), output_colored.body_q.numpy(), rtol=0.0, atol=1.0e-6)
+        np.testing.assert_allclose(output_serial.body_qd.numpy(), output_colored.body_qd.numpy(), rtol=0.0, atol=2.0e-5)
 
     def test_world_serial_fallback_matches_colored_mixed_body_contacts(self):
         device = wp.get_preferred_device()
@@ -4696,6 +4712,76 @@ class TestReducedArticulation(unittest.TestCase):
         fk_state = model.state()
         newton.eval_fk(model, output.joint_q, output.joint_qd, fk_state)
         np.testing.assert_allclose(output.body_qd.numpy()[:2], fk_state.body_qd.numpy()[:2], atol=2.0e-5)
+
+
+def _make_isolated_contact_scene(device, *, chain: bool, box: bool, box_first: bool = False):
+    """A three-link chain lying on the ground and, far away, a single-body articulation."""
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, -9.81), up_axis=newton.Axis.Z)
+    builder.add_ground_plane()
+
+    def add_box():
+        body = builder.add_body(xform=wp.transform(wp.vec3(5.0, 0.0, 0.2), wp.quat_identity()))
+        builder.add_shape_box(body, hx=0.2, hy=0.2, hz=0.2, cfg=newton.ModelBuilder.ShapeConfig(collision_group=-3))
+
+    if box and box_first:
+        add_box()
+    if chain:
+        previous = -1
+        first = builder.joint_count
+        for i in range(3):
+            body = builder.add_link(xform=wp.transform(wp.vec3(0.3 * i, 0.0, 0.14), wp.quat_identity()))
+            builder.add_shape_box(
+                body, hx=0.14, hy=0.14, hz=0.14, cfg=newton.ModelBuilder.ShapeConfig(collision_group=-2)
+            )
+            if previous < 0:
+                builder.add_joint_free(body)
+            else:
+                builder.add_joint_revolute(
+                    previous,
+                    body,
+                    parent_xform=wp.transform(wp.vec3(0.15, 0.0, 0.0), wp.quat_identity()),
+                    child_xform=wp.transform(wp.vec3(-0.15, 0.0, 0.0), wp.quat_identity()),
+                    axis=newton.Axis.Y,
+                )
+            previous = body
+        builder.add_articulation(list(range(first, builder.joint_count)))
+    if box and not box_first:
+        add_box()
+    return builder.finalize(device=device)
+
+
+def _simulate_isolated_contact_scene(model, frames: int) -> np.ndarray:
+    solver = newton.solvers.SolverPhoenX(model, joint_mode="reduced", substeps=4, solver_iterations=4)
+    state_0, state_1 = model.state(), model.state()
+    contacts = model._collision_pipeline.contacts()
+    with wp.ScopedCapture() as capture:
+        solver.collide(state_0, contacts)
+        solver.step(state_0, state_1, None, contacts, 1.0 / 60.0)
+        for name in ("body_q", "body_qd", "joint_q", "joint_qd"):
+            wp.copy(getattr(state_0, name), getattr(state_1, name))
+    for _ in range(frames):
+        wp.capture_launch(capture.graph)
+    return state_0.body_qd.numpy()
+
+
+class TestReducedContactIsolation(unittest.TestCase):
+    def test_articulations_with_different_dof_counts_do_not_share_contact_rows(self):
+        """Contact rows of one articulation must not leak into another's DOF columns."""
+        device = wp.get_preferred_device()
+        if not device.is_cuda:
+            self.skipTest("reduced articulation tests require CUDA graph capture")
+        frames = 30
+        chain = _simulate_isolated_contact_scene(_make_isolated_contact_scene(device, chain=True, box=False), frames)
+        box = _simulate_isolated_contact_scene(_make_isolated_contact_scene(device, chain=False, box=True), frames)
+        # The chain's 36 contact rows take the transposed response path; the box comes after the
+        # chain's DOFs, then before them so that its wider DOF window covers the chain's columns.
+        for box_first in (False, True):
+            with self.subTest(box_first=box_first):
+                scene = _make_isolated_contact_scene(device, chain=True, box=True, box_first=box_first)
+                both = _simulate_isolated_contact_scene(scene, frames)
+                chain_rows, box_rows = (slice(1, 4), slice(0, 1)) if box_first else (slice(0, 3), slice(3, 4))
+                np.testing.assert_allclose(both[chain_rows], chain, atol=1.0e-5)
+                np.testing.assert_allclose(both[box_rows], box, atol=1.0e-5)
 
 
 if __name__ == "__main__":

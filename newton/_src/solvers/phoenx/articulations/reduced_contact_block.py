@@ -1904,7 +1904,7 @@ def _make_transpose_response_kernel():
         joint_work: wp.array2d[wp.float32],
         packed_response: wp.array2d[_rows_dtype],
     ):
-        tile, _lane = wp.tid()
+        tile, lane = wp.tid()
         page = page_index[0]
         if not prepare and (
             page == wp.int32(0) or (page == wp.int32(1) and max_page_count[0] <= wp.int32(_CACHED_PAGE_COUNT))
@@ -1935,14 +1935,17 @@ def _make_transpose_response_kernel():
             offset=(dof_start + dof_tile * wp.int32(_RESPONSE_TILE), row_tile * wp.int32(_RESPONSE_TILE)),
             storage="shared",
         )
-        wp.tile_store(
-            packed_response,
-            wp.tile_transpose(source),
-            offset=(
-                storage_page * wp.int32(_MAX_ROWS) + row_tile * wp.int32(_RESPONSE_TILE),
-                dof_start + dof_tile * wp.int32(_RESPONSE_TILE),
-            ),
-        )
+        transposed = wp.tile_transpose(source)
+        # Articulations share packed rows in disjoint DOF columns, so write only this
+        # articulation's columns and rows; a whole-tile store would overwrite its neighbors.
+        row0 = row_tile * wp.int32(_RESPONSE_TILE)
+        dof0 = dof_tile * wp.int32(_RESPONSE_TILE)
+        for row in range(_RESPONSE_TILE):
+            value = transposed[row, lane]
+            if row0 + wp.int32(row) < row_count and dof0 + lane < dof_count:
+                packed_response[storage_page * wp.int32(_MAX_ROWS) + row0 + wp.int32(row), dof_start + dof0 + lane] = (
+                    value
+                )
 
     return wp.kernel(enable_backward=False, module=module)(
         _bind_rows_dtype_annotations(_transpose_generalized_contact_response_kernel, _rows_dtype, "packed_response")
@@ -1984,6 +1987,11 @@ def _broadcast_contact_scalar(value: wp.float32) -> wp.float32: ...
 def _sync_contact_block(): ...
 
 
+@wp.func
+def _dof_lane_mask(index: wp.float32, count: wp.float32) -> wp.float32:
+    return wp.where(index < count, wp.float32(1.0), wp.float32(0.0))
+
+
 def _make_solve_generalized_contact_tile_ops(max_dofs: int):
     _rows_dtype = wp.float32
     module = wp.get_module(f"reduced_contact_generalized_solve_{max_dofs}")
@@ -2023,6 +2031,14 @@ def _make_solve_generalized_contact_tile_ops(max_dofs: int):
         data = bodies.reduced
         start = data.articulation_start[articulation]
         dof_start_articulation = data.joint_qd_start[start]
+        # Articulations share packed rows in disjoint DOF columns. The max_dofs-wide window also covers
+        # a neighbor's columns, which every product with a Jacobian row must drop.
+        dof_count_articulation = data.joint_qd_start[data.articulation_end[articulation]] - dof_start_articulation
+        own_dofs = wp.tile_map(
+            _dof_lane_mask,
+            wp.tile_arange(max_dofs, dtype=wp.float32, storage="register"),
+            wp.tile_full(max_dofs, wp.float32(dof_count_articulation), dtype=wp.float32, storage="register"),
+        )
         # Reuse across every contact row; registers avoid shared-memory round trips.
         generalized_delta = wp.tile_zeros(shape=max_dofs, dtype=wp.float32, storage="register")
         generalized_velocity = wp.tile_load(
@@ -2084,18 +2100,21 @@ def _make_solve_generalized_contact_tile_ops(max_dofs: int):
                 jacobian0 = wp.tile_load(
                     packed_jacobian[packed_row], shape=max_dofs, offset=dof_start_articulation, storage="register"
                 )
+                jacobian0 = jacobian0 * own_dofs
                 jacobian1 = wp.tile_load(
                     packed_jacobian[packed_row + wp.int32(1)],
                     shape=max_dofs,
                     offset=dof_start_articulation,
                     storage="register",
                 )
+                jacobian1 = jacobian1 * own_dofs
                 jacobian2 = wp.tile_load(
                     packed_jacobian[packed_row + wp.int32(2)],
                     shape=max_dofs,
                     offset=dof_start_articulation,
                     storage="register",
                 )
+                jacobian2 = jacobian2 * own_dofs
                 response0 = wp.tile_load(
                     packed_response[packed_row], shape=max_dofs, offset=dof_start_articulation, storage="register"
                 )
@@ -2370,6 +2389,14 @@ def _make_solve_patch_contact_tile_kernel(
         data = bodies.reduced
         start = data.articulation_start[articulation]
         dof_start_articulation = data.joint_qd_start[start]
+        # Articulations share packed rows in disjoint DOF columns. The packed_width-wide window also covers
+        # a neighbor's columns, which every product with a Jacobian row must drop.
+        dof_count_articulation = data.joint_qd_start[data.articulation_end[articulation]] - dof_start_articulation
+        own_dofs = wp.tile_map(
+            _dof_lane_mask,
+            wp.tile_arange(packed_width, dtype=wp.float32, storage="register"),
+            wp.tile_full(packed_width, wp.float32(dof_count_articulation), dtype=wp.float32, storage="register"),
+        )
         active_point_count = point_count[packed_articulation]
         generalized_delta = wp.tile_zeros(shape=packed_width, dtype=wp.float32, storage="register")
 
@@ -2447,6 +2474,7 @@ def _make_solve_patch_contact_tile_kernel(
                     offset=dof_start_articulation,
                     storage="register",
                 )
+                jacobian = jacobian * own_dofs
                 response = wp.tile_load(
                     packed_response[packed_row],
                     shape=packed_width,
@@ -2512,12 +2540,14 @@ def _make_solve_patch_contact_tile_kernel(
                     offset=dof_start_articulation,
                     storage="register",
                 )
+                jacobian1 = jacobian1 * own_dofs
                 jacobian2 = wp.tile_load(
                     packed_jacobian[packed_row + wp.int32(1)],
                     shape=packed_width,
                     offset=dof_start_articulation,
                     storage="register",
                 )
+                jacobian2 = jacobian2 * own_dofs
                 response1 = wp.tile_load(
                     packed_response[packed_row],
                     shape=packed_width,
