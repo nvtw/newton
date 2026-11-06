@@ -989,9 +989,7 @@ def g1_apply_actions_kernel(
     ctrl_upper: wp.array[wp.float32],
     action_scale: wp.float32,
     controlled_action_count: wp.int32,
-    dof_stride: wp.int32,
     coord_stride: wp.int32,
-    target_uses_coord_layout: wp.int32,
     current_actions: wp.array2d[wp.float32],
     joint_target_q: wp.array[wp.float32],
 ):
@@ -1003,10 +1001,7 @@ def g1_apply_actions_kernel(
 
     target = default_joint_pos[action] + action_scale * value
     target = _clip_float(target, ctrl_lower[action], ctrl_upper[action])
-    if target_uses_coord_layout != 0:
-        joint_target_q[world * coord_stride + wp.int32(7) + action] = target
-    else:
-        joint_target_q[world * dof_stride + wp.int32(6) + action] = target
+    joint_target_q[world * coord_stride + wp.int32(7) + action] = target
 
 
 @wp.kernel
@@ -2041,7 +2036,6 @@ def g1_gather_actuator_force_kernel(
     actuator_force_upper: wp.array[wp.float32],
     coord_stride: wp.int32,
     dof_stride: wp.int32,
-    target_uses_coord_layout: wp.int32,
     scatter_joint_f: wp.int32,
     actuator_force: wp.array2d[wp.float32],
     joint_f: wp.array[wp.float32],
@@ -2049,10 +2043,7 @@ def g1_gather_actuator_force_kernel(
     world, action = wp.tid()
     q = joint_q[world * coord_stride + wp.int32(7) + action]
     qd = joint_qd[world * dof_stride + wp.int32(6) + action]
-    if target_uses_coord_layout != wp.int32(0):
-        target = joint_target_q[world * coord_stride + wp.int32(7) + action]
-    else:
-        target = joint_target_q[world * dof_stride + wp.int32(6) + action]
+    target = joint_target_q[world * coord_stride + wp.int32(7) + action]
     force = actuator_force_kp[action] * (target - q) - actuator_force_kd[action] * qd
     force = _clip_float(force, actuator_force_lower[action], actuator_force_upper[action])
     actuator_force[world, action] = force
@@ -3239,7 +3230,6 @@ class EnvG1PhoenX:
                 self.actuator_force_upper,
                 self.coord_stride,
                 self.dof_stride,
-                int(bool(self.model.use_coord_layout_targets)),
                 int(bool(scatter_joint_f)),
             ],
             outputs=[self.actuator_force, self.control.joint_f],
@@ -3259,9 +3249,7 @@ class EnvG1PhoenX:
                 self.ctrl_upper,
                 self.config.action_scale,
                 int(self.config.controlled_action_count),
-                self.dof_stride,
                 self.coord_stride,
-                int(bool(self.model.use_coord_layout_targets)),
             ],
             outputs=[self.current_actions, self.control.joint_target_q],
             device=self.device,

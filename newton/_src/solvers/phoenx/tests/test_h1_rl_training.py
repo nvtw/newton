@@ -60,7 +60,7 @@ class TestH1PhoenXRL(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(forward_velocities)))
         np.testing.assert_allclose(forward_velocities, obs[:, 0], rtol=0.0, atol=1.0e-6)
         np.testing.assert_allclose(
-            targets[:, 6:25], np.tile(expected_targets, (env.world_count, 1)), rtol=0.0, atol=1.0e-6
+            targets[:, 7:26], np.tile(expected_targets, (env.world_count, 1)), rtol=0.0, atol=1.0e-6
         )
         self.assertGreater(float(np.min(q[:, 2])), 0.8)
         self.assertGreaterEqual(int(np.count_nonzero(env.foot_contacts.numpy())), env.world_count)

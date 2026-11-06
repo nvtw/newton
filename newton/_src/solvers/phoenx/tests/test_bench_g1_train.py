@@ -144,12 +144,8 @@ class TestBenchG1TrainAnalyticalDynamics(unittest.TestCase):
         env.state_0.joint_qd.assign(qd.reshape(-1))
 
         target = env.control.joint_target_q.numpy()
-        if env.model.use_coord_layout_targets:
-            target = target.reshape(1, env.coord_stride)
-            target[:, 7 : 7 + ACTION_DIM_G1] = env.default_joint_pos.numpy()
-        else:
-            target = target.reshape(1, env.dof_stride)
-            target[:, 6 : 6 + ACTION_DIM_G1] = env.default_joint_pos.numpy()
+        target = target.reshape(1, env.coord_stride)
+        target[:, 7 : 7 + ACTION_DIM_G1] = env.default_joint_pos.numpy()
         env.control.joint_target_q.assign(target.reshape(-1))
         env._gather_actuator_force(scatter_joint_f=True)
 

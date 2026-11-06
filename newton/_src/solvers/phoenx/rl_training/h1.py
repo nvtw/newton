@@ -130,9 +130,7 @@ def h1_apply_actions_kernel(
     actions: wp.array2d[wp.float32],
     default_joint_pos: wp.array[wp.float32],
     action_scale: wp.float32,
-    dof_stride: wp.int32,
     coord_stride: wp.int32,
-    target_uses_coord_layout: wp.int32,
     current_actions: wp.array2d[wp.float32],
     joint_target_q: wp.array[wp.float32],
 ):
@@ -140,10 +138,7 @@ def h1_apply_actions_kernel(
     value = _clip_h1(actions[world, action], wp.float32(-1.0), wp.float32(1.0))
     current_actions[world, action] = value
     target = default_joint_pos[action] + action_scale * value
-    if target_uses_coord_layout != wp.int32(0):
-        joint_target_q[world * coord_stride + wp.int32(7) + action] = target
-    else:
-        joint_target_q[world * dof_stride + wp.int32(6) + action] = target
+    joint_target_q[world * coord_stride + wp.int32(7) + action] = target
 
 
 @wp.kernel(enable_backward=False)
@@ -753,9 +748,7 @@ class EnvH1PhoenX:
                 actions,
                 self.default_joint_pos,
                 float(self.config.action_scale),
-                self.dof_stride,
                 self.coord_stride,
-                int(bool(self.model.use_coord_layout_targets)),
             ],
             outputs=[self.current_actions, self.control.joint_target_q],
             device=self.device,

@@ -132,18 +132,13 @@ def anymal_apply_actions_kernel(
     default_joint_pos: wp.array[wp.float32],
     lab_to_mujoco: wp.array[wp.int32],
     action_scale: wp.float32,
-    dof_stride: wp.int32,
     coord_stride: wp.int32,
-    target_uses_coord_layout: wp.int32,
     joint_target_q: wp.array[wp.float32],
 ):
     world, lab_joint = wp.tid()
     model_joint = lab_to_mujoco[lab_joint]
     target = default_joint_pos[model_joint] + action_scale * actions[world, lab_joint]
-    if target_uses_coord_layout != 0:
-        joint_target_q[world * coord_stride + wp.int32(7) + model_joint] = target
-    else:
-        joint_target_q[world * dof_stride + wp.int32(6) + model_joint] = target
+    joint_target_q[world * coord_stride + wp.int32(7) + model_joint] = target
 
 
 @wp.kernel
@@ -896,9 +891,7 @@ class EnvAnymalPhoenX:
                 self.default_joint_pos,
                 self.lab_to_mujoco,
                 self.config.action_scale,
-                self.dof_stride,
                 self.coord_stride,
-                int(bool(self.model.use_coord_layout_targets)),
             ],
             outputs=[self.control.joint_target_q],
             device=self.device,

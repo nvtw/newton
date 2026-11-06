@@ -346,10 +346,7 @@ class Example:
         default_q = self.env.default_joint_pos.numpy()[None, :]
 
         target_q = np.asarray(self.env.control.joint_target_q.numpy())
-        if bool(self.env.model.use_coord_layout_targets):
-            target = target_q.reshape(self.env.world_count, self.env.coord_stride)[:, 7 : 7 + self.env.action_dim]
-        else:
-            target = target_q.reshape(self.env.world_count, self.env.dof_stride)[:, 6 : 6 + self.env.action_dim]
+        target = target_q.reshape(self.env.world_count, self.env.coord_stride)[:, 7 : 7 + self.env.action_dim]
 
         joint_delta_mean, joint_delta_max = self._abs_mean_max(q[:, action_slice] - default_q[:, action_slice])
         target_delta_mean, target_delta_max = self._abs_mean_max(target[:, action_slice] - default_q[:, action_slice])

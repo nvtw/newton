@@ -499,9 +499,8 @@ class EnvDrLegsPhoenX:
         self._can_scan_foot_contacts = self.model.shape_body is not None and self.model.shape_world is not None
         self.actuated_joint = wp.array(self._actuated_joint_q, dtype=wp.int32, device=self.device)
         self.actuated_joint_qd = wp.array(self._actuated_joint_qd, dtype=wp.int32, device=self.device)
-        target_indices = self._actuated_joint_q if self.model.use_coord_layout_targets else self._actuated_joint_qd
-        self.actuated_joint_target = wp.array(target_indices, dtype=wp.int32, device=self.device)
-        self.joint_target_stride = self.joint_stride if self.model.use_coord_layout_targets else self.joint_dof_stride
+        self.actuated_joint_target = wp.array(self._actuated_joint_q, dtype=wp.int32, device=self.device)
+        self.joint_target_stride = self.joint_stride
         command_np = np.tile(np.asarray(self.config.command, dtype=np.float32), (self.world_count, 1))
         self.command = wp.array(command_np, dtype=wp.float32, device=self.device)
         self._command_seed_counter = wp.array([int(self.config.command_seed)], dtype=wp.int32, device=self.device)

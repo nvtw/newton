@@ -938,10 +938,7 @@ class TestG1PhoenXRL(unittest.TestCase):
         np.testing.assert_allclose(env.current_actions.numpy()[0], expected_actions, rtol=0.0, atol=0.0)
 
         target_q = env.control.joint_target_q.numpy()
-        if env.model.use_coord_layout_targets:
-            actual_target = target_q[7 : 7 + rl.ACTION_DIM_G1]
-        else:
-            actual_target = target_q[6 : 6 + rl.ACTION_DIM_G1]
+        actual_target = target_q[7 : 7 + rl.ACTION_DIM_G1]
         np.testing.assert_allclose(actual_target, expected_target, rtol=0.0, atol=1.0e-6)
 
     def test_g1_compact_policy_actions_zero_uncontrolled_joints(self) -> None:
@@ -5805,7 +5802,8 @@ class TestG1PhoenXRL(unittest.TestCase):
             def __init__(self, device):
                 self.device = device
                 self.obs_dim = rl.OBS_DIM_G1
-                self.action_dim = rl.ACTION_DIM_G1
+                # The policy drives only the controlled G1 joints.
+                self.action_dim = g1_recipe.CONTROLLED_ACTION_COUNT
                 self.battery_commands = []
                 self._actions = None
                 self._log_probs = None
@@ -6191,7 +6189,7 @@ class TestG1PhoenXRL(unittest.TestCase):
         env.use_reset_seed_counter(reset_seed_counter)
         trainer = rl.TrainerPPO(
             obs_dim=env.obs_dim,
-            action_dim=env.action_dim,
+            action_dim=env.policy_action_dim,
             hidden_layers=(32, 32, 32),
             config=g1_recipe.default_g1_ppo_config(minibatch_size=0, replay_ratio=0.0),
             device=device,
@@ -6199,13 +6197,13 @@ class TestG1PhoenXRL(unittest.TestCase):
             squash_actions=g1_recipe.SQUASH_ACTIONS,
             activation=g1_recipe.ACTIVATION,
             log_std_init=g1_recipe.LOG_STD_INIT,
-            mirror_map=rl.g1_mirror_map_ppo(),
+            mirror_map=rl.g1_mirror_map_ppo(env.policy_action_dim, env.config.observation_mode),
         )
         buffer = rl.BufferRollout(
             num_steps=8,
             num_envs=env.world_count,
             obs_dim=env.obs_dim,
-            action_dim=env.action_dim,
+            action_dim=env.policy_action_dim,
             device=device,
         )
 

@@ -36,18 +36,19 @@ def _init_animation(
         raise RuntimeError(f"animation has {anim.shape[1]} channels, expected {len(_ANIMATION_JOINT_PATHS)}")
 
     joint_label = list(model.joint_label)
-    joint_qd_start = model.joint_qd_start.numpy()
+    # control.joint_target_q follows the joint coordinate layout.
+    joint_target_q_start = model.joint_target_q_start.numpy()
     try:
-        channel_dofs = np.array(
-            [joint_qd_start[joint_label.index(path)] for path in _ANIMATION_JOINT_PATHS],
+        channel_targets = np.array(
+            [joint_target_q_start[joint_label.index(path)] for path in _ANIMATION_JOINT_PATHS],
             dtype=np.int32,
         )
     except ValueError as e:
         raise RuntimeError(f"animation joint not found in model.joint_label: {e}") from e
 
-    n_dof_per_world = model.joint_dof_count // num_worlds
-    world_offsets = np.arange(num_worlds, dtype=np.int32) * n_dof_per_world
-    animation_indices = channel_dofs[None, :] + world_offsets[:, None]
+    n_target_per_world = model.joint_coord_count // num_worlds
+    world_offsets = np.arange(num_worlds, dtype=np.int32) * n_target_per_world
+    animation_indices = channel_targets[None, :] + world_offsets[:, None]
     animation_data = wp.array(anim * _ANIMATION_CHANNEL_SIGN[None, :], dtype=float)
     return anim.shape[0], 100.0, animation_data, wp.array(animation_indices, dtype=int)
 
@@ -87,7 +88,8 @@ def build(
     dr_legs.default_shape_cfg.kf = 1.0e3
     dr_legs.default_shape_cfg.mu = 0.75
 
-    asset_path = newton.utils.download_asset("disneyresearch")
+    # Pinned like example_robot_dr_legs_phoenx: newer revisions renamed the USD prims.
+    asset_path = newton.utils.download_asset("disneyresearch", ref="261cd1f429619d8ef4f546bd788ab9dea906b5e1")
     asset_file = str(asset_path / "dr_legs/usd" / "dr_legs_with_meshes_and_boxes.usda")
     stage = Usd.Stage.Open(asset_file)
     if stage is None:

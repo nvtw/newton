@@ -54,7 +54,7 @@ class TestGo2PhoenXRL(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(env.step_forward_velocities.numpy())))
         np.testing.assert_allclose(dones, 0.0, rtol=0.0, atol=0.0)
         np.testing.assert_allclose(
-            targets[:, 6:18], np.tile(expected_targets, (env.world_count, 1)), rtol=0.0, atol=1.0e-6
+            targets[:, 7:19], np.tile(expected_targets, (env.world_count, 1)), rtol=0.0, atol=1.0e-6
         )
         self.assertGreater(float(np.min(q[:, 2])), 0.2)
 

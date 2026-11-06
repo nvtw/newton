@@ -760,7 +760,6 @@ class Example:
         ignored = _physics_ignore_paths(stage)
         authored_unit = _normalize_stage_units_for_newton(stage)
 
-        newton.use_coord_layout_targets = True
         builder = newton.ModelBuilder(gravity=(0.0, 0.0, -9.81))
         result = builder.add_usd(
             stage,
