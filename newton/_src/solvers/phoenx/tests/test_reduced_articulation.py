@@ -33,13 +33,13 @@ from newton._src.solvers.phoenx.articulations.reduced import (
     _capture_reduced_momentum_warp_kernel,
     _factor_reduced_singledof_warp_kernel,
     _factor_reduced_warp_kernel,
-    _flush_deferred_articulation,
     _pack_transformed_body_inertia,
     _unpack_symmetric_mat66,
 )
 from newton._src.solvers.phoenx.articulations.reduced_contact import (
     _apply_deferred_impulse,
     _deferred_link_delta_twist,
+    flush_deferred_articulation,
 )
 from newton._src.solvers.phoenx.articulations.reduced_contact_block import (
     _CACHED_PAGE_COUNT,
@@ -971,7 +971,7 @@ def _compare_deferred_contact_response(
         impulse_on_static,
     )
     deferred_twist[0] = _deferred_link_delta_twist(bodies, body_slot)
-    _flush_deferred_articulation(bodies, articulation)
+    flush_deferred_articulation(bodies, articulation)
 
 
 @wp.kernel
@@ -4782,6 +4782,76 @@ class TestReducedContactIsolation(unittest.TestCase):
                 chain_rows, box_rows = (slice(1, 4), slice(0, 1)) if box_first else (slice(0, 3), slice(3, 4))
                 np.testing.assert_allclose(both[chain_rows], chain, atol=1.0e-5)
                 np.testing.assert_allclose(both[box_rows], box, atol=1.0e-5)
+
+
+def _make_colliding_chains_model(device):
+    """Two free hinge chains crossing at right angles, flying into each other without gravity."""
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
+    cfg = newton.ModelBuilder.ShapeConfig(density=500.0, mu=0.5, restitution=0.0)
+    capsule_x = wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), 0.5 * wp.pi)
+    for k, (start, yaw) in enumerate(((wp.vec3(-0.5, 0.0, 0.0), 0.0), (wp.vec3(0.0, -0.5, 0.08), 0.5 * wp.pi))):
+        rotation = wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), yaw)
+        joints = []
+        previous = -1
+        for i in range(6):
+            body = builder.add_link(
+                xform=wp.transform(start + wp.quat_rotate(rotation, wp.vec3(0.2 * i, 0.0, 0.0)), rotation)
+            )
+            builder.add_shape_capsule(
+                body, xform=wp.transform(wp.vec3(0.0), capsule_x), radius=0.05, half_height=0.05, cfg=cfg
+            )
+            if previous < 0:
+                joints.append(builder.add_joint_free(body))
+            else:
+                joints.append(
+                    builder.add_joint_revolute(
+                        previous,
+                        body,
+                        axis=newton.Axis.Z if i % 2 else newton.Axis.Y,
+                        parent_xform=wp.transform(wp.vec3(0.1, 0.0, 0.0), wp.quat_identity()),
+                        child_xform=wp.transform(wp.vec3(-0.1, 0.0, 0.0), wp.quat_identity()),
+                    )
+                )
+            previous = body
+        builder.add_articulation(joints)
+        qd = builder.joint_qd_start[joints[0]]
+        builder.joint_qd[qd + 2] = -1.0 if k == 1 else 1.0  # close along z
+    return builder.finalize(device=device)
+
+
+class TestReducedArticulationPairContacts(unittest.TestCase):
+    def test_contacts_between_articulations_conserve_momentum(self):
+        """Contacts between two articulations are grouped per pair and push both apart equally."""
+        device = wp.get_preferred_device()
+        if not device.is_cuda:
+            self.skipTest("reduced articulation tests require CUDA graph capture")
+        model = _make_colliding_chains_model(device)
+        solver = newton.solvers.SolverPhoenX(model, joint_mode="reduced", substeps=4, solver_iterations=4)
+        block = solver._reduced_articulation.contact_block_system
+        state_0, state_1 = model.state(), model.state()
+        newton.eval_fk(model, state_0.joint_q, state_0.joint_qd, state_0)
+        contacts = model.contacts()
+        momentum_before = _total_momentum(model, state_0)[:3]
+        with wp.ScopedCapture(device=device) as capture:
+            model.collide(state_0, contacts)
+            solver.step(state_0, state_1, None, contacts, 1.0 / 240.0)
+            state_0, state_1 = state_1, state_0
+            model.collide(state_0, contacts)
+            solver.step(state_0, state_1, None, contacts, 1.0 / 240.0)
+            state_0, state_1 = state_1, state_0
+        most_columns = 0
+        for _ in range(30):
+            wp.capture_launch(capture.graph)
+            most_columns = max(most_columns, int(block.fallback_count.numpy()[0]))
+            # All contact columns between the two chains form one coloring element.
+            self.assertLessEqual(int(block.fallback_run_count.numpy()[0]), 1)
+        self.assertGreater(most_columns, 1)
+        momentum_after = _total_momentum(model, state_0)[:3]
+        np.testing.assert_allclose(momentum_after, momentum_before, atol=1.0e-3)
+        # The chains stopped closing: each one's mean z velocity no longer approaches the other.
+        qd = state_0.body_qd.numpy()
+        self.assertGreater(qd[:6, 2].mean(), qd[6:, 2].mean() - 0.05)
+        self.assertTrue(np.isfinite(qd).all())
 
 
 if __name__ == "__main__":

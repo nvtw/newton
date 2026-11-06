@@ -15,6 +15,7 @@ from newton._src.sim import Model
 from newton._src.solvers.phoenx.articulations.reduced_contact import (
     _deferred_point_velocity,
     _prepare_contact_bias_geometry,
+    flush_deferred_articulation,
     reduced_contact_iterate,
     reduced_contact_packed_owner,
     reduced_contact_prepare,
@@ -295,26 +296,9 @@ def _classify_grouped_reduced_contact_columns_kernel(
     wp.atomic_add(section_end, owner, wp.int32(1))
 
 
-@wp.kernel(enable_backward=False)
-def _compact_fallback_contact_elements_kernel(
-    columns: ContactColumnContainer,
-    bodies: BodyContainer,
-    reduced_column_count: wp.array[wp.int32],
-    articulation_count: wp.int32,
-    schedule_section_end: wp.array[wp.int32],
-    scheduled_column: wp.array[wp.int32],
-    fallback_count: wp.array[wp.int32],
-    fallback_column: wp.array[wp.int32],
-    fallback_element: wp.array[ElementInteractionData],
-):
-    fallback = wp.tid()
-    start = schedule_section_end[articulation_count - wp.int32(1)]
-    count = reduced_column_count[0] - start
-    if fallback == wp.int32(0):
-        fallback_count[0] = count
-    if fallback >= count:
-        return
-    column = scheduled_column[start + fallback]
+@wp.func
+def _fallback_contact_nodes(columns: ContactColumnContainer, bodies: BodyContainer, column: wp.int32) -> wp.vec2i:
+    """Coloring nodes of one fallback column; a reduced articulation is one node."""
     body0 = contact_get_body1(columns, column)
     body1 = contact_get_body2(columns, column)
     node0 = wp.int32(-1)
@@ -328,9 +312,82 @@ def _compact_fallback_contact_elements_kernel(
     if node0 < wp.int32(0):
         node0 = node1
         node1 = wp.int32(-1)
+    return wp.vec2i(node0, node1)
+
+
+@wp.kernel(enable_backward=False)
+def _key_fallback_contact_columns_kernel(
+    columns: ContactColumnContainer,
+    bodies: BodyContainer,
+    reduced_column_count: wp.array[wp.int32],
+    articulation_count: wp.int32,
+    schedule_section_end: wp.array[wp.int32],
+    scheduled_column: wp.array[wp.int32],
+    fallback_count: wp.array[wp.int32],
+    fallback_key: wp.array[wp.int64],
+    fallback_column: wp.array[wp.int32],
+):
+    """Key fallback columns by node pair so one pair's columns become one run."""
+    fallback = wp.tid()
+    start = schedule_section_end[articulation_count - wp.int32(1)]
+    count = reduced_column_count[0] - start
+    if fallback == wp.int32(0):
+        fallback_count[0] = count
+    if fallback >= count:
+        return
+    column = scheduled_column[start + fallback]
+    nodes = _fallback_contact_nodes(columns, bodies, column)
+    low = wp.min(nodes[0], nodes[1]) + wp.int32(1)
+    high = wp.max(nodes[0], nodes[1]) + wp.int32(1)
+    # Ties keep the deterministic schedule order because the radix sort is stable.
+    fallback_key[fallback] = (wp.int64(high) << wp.int64(32)) | wp.int64(low)
     fallback_column[fallback] = column
-    fallback_element[fallback] = element_interaction_data_make(
-        node0, node1, wp.int32(-1), wp.int32(-1), wp.int32(-1), wp.int32(-1), wp.int32(-1), wp.int32(-1)
+
+
+@wp.kernel(enable_backward=False)
+def _mark_fallback_runs_kernel(
+    fallback_count: wp.array[wp.int32],
+    fallback_key: wp.array[wp.int64],
+    run_head: wp.array[wp.int32],
+):
+    fallback = wp.tid()
+    head = wp.int32(0)
+    if fallback < fallback_count[0]:
+        if fallback == wp.int32(0) or fallback_key[fallback] != fallback_key[fallback - wp.int32(1)]:
+            head = wp.int32(1)
+    run_head[fallback] = head
+
+
+@wp.kernel(enable_backward=False)
+def _compact_fallback_runs_kernel(
+    columns: ContactColumnContainer,
+    bodies: BodyContainer,
+    fallback_count: wp.array[wp.int32],
+    fallback_key: wp.array[wp.int64],
+    fallback_column: wp.array[wp.int32],
+    run_index: wp.array[wp.int32],
+    run_count: wp.array[wp.int32],
+    run_start: wp.array[wp.int32],
+    fallback_element: wp.array[ElementInteractionData],
+):
+    """Turn each run of equal node pairs into one coloring element."""
+    fallback = wp.tid()
+    count = fallback_count[0]
+    if fallback == wp.int32(0):
+        runs = wp.int32(0)
+        if count > wp.int32(0):
+            runs = run_index[count - wp.int32(1)]
+        run_count[0] = runs
+        run_start[runs] = count
+    if fallback >= count:
+        return
+    if fallback > wp.int32(0) and fallback_key[fallback] == fallback_key[fallback - wp.int32(1)]:
+        return
+    run = run_index[fallback] - wp.int32(1)
+    run_start[run] = fallback
+    nodes = _fallback_contact_nodes(columns, bodies, fallback_column[fallback])
+    fallback_element[run] = element_interaction_data_make(
+        nodes[0], nodes[1], wp.int32(-1), wp.int32(-1), wp.int32(-1), wp.int32(-1), wp.int32(-1), wp.int32(-1)
     )
 
 
@@ -347,14 +404,27 @@ def _solve_fallback_contact_column(
     phase: wp.int32,
     use_bias: wp.bool,
 ):
+    # Contacts between different articulations or rigid bodies defer their articulated
+    # impulses, which costs one root path per endpoint. Contacts inside one
+    # articulation need the exact coupled response, so they flush pending impulses first.
+    articulation0 = bodies.reduced.body_articulation[contact_get_body1(columns, column)]
+    articulation1 = bodies.reduced.body_articulation[contact_get_body2(columns, column)]
+    internal = articulation0 >= wp.int32(0) and articulation0 == articulation1
+    if internal:
+        flush_deferred_articulation(bodies, articulation0)
     if phase == wp.int32(0):
         reduced_contact_prepare(
-            columns, column, bodies, idt, cc, contacts, wp.bool(False), use_bias, wp.bool(True), cross_mobility
+            columns, column, bodies, idt, cc, contacts, not internal, use_bias, wp.bool(True), cross_mobility
         )
     else:
         reduced_contact_iterate(
-            columns, column, bodies, idt, sor_boost, cc, contacts, use_bias, wp.bool(False), cross_mobility
+            columns, column, bodies, idt, sor_boost, cc, contacts, use_bias, not internal, cross_mobility
         )
+
+
+@wp.kernel(enable_backward=False, module="reduced_contact_fallback")
+def _flush_fallback_contacts_kernel(bodies: BodyContainer):
+    flush_deferred_articulation(bodies, wp.tid())
 
 
 @wp.kernel(enable_backward=False, module="reduced_contact_fallback")
@@ -367,6 +437,7 @@ def _solve_fallback_contact_color_kernel(
     contacts: ContactViews,
     cross_mobility: wp.array[wp.vec3],
     fallback_column: wp.array[wp.int32],
+    fallback_run_start: wp.array[wp.int32],
     element_ids_by_color: wp.array[wp.int32],
     color_starts: wp.array[wp.int32],
     num_colors: wp.array[wp.int32],
@@ -396,7 +467,25 @@ def _solve_fallback_contact_color_kernel(
     if has_overflow and color == max_colored_partitions:
         if tid == wp.int32(0):
             for index in range(start, end):
-                fallback = element_ids_by_color[index]
+                run = element_ids_by_color[index]
+                for fallback in range(fallback_run_start[run], fallback_run_start[run + wp.int32(1)]):
+                    _solve_fallback_contact_column(
+                        columns,
+                        bodies,
+                        idt,
+                        sor_boost,
+                        cc,
+                        contacts,
+                        cross_mobility,
+                        fallback_column[fallback],
+                        phase,
+                        use_bias,
+                    )
+    else:
+        index = start + tid
+        while index < end:
+            run = element_ids_by_color[index]
+            for fallback in range(fallback_run_start[run], fallback_run_start[run + wp.int32(1)]):
                 _solve_fallback_contact_column(
                     columns,
                     bodies,
@@ -409,22 +498,6 @@ def _solve_fallback_contact_color_kernel(
                     phase,
                     use_bias,
                 )
-    else:
-        index = start + tid
-        while index < end:
-            fallback = element_ids_by_color[index]
-            _solve_fallback_contact_column(
-                columns,
-                bodies,
-                idt,
-                sor_boost,
-                cc,
-                contacts,
-                cross_mobility,
-                fallback_column[fallback],
-                phase,
-                use_bias,
-            )
             index += worker_count
     if tid == wp.int32(0):
         color_cursor[0] = cursor - wp.int32(1)
@@ -2864,6 +2937,10 @@ class ReducedContactBlockSystem:
         self.reorder_pair_source: wp.array[wp.int32] | None = None
         self.fallback_count: wp.array[wp.int32] | None = None
         self.fallback_column: wp.array[wp.int32] | None = None
+        self.fallback_key: wp.array[wp.int64] | None = None
+        self.fallback_run_index: wp.array[wp.int32] | None = None
+        self.fallback_run_count: wp.array[wp.int32] | None = None
+        self.fallback_run_start: wp.array[wp.int32] | None = None
         self.packed_previous_row_body_pair: wp.array[wp.int32] | None = None
         self.fallback_element: wp.array[ElementInteractionData] | None = None
         self.fallback_partitioner: IncrementalContactPartitioner | None = None
@@ -2948,7 +3025,12 @@ class ReducedContactBlockSystem:
         self.reorder_data = wp.empty((CONTACT_DWORDS, capacity), dtype=wp.float32, device=self.device)
         self.reorder_pair_source = wp.empty(capacity, dtype=wp.int32, device=self.device)
         self.fallback_count = wp.zeros(1, dtype=wp.int32, device=self.device)
-        self.fallback_column = wp.empty(capacity, dtype=wp.int32, device=self.device)
+        # Radix-sort buffers need twice the capacity.
+        self.fallback_key = wp.empty(2 * capacity, dtype=wp.int64, device=self.device)
+        self.fallback_column = wp.empty(2 * capacity, dtype=wp.int32, device=self.device)
+        self.fallback_run_index = wp.empty(capacity, dtype=wp.int32, device=self.device)
+        self.fallback_run_count = wp.zeros(1, dtype=wp.int32, device=self.device)
+        self.fallback_run_start = wp.zeros(capacity + 1, dtype=wp.int32, device=self.device)
         self.fallback_element = wp.empty(capacity, dtype=ElementInteractionData, device=self.device)
         self.fallback_partitioner = IncrementalContactPartitioner(
             max_num_interactions=capacity,
@@ -3073,8 +3155,10 @@ class ReducedContactBlockSystem:
         if self._skip_fallback_coloring or self._solve_fallback_by_world:
             self.fallback_count.zero_()
             return
+        # Color one element per node pair: an articulation is one node, so per-column
+        # elements would need a color for every column it touches.
         wp.launch(
-            _compact_fallback_contact_elements_kernel,
+            _key_fallback_contact_columns_kernel,
             dim=self.schedule_capacity,
             inputs=[
                 columns,
@@ -3084,7 +3168,30 @@ class ReducedContactBlockSystem:
                 self.schedule_section_end,
                 self.schedule_columns,
             ],
-            outputs=[self.fallback_count, self.fallback_column, self.fallback_element],
+            outputs=[self.fallback_count, self.fallback_key, self.fallback_column],
+            device=self.device,
+        )
+        sort_variable_length_int64(self.fallback_key, self.fallback_column, self.fallback_count)
+        wp.launch(
+            _mark_fallback_runs_kernel,
+            dim=self.schedule_capacity,
+            inputs=[self.fallback_count, self.fallback_key],
+            outputs=[self.fallback_run_index],
+            device=self.device,
+        )
+        wp.utils.array_scan(self.fallback_run_index, self.fallback_run_index, inclusive=True)
+        wp.launch(
+            _compact_fallback_runs_kernel,
+            dim=self.schedule_capacity,
+            inputs=[
+                columns,
+                bodies,
+                self.fallback_count,
+                self.fallback_key,
+                self.fallback_column,
+                self.fallback_run_index,
+            ],
+            outputs=[self.fallback_run_count, self.fallback_run_start, self.fallback_element],
             device=self.device,
         )
         self._build_fallback_coloring()
@@ -3093,7 +3200,7 @@ class ReducedContactBlockSystem:
         assert self.fallback_partitioner is not None
         assert self.fallback_element is not None
         assert self.fallback_count is not None
-        self.fallback_partitioner.reset(self.fallback_element, self.fallback_count)
+        self.fallback_partitioner.reset(self.fallback_element, self.fallback_run_count)
         self.fallback_partitioner.build_csr()
 
     def solve_fallback(
@@ -3142,6 +3249,9 @@ class ReducedContactBlockSystem:
         assert self.fallback_column is not None
         partitioner = self.fallback_partitioner
 
+        def flush() -> None:
+            wp.launch(_flush_fallback_contacts_kernel, dim=self.articulation_count, inputs=[bodies], device=self.device)
+
         def sweep(phase: int) -> None:
             partitioner.begin_sweep()
             if self._solve_fallback_by_world:
@@ -3168,6 +3278,7 @@ class ReducedContactBlockSystem:
                     ],
                     device=self.device,
                 )
+                flush()
                 return
 
             def solve_color() -> None:
@@ -3184,6 +3295,7 @@ class ReducedContactBlockSystem:
                         contacts,
                         self.cross_mobility,
                         self.fallback_column,
+                        self.fallback_run_start,
                         partitioner.element_ids_by_color,
                         partitioner.color_starts,
                         partitioner.num_colors,
@@ -3198,6 +3310,7 @@ class ReducedContactBlockSystem:
                 )
 
             wp.capture_while(partitioner.color_cursor, solve_color)
+            flush()
 
         if prepare:
             sweep(0)

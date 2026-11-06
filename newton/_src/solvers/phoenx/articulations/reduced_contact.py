@@ -280,6 +280,20 @@ def _response_matrix_multiply(
 
 
 @wp.func
+def _deferred_endpoint_inverse_mass(
+    bodies: BodyContainer,
+    body: wp.int32,
+    point: wp.vec3f,
+    direction: wp.vec3f,
+) -> wp.float32:
+    if bodies.reduced.body_articulation[body] < wp.int32(0):
+        return _rigid_endpoint_inverse_mass(bodies, body, point, direction)
+    point_local = _reduced_point_local(bodies, body, point)
+    wrench = wp.spatial_vector(direction, wp.cross(point_local, direction))
+    return wp.dot(wrench, _response_matrix_multiply(bodies, body - wp.int32(1), wrench))
+
+
+@wp.func
 def _deferred_inverse_mass(
     bodies: BodyContainer,
     body0: wp.int32,
@@ -288,36 +302,19 @@ def _deferred_inverse_mass(
     point1: wp.vec3f,
     direction: wp.vec3f,
 ) -> wp.float32:
-    body = body0
-    point = point0
-    impulse = -direction
-    if bodies.reduced.body_articulation[body] < wp.int32(0):
-        body = body1
-        point = point1
-        impulse = direction
-    link = body - wp.int32(1)
-    point_local = _reduced_point_local(bodies, body, point)
-    wrench = wp.spatial_vector(impulse, wp.cross(point_local, impulse))
-    return wp.dot(wrench, _response_matrix_multiply(bodies, link, wrench))
+    """Inverse mass of a contact between two different articulations or rigid bodies.
+
+    Each articulated side contributes its link's cached impulse response, which is
+    exact as long as the endpoints do not share an articulation.
+    """
+    return _deferred_endpoint_inverse_mass(bodies, body0, point0, -direction) + _deferred_endpoint_inverse_mass(
+        bodies, body1, point1, direction
+    )
 
 
 @wp.func
-def _apply_deferred_impulse(
-    bodies: BodyContainer,
-    body0: wp.int32,
-    point0: wp.vec3f,
-    body1: wp.int32,
-    point1: wp.vec3f,
-    impulse_on_body1: wp.vec3f,
-):
-    body = body0
-    point = point0
-    impulse = -impulse_on_body1
-    if bodies.reduced.body_articulation[body] < wp.int32(0):
-        body = body1
-        point = point1
-        impulse = impulse_on_body1
-
+def _defer_articulation_impulse(bodies: BodyContainer, body: wp.int32, point: wp.vec3f, impulse: wp.vec3f):
+    """Record a link impulse as articulated wrenches along its root path."""
     data = bodies.reduced
     link = body - wp.int32(1)
     point_local = _reduced_point_local(bodies, body, point)
@@ -348,6 +345,74 @@ def _apply_deferred_impulse(
             joint = data.body_joint[link]
         else:
             joint = wp.int32(-1)
+
+
+@wp.func
+def _apply_deferred_impulse(
+    bodies: BodyContainer,
+    body0: wp.int32,
+    point0: wp.vec3f,
+    body1: wp.int32,
+    point1: wp.vec3f,
+    impulse_on_body1: wp.vec3f,
+):
+    """Apply a contact impulse; articulated sides wait for :func:`flush_deferred_articulation`."""
+    for side in range(2):
+        body = body0
+        point = point0
+        impulse = -impulse_on_body1
+        if side == 1:
+            body = body1
+            point = point1
+            impulse = impulse_on_body1
+        if bodies.reduced.body_articulation[body] >= wp.int32(0):
+            _defer_articulation_impulse(bodies, body, point, impulse)
+        else:
+            _apply_rigid_endpoint_impulse(bodies, body, point, impulse)
+
+
+@wp.func
+def flush_deferred_articulation(bodies: BodyContainer, articulation: wp.int32):
+    """Apply an articulation's deferred wrenches to its joint and link velocities."""
+    data = bodies.reduced
+    start = data.articulation_start[articulation]
+    end = data.articulation_end[articulation]
+    for joint in range(start, end):
+        parent = data.joint_parent[joint]
+        child = data.joint_child[joint]
+        parent_delta = wp.spatial_vector()
+        if parent >= wp.int32(0):
+            parent_delta = data.body_acceleration[parent]
+        wrench = data.deferred_wrench[child]
+        dof_start = data.joint_qd_start[joint]
+        dof_end = data.joint_qd_start[joint + wp.int32(1)]
+        dof_count = dof_end - dof_start
+        rhs = _vec6(0.0)
+        response = _vec6(0.0)
+        for row in range(6):
+            if wp.int32(row) < dof_count:
+                dof = dof_start + wp.int32(row)
+                rhs[row] = wp.dot(data.joint_s[dof], wrench) - wp.dot(data.joint_u[dof], parent_delta)
+        for row in range(6):
+            if wp.int32(row) < dof_count:
+                for column in range(6):
+                    if wp.int32(column) < dof_count:
+                        response[row] += data.joint_d_inv[dof_start + wp.int32(row), column] * rhs[column]
+        child_delta = parent_delta
+        for row in range(6):
+            if wp.int32(row) < dof_count:
+                dof = dof_start + wp.int32(row)
+                data.joint_qd[dof] += response[row]
+                child_delta += data.joint_s[dof] * response[row]
+        data.body_acceleration[child] = child_delta
+        slot = child + wp.int32(1)
+        delta_omega = wp.spatial_bottom(child_delta)
+        bodies.angular_velocity[slot] = bodies.angular_velocity[slot] + delta_omega
+        local_com_position = wp.transform_get_translation(data.body_q_com[child])
+        bodies.velocity[slot] = (
+            bodies.velocity[slot] + wp.spatial_top(child_delta) + wp.cross(delta_omega, local_com_position)
+        )
+        data.deferred_wrench[child] = wp.spatial_vector()
 
 
 @wp.func
@@ -683,4 +748,9 @@ def reduced_contact_iterate(
             _apply_pair_impulse(bodies, body0, contact_point, body1, contact_point, impulse)
 
 
-__all__ = ["reduced_contact_deferred_owner", "reduced_contact_iterate", "reduced_contact_prepare"]
+__all__ = [
+    "flush_deferred_articulation",
+    "reduced_contact_deferred_owner",
+    "reduced_contact_iterate",
+    "reduced_contact_prepare",
+]

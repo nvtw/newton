@@ -1,0 +1,1 @@
+Speed up contacts between reduced PhoenX articulations: each touching pair is colored as one element and solved with linear-time deferred impulses, removing a serial overflow pass that made piles of articulations take seconds per frame.

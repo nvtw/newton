@@ -23,6 +23,7 @@ from newton._src.solvers.featherstone.kernels import (
     spatial_cross_dual,
 )
 from newton._src.solvers.phoenx.articulations.reduced_contact import (
+    flush_deferred_articulation,
     reduced_contact_iterate,
     reduced_contact_prepare,
 )
@@ -3433,49 +3434,6 @@ def _make_relax_and_publish_reduced_contacts_kernel(max_dofs: int):
     return _relax_and_publish_reduced_contacts_kernel
 
 
-@wp.func
-def _flush_deferred_articulation(bodies: BodyContainer, articulation: wp.int32):
-    data = bodies.reduced
-    start = data.articulation_start[articulation]
-    end = data.articulation_end[articulation]
-    for joint in range(start, end):
-        parent = data.joint_parent[joint]
-        child = data.joint_child[joint]
-        parent_delta = wp.spatial_vector()
-        if parent >= wp.int32(0):
-            parent_delta = data.body_acceleration[parent]
-        wrench = data.deferred_wrench[child]
-        dof_start = data.joint_qd_start[joint]
-        dof_end = data.joint_qd_start[joint + wp.int32(1)]
-        dof_count = dof_end - dof_start
-        rhs = _vec6(0.0)
-        response = _vec6(0.0)
-        for row in range(_MAX_JOINT_DOF):
-            if wp.int32(row) < dof_count:
-                dof = dof_start + wp.int32(row)
-                rhs[row] = wp.dot(data.joint_s[dof], wrench) - wp.dot(data.joint_u[dof], parent_delta)
-        for row in range(_MAX_JOINT_DOF):
-            if wp.int32(row) < dof_count:
-                for column in range(_MAX_JOINT_DOF):
-                    if wp.int32(column) < dof_count:
-                        response[row] += data.joint_d_inv[dof_start + wp.int32(row), column] * rhs[column]
-        child_delta = parent_delta
-        for row in range(_MAX_JOINT_DOF):
-            if wp.int32(row) < dof_count:
-                dof = dof_start + wp.int32(row)
-                data.joint_qd[dof] += response[row]
-                child_delta += data.joint_s[dof] * response[row]
-        data.body_acceleration[child] = child_delta
-        slot = child + wp.int32(1)
-        delta_omega = wp.spatial_bottom(child_delta)
-        bodies.angular_velocity[slot] = bodies.angular_velocity[slot] + delta_omega
-        local_com_position = wp.transform_get_translation(data.body_q_com[child])
-        bodies.velocity[slot] = (
-            bodies.velocity[slot] + wp.spatial_top(child_delta) + wp.cross(delta_omega, local_com_position)
-        )
-        data.deferred_wrench[child] = wp.spatial_vector()
-
-
 @wp.kernel(enable_backward=False)
 def _solve_reduced_deferred_contacts_kernel(
     schedule_section_end: wp.array[wp.int32],
@@ -3527,7 +3485,7 @@ def _solve_reduced_deferred_contacts_kernel(
                 cross_mobility,
             )
 
-    _flush_deferred_articulation(bodies, articulation)
+    flush_deferred_articulation(bodies, articulation)
 
 
 class ReducedArticulationSystem:
