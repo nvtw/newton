@@ -1236,6 +1236,17 @@ contact accuracy are still being investigated.
       <br><code>python -m newton.examples phoenx_baggage_hall</code>
     </td>
   </tr>
+  <tr>
+    <td align="center" width="33%">
+      <img width="320" src="docs/images/examples/example_phoenx_bridge.jpg" alt="PhoenX breaking bridge">
+      <br><b>Breaking and rebuilding a bridge</b>
+      <br><code>python -m newton.examples phoenx_bridge</code>
+    </td>
+    <td align="center" width="33%">
+    </td>
+    <td align="center" width="33%">
+    </td>
+  </tr>
 </table>
 
 ### Example Options

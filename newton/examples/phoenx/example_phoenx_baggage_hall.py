@@ -597,7 +597,7 @@ class Example:
 
         viewer.set_model(self.model)
         # One unit box serves every suitcase size through per-instance scales.
-        viewer.log_geo("/suitcase", newton.GeoType.BOX, (1.0, 1.0, 1.0), 0.0, True)
+        viewer.log_geo("/suitcase", newton.GeoType.BOX, (1.0, 1.0, 1.0), 0.0, True, hidden=True)
         viewer.set_camera(wp.vec3(40.0, -12.0, 14.0), pitch=-28.0, yaw=70.0)
 
         self.graph = None
