@@ -127,7 +127,7 @@ def _build_pendulum(
     )
 
     mb.add_articulation([0])
-    mb.gravity = -_G
+    mb.gravity = wp.vec3(mb.up_vector) * -_G
     model = mb.finalize()
     q = model.joint_q.numpy()
     q[0] = init_q
@@ -479,7 +479,7 @@ def _build_three_link_leg(
         actuator_mode=newton.JointTargetMode.POSITION,
     )
     mb.add_articulation([hip, knee, ankle])
-    mb.gravity = -_G
+    mb.gravity = wp.vec3(mb.up_vector) * -_G
 
     if with_foot_contact:
         # Box "foot" attached to the leaf body, touching the ground.
@@ -619,7 +619,6 @@ def _build_block_on_plane(mu: float, *, incline_deg: float = 0.0) -> newton.Mode
     # normal load and m*g sin(theta) tangential, stiction breaks at
     # tan(theta) > mu.
     a = math.radians(incline_deg)
-    mb.gravity = -_G  # the magnitude; we re-decompose via vec3 below
     model = mb.finalize()
     # Rewrite gravity as a vec3 so the tilt direction matters.
     model.set_gravity((-_G * math.sin(a), 0.0, -_G * math.cos(a)))

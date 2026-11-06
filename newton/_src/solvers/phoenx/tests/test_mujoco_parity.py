@@ -104,7 +104,7 @@ def _build_pendulum_model(
 
     joint = mb.add_joint_revolute(**kwargs)
     mb.add_articulation([joint])
-    mb.gravity = gravity
+    mb.gravity = wp.vec3(mb.up_vector) * gravity
     model = mb.finalize()
 
     if init_q != 0.0:

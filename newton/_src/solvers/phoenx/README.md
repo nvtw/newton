@@ -304,7 +304,7 @@ builder.add_shape_box(
     hz=0.1,
     cfg=newton.ModelBuilder.ShapeConfig(density=1000.0, mu=0.8),
 )
-builder.gravity = -9.81
+builder.gravity = (0.0, 0.0, -9.81)
 model = builder.finalize()
 
 solver = newton.solvers.SolverPhoenX(

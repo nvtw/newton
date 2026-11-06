@@ -192,7 +192,7 @@ def _build_rotor(
         actuator_mode=newton.JointTargetMode.POSITION if target_ke > 0.0 else newton.JointTargetMode.NONE,
     )
     mb.add_articulation([joint])
-    mb.gravity = 0.0  # rotor tests are gravity-free
+    mb.gravity = (0.0, 0.0, 0.0)  # rotor tests are gravity-free
     model = mb.finalize()
     model.set_gravity((0.0, 0.0, 0.0))
     return model

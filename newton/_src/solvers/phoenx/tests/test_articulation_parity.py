@@ -170,7 +170,7 @@ def _build_two_link_chain(
     )
 
     mb.add_articulation([j0, j1])
-    mb.gravity = 0.0
+    mb.gravity = (0.0, 0.0, 0.0)
     model = mb.finalize()
 
     # Preload joint_q the way Anymal does -- builder.joint_q is a
@@ -351,7 +351,7 @@ def _anymal_model() -> newton.Model:
         )
         if idx is not None:
             mb.joint_q[idx + 6] = value
-    mb.gravity = -9.81
+    mb.gravity = wp.vec3(mb.up_vector) * -9.81
     return mb.finalize()
 
 
@@ -480,7 +480,7 @@ def _build_pd_torque_rig(
         actuator_mode=newton.JointTargetMode.POSITION,
     )
     mb.add_articulation([j])
-    mb.gravity = 0.0
+    mb.gravity = (0.0, 0.0, 0.0)
     model = mb.finalize()
     q = model.joint_q.numpy()
     q[0] = init_q

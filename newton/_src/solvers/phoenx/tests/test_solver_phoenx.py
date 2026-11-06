@@ -44,7 +44,7 @@ def _make_box_model(*, box_z: float = 0.5, mu: float = 0.5, rigid_gap: float | N
         hz=0.1,
         cfg=newton.ModelBuilder.ShapeConfig(density=1000.0, mu=mu),
     )
-    mb.gravity = -GRAVITY
+    mb.gravity = wp.vec3(mb.up_vector) * -GRAVITY
     return mb.finalize()
 
 
@@ -66,7 +66,7 @@ def _make_box_margin_stack_model(*, margin: float) -> tuple[newton.Model, int]:
         mass=1.0,
     )
     mb.add_shape_box(body, hx=0.1, hy=0.1, hz=0.1, cfg=dynamic_cfg)
-    mb.gravity = -GRAVITY
+    mb.gravity = wp.vec3(mb.up_vector) * -GRAVITY
     return mb.finalize(), body
 
 
@@ -79,7 +79,7 @@ def _make_offset_com_free_body_model() -> tuple[newton.Model, int]:
         inertia=((0.15, 0.0, 0.0), (0.0, 0.15, 0.0), (0.0, 0.0, 0.15)),
     )
     mb.body_com[body] = wp.vec3(0.35, -0.12, 0.22)
-    mb.gravity = 0.0
+    mb.gravity = (0.0, 0.0, 0.0)
     return mb.finalize(), body
 
 
@@ -100,7 +100,7 @@ def _make_offset_com_free_joint_model() -> tuple[newton.Model, int]:
         ),
     )
     mb.add_articulation([joint])
-    mb.gravity = 0.0
+    mb.gravity = (0.0, 0.0, 0.0)
     return mb.finalize(), body
 
 
@@ -121,7 +121,7 @@ def _make_offset_com_contact_model() -> tuple[newton.Model, int]:
         hz=0.1,
         cfg=newton.ModelBuilder.ShapeConfig(density=0.0, mu=0.5),
     )
-    mb.gravity = -GRAVITY
+    mb.gravity = wp.vec3(mb.up_vector) * -GRAVITY
     return mb.finalize(), body
 
 
@@ -157,7 +157,7 @@ def _make_pendulum_model(*, target_angle: float = 0.0) -> newton.Model:
         actuator_mode=newton.JointTargetMode.POSITION,
     )
     mb.add_articulation([joint])
-    mb.gravity = -GRAVITY
+    mb.gravity = wp.vec3(mb.up_vector) * -GRAVITY
     return mb.finalize()
 
 
@@ -184,7 +184,7 @@ def _make_welded_cube_model() -> newton.Model:
         child_xform=wp.transform(p=wp.vec3(0.0, 0.0, 0.0), q=wp.quat_identity()),
     )
     mb.add_articulation([joint])
-    mb.gravity = -GRAVITY
+    mb.gravity = wp.vec3(mb.up_vector) * -GRAVITY
     return mb.finalize()
 
 
@@ -367,7 +367,7 @@ class TestSolverPhoenX(unittest.TestCase):
             hz=0.1,
             cfg=newton.ModelBuilder.ShapeConfig(density=1000.0),
         )
-        mb.gravity = 0.0
+        mb.gravity = (0.0, 0.0, 0.0)
         model = mb.finalize()
 
         solver = newton.solvers.SolverPhoenX(model, substeps=1, solver_iterations=1)
@@ -500,7 +500,7 @@ class TestSolverPhoenX(unittest.TestCase):
 
     def test_public_cloth_step_exports_particles(self) -> None:
         mb = newton.ModelBuilder()
-        mb.gravity = 0.0
+        mb.gravity = (0.0, 0.0, 0.0)
         body = mb.add_body(xform=wp.transform(p=wp.vec3(2.0, 0.0, 0.0), q=wp.quat_identity()), mass=0.0)
         mb.add_shape_box(
             body,
@@ -542,7 +542,7 @@ class TestSolverPhoenX(unittest.TestCase):
 
     def test_public_soft_tet_step_exports_particles(self) -> None:
         mb = newton.ModelBuilder()
-        mb.gravity = 0.0
+        mb.gravity = (0.0, 0.0, 0.0)
         mb.add_soft_grid(
             pos=wp.vec3(0.0, 0.0, 0.0),
             rot=wp.quat_identity(),

@@ -81,7 +81,7 @@ def _pendulum(
         kwargs["limit_kd"] = limit_kd
     joint = mb.add_joint_revolute(**kwargs)
     mb.add_articulation([joint])
-    mb.gravity = 0.0
+    mb.gravity = (0.0, 0.0, 0.0)
     model = mb.finalize()
     if init_q != 0.0:
         model.joint_q.assign(np.array([init_q], dtype=np.float32))

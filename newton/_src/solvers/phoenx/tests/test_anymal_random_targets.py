@@ -91,7 +91,7 @@ def _anymal_model_with_position_drives() -> newton.Model:
         )
         if idx is not None:
             mb.joint_q[idx + 6] = value
-    mb.gravity = -9.81
+    mb.gravity = wp.vec3(mb.up_vector) * -9.81
     return mb.finalize()
 
 

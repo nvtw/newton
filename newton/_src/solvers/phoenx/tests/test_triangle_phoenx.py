@@ -54,7 +54,7 @@ def _make_sphere_on_triangle_model() -> newton.Model:
         cfg=newton.ModelBuilder.ShapeConfig(density=1000.0, mu=0.5),
     )
 
-    mb.gravity = -GRAVITY
+    mb.gravity = wp.vec3(mb.up_vector) * -GRAVITY
     return mb.finalize()
 
 

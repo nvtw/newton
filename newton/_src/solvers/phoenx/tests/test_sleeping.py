@@ -54,7 +54,7 @@ def _make_box_on_plane(*, box_z: float = 0.5, mu: float = 0.5) -> newton.Model:
         hz=0.1,
         cfg=newton.ModelBuilder.ShapeConfig(density=1000.0, mu=mu),
     )
-    mb.gravity = -GRAVITY
+    mb.gravity = wp.vec3(mb.up_vector) * -GRAVITY
     return mb.finalize()
 
 
@@ -73,7 +73,7 @@ def _make_two_separated_boxes(*, gap: float = 5.0, box_z: float = 0.5) -> newton
             hz=0.1,
             cfg=newton.ModelBuilder.ShapeConfig(density=1000.0, mu=0.5),
         )
-    mb.gravity = -GRAVITY
+    mb.gravity = wp.vec3(mb.up_vector) * -GRAVITY
     return mb.finalize()
 
 
@@ -97,7 +97,7 @@ def _make_two_stacks(*, n_layers: int = 3, box_half: float = 0.1, gap: float = 3
                 hz=box_half,
                 cfg=newton.ModelBuilder.ShapeConfig(density=1000.0, mu=0.6),
             )
-    mb.gravity = -GRAVITY
+    mb.gravity = wp.vec3(mb.up_vector) * -GRAVITY
     return mb.finalize()
 
 
@@ -117,7 +117,7 @@ def _make_box_stack(*, n_layers: int = 4, box_half: float = 0.1) -> newton.Model
             hz=box_half,
             cfg=newton.ModelBuilder.ShapeConfig(density=1000.0, mu=0.6),
         )
-    mb.gravity = -GRAVITY
+    mb.gravity = wp.vec3(mb.up_vector) * -GRAVITY
     return mb.finalize()
 
 
@@ -996,7 +996,7 @@ class TestSleepingKinematicWake(unittest.TestCase):
             radius=pusher_radius,
             cfg=newton.ModelBuilder.ShapeConfig(density=1000.0),
         )
-        mb.gravity = -GRAVITY
+        mb.gravity = wp.vec3(mb.up_vector) * -GRAVITY
         model = mb.finalize()
 
         # Sleeping-aware collision pipeline (share-vertex filter

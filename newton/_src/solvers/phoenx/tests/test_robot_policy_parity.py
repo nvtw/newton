@@ -207,7 +207,7 @@ def _build_sliding_block(mu: float, v0: float) -> newton.Model:
     )
     mb.add_shape_box(body, hx=0.5, hy=0.5, hz=0.5)
     mb.add_ground_plane()
-    mb.gravity = -9.81
+    mb.gravity = wp.vec3(mb.up_vector) * -9.81
     model = mb.finalize()
     # Stash v0 on the model so the harness can read it back; we can't
     # set body_qd at builder level for free joints (they seed via
@@ -314,7 +314,7 @@ def _build_primitive_drop(shape_kind: str, drop_height: float) -> newton.Model:
     else:
         raise ValueError(f"unknown shape: {shape_kind}")
     mb.add_ground_plane()
-    mb.gravity = -9.81
+    mb.gravity = wp.vec3(mb.up_vector) * -9.81
     return mb.finalize()
 
 
@@ -446,7 +446,7 @@ def _g1_robot_model() -> newton.Model:
     mb.joint_q[3:7] = [0.0, 0.0, 0.7071, 0.7071]
     mb.joint_q[7:] = cfg["mjw_joint_pos"]
 
-    mb.gravity = -9.81
+    mb.gravity = wp.vec3(mb.up_vector) * -9.81
     return mb.finalize()
 
 
