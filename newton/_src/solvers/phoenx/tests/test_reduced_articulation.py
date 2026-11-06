@@ -4799,10 +4799,17 @@ class TestReducedArticulationPairContacts(unittest.TestCase):
 _CAPSULE_PITCH = 2.0 * (0.07 + 0.045)
 
 
-def _make_capsule_ball_chain(device, links, *, tilt=0.0, qd=()):
-    """Weightless free-root chain of thin capsules along their local x axis, joined by ball joints."""
-    builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
-    cfg = newton.ModelBuilder.ShapeConfig(density=400.0)
+def _make_capsule_ball_chain(device, links, *, tilt=0.0, qd=(), falling=False, spheres=False):
+    """Free-root chain of thin capsules along their local x axis, joined by ball joints.
+
+    The chain is weightless unless ``falling``, which adds gravity and a ground
+    plane with friction 0.5. ``spheres`` swaps the capsules for isotropic spheres.
+    """
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, -9.81 if falling else 0.0), up_axis=newton.Axis.Z)
+    builder.default_shape_cfg.mu = 0.5
+    if falling:
+        builder.add_ground_plane()
+    cfg = newton.ModelBuilder.ShapeConfig(density=400.0, mu=0.5)
     cfg.collision_group = -7
     capsule_x = wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), 0.5 * wp.pi)
     rotation = wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), tilt)
@@ -4814,9 +4821,12 @@ def _make_capsule_ball_chain(device, links, *, tilt=0.0, qd=()):
                 wp.vec3(0.0, 0.0, 2.0) + wp.quat_rotate(rotation, wp.vec3(_CAPSULE_PITCH * i, 0.0, 0.0)), rotation
             )
         )
-        builder.add_shape_capsule(
-            body, xform=wp.transform(wp.vec3(0.0), capsule_x), radius=0.045, half_height=0.07, cfg=cfg
-        )
+        if spheres:
+            builder.add_shape_sphere(body, radius=0.06, cfg=cfg)
+        else:
+            builder.add_shape_capsule(
+                body, xform=wp.transform(wp.vec3(0.0), capsule_x), radius=0.045, half_height=0.07, cfg=cfg
+            )
         if previous < 0:
             joints.append(builder.add_joint_free(body))
         else:
@@ -4857,8 +4867,53 @@ def _link_axial_spin(state):
     return np.asarray(spins)
 
 
+# Pose and rates of a 6-link capsule rope right after it hit the ground spinning:
+# links turn 65, 143, 83 and 81 rad/s about their own axes (state of the
+# falling-rope scene below, 38 frames in).
+_POST_IMPACT_ROPE_Q = (
+    (1.0859, 2.1828, 0.0339, -0.1763, 0.9412, 0.2882, 0.0056),
+    (0.4352, 0.0283, 0.0791, 0.8964),
+    (-0.9667, -0.0013, 0.0698, 0.2462),
+    (-0.8036, 0.0088, -0.0188, 0.5949),
+    (-0.0307, -0.1187, -0.2352, 0.9642),
+    (-0.0011, 0.0235, 0.0502, 0.9985),
+)
+_POST_IMPACT_ROPE_QD = (
+    (0.215, 0.151, 2.657, -61.372, -21.739, -3.058),
+    (77.173, 12.879, 4.68),
+    (-59.546, 14.684, -9.166),
+    (-0.854, 13.675, -17.905),
+    (-80.653, -12.068, -20.829),
+    (-1.033, -2.964, -6.475),
+)
+
+
+def _set_post_impact_rope_state(model, state):
+    joint_q = []
+    for i, coordinates in enumerate(_POST_IMPACT_ROPE_Q):
+        values = np.asarray(coordinates, dtype=np.float32)
+        rotation = values[3:] if i == 0 else values
+        rotation /= np.linalg.norm(rotation)
+        joint_q.extend(values)
+    state.joint_q.assign(np.asarray(joint_q, dtype=np.float32))
+    state.joint_qd.assign(np.concatenate(_POST_IMPACT_ROPE_QD).astype(np.float32))
+    newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+
+
+def _total_energy(model, state):
+    """Kinetic plus gravitational potential energy (gravity along -z)."""
+    com = np.array(
+        [
+            wp.transform_point(wp.transform(*transform), wp.vec3(*offset))
+            for transform, offset in zip(state.body_q.numpy(), model.body_com.numpy(), strict=True)
+        ]
+    )
+    gravity = -float(model.gravity.numpy()[0][2])
+    return _kinetic_energy(model, state) + gravity * float(np.dot(model.body_mass.numpy(), com[:, 2]))
+
+
 class TestReducedVelocityProductStep(unittest.TestCase):
-    """The implicit velocity-product step keeps fast spin stable and physical."""
+    """The variational midpoint step keeps fast spin stable and physical."""
 
     def setUp(self):
         self.device = wp.get_preferred_device()
@@ -4953,15 +5008,38 @@ class TestReducedVelocityProductStep(unittest.TestCase):
         expected = explicit_qdd.numpy()
         return np.allclose(step_qdd, expected, rtol=1.0e-3, atol=1.0e-3 * np.abs(expected).max())
 
-    def test_slow_tree_keeps_explicit_step_and_fast_tree_switches_to_implicit(self):
-        # Slow trees (|omega| dt well below the bound) keep the explicit ABA step, so ordinary
-        # robots pay nothing; fast spin switches the whole tree to the implicit operator.
+    def test_slow_tree_keeps_explicit_step_and_fast_tree_switches_to_midpoint(self):
+        # Slow trees keep the explicit ABA step, so ordinary robots pay nothing; a fast
+        # gyroscopic tumble switches the whole tree to the midpoint step.
         self.assertTrue(self._velocity_step_matches_explicit_dynamics(1.0))
         self.assertFalse(self._velocity_step_matches_explicit_dynamics(40.0))
 
-    def test_implicit_step_matches_across_execution_paths(self):
+    def _takes_midpoint_step(self, model):
+        state = model.state()
+        newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+        solver = newton.solvers.SolverPhoenX(model, joint_mode="reduced", substeps=4, solver_iterations=4)
+        system = solver._reduced_articulation.system
+        system.factor(state, model.control(), 1.0 / 240.0)
+        system.advance(
+            state, model.control(), solver.bodies, 1.0 / 240.0, include_external=False, include_coriolis=True
+        )
+        return bool(system.midpoint.flag.numpy()[0])
+
+    def test_switch_follows_gyroscopic_growth_not_spin_rate(self):
+        # The switch estimates the explicit step's energy growth from each link's gyroscopic
+        # frequency, not from |omega| dt: at 72 rad/s (0.3 rad per 240 Hz step) an isotropic
+        # sphere stays explicit, while a capsule takes the midpoint step whether it spins about
+        # its axis (fast precession of any wobble) or tumbles off its principal axes.
+        rate = ((3, 60.0), (5, 40.0))
+        self.assertFalse(self._takes_midpoint_step(_make_capsule_ball_chain(self.device, 1, qd=rate, spheres=True)))
+        self.assertTrue(self._takes_midpoint_step(_make_capsule_ball_chain(self.device, 1, qd=((3, 72.0),))))
+        self.assertTrue(self._takes_midpoint_step(_make_capsule_ball_chain(self.device, 1, qd=rate)))
+        # The same capsule tumbling slowly (0.6 rad/s) stays explicit.
+        self.assertFalse(self._takes_midpoint_step(_make_capsule_ball_chain(self.device, 1, qd=((3, 0.5), (5, 0.35)))))
+
+    def test_midpoint_step_matches_across_execution_paths(self):
         # Serial kernels, the fused warp advance+publish, and the persistent path
-        # must apply the same implicit step, root re-referencing, and momentum boost.
+        # must apply the same midpoint step and publish the same new pose.
         model = _make_capsule_ball_chain(self.device, 4, tilt=0.2, qd=((3, 0.4), (5, 2.0), (12, 25.0), (13, 2.0)))
         results = []
         for path in ("serial", "reference", "persistent"):
@@ -4980,13 +5058,95 @@ class TestReducedVelocityProductStep(unittest.TestCase):
                 system.use_warp_publish = False
             with wp.ScopedCapture(device=self.device) as capture:
                 solver.step(state0, state1, None, None, 1.0 / 60.0)
-                solver.step(state1, state0, None, None, 1.0 / 60.0)
-            for _ in range(5):
-                wp.capture_launch(capture.graph)
-            results.append((state0.joint_qd.numpy(), state0.body_q.numpy(), state0.body_qd.numpy()))
-        for other in results[1:]:
-            for reference, value in zip(results[0], other, strict=True):
-                np.testing.assert_allclose(value, reference, rtol=1.0e-4, atol=1.0e-4)
+            wp.capture_launch(capture.graph)
+            self.assertEqual(int(solver._reduced_articulation.system.midpoint.flag.numpy()[0]), 1)
+            results.append((state1.joint_q.numpy(), state1.joint_qd.numpy(), state1.body_q.numpy()))
+        # The warp paths share every kernel. The serial kernels differ only in rounding,
+        # which the 25 rad/s tip amplifies to about 1e-5 of its rate within a frame.
+        for reference, value in zip(results[1], results[2], strict=True):
+            np.testing.assert_array_equal(value, reference)
+        for reference, value in zip(results[1], results[0], strict=True):
+            np.testing.assert_allclose(value, reference, rtol=1.0e-4, atol=1.0e-3)
+
+    def test_free_flight_after_impact_keeps_energy_momentum_and_link_spins(self):
+        # Right after impact the rope's links spin up to 143 rad/s about their own axes,
+        # 0.6 rad per 240 Hz substep. Ball joints act on the link axes and cannot change
+        # those spins, the total momentum is conserved, and so is the energy.
+        model = _make_capsule_ball_chain(self.device, 6)
+        state0, state1 = model.state(), model.state()
+        for state in (state0, state1):
+            _set_post_impact_rope_state(model, state)
+        initial_energy = _kinetic_energy(model, state0)
+        initial_momentum = _total_momentum(model, state0)
+        initial_spins = _link_axial_spin(state0)
+        self.assertGreater(initial_spins.max(), 140.0)
+
+        state = _run_reduced_frames(model, state0, state1, 30)
+
+        self.assertTrue(np.isfinite(state.body_qd.numpy()).all())
+        self.assertLess(abs(_kinetic_energy(model, state) / initial_energy - 1.0), 0.01)
+        np.testing.assert_allclose(_link_axial_spin(state), initial_spins, atol=0.5)
+        momentum = _total_momentum(model, state)
+        np.testing.assert_allclose(momentum[:3], initial_momentum[:3], atol=1.0e-3)
+        np.testing.assert_allclose(momentum[3:], initial_momentum[3:], atol=2.0e-3 * np.abs(initial_momentum[3:]).max())
+
+    def test_tumbling_tilted_capsule_keeps_energy_and_angular_momentum(self):
+        # A capsule tilted by 0.3 rad tumbles at 60 rad/s about world x, 0.25 rad per substep.
+        # Its world angular momentum is fixed while the anisotropic inertia rotates.
+        model = _make_capsule_ball_chain(self.device, 1, tilt=0.3, qd=((3, 60.0),))
+        state0, state1 = self._initial_states(model)
+        initial_energy = _kinetic_energy(model, state0)
+        initial_momentum = _total_momentum(model, state0)
+
+        state = _run_reduced_frames(model, state0, state1, 120)
+
+        self.assertLess(abs(_kinetic_energy(model, state) / initial_energy - 1.0), 5.0e-3)
+        np.testing.assert_allclose(_total_momentum(model, state), initial_momentum, atol=1.0e-4)
+
+    def test_rigidly_spinning_two_link_chain_keeps_energy(self):
+        # A straight two-link chain starts turning as one body at 72 rad/s, off its principal axes.
+        model = _make_capsule_ball_chain(self.device, 2, qd=((3, 60.0), (5, 40.0)))
+        state0, state1 = self._initial_states(model)
+        initial_energy = _kinetic_energy(model, state0)
+        initial_momentum = _total_momentum(model, state0)
+
+        state = _run_reduced_frames(model, state0, state1, 120)
+
+        self.assertLess(abs(_kinetic_energy(model, state) / initial_energy - 1.0), 5.0e-3)
+        # Float32 rounding drifts the momentum by about 4e-7 of its size per substep.
+        momentum = _total_momentum(model, state)
+        np.testing.assert_allclose(momentum, initial_momentum, atol=1.0e-3 * np.abs(initial_momentum).max())
+
+    def test_spinning_rope_falls_onto_ground_without_gaining_energy(self):
+        # A spinning ball-jointed rope lands on rough ground. Friction makes the links roll
+        # fast about their own axes; the impact may only remove energy.
+        for links in (6, 14):
+            with self.subTest(links=links):
+                model = _make_capsule_ball_chain(self.device, links, tilt=0.3, qd=((5, 6.0),), falling=True)
+                state0, state1 = self._initial_states(model)
+                solver = newton.solvers.SolverPhoenX(model, joint_mode="reduced", substeps=4, solver_iterations=4)
+                contacts = model.contacts()
+                with wp.ScopedCapture(device=self.device) as capture:
+                    model.collide(state0, contacts)
+                    solver.step(state0, state1, None, contacts, 1.0 / 60.0)
+                    model.collide(state1, contacts)
+                    solver.step(state1, state0, None, contacts, 1.0 / 60.0)
+                impact_energy = None
+                took_midpoint = False
+                flag = solver._reduced_articulation.system.midpoint.flag
+                for _ in range(30):
+                    wp.capture_launch(capture.graph)
+                    energy = _total_energy(model, state0)
+                    self.assertTrue(np.isfinite(state0.body_qd.numpy()).all())
+                    if impact_energy is None:
+                        if int(contacts.rigid_contact_count.numpy()[0]) > 0:
+                            impact_energy = energy
+                        continue
+                    took_midpoint = took_midpoint or bool(flag.numpy()[0])
+                    self.assertLess(energy, impact_energy * 1.002)
+                self.assertIsNotNone(impact_energy)
+                # The rolling, tumbling links sent the rope through the midpoint step.
+                self.assertTrue(took_midpoint)
 
 
 if __name__ == "__main__":
