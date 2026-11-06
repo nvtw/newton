@@ -1243,6 +1243,9 @@ contact accuracy are still being investigated.
       <br><code>python -m newton.examples phoenx_bridge</code>
     </td>
     <td align="center" width="33%">
+      <img width="320" src="docs/images/examples/example_phoenx_articulation_rain.jpg" alt="PhoenX articulation rain">
+      <br><b>Runtime articulation spawning</b>
+      <br><code>python -m newton.examples phoenx_articulation_rain</code>
     </td>
     <td align="center" width="33%">
     </td>
