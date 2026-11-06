@@ -1526,7 +1526,7 @@ def _empty_slot(slots: ReducedSlots, joint_type: wp.array[wp.int32], instance: w
     a = slots.articulation + instance
     start = slots.articulation_start[a]
     slots.articulation_end[a] = start
-    joint_type[start] = _FIXED_JOINT  # keeps the momentum restore away from the empty range
+    joint_type[start] = _FIXED_JOINT  # keeps the linear momentum boost away from the empty range
     base = slots.depth_start[a, 0]
     for d in range(slots.depth_start.shape[1]):
         slots.depth_start[a, d] = base
