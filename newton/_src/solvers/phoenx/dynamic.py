@@ -7,14 +7,19 @@ them out from device code: each kind of row has a slot pool with a per-slot stat
 list of active slots, and a list of free slots that :func:`add_body` and friends pop.
 
 Everything runs on the device, so a CUDA graph can capture creation and removal along with the
-simulation. Changes are staged by the ``wp.func`` API and applied by
-:meth:`Dynamics.commit` at the start of :meth:`SolverPhoenX.step`:
+simulation. The ``wp.func`` API only claims slots and stages descriptors; :meth:`Dynamics._commit`
+writes them into the model and solver rows in parallel at the start of :meth:`SolverPhoenX.step`:
 
 * Added rows become active. Their shapes collide from the next collision pass on, because that
   pass reads the pose the step exports.
 * Removed rows are deactivated, and removing a body also removes its shapes and joints. A
   removed row is quarantined for one commit before it can be handed out again, so no stale
   contact or warm-start history can match its next occupant.
+
+The device handle :class:`DynamicsData` stays small on purpose: Warp passes structs to functions
+by value, and a struct of more than about 8 KB forwarded through nested functions is copied
+through local memory on every call. The commit kernels take the rows they write as separate
+structs, each well below that size.
 """
 
 from __future__ import annotations
@@ -63,12 +68,14 @@ __all__ = [
     "shape_desc",
 ]
 
-# Slot states.
+# Slot states. A row removed before its addition was committed is cancelled: nothing of it was
+# written, so the commit only quarantines it.
 _FREE = wp.constant(0)
 _ACTIVE = wp.constant(1)
 _ADDED = wp.constant(2)
 _REMOVED = wp.constant(3)
 _QUARANTINE = wp.constant(4)
+_CANCELLED = wp.constant(5)
 
 _KINEMATIC = wp.constant(int(BodyFlags.KINEMATIC))
 _VELOCITY_LEVEL = wp.constant(ACCESS_MODE_VELOCITY_LEVEL)
@@ -87,11 +94,16 @@ _CONE = wp.constant(int(GeoType.CONE))
 _CONVEX_MESH = wp.constant(int(GeoType.CONVEX_MESH))
 _VOXEL_BUDGET = wp.constant(100)  # matches ModelBuilder.finalize
 _D6 = wp.constant(int(JointType.D6))
+_FIXED_JOINT = wp.constant(int(JointType.FIXED))
+_FREE_JOINT = wp.constant(int(JointType.FREE))
 _POSITION = wp.constant(int(JointTargetMode.POSITION))
 _VELOCITY = wp.constant(int(JointTargetMode.VELOCITY))
 _POSITION_VELOCITY = wp.constant(int(JointTargetMode.POSITION_VELOCITY))
 _ROWS = wp.constant(6)  # rows and degrees of freedom per reserved joint
 _NO_FILTER = wp.constant(-2)  # body_filter_parent value of bodies without a filtered parent
+_ARTICULATED = wp.constant(MOTION_ARTICULATED)
+_ARTICULATION_GROUP = wp.constant(-(1 << 24))  # first per-instance negative collision group
+_TREE_LANES = wp.constant(32)  # lanes of an exact tree solve
 
 vec6f = wp.types.vector(length=6, dtype=wp.float32)
 vec6i = wp.types.vector(length=6, dtype=wp.int32)
@@ -126,7 +138,17 @@ def _pool_release(pool: SlotPool, row: wp.int32) -> wp.bool:
         return False
     if wp.atomic_cas(pool.state, slot, _ACTIVE, _REMOVED) == _ACTIVE:
         return True
-    return wp.atomic_cas(pool.state, slot, _ADDED, _REMOVED) == _ADDED
+    return wp.atomic_cas(pool.state, slot, _ADDED, _CANCELLED) == _ADDED
+
+
+@wp.func
+def _pool_removed(pool: SlotPool, row: wp.int32) -> wp.bool:
+    """Whether ``row`` is a slot of ``pool`` that is being removed or cancelled."""
+    slot = row - pool.start
+    if slot < 0 or slot >= pool.state.shape[0]:
+        return False
+    state = pool.state[slot]
+    return state == _REMOVED or state == _CANCELLED
 
 
 @wp.struct
@@ -255,16 +277,550 @@ def joint_desc(parent: wp.int32, child: wp.int32, parent_xform: wp.transform, ch
 
 
 @wp.struct
-class ReducedSlots:
-    """Generalized-coordinate instance slots; slot ``s`` owns ``size`` consecutive bodies and joints.
+class DynamicsData:
+    """Device handle of the runtime-creation functions; pass ``solver.dynamics.data`` to kernels."""
 
-    Spawning rewrites the slot's rows of the reduced solver's topology tables in place: its joint
-    range, depth-walk tables, child lists, and per-body joint paths, all sized for a full chain.
+    body_pool: SlotPool
+    shape_pool: SlotPool
+    joint_pool: SlotPool
+    #: Runtime articulation instances.
+    articulation_pool: SlotPool
+    #: Failed requests: full pools, unknown rows, or invalid descriptors.
+    error_count: wp.array[wp.int32]
+    world_count: wp.int32
+    body_count: wp.int32
+
+    #: Model body worlds, assigned when a body is added so shapes can follow in the same kernel.
+    body_world: wp.array[wp.int32]
+    #: Model shape types, to check mesh prototypes.
+    shape_type: wp.array[wp.int32]
+    #: Descriptors of added rows per slot, written into the rows at the next commit.
+    staged_bodies: wp.array[BodyDesc]
+    staged_shapes: wp.array[ShapeDesc]
+    staged_shape_body: wp.array[wp.int32]
+    staged_joints: wp.array[JointDesc]
+
+    #: Constraint column of each model joint and the wrench it applied; see :func:`joint_wrench`.
+    joint_cid: wp.array[wp.int32]
+    constraint_wrench: wp.array[wp.spatial_vector]
+
+    #: Templates, laid out per template by ``*_start``.
+    template_body_start: wp.array[wp.int32]
+    template_shape_start: wp.array[wp.int32]
+    template_joint_start: wp.array[wp.int32]
+    #: Template bodies posed relative to the template's first body.
+    template_bodies: wp.array[BodyDesc]
+    template_shapes: wp.array[ShapeDesc]
+    #: Template-local body of each template shape.
+    template_shape_body: wp.array[wp.int32]
+    #: Template joints whose parent and child are template-local bodies (``-1`` is the world).
+    template_joints: wp.array[JointDesc]
+    #: Per template: tree lanes (zero when it is not solved as a tree), and per lane its
+    #: template body and joint (``-1`` for a floating root).
+    template_tree_count: wp.array[wp.int32]
+    template_tree_body: wp.array2d[wp.int32]
+    template_tree_joint: wp.array2d[wp.int32]
+
+    #: Template, model bodies, and model joints of each instance; ``-1`` past the template's size.
+    articulation_template: wp.array[wp.int32]
+    articulation_bodies: wp.array2d[wp.int32]
+    articulation_joints: wp.array2d[wp.int32]
+    #: Spawn pose, velocity, and world of each instance, laid out by the commit.
+    articulation_pose: wp.array[wp.transform]
+    articulation_velocity: wp.array[wp.spatial_vector]
+    articulation_world: wp.array[wp.int32]
+    #: Bodies of an exact tree solve per instance, zero without one; the commit lays out the tree.
+    tree_body_count: wp.array[wp.int32]
+    #: Instance whose tree solve owns each reserved body and joint slot, or ``-1``.
+    body_articulation: wp.array[wp.int32]
+    joint_articulation: wp.array[wp.int32]
+
+    #: Reduced-coordinate instance slots; ``slot_size`` is zero without them. Slot ``s`` owns
+    #: ``slot_size`` consecutive bodies and joints.
+    slot_size: wp.int32
+    slot_body_start: wp.int32
+    slot_joint_start: wp.int32
+    #: Runtime shapes of each reduced instance, removed with it.
+    instance_shapes: wp.array2d[wp.int32]
+
+
+# ---------------------------------------------------------------------------
+# Device API: claim slots and stage descriptors
+# ---------------------------------------------------------------------------
+
+
+@wp.func
+def _fail(dyn: DynamicsData) -> wp.int32:
+    wp.atomic_add(dyn.error_count, 0, 1)
+    return -1
+
+
+@wp.func
+def _drop_tree(dyn: DynamicsData, owners: wp.array[wp.int32], slot: wp.int32):
+    """Stop solving the tree of the instance owning ``slot`` exactly; its rows fall back to local blocks."""
+    if owners.shape[0] > slot:
+        instance = owners[slot]
+        if instance >= 0:
+            dyn.tree_body_count[instance] = 0
+            owners[slot] = -1
+
+
+@wp.func
+def add_body(dyn: DynamicsData, desc: BodyDesc) -> wp.int32:
+    """Add a body; returns its model body index, or ``-1`` when the reserved rows are used up.
+
+    The body is simulated from the next :meth:`~newton.solvers.SolverPhoenX.step` on.
+    """
+    if desc.world < 0 or desc.world >= dyn.world_count:
+        return _fail(dyn)
+    slot = _pool_alloc(dyn.body_pool)
+    if slot < 0:
+        return _fail(dyn)
+    body = dyn.body_pool.start + slot
+    if dyn.body_articulation.shape[0] > slot:
+        dyn.body_articulation[slot] = -1
+    dyn.staged_bodies[slot] = desc
+    dyn.body_world[body] = desc.world
+    return body
+
+
+@wp.func
+def is_body_active(dyn: DynamicsData, body: wp.int32) -> wp.bool:
+    """Whether a reserved body row holds a body that is not being removed."""
+    slot = body - dyn.body_pool.start
+    if slot < 0 or slot >= dyn.body_pool.state.shape[0]:
+        return False
+    state = dyn.body_pool.state[slot]
+    return state == _ACTIVE or state == _ADDED
+
+
+@wp.func
+def remove_body(dyn: DynamicsData, body: wp.int32) -> wp.bool:
+    """Remove a runtime body with its shapes and joints at the next :meth:`~newton.solvers.SolverPhoenX.step`; ``False`` if not removable."""
+    if _pool_release(dyn.body_pool, body):
+        _drop_tree(dyn, dyn.body_articulation, body - dyn.body_pool.start)
+        return True
+    wp.atomic_add(dyn.error_count, 0, 1)
+    return False
+
+
+@wp.func
+def add_shape(dyn: DynamicsData, body: wp.int32, desc: ShapeDesc) -> wp.int32:
+    """Add a collision shape to ``body``, or a static one for ``-1``; returns its model shape index or ``-1``.
+
+    The shape collides from the first collision pass after the next :meth:`~newton.solvers.SolverPhoenX.step`.
+    """
+    geo = desc.type
+    proto = desc.prototype
+    is_reference = geo == _CONVEX_MESH or geo == _MESH
+    valid = (geo >= _PLANE and geo <= _CONE) or (is_reference and proto >= 0)
+    if is_reference and valid:
+        valid = dyn.shape_type[proto] == geo
+    world = desc.world
+    if body >= 0:
+        world = dyn.body_world[body]
+    if not valid or world < 0 or world >= dyn.world_count:
+        return _fail(dyn)
+    slot = _pool_alloc(dyn.shape_pool)
+    if slot < 0:
+        return _fail(dyn)
+    dyn.staged_shapes[slot] = desc
+    dyn.staged_shape_body[slot] = body
+    return dyn.shape_pool.start + slot
+
+
+@wp.func
+def remove_shape(dyn: DynamicsData, shape: wp.int32) -> wp.bool:
+    """Remove a runtime shape at the next :meth:`~newton.solvers.SolverPhoenX.step`; ``False`` if not removable."""
+    if _pool_release(dyn.shape_pool, shape):
+        return True
+    wp.atomic_add(dyn.error_count, 0, 1)
+    return False
+
+
+@wp.func
+def _axes_valid(axes: wp.mat33, count: wp.int32) -> wp.bool:
+    """Nonzero, independent free axes."""
+    if count < 0 or count > 3:
+        return False
+    for i in range(count):
+        if wp.length(axes[i]) < 1.0e-6:
+            return False
+    if count == 2:
+        return wp.length(wp.cross(axes[0], axes[1])) > 1.0e-6
+    if count == 3:
+        return wp.abs(wp.determinant(axes)) > 1.0e-6
+    return True
+
+
+@wp.func
+def add_joint(dyn: DynamicsData, desc: JointDesc) -> wp.int32:
+    """Add a joint; returns its model joint index, or ``-1`` when rows are used up or ``desc`` is invalid.
+
+    The joint is solved from the next :meth:`~newton.solvers.SolverPhoenX.step` on and requires ``joint_mode="maximal_pgs"``. Drive
+    targets come from :class:`~newton.Control` at the joint's rows. Effort limits are not enforced.
+    """
+    n_free = desc.linear_count + desc.angular_count
+    valid = _axes_valid(desc.linear_axes, desc.linear_count) and _axes_valid(desc.angular_axes, desc.angular_count)
+    valid = valid and desc.child >= 0 and desc.child < dyn.body_count and desc.parent >= -1
+    valid = valid and desc.parent < dyn.body_count and desc.parent != desc.child
+    for k in range(_ROWS):
+        if k < n_free and desc.limit_lower[k] > desc.limit_upper[k]:
+            valid = False
+    slot = wp.int32(-1)
+    if valid:
+        slot = _pool_alloc(dyn.joint_pool)
+    if slot < 0:
+        return _fail(dyn)
+    if dyn.joint_articulation.shape[0] > slot:
+        dyn.joint_articulation[slot] = -1
+    dyn.staged_joints[slot] = desc
+    return dyn.joint_pool.start + slot
+
+
+@wp.func
+def remove_joint(dyn: DynamicsData, joint: wp.int32) -> wp.bool:
+    """Remove a runtime joint at the next :meth:`~newton.solvers.SolverPhoenX.step`; ``False`` if not removable."""
+    if _pool_release(dyn.joint_pool, joint):
+        _drop_tree(dyn, dyn.joint_articulation, joint - dyn.joint_pool.start)
+        return True
+    wp.atomic_add(dyn.error_count, 0, 1)
+    return False
+
+
+@wp.func
+def joint_wrench(dyn: DynamicsData, joint: wp.int32) -> wp.spatial_vector:
+    """World-frame force and torque [N, N·m] that ``joint`` applies to its child body.
+
+    Valid for any model joint, as of the latest :meth:`Dynamics.update_joint_wrenches`; it averages
+    the last substep of the step before.
+    """
+    return dyn.constraint_wrench[dyn.joint_cid[joint]]
+
+
+@wp.func
+def _remove_articulation_rows(dyn: DynamicsData, instance: wp.int32):
+    if dyn.tree_body_count.shape[0] > instance:
+        dyn.tree_body_count[instance] = 0
+    for i in range(dyn.articulation_bodies.shape[1]):
+        body = dyn.articulation_bodies[instance, i]
+        if body >= 0:
+            _pool_release(dyn.body_pool, body)  # its shapes and joints follow at the commit
+
+
+@wp.func
+def _release_instance_shapes(dyn: DynamicsData, instance: wp.int32):
+    for k in range(dyn.instance_shapes.shape[1]):
+        shape = dyn.instance_shapes[instance, k]
+        if shape >= 0:
+            _pool_release(dyn.shape_pool, shape)
+            dyn.instance_shapes[instance, k] = -1
+
+
+@wp.func
+def _clear_instance_maps(dyn: DynamicsData, instance: wp.int32):
+    for i in range(dyn.articulation_bodies.shape[1]):
+        dyn.articulation_bodies[instance, i] = -1
+    for i in range(dyn.articulation_joints.shape[1]):
+        dyn.articulation_joints[instance, i] = -1
+
+
+@wp.func
+def _spawn_body(template_body: BodyDesc, pose: wp.transform, velocity: wp.spatial_vector, world: wp.int32) -> BodyDesc:
+    """A template body moved by the spawn pose and carried by the instance's rigid motion."""
+    desc = template_body
+    desc.pose = pose * template_body.pose
+    com = wp.transform_point(desc.pose, desc.com)
+    angular = wp.spatial_bottom(velocity)
+    desc.velocity = wp.spatial_vector(
+        wp.spatial_top(velocity) + wp.cross(angular, com - wp.transform_get_translation(pose)), angular
+    )
+    desc.world = world
+    return desc
+
+
+@wp.func
+def _add_reduced(
+    dyn: DynamicsData, template: wp.int32, pose: wp.transform, velocity: wp.spatial_vector, world: wp.int32
+) -> wp.int32:
+    """Claim a reduced instance slot; the commit lays the template tree into it."""
+    lanes = dyn.template_tree_count[template]
+    if lanes <= 0 or lanes > dyn.slot_size or world < 0 or world >= dyn.world_count:
+        return _fail(dyn)
+    instance = _pool_alloc(dyn.articulation_pool)
+    if instance < 0:
+        return _fail(dyn)
+    _clear_instance_maps(dyn, instance)
+    b0 = dyn.slot_body_start + instance * dyn.slot_size
+    j0 = dyn.slot_joint_start + instance * dyn.slot_size
+    for lane in range(lanes):
+        dyn.articulation_bodies[instance, dyn.template_tree_body[template, lane]] = b0 + lane
+        dyn.body_world[b0 + lane] = world
+        local_joint = dyn.template_tree_joint[template, lane]
+        if local_joint >= 0:
+            dyn.articulation_joints[instance, local_joint] = j0 + lane
+    tree_group = _ARTICULATION_GROUP - instance  # no collisions within an instance
+    ok = wp.bool(True)
+    s0 = dyn.template_shape_start[template]
+    for i in range(s0, dyn.template_shape_start[template + 1]):
+        sdesc = dyn.template_shapes[i]
+        sdesc.collision_group = tree_group
+        shape = add_shape(dyn, dyn.articulation_bodies[instance, dyn.template_shape_body[i]], sdesc)
+        dyn.instance_shapes[instance, i - s0] = shape
+        ok = ok and shape >= 0
+    if not ok:
+        _release_instance_shapes(dyn, instance)
+        _pool_release(dyn.articulation_pool, instance)
+        return -1
+    return instance
+
+
+@wp.func
+def add_articulation(
+    dyn: DynamicsData, template: wp.int32, pose: wp.transform, velocity: wp.spatial_vector, world: wp.int32
+) -> wp.int32:
+    """Add an instance of an articulation template; returns its index, or ``-1`` when rows run out.
+
+    The instance is simulated from the next :meth:`~newton.solvers.SolverPhoenX.step` on, in the coordinates chosen by
+    ``articulation_coordinates`` in :meth:`~newton.ModelBuilder.reserve_dynamic_capacity`. Its
+    joints start at their template coordinates; drive targets come from :class:`~newton.Control`
+    at the rows of :func:`articulation_joint`.
+
+    Args:
+        dyn: ``solver.dynamics.data``.
+        template: Index into the reservation's ``articulation_templates``.
+        pose: World pose of the template's first body; the other bodies keep their offsets.
+        velocity: Rigid motion of the whole instance: linear velocity at the origin of ``pose``
+            and angular velocity [m/s, rad/s], world frame.
+        world: World index of the instance.
+    """
+    if template < 0 or template >= dyn.template_body_start.shape[0] - 1:
+        return _fail(dyn)
+    if dyn.slot_size == 0 and (world < 0 or world >= dyn.world_count):
+        return _fail(dyn)
+    instance = wp.int32(-1)
+    if dyn.slot_size > 0:
+        instance = _add_reduced(dyn, template, pose, velocity, world)
+    else:
+        instance = _pool_alloc(dyn.articulation_pool)
+        if instance < 0:
+            return _fail(dyn)
+    if instance < 0:
+        return -1
+    dyn.articulation_template[instance] = template
+    dyn.articulation_pose[instance] = pose
+    dyn.articulation_velocity[instance] = velocity
+    dyn.articulation_world[instance] = world
+    if dyn.slot_size > 0:
+        return instance
+    _clear_instance_maps(dyn, instance)
+
+    ok = wp.bool(True)
+    b0 = dyn.template_body_start[template]
+    for i in range(b0, dyn.template_body_start[template + 1]):
+        body = add_body(dyn, _spawn_body(dyn.template_bodies[i], pose, velocity, world))
+        dyn.articulation_bodies[instance, i - b0] = body
+        ok = ok and body >= 0
+    if ok:
+        for i in range(dyn.template_shape_start[template], dyn.template_shape_start[template + 1]):
+            sdesc = dyn.template_shapes[i]
+            sdesc.collision_group = _ARTICULATION_GROUP - instance  # no collisions within an instance
+            body = dyn.articulation_bodies[instance, dyn.template_shape_body[i]]
+            ok = ok and add_shape(dyn, body, sdesc) >= 0
+    if ok:
+        j0 = dyn.template_joint_start[template]
+        for i in range(j0, dyn.template_joint_start[template + 1]):
+            jdesc = dyn.template_joints[i]
+            if jdesc.parent >= 0:
+                jdesc.parent = dyn.articulation_bodies[instance, jdesc.parent]
+            else:
+                jdesc.parent_xform = pose * jdesc.parent_xform
+            jdesc.child = dyn.articulation_bodies[instance, jdesc.child]
+            joint = add_joint(dyn, jdesc)
+            dyn.articulation_joints[instance, i - j0] = joint
+            ok = ok and joint >= 0
+    if not ok:
+        _remove_articulation_rows(dyn, instance)
+        _pool_release(dyn.articulation_pool, instance)
+        return -1
+    lanes = dyn.template_tree_count[template]
+    if lanes > 0 and dyn.tree_body_count.shape[0] > instance:
+        # The tree solve owns these rows until one of them is removed.
+        for lane in range(lanes):
+            body = dyn.articulation_bodies[instance, dyn.template_tree_body[template, lane]]
+            dyn.body_articulation[body - dyn.body_pool.start] = instance
+            local_joint = dyn.template_tree_joint[template, lane]
+            if local_joint >= 0:
+                joint = dyn.articulation_joints[instance, local_joint]
+                dyn.joint_articulation[joint - dyn.joint_pool.start] = instance
+        dyn.tree_body_count[instance] = lanes
+    return instance
+
+
+@wp.func
+def remove_articulation(dyn: DynamicsData, instance: wp.int32) -> wp.bool:
+    """Remove an instance with all its bodies, shapes, and joints at the next :meth:`~newton.solvers.SolverPhoenX.step`.
+
+    Instances in reduced coordinates can only be removed as a whole. Removing a body or joint of an
+    instance in maximal coordinates keeps the rest, solved as independent joints.
+    """
+    if not _pool_release(dyn.articulation_pool, instance):
+        wp.atomic_add(dyn.error_count, 0, 1)
+        return False
+    if dyn.slot_size > 0:
+        _release_instance_shapes(dyn, instance)
+    else:
+        _remove_articulation_rows(dyn, instance)
+    return True
+
+
+@wp.func
+def is_articulation_active(dyn: DynamicsData, instance: wp.int32) -> wp.bool:
+    """Whether ``instance`` is an articulation that is not being removed."""
+    if instance < 0 or instance >= dyn.articulation_pool.state.shape[0]:
+        return False
+    state = dyn.articulation_pool.state[instance]
+    return state == _ACTIVE or state == _ADDED
+
+
+@wp.func
+def articulation_body(dyn: DynamicsData, instance: wp.int32, index: wp.int32) -> wp.int32:
+    """Model body of ``instance`` that template body ``index`` became, or ``-1``."""
+    return dyn.articulation_bodies[instance, index]
+
+
+@wp.func
+def articulation_joint(dyn: DynamicsData, instance: wp.int32, index: wp.int32) -> wp.int32:
+    """Model joint of ``instance`` that template joint ``index`` became, or ``-1``; free root joints are not counted."""
+    return dyn.articulation_joints[instance, index]
+
+
+# ---------------------------------------------------------------------------
+# Commit: rows written from staged descriptors, one thread per slot
+# ---------------------------------------------------------------------------
+
+
+@wp.struct
+class _BodyRows:
+    """Model and PhoenX rows of bodies."""
+
+    mass: wp.array[wp.float32]
+    inv_mass: wp.array[wp.float32]
+    inertia: wp.array[wp.mat33]
+    inv_inertia: wp.array[wp.mat33]
+    com: wp.array[wp.vec3]
+    flags: wp.array[wp.int32]
+    bodies: BodyContainer
+    #: PhoenX slots whose pose must not be imported from the stale state yet.
+    fresh: wp.array[wp.int32]
+
+
+@wp.struct
+class _ShapeRows:
+    """Model and PhoenX rows of shapes."""
+
+    type: wp.array[wp.int32]
+    transform: wp.array[wp.transform]
+    scale: wp.array[wp.vec3]
+    body: wp.array[wp.int32]
+    body_world: wp.array[wp.int32]
+    world: wp.array[wp.int32]
+    flags: wp.array[wp.int32]
+    collision_group: wp.array[wp.int32]
+    margin: wp.array[wp.float32]
+    gap: wp.array[wp.float32]
+    is_solid: wp.array[wp.bool]
+    mu: wp.array[wp.float32]
+    restitution: wp.array[wp.float32]
+    collision_radius: wp.array[wp.float32]
+    aabb_lower: wp.array[wp.vec3]
+    aabb_upper: wp.array[wp.vec3]
+    interior_point: wp.array[wp.vec3]
+    voxel_resolution: wp.array[wp.vec3i]
+    source_ptr: wp.array[wp.uint64]
+    support_data: wp.array[wp.vec4i]
+    sdf_index: wp.array[wp.int32]
+    edge_range: wp.array[wp.vec2i]
+    mesh_properties: wp.array[wp.int32]
+    mesh_boundary_start: wp.array[wp.int32]
+    heightfield_index: wp.array[wp.int32]
+    #: PhoenX's own shape -> slot map and material table.
+    phoenx_body: wp.array[wp.int32]
+    no_response: wp.array[wp.int32]
+    materials: wp.array[MaterialData]
+    friction_combine_mode: wp.int32
+    world_map_dirty: wp.array[wp.int32]
+
+
+@wp.struct
+class _JointRows:
+    """Model rows of joints and their degrees of freedom."""
+
+    type: wp.array[wp.int32]
+    parent: wp.array[wp.int32]
+    child: wp.array[wp.int32]
+    X_p: wp.array[wp.transform]
+    X_c: wp.array[wp.transform]
+    dof_dim: wp.array2d[wp.int32]
+    enabled: wp.array[wp.bool]
+    qd_start: wp.array[wp.int32]
+    target_q_start: wp.array[wp.int32]
+    axis: wp.array[wp.vec3]
+    limit_lower: wp.array[wp.float32]
+    limit_upper: wp.array[wp.float32]
+    velocity_limit: wp.array[wp.float32]
+    friction: wp.array[wp.float32]
+    armature: wp.array[wp.float32]
+    damping: wp.array[wp.float32]
+    target_mode: wp.array[wp.int32]
+    target_ke: wp.array[wp.float32]
+    target_kd: wp.array[wp.float32]
+    effort_limit: wp.array[wp.float32]
+    gear: wp.array[wp.float32]
+
+
+@wp.struct
+class _BlockRows:
+    """PhoenX rows of maximal joints: six-row blocks of the block joint system and D6 columns."""
+
+    joint_cid: wp.array[wp.int32]
+    generic_linear_axes: wp.array[wp.vec3]
+    generic_angular_axes: wp.array[wp.vec3]
+    generic_linear_count: wp.array[wp.int32]
+    generic_angular_count: wp.array[wp.int32]
+    row_dynamic: wp.array[wp.bool]
+    row_dof: wp.array[wp.int32]
+    row_direct_drive: wp.array[wp.bool]
+    row_bounded_drive: wp.array[wp.bool]
+    row_target_q: wp.array[wp.int32]
+    previous_coordinate: wp.array[wp.float32]
+    coordinate_revolutions: wp.array[wp.int32]
+    constraints: ConstraintContainer
+    pgs_enabled: wp.array[wp.int32]
+    #: Per model body, the joint parent whose shapes it must not collide with.
+    body_filter_parent: wp.array[wp.int32]
+
+
+@wp.struct
+class _TreeTemplates:
+    """Per template and lane: depth, parent lane, and children of an exact tree solve."""
+
+    floating: wp.array[wp.int32]
+    max_depth: wp.array[wp.int32]
+    depth: wp.array2d[wp.int32]
+    parent: wp.array2d[wp.int32]
+    child_start: wp.array2d[wp.int32]
+    child_index: wp.array2d[wp.int32]
+
+
+@wp.struct
+class ReducedSlots:
+    """Reduced solver tables that spawning rewrites in place for an instance slot.
+
+    A slot's rows hold its joint range, depth-walk tables, child lists, and per-body joint
+    paths, all sized for a full chain.
     """
 
-    size: wp.int32
-    body_start: wp.int32
-    joint_start: wp.int32
     #: Reduced articulation index of slot 0; slots are consecutive.
     articulation: wp.int32
     articulation_start: wp.array[wp.int32]
@@ -293,8 +849,6 @@ class ReducedSlots:
     template_joint_q: wp.array2d[wp.float32]
     template_joint_limit_ke: wp.array2d[wp.float32]
     template_joint_limit_kd: wp.array2d[wp.float32]
-    #: Runtime shapes of each instance, removed with it.
-    instance_shapes: wp.array2d[wp.int32]
     #: Contact Jacobian rows the reduced contact solver keeps across steps; a slot whose old
     #: topology can no longer appear clears its columns and row owners before reuse.
     packed_jacobian: wp.array2d[wp.float32]
@@ -306,186 +860,39 @@ class ReducedSlots:
     clear: wp.array[wp.int32]
 
 
-@wp.struct
-class DynamicsData:
-    """Device handle of the runtime-creation functions; pass ``solver.dynamics.data`` to kernels."""
-
-    body_pool: SlotPool
-    shape_pool: SlotPool
-    #: Failed requests: full pools, unknown rows, or invalid descriptors.
-    error_count: wp.array[wp.int32]
-
-    body_mass: wp.array[wp.float32]
-    body_inv_mass: wp.array[wp.float32]
-    body_inertia: wp.array[wp.mat33]
-    body_inv_inertia: wp.array[wp.mat33]
-    body_com: wp.array[wp.vec3]
-    body_flags: wp.array[wp.int32]
-    body_world: wp.array[wp.int32]
-    bodies: BodyContainer
-    #: PhoenX slots whose pose must not be imported from the stale state yet.
-    body_fresh: wp.array[wp.int32]
-
-    shape_type: wp.array[wp.int32]
-    shape_transform: wp.array[wp.transform]
-    shape_scale: wp.array[wp.vec3]
-    shape_body: wp.array[wp.int32]
-    shape_world: wp.array[wp.int32]
-    shape_flags: wp.array[wp.int32]
-    shape_collision_group: wp.array[wp.int32]
-    shape_margin: wp.array[wp.float32]
-    shape_gap: wp.array[wp.float32]
-    shape_is_solid: wp.array[wp.bool]
-    shape_mu: wp.array[wp.float32]
-    shape_restitution: wp.array[wp.float32]
-    shape_collision_radius: wp.array[wp.float32]
-    shape_aabb_lower: wp.array[wp.vec3]
-    shape_aabb_upper: wp.array[wp.vec3]
-    shape_interior_point: wp.array[wp.vec3]
-    shape_voxel_resolution: wp.array[wp.vec3i]
-    shape_source_ptr: wp.array[wp.uint64]
-    shape_support_data: wp.array[wp.vec4i]
-    shape_sdf_index: wp.array[wp.int32]
-    shape_edge_range: wp.array[wp.vec2i]
-    shape_mesh_properties: wp.array[wp.int32]
-    shape_mesh_boundary_start: wp.array[wp.int32]
-    shape_heightfield_index: wp.array[wp.int32]
-    #: Flags a shape gets once its addition is committed, per shape slot.
-    shape_pending_flags: wp.array[wp.int32]
-    #: PhoenX's own shape -> slot map and material table.
-    phoenx_shape_body: wp.array[wp.int32]
-    shape_no_response: wp.array[wp.int32]
-    materials: wp.array[MaterialData]
-    friction_combine_mode: wp.int32
-    world_map_dirty: wp.array[wp.int32]
-    world_count: wp.int32
-
-    joint_pool: SlotPool
-    #: Constraint column of each model joint.
-    joint_cid: wp.array[wp.int32]
-    joint_type: wp.array[wp.int32]
-    joint_parent: wp.array[wp.int32]
-    joint_child: wp.array[wp.int32]
-    joint_X_p: wp.array[wp.transform]
-    joint_X_c: wp.array[wp.transform]
-    joint_dof_dim: wp.array2d[wp.int32]
-    joint_enabled: wp.array[wp.bool]
-    joint_qd_start: wp.array[wp.int32]
-    joint_target_q_start: wp.array[wp.int32]
-    joint_axis: wp.array[wp.vec3]
-    joint_limit_lower: wp.array[wp.float32]
-    joint_limit_upper: wp.array[wp.float32]
-    joint_velocity_limit: wp.array[wp.float32]
-    joint_friction: wp.array[wp.float32]
-    joint_armature: wp.array[wp.float32]
-    joint_damping: wp.array[wp.float32]
-    joint_target_mode: wp.array[wp.int32]
-    joint_target_ke: wp.array[wp.float32]
-    joint_target_kd: wp.array[wp.float32]
-    joint_effort_limit: wp.array[wp.float32]
-    joint_gear: wp.array[wp.float32]
-    #: Fixed six-row joint blocks of the block joint system.
-    generic_linear_axes: wp.array[wp.vec3]
-    generic_angular_axes: wp.array[wp.vec3]
-    generic_linear_count: wp.array[wp.int32]
-    generic_angular_count: wp.array[wp.int32]
-    row_dynamic: wp.array[wp.bool]
-    row_dof: wp.array[wp.int32]
-    row_direct_drive: wp.array[wp.bool]
-    row_bounded_drive: wp.array[wp.bool]
-    row_target_q: wp.array[wp.int32]
-    previous_coordinate: wp.array[wp.float32]
-    coordinate_revolutions: wp.array[wp.int32]
-    constraints: ConstraintContainer
-    joint_pgs_enabled: wp.array[wp.int32]
-    #: Per model body, the joint parent whose shapes it must not collide with.
-    body_filter_parent: wp.array[wp.int32]
-
-    #: Runtime articulation instances and their templates, laid out per template by ``*_start``.
-    articulation_pool: SlotPool
-    template_body_start: wp.array[wp.int32]
-    template_shape_start: wp.array[wp.int32]
-    template_joint_start: wp.array[wp.int32]
-    #: Template bodies posed relative to the template's first body.
-    template_bodies: wp.array[BodyDesc]
-    template_shapes: wp.array[ShapeDesc]
-    #: Template-local body of each template shape.
-    template_shape_body: wp.array[wp.int32]
-    #: Template joints whose parent and child are template-local bodies (``-1`` is the world).
-    template_joints: wp.array[JointDesc]
-    #: Template, model bodies, and model joints of each instance; ``-1`` past the template's size.
-    articulation_template: wp.array[wp.int32]
-    articulation_bodies: wp.array2d[wp.int32]
-    articulation_joints: wp.array2d[wp.int32]
-    #: World wrench of every constraint column on its second body; see :func:`joint_wrench`.
-    constraint_wrench: wp.array[wp.spatial_vector]
-
-    #: Exact joint-tree solve of each instance; ``tree.body_count`` is zero for instances without one.
-    tree: GeneralMaximalTreeProjectorData
-    #: Per template: tree lanes (zero when it is not solved as a tree), root kind, and depth.
-    template_tree_count: wp.array[wp.int32]
-    template_tree_floating: wp.array[wp.int32]
-    template_tree_max_depth: wp.array[wp.int32]
-    #: Per template and lane: template body, template joint, depth, parent lane, and children.
-    template_tree_body: wp.array2d[wp.int32]
-    template_tree_joint: wp.array2d[wp.int32]
-    template_tree_depth: wp.array2d[wp.int32]
-    template_tree_parent: wp.array2d[wp.int32]
-    template_tree_child_start: wp.array2d[wp.int32]
-    template_tree_child_index: wp.array2d[wp.int32]
-    #: Instance owning each reserved body and joint slot, or ``-1``.
-    body_articulation: wp.array[wp.int32]
-    joint_articulation: wp.array[wp.int32]
-    #: Reduced-coordinate instance slots; ``slots.size`` is zero without them.
-    slots: ReducedSlots
+@wp.func
+def _resolve(pool: SlotPool, slot: wp.int32, active: wp.array[wp.int32], free: wp.array[wp.int32]) -> wp.int32:
+    """Advance one slot's state; returns the state it had."""
+    old = pool.state[slot]
+    new = old
+    if old == _ADDED:
+        new = _ACTIVE
+    elif old == _REMOVED or old == _CANCELLED:
+        new = _QUARANTINE
+    elif old == _QUARANTINE:
+        new = _FREE
+    pool.state[slot] = new
+    active[slot] = wp.where(new == _ACTIVE, 1, 0)
+    free[slot] = wp.where(new == _FREE, 1, 0)
+    return old
 
 
 @wp.func
-def _drop_tree(dyn: DynamicsData, owners: wp.array[wp.int32], slot: wp.int32):
-    """Stop solving the tree of the instance owning ``slot`` exactly; its rows fall back to local blocks."""
-    if owners.shape[0] > slot:
-        instance = owners[slot]
-        if instance >= 0:
-            dyn.tree.body_count[instance] = 0
-            owners[slot] = -1
-
-
-@wp.func
-def add_body(dyn: DynamicsData, desc: BodyDesc) -> wp.int32:
-    """Add a body; returns its model body index, or ``-1`` when the reserved rows are used up.
-
-    The body is simulated from the next :meth:`~newton.solvers.SolverPhoenX.step` on.
-    """
-    slot = _pool_alloc(dyn.body_pool)
-    if slot < 0 or desc.world < 0 or desc.world >= dyn.world_count:
-        wp.atomic_add(dyn.error_count, 0, 1)
-        if slot >= 0:
-            dyn.body_pool.state[slot] = _REMOVED
-        return -1
-    body = dyn.body_pool.start + slot
-    if dyn.body_articulation.shape[0] > slot:
-        dyn.body_articulation[slot] = -1
-    _write_body(dyn, body, desc)
-    return body
-
-
-@wp.func
-def _write_body(dyn: DynamicsData, body: wp.int32, desc: BodyDesc):
+def _write_body(rows: _BodyRows, body: wp.int32, desc: BodyDesc):
     """Write a body's model rows and PhoenX state."""
     inv_mass = wp.float32(0.0)
     inv_inertia = wp.mat33(0.0)
     if desc.mass > 0.0:
         inv_mass = 1.0 / desc.mass
         inv_inertia = _inverse_inertia_wp(desc.inertia)
-    dyn.body_mass[body] = desc.mass
-    dyn.body_inv_mass[body] = inv_mass
-    dyn.body_inertia[body] = desc.inertia
-    dyn.body_inv_inertia[body] = inv_inertia
-    dyn.body_com[body] = desc.com
-    dyn.body_flags[body] = desc.flags
-    dyn.body_world[body] = desc.world
+    rows.mass[body] = desc.mass
+    rows.inv_mass[body] = inv_mass
+    rows.inertia[body] = desc.inertia
+    rows.inv_inertia[body] = inv_inertia
+    rows.com[body] = desc.com
+    rows.flags[body] = desc.flags
 
-    bodies = dyn.bodies
+    bodies = rows.bodies
     p = body + 1
     kinematic = (desc.flags & _KINEMATIC) != 0
     write_body_properties(bodies, p, inv_mass, inv_inertia, desc.com, kinematic, desc.world)
@@ -510,27 +917,44 @@ def _write_body(dyn: DynamicsData, body: wp.int32, desc: BodyDesc):
     bodies.access_mode[p] = _VELOCITY_LEVEL
     bodies.island_root[p] = -1
     bodies.frames_below_threshold[p] = 0
-    dyn.body_fresh[p] = 1
+    rows.fresh[p] = 1
 
 
-@wp.func
-def is_body_active(dyn: DynamicsData, body: wp.int32) -> wp.bool:
-    """Whether a reserved body row holds a body that is not being removed."""
-    slot = body - dyn.body_pool.start
-    if slot < 0 or slot >= dyn.body_pool.state.shape[0]:
-        return False
-    state = dyn.body_pool.state[slot]
-    return state == _ACTIVE or state == _ADDED
+@wp.kernel(enable_backward=False)
+def _commit_bodies_kernel(dyn: DynamicsData, rows: _BodyRows, active: wp.array[wp.int32], free: wp.array[wp.int32]):
+    slot = wp.tid()
+    old = _resolve(dyn.body_pool, slot, active, free)
+    body = dyn.body_pool.start + slot
+    if old == _ADDED:
+        _write_body(rows, body, dyn.staged_bodies[slot])
+    elif old == _REMOVED:
+        # A removed body becomes an inert static slot until it is reused.
+        rows.mass[body] = 0.0
+        rows.inv_mass[body] = 0.0
+        rows.inertia[body] = wp.mat33(0.0)
+        rows.inv_inertia[body] = wp.mat33(0.0)
+        rows.flags[body] = 0
+        p = body + 1
+        write_body_properties(rows.bodies, p, 0.0, wp.mat33(0.0), rows.com[body], False, 0)
+        rows.bodies.velocity[p] = wp.vec3(0.0)
+        rows.bodies.angular_velocity[p] = wp.vec3(0.0)
+        rows.bodies.force[p] = wp.vec3(0.0)
+        rows.bodies.torque[p] = wp.vec3(0.0)
+        rows.bodies.island_root[p] = -1
+        rows.bodies.frames_below_threshold[p] = 0
+        rows.fresh[p] = 0
 
 
-@wp.func
-def remove_body(dyn: DynamicsData, body: wp.int32) -> wp.bool:
-    """Remove a runtime body with its shapes and joints at the next :meth:`~newton.solvers.SolverPhoenX.step`; ``False`` if not removable."""
-    if _pool_release(dyn.body_pool, body):
-        _drop_tree(dyn, dyn.body_articulation, body - dyn.body_pool.start)
-        return True
-    wp.atomic_add(dyn.error_count, 0, 1)
-    return False
+@wp.kernel(enable_backward=False)
+def _wake_orphaned_islands_kernel(pool: SlotPool, bodies: BodyContainer):
+    """Wake sleeping bodies whose island root was just removed, so the slot cannot alias them."""
+    p = wp.tid()
+    root = bodies.island_root[p]
+    root_slot = root - 1 - pool.start
+    if root >= 0 and root_slot >= 0 and root_slot < pool.state.shape[0]:
+        if pool.state[root_slot] == _QUARANTINE:
+            bodies.island_root[p] = -1
+            bodies.frames_below_threshold[p] = 0
 
 
 @wp.func
@@ -587,93 +1011,92 @@ def _primitive_bounds(geo: wp.int32, s: wp.vec3):
 
 
 @wp.func
-def add_shape(dyn: DynamicsData, body: wp.int32, desc: ShapeDesc) -> wp.int32:
-    """Add a collision shape to ``body``, or a static one for ``-1``; returns its model shape index or ``-1``.
-
-    The shape collides from the first collision pass after the next :meth:`~newton.solvers.SolverPhoenX.step`.
-    """
+def _write_shape(rows: _ShapeRows, shape: wp.int32, body: wp.int32, desc: ShapeDesc):
+    """Write a shape's model rows, bounds, and PhoenX material."""
     geo = desc.type
     proto = desc.prototype
-    is_reference = geo == _CONVEX_MESH or geo == _MESH
-    valid = (geo >= _PLANE and geo <= _CONE) or (is_reference and proto >= 0)
-    if is_reference and valid:
-        valid = dyn.shape_type[proto] == geo
-    world = desc.world
-    if body >= 0:
-        world = dyn.body_world[body]
-    if not valid or world < 0 or world >= dyn.world_count:
-        wp.atomic_add(dyn.error_count, 0, 1)
-        return -1
-    slot = _pool_alloc(dyn.shape_pool)
-    if slot < 0:
-        wp.atomic_add(dyn.error_count, 0, 1)
-        return -1
-    shape = dyn.shape_pool.start + slot
     s = desc.scale
     lower = wp.vec3(0.0)
     upper = wp.vec3(0.0)
     radius = wp.float32(0.0)
     interior = wp.vec3(0.0)
-    if is_reference:
+    if geo == _CONVEX_MESH or geo == _MESH:
         # Undo the prototype's scale and apply the new one.
-        ratio = wp.cw_div(s, dyn.shape_scale[proto])
-        a = wp.cw_mul(dyn.shape_aabb_lower[proto], ratio)
-        b = wp.cw_mul(dyn.shape_aabb_upper[proto], ratio)
+        ratio = wp.cw_div(s, rows.scale[proto])
+        a = wp.cw_mul(rows.aabb_lower[proto], ratio)
+        b = wp.cw_mul(rows.aabb_upper[proto], ratio)
         lower = wp.min(a, b)
         upper = wp.max(a, b)
         radius = 0.5 * wp.length(upper - lower)
-        interior = wp.cw_mul(dyn.shape_interior_point[proto], ratio)
-        dyn.shape_source_ptr[shape] = dyn.shape_source_ptr[proto]
-        dyn.shape_support_data[shape] = dyn.shape_support_data[proto]
-        dyn.shape_sdf_index[shape] = dyn.shape_sdf_index[proto]
-        dyn.shape_edge_range[shape] = dyn.shape_edge_range[proto]
-        dyn.shape_mesh_properties[shape] = dyn.shape_mesh_properties[proto]
-        dyn.shape_mesh_boundary_start[shape] = dyn.shape_mesh_boundary_start[proto]
+        interior = wp.cw_mul(rows.interior_point[proto], ratio)
+        rows.source_ptr[shape] = rows.source_ptr[proto]
+        rows.support_data[shape] = rows.support_data[proto]
+        rows.sdf_index[shape] = rows.sdf_index[proto]
+        rows.edge_range[shape] = rows.edge_range[proto]
+        rows.mesh_properties[shape] = rows.mesh_properties[proto]
+        rows.mesh_boundary_start[shape] = rows.mesh_boundary_start[proto]
     else:
         lower, upper, radius = _primitive_bounds(geo, s)
-        dyn.shape_source_ptr[shape] = wp.uint64(0)
-        dyn.shape_support_data[shape] = wp.vec4i(-1, -1, -1, 0)
-        dyn.shape_sdf_index[shape] = -1
-        dyn.shape_edge_range[shape] = wp.vec2i(-1, 0)
-        dyn.shape_mesh_properties[shape] = 0
-        dyn.shape_mesh_boundary_start[shape] = -1
-    dyn.shape_heightfield_index[shape] = -1
-    dyn.shape_type[shape] = geo
-    dyn.shape_transform[shape] = desc.transform
-    dyn.shape_scale[shape] = s
-    dyn.shape_body[shape] = body
-    dyn.shape_world[shape] = world
-    dyn.shape_collision_group[shape] = desc.collision_group
-    dyn.shape_margin[shape] = desc.margin
-    dyn.shape_gap[shape] = desc.gap
-    dyn.shape_is_solid[shape] = True
-    dyn.shape_mu[shape] = desc.mu
-    dyn.shape_restitution[shape] = desc.restitution
-    dyn.shape_collision_radius[shape] = radius
-    dyn.shape_aabb_lower[shape] = lower
-    dyn.shape_aabb_upper[shape] = upper
-    dyn.shape_interior_point[shape] = interior
-    dyn.shape_voxel_resolution[shape] = _voxel_resolution(lower, upper)
-    dyn.shape_pending_flags[slot] = desc.flags
+        rows.source_ptr[shape] = wp.uint64(0)
+        rows.support_data[shape] = wp.vec4i(-1, -1, -1, 0)
+        rows.sdf_index[shape] = -1
+        rows.edge_range[shape] = wp.vec2i(-1, 0)
+        rows.mesh_properties[shape] = 0
+        rows.mesh_boundary_start[shape] = -1
+    rows.heightfield_index[shape] = -1
+    rows.type[shape] = geo
+    rows.transform[shape] = desc.transform
+    rows.scale[shape] = s
+    rows.body[shape] = body
+    rows.world[shape] = wp.where(body >= 0, rows.body_world[wp.max(body, 0)], desc.world)
+    rows.flags[shape] = desc.flags
+    rows.collision_group[shape] = desc.collision_group
+    rows.margin[shape] = desc.margin
+    rows.gap[shape] = desc.gap
+    rows.is_solid[shape] = True
+    rows.mu[shape] = desc.mu
+    rows.restitution[shape] = desc.restitution
+    rows.collision_radius[shape] = radius
+    rows.aabb_lower[shape] = lower
+    rows.aabb_upper[shape] = upper
+    rows.interior_point[shape] = interior
+    rows.voxel_resolution[shape] = _voxel_resolution(lower, upper)
     material = MaterialData()
     material.static_friction = desc.mu
     material.dynamic_friction = desc.mu
     material.restitution = desc.restitution
-    material.friction_combine_mode = dyn.friction_combine_mode
+    material.friction_combine_mode = rows.friction_combine_mode
     material.restitution_combine_mode = 0
-    dyn.materials[shape] = material
-    dyn.phoenx_shape_body[shape] = body + 1
-    dyn.shape_no_response[shape] = wp.where(desc.tracking_volume, 1, 0)
-    return shape
+    rows.materials[shape] = material
+    rows.phoenx_body[shape] = body + 1
+    rows.no_response[shape] = wp.where(desc.tracking_volume, 1, 0)
 
 
-@wp.func
-def remove_shape(dyn: DynamicsData, shape: wp.int32) -> wp.bool:
-    """Remove a runtime shape at the next :meth:`~newton.solvers.SolverPhoenX.step`; ``False`` if not removable."""
-    if _pool_release(dyn.shape_pool, shape):
-        return True
-    wp.atomic_add(dyn.error_count, 0, 1)
-    return False
+@wp.kernel(enable_backward=False)
+def _cascade_shapes_kernel(dyn: DynamicsData, shape_body: wp.array[wp.int32]):
+    """Remove the shapes of removed bodies."""
+    slot = wp.tid()
+    shape = dyn.shape_pool.start + slot
+    body = shape_body[shape]
+    if dyn.shape_pool.state[slot] == _ADDED:
+        body = dyn.staged_shape_body[slot]
+    if _pool_removed(dyn.body_pool, body):
+        _pool_release(dyn.shape_pool, shape)
+
+
+@wp.kernel(enable_backward=False)
+def _commit_shapes_kernel(dyn: DynamicsData, rows: _ShapeRows, active: wp.array[wp.int32], free: wp.array[wp.int32]):
+    slot = wp.tid()
+    old = _resolve(dyn.shape_pool, slot, active, free)
+    shape = dyn.shape_pool.start + slot
+    if old == _ADDED:
+        _write_shape(rows, shape, dyn.staged_shape_body[slot], dyn.staged_shapes[slot])
+        rows.world_map_dirty[0] = 1
+    elif old == _REMOVED:
+        rows.flags[shape] = rows.flags[shape] & ~_COLLIDE_FLAGS
+        rows.body[shape] = -1
+        rows.phoenx_body[shape] = 0
+        rows.world_map_dirty[0] = 1
 
 
 @wp.func
@@ -702,63 +1125,28 @@ def _store_locked_axes(axes: wp.array[wp.vec3], joint: wp.int32, free: wp.mat33,
 
 
 @wp.func
-def _axes_valid(axes: wp.mat33, count: wp.int32) -> wp.bool:
-    """Nonzero, independent free axes."""
-    if count < 0 or count > 3:
-        return False
-    for i in range(count):
-        if wp.length(axes[i]) < 1.0e-6:
-            return False
-    if count == 2:
-        return wp.length(wp.cross(axes[0], axes[1])) > 1.0e-6
-    if count == 3:
-        return wp.abs(wp.determinant(axes)) > 1.0e-6
-    return True
-
-
-@wp.func
-def add_joint(dyn: DynamicsData, desc: JointDesc) -> wp.int32:
-    """Add a joint; returns its model joint index, or ``-1`` when rows are used up or ``desc`` is invalid.
-
-    The joint is solved from the next :meth:`~newton.solvers.SolverPhoenX.step` on and requires ``joint_mode="maximal_pgs"``. Drive
-    targets come from :class:`~newton.Control` at the joint's rows. Effort limits are not enforced.
-    """
+def _write_joint(rows: _JointRows, block: _BlockRows, joint: wp.int32, desc: JointDesc):
+    """Write a maximal D6 joint's model rows, block rows, and constraint column."""
     n_lin = desc.linear_count
     n_free = n_lin + desc.angular_count
-    body_count = dyn.body_mass.shape[0]
-    valid = _axes_valid(desc.linear_axes, n_lin) and _axes_valid(desc.angular_axes, desc.angular_count)
-    valid = valid and desc.child >= 0 and desc.child < body_count and desc.parent >= -1
-    valid = valid and desc.parent < body_count and desc.parent != desc.child
-    for k in range(_ROWS):
-        if k < n_free and desc.limit_lower[k] > desc.limit_upper[k]:
-            valid = False
-    slot = wp.int32(-1)
-    if valid:
-        slot = _pool_alloc(dyn.joint_pool)
-    if slot < 0:
-        wp.atomic_add(dyn.error_count, 0, 1)
-        return -1
-    joint = dyn.joint_pool.start + slot
-    if dyn.joint_articulation.shape[0] > slot:
-        dyn.joint_articulation[slot] = -1
-    cid = dyn.joint_cid[joint]
-    qd = dyn.joint_qd_start[joint]
-    target_q = dyn.joint_target_q_start[joint]
-    dyn.joint_type[joint] = _D6
-    dyn.joint_parent[joint] = desc.parent
-    dyn.joint_child[joint] = desc.child
-    dyn.joint_X_p[joint] = desc.parent_xform
-    dyn.joint_X_c[joint] = desc.child_xform
-    dyn.joint_dof_dim[joint, 0] = n_lin
-    dyn.joint_dof_dim[joint, 1] = desc.angular_count
-    dyn.joint_enabled[joint] = True
+    cid = block.joint_cid[joint]
+    qd = rows.qd_start[joint]
+    target_q = rows.target_q_start[joint]
+    rows.type[joint] = _D6
+    rows.parent[joint] = desc.parent
+    rows.child[joint] = desc.child
+    rows.X_p[joint] = desc.parent_xform
+    rows.X_c[joint] = desc.child_xform
+    rows.dof_dim[joint, 0] = n_lin
+    rows.dof_dim[joint, 1] = desc.angular_count
+    rows.enabled[joint] = True
 
-    lin = _store_locked_axes(dyn.generic_linear_axes, joint, desc.linear_axes, n_lin)
-    ang = _store_locked_axes(dyn.generic_angular_axes, joint, desc.angular_axes, desc.angular_count)
-    dyn.generic_linear_count[joint] = lin
-    dyn.generic_angular_count[joint] = ang
+    lin = _store_locked_axes(block.generic_linear_axes, joint, desc.linear_axes, n_lin)
+    ang = _store_locked_axes(block.generic_angular_axes, joint, desc.angular_axes, desc.angular_count)
+    block.generic_linear_count[joint] = lin
+    block.generic_angular_count[joint] = ang
 
-    d6 = dyn.constraints.d6
+    d6 = block.constraints.d6
     d6.linear_count[cid] = n_lin
     d6.angular_count[cid] = desc.angular_count
     d6.joint_x_p[cid] = desc.parent_xform
@@ -781,33 +1169,27 @@ def add_joint(dyn: DynamicsData, desc: JointDesc) -> wp.int32:
             lower = desc.limit_lower[k]
             upper = desc.limit_upper[k]
             mode = desc.target_mode[k]
-        ke = wp.where(k < n_free, desc.target_ke[k], 0.0)
-        kd = wp.where(k < n_free, desc.target_kd[k], 0.0)
-        armature = wp.where(k < n_free, desc.armature[k], 0.0)
-        damping = wp.where(k < n_free, desc.damping[k], 0.0)
-        friction = wp.where(k < n_free, wp.max(desc.friction[k], 0.0), 0.0)
-        speed = wp.where(k < n_free, desc.velocity_limit[k], 0.0)
-        dyn.joint_axis[dof] = axis
-        dyn.joint_limit_lower[dof] = lower
-        dyn.joint_limit_upper[dof] = upper
-        dyn.joint_velocity_limit[dof] = speed
-        dyn.joint_friction[dof] = friction
-        dyn.joint_armature[dof] = armature
-        dyn.joint_damping[dof] = damping
-        dyn.joint_target_mode[dof] = mode
-        dyn.joint_target_ke[dof] = ke
-        dyn.joint_target_kd[dof] = kd
-        dyn.joint_effort_limit[dof] = MAXVAL
-        dyn.joint_gear[dof] = 1.0
+        rows.axis[dof] = axis
+        rows.limit_lower[dof] = lower
+        rows.limit_upper[dof] = upper
+        rows.velocity_limit[dof] = wp.where(k < n_free, desc.velocity_limit[k], 0.0)
+        rows.friction[dof] = wp.where(k < n_free, wp.max(desc.friction[k], 0.0), 0.0)
+        rows.armature[dof] = wp.where(k < n_free, desc.armature[k], 0.0)
+        rows.damping[dof] = wp.where(k < n_free, desc.damping[k], 0.0)
+        rows.target_mode[dof] = mode
+        rows.target_ke[dof] = wp.where(k < n_free, desc.target_ke[k], 0.0)
+        rows.target_kd[dof] = wp.where(k < n_free, desc.target_kd[k], 0.0)
+        rows.effort_limit[dof] = MAXVAL
+        rows.gear[dof] = 1.0
 
         row = row_base + k
-        dyn.row_dynamic[row] = False
-        dyn.row_dof[row] = -1
-        dyn.row_direct_drive[row] = False
-        dyn.row_bounded_drive[row] = False
-        dyn.row_target_q[row] = 0
-        dyn.previous_coordinate[row] = 0.0
-        dyn.coordinate_revolutions[row] = 0
+        block.row_dynamic[row] = False
+        block.row_dof[row] = -1
+        block.row_direct_drive[row] = False
+        block.row_bounded_drive[row] = False
+        block.row_target_q[row] = 0
+        block.previous_coordinate[row] = 0.0
+        block.coordinate_revolutions[row] = 0
 
         d6.axis[cid, k] = axis
         d6.revolution_counter[cid, k] = 0
@@ -826,10 +1208,10 @@ def add_joint(dyn: DynamicsData, desc: JointDesc) -> wp.int32:
             if drive or desc.armature[k] > 0.0 or desc.damping[k] > 0.0:
                 # A dynamic row per driven or armature-carrying axis, after the structural rows.
                 row = row_base + used_rows
-                dyn.row_dynamic[row] = True
-                dyn.row_dof[row] = qd + k
-                dyn.row_direct_drive[row] = drive
-                dyn.row_target_q[row] = target_q + k
+                block.row_dynamic[row] = True
+                block.row_dof[row] = qd + k
+                block.row_direct_drive[row] = drive
+                block.row_target_q[row] = target_q + k
                 used_rows += 1
             speed = desc.velocity_limit[k]
             if speed <= 0.0 or speed >= 1.0e5:
@@ -847,200 +1229,87 @@ def add_joint(dyn: DynamicsData, desc: JointDesc) -> wp.int32:
                 d6.condense_translation[cid, d6_rows] = 0
                 d6_rows += 1
     d6.row_count[cid] = d6_rows
-    dyn.constraints.bilateral.row_count[cid] = used_rows
-    dyn.constraints.bilateral.valid[cid] = 0
-    write_int(dyn.constraints, CONSTRAINT_BODY1_OFFSET, cid, desc.parent + 1)
-    write_int(dyn.constraints, CONSTRAINT_BODY2_OFFSET, cid, desc.child + 1)
+    block.constraints.bilateral.row_count[cid] = used_rows
+    block.constraints.bilateral.valid[cid] = 0
+    write_int(block.constraints, CONSTRAINT_BODY1_OFFSET, cid, desc.parent + 1)
+    write_int(block.constraints, CONSTRAINT_BODY2_OFFSET, cid, desc.child + 1)
     if not desc.collide_parent:
-        dyn.body_filter_parent[desc.child] = desc.parent
-    dyn.joint_pgs_enabled[cid] = 1
-    return joint
+        block.body_filter_parent[desc.child] = desc.parent
+    block.pgs_enabled[cid] = 1
 
 
-@wp.func
-def remove_joint(dyn: DynamicsData, joint: wp.int32) -> wp.bool:
-    """Remove a runtime joint at the next :meth:`~newton.solvers.SolverPhoenX.step`; ``False`` if not removable."""
-    if _pool_release(dyn.joint_pool, joint):
-        _drop_tree(dyn, dyn.joint_articulation, joint - dyn.joint_pool.start)
-        return True
-    wp.atomic_add(dyn.error_count, 0, 1)
-    return False
+@wp.kernel(enable_backward=False)
+def _cascade_joints_kernel(dyn: DynamicsData, joint_parent: wp.array[wp.int32], joint_child: wp.array[wp.int32]):
+    """Remove the joints of removed bodies."""
+    slot = wp.tid()
+    joint = dyn.joint_pool.start + slot
+    parent = joint_parent[joint]
+    child = joint_child[joint]
+    if dyn.joint_pool.state[slot] == _ADDED:
+        parent = dyn.staged_joints[slot].parent
+        child = dyn.staged_joints[slot].child
+    if _pool_removed(dyn.body_pool, parent) or _pool_removed(dyn.body_pool, child):
+        _pool_release(dyn.joint_pool, joint)
 
 
-@wp.func
-def joint_wrench(dyn: DynamicsData, joint: wp.int32) -> wp.spatial_vector:
-    """World-frame force and torque [N, N·m] that ``joint`` applies to its child body.
-
-    Valid for any model joint, as of the latest :meth:`Dynamics.update_joint_wrenches`; it averages
-    the last substep of the step before.
-    """
-    return dyn.constraint_wrench[dyn.joint_cid[joint]]
-
-
-_ARTICULATION_GROUP = wp.constant(-(1 << 24))  # first per-instance negative collision group
-
-
-@wp.func
-def _remove_articulation_rows(dyn: DynamicsData, instance: wp.int32):
-    if dyn.tree.body_count.shape[0] > instance:
-        dyn.tree.body_count[instance] = 0
-    for i in range(dyn.articulation_bodies.shape[1]):
-        body = dyn.articulation_bodies[instance, i]
-        if body >= 0:
-            _pool_release(dyn.body_pool, body)  # its shapes and joints follow at the commit
-
-
-@wp.func
-def add_articulation(
-    dyn: DynamicsData, template: wp.int32, pose: wp.transform, velocity: wp.spatial_vector, world: wp.int32
-) -> wp.int32:
-    """Add an instance of an articulation template; returns its index, or ``-1`` when rows run out.
-
-    The instance is simulated from the next :meth:`~newton.solvers.SolverPhoenX.step` on, in the coordinates chosen by
-    ``articulation_coordinates`` in :meth:`~newton.ModelBuilder.reserve_dynamic_capacity`. Its
-    joints start at their template coordinates; drive targets come from :class:`~newton.Control`
-    at the rows of :func:`articulation_joint`.
-
-    Args:
-        dyn: ``solver.dynamics.data``.
-        template: Index into the reservation's ``articulation_templates``.
-        pose: World pose of the template's first body; the other bodies keep their offsets.
-        velocity: Rigid motion of the whole instance: linear velocity at the origin of ``pose``
-            and angular velocity [m/s, rad/s], world frame.
-        world: World index of the instance.
-    """
-    if template < 0 or template >= dyn.template_body_start.shape[0] - 1:
-        wp.atomic_add(dyn.error_count, 0, 1)
-        return -1
-    instance = _pool_alloc(dyn.articulation_pool)
-    if instance < 0:
-        wp.atomic_add(dyn.error_count, 0, 1)
-        return -1
-    if dyn.slots.size > 0:
-        if not _spawn_reduced(dyn, template, instance, pose, velocity, world):
-            _empty_slot(dyn, instance)
-            _pool_release(dyn.articulation_pool, instance)
-            wp.atomic_add(dyn.error_count, 0, 1)
-            return -1
-        return instance
-    dyn.articulation_template[instance] = template
-    for i in range(dyn.articulation_bodies.shape[1]):
-        dyn.articulation_bodies[instance, i] = -1
-    for i in range(dyn.articulation_joints.shape[1]):
-        dyn.articulation_joints[instance, i] = -1
-
-    ok = wp.bool(True)
-    origin = wp.transform_get_translation(pose)
-    linear = wp.spatial_top(velocity)
-    angular = wp.spatial_bottom(velocity)
-    b0 = dyn.template_body_start[template]
-    for i in range(b0, dyn.template_body_start[template + 1]):
-        bdesc = dyn.template_bodies[i]
-        bdesc.pose = pose * bdesc.pose
-        com = wp.transform_point(bdesc.pose, bdesc.com)
-        bdesc.velocity = wp.spatial_vector(linear + wp.cross(angular, com - origin), angular)
-        bdesc.world = world
-        body = add_body(dyn, bdesc)
-        dyn.articulation_bodies[instance, i - b0] = body
-        ok = ok and body >= 0
-    if ok:
-        for i in range(dyn.template_shape_start[template], dyn.template_shape_start[template + 1]):
-            sdesc = dyn.template_shapes[i]
-            sdesc.collision_group = _ARTICULATION_GROUP - instance  # no collisions within an instance
-            body = dyn.articulation_bodies[instance, dyn.template_shape_body[i]]
-            ok = ok and add_shape(dyn, body, sdesc) >= 0
-    if ok:
-        j0 = dyn.template_joint_start[template]
-        for i in range(j0, dyn.template_joint_start[template + 1]):
-            jdesc = dyn.template_joints[i]
-            if jdesc.parent >= 0:
-                jdesc.parent = dyn.articulation_bodies[instance, jdesc.parent]
-            else:
-                jdesc.parent_xform = pose * jdesc.parent_xform
-            jdesc.child = dyn.articulation_bodies[instance, jdesc.child]
-            joint = add_joint(dyn, jdesc)
-            dyn.articulation_joints[instance, i - j0] = joint
-            ok = ok and joint >= 0
-    if not ok:
-        _remove_articulation_rows(dyn, instance)
-        _pool_release(dyn.articulation_pool, instance)
-        return -1
-    lanes = dyn.template_tree_count[template]
-    if lanes > 0 and dyn.tree.body_count.shape[0] > instance:
-        _write_tree(dyn, template, instance, lanes)
-    return instance
+@wp.kernel(enable_backward=False)
+def _commit_joints_kernel(
+    dyn: DynamicsData, rows: _JointRows, block: _BlockRows, active: wp.array[wp.int32], free: wp.array[wp.int32]
+):
+    slot = wp.tid()
+    old = _resolve(dyn.joint_pool, slot, active, free)
+    joint = dyn.joint_pool.start + slot
+    if old == _ADDED:
+        _write_joint(rows, block, joint, dyn.staged_joints[slot])
+    elif old == _REMOVED:
+        cid = block.joint_cid[joint]
+        block.pgs_enabled[cid] = 0
+        block.constraints.bilateral.row_count[cid] = 0
+        block.constraints.d6.row_count[cid] = 0
+        rows.enabled[joint] = False
+        block.generic_linear_count[joint] = 0
+        block.generic_angular_count[joint] = 0
+        for k in range(_ROWS):
+            block.row_dynamic[joint * _ROWS + k] = False
+        child = rows.child[joint]
+        if block.body_filter_parent[child] == rows.parent[joint]:
+            block.body_filter_parent[child] = _NO_FILTER
 
 
-@wp.func
-def _write_tree(dyn: DynamicsData, template: wp.int32, instance: wp.int32, lanes: wp.int32):
-    """Lay out an instance's tree for the exact projection from its template's lane table."""
-    tree = dyn.tree
-    for lane in range(32):
-        body = wp.int32(-1)
-        joint = wp.int32(-1)
-        if lane < lanes:
-            body = dyn.articulation_bodies[instance, dyn.template_tree_body[template, lane]]
-            local_joint = dyn.template_tree_joint[template, lane]
-            if local_joint >= 0:
-                joint = dyn.articulation_joints[instance, local_joint]
-                dyn.joint_articulation[joint - dyn.joint_pool.start] = instance
-            dyn.body_articulation[body - dyn.body_pool.start] = instance
-            body += 1  # PhoenX body slot
-        tree.body_slot[instance, lane] = body
-        tree.joint_index[instance, lane] = joint
-        tree.depth[instance, lane] = dyn.template_tree_depth[template, lane]
-        tree.parent[instance, lane] = dyn.template_tree_parent[template, lane]
-        tree.child_index[instance, lane] = dyn.template_tree_child_index[template, lane]
-    for lane in range(33):
-        tree.child_start[instance, lane] = dyn.template_tree_child_start[template, lane]
-    tree.floating_root[instance] = dyn.template_tree_floating[template]
-    tree.max_depth[instance] = dyn.template_tree_max_depth[template]
-    tree.body_count[instance] = lanes
-
-
-@wp.func
-def remove_articulation(dyn: DynamicsData, instance: wp.int32) -> wp.bool:
-    """Remove an instance with all its bodies, shapes, and joints at the next :meth:`~newton.solvers.SolverPhoenX.step`.
-
-    Instances in reduced coordinates can only be removed as a whole. Removing a body or joint of an
-    instance in maximal coordinates keeps the rest, solved as independent joints.
-    """
-    if not _pool_release(dyn.articulation_pool, instance):
-        wp.atomic_add(dyn.error_count, 0, 1)
-        return False
-    if dyn.slots.size > 0:
-        _empty_slot(dyn, instance)
-    else:
-        _remove_articulation_rows(dyn, instance)
-    return True
-
-
-_FIXED_JOINT = wp.constant(int(JointType.FIXED))
-_FREE_JOINT = wp.constant(int(JointType.FREE))
-_ARTICULATED = wp.constant(MOTION_ARTICULATED)
-
-
-@wp.func
-def _empty_slot(dyn: DynamicsData, instance: wp.int32):
-    """Detach a slot from the reduced solver: no joints, no depth lanes, a fixed root, no shapes."""
-    slots = dyn.slots
-    a = slots.articulation + instance
-    start = slots.articulation_start[a]
-    slots.articulation_end[a] = start
-    dyn.joint_type[start] = _FIXED_JOINT  # keeps the momentum restore away from the empty range
-    base = slots.depth_start[a, 0]
-    for d in range(slots.depth_start.shape[1]):
-        slots.depth_start[a, d] = base
-    for k in range(slots.instance_shapes.shape[1]):
-        shape = slots.instance_shapes[instance, k]
-        if shape >= 0:
-            _pool_release(dyn.shape_pool, shape)
-            slots.instance_shapes[instance, k] = -1
+@wp.kernel(enable_backward=False)
+def _layout_trees_kernel(dyn: DynamicsData, trees: _TreeTemplates, tree: GeneralMaximalTreeProjectorData):
+    """Lay out the exact tree solve of each added instance from its template's lane table."""
+    tid = wp.tid()
+    instance = tid // (_TREE_LANES + 1)
+    lane = tid - instance * (_TREE_LANES + 1)
+    lanes = dyn.tree_body_count[instance]
+    if dyn.articulation_pool.state[instance] != _ADDED or lanes == 0:
+        return
+    template = dyn.articulation_template[instance]
+    tree.child_start[instance, lane] = trees.child_start[template, lane]
+    if lane == _TREE_LANES:
+        return
+    body = wp.int32(-1)
+    joint = wp.int32(-1)
+    if lane < lanes:
+        body = dyn.articulation_bodies[instance, dyn.template_tree_body[template, lane]] + 1  # PhoenX slot
+        local_joint = dyn.template_tree_joint[template, lane]
+        if local_joint >= 0:
+            joint = dyn.articulation_joints[instance, local_joint]
+    tree.body_slot[instance, lane] = body
+    tree.joint_index[instance, lane] = joint
+    tree.depth[instance, lane] = trees.depth[template, lane]
+    tree.parent[instance, lane] = trees.parent[template, lane]
+    tree.child_index[instance, lane] = trees.child_index[template, lane]
+    if lane == 0:
+        tree.floating_root[instance] = trees.floating[template]
+        tree.max_depth[instance] = trees.max_depth[template]
 
 
 @wp.func
 def _write_reduced_joint(
-    dyn: DynamicsData,
+    rows: _JointRows,
+    slots: ReducedSlots,
     joint: wp.int32,
     joint_type: wp.int32,
     parent: wp.int32,
@@ -1051,19 +1320,18 @@ def _write_reduced_joint(
     template_joint: wp.int32,
 ):
     """Write one slot joint's model rows; unused degrees of freedom stay inert."""
-    slots = dyn.slots
-    dyn.joint_type[joint] = joint_type
-    dyn.joint_parent[joint] = parent
-    dyn.joint_child[joint] = child
-    dyn.joint_X_p[joint] = parent_xform
-    dyn.joint_X_c[joint] = child_xform
-    dyn.joint_dof_dim[joint, 0] = desc.linear_count
-    dyn.joint_dof_dim[joint, 1] = desc.angular_count
-    dyn.joint_enabled[joint] = True
+    rows.type[joint] = joint_type
+    rows.parent[joint] = parent
+    rows.child[joint] = child
+    rows.X_p[joint] = parent_xform
+    rows.X_c[joint] = child_xform
+    rows.dof_dim[joint, 0] = desc.linear_count
+    rows.dof_dim[joint, 1] = desc.angular_count
+    rows.enabled[joint] = True
     n_lin = desc.linear_count
     n_free = n_lin + desc.angular_count
-    qd = dyn.joint_qd_start[joint]
-    for k in range(dyn.joint_qd_start[joint + 1] - qd):
+    qd = rows.qd_start[joint]
+    for k in range(rows.qd_start[joint + 1] - qd):
         dof = qd + k
         used = k < n_free
         axis = wp.vec3(0.0)
@@ -1071,19 +1339,19 @@ def _write_reduced_joint(
             axis = desc.linear_axes[k]
         elif used:
             axis = desc.angular_axes[k - n_lin]
-        dyn.joint_axis[dof] = axis
-        dyn.joint_limit_lower[dof] = wp.where(used, desc.limit_lower[k], -MAXVAL)
-        dyn.joint_limit_upper[dof] = wp.where(used, desc.limit_upper[k], MAXVAL)
-        dyn.joint_velocity_limit[dof] = wp.where(used, desc.velocity_limit[k], MAXVAL)
-        dyn.joint_friction[dof] = wp.where(used, desc.friction[k], 0.0)
+        rows.axis[dof] = axis
+        rows.limit_lower[dof] = wp.where(used, desc.limit_lower[k], -MAXVAL)
+        rows.limit_upper[dof] = wp.where(used, desc.limit_upper[k], MAXVAL)
+        rows.velocity_limit[dof] = wp.where(used, desc.velocity_limit[k], MAXVAL)
+        rows.friction[dof] = wp.where(used, desc.friction[k], 0.0)
         # Unused rows are padding: a unit armature keeps their factor pivot regular.
-        dyn.joint_armature[dof] = wp.where(used, desc.armature[k], 1.0)
-        dyn.joint_damping[dof] = wp.where(used, desc.damping[k], 0.0)
-        dyn.joint_target_mode[dof] = wp.where(used, desc.target_mode[k], 0)
-        dyn.joint_target_ke[dof] = wp.where(used, desc.target_ke[k], 0.0)
-        dyn.joint_target_kd[dof] = wp.where(used, desc.target_kd[k], 0.0)
-        dyn.joint_effort_limit[dof] = MAXVAL
-        dyn.joint_gear[dof] = 1.0
+        rows.armature[dof] = wp.where(used, desc.armature[k], 1.0)
+        rows.damping[dof] = wp.where(used, desc.damping[k], 0.0)
+        rows.target_mode[dof] = wp.where(used, desc.target_mode[k], 0)
+        rows.target_ke[dof] = wp.where(used, desc.target_ke[k], 0.0)
+        rows.target_kd[dof] = wp.where(used, desc.target_kd[k], 0.0)
+        rows.effort_limit[dof] = MAXVAL
+        rows.gear[dof] = 1.0
         ke = wp.float32(0.0)
         kd = wp.float32(0.0)
         if used and template_joint >= 0:
@@ -1103,322 +1371,198 @@ def _write_reduced_joint(
 
 
 @wp.func
-def _spawn_reduced(
-    dyn: DynamicsData,
-    template: wp.int32,
-    instance: wp.int32,
-    pose: wp.transform,
-    velocity: wp.spatial_vector,
-    world: wp.int32,
-) -> wp.bool:
-    """Lay a template tree into a reduced instance slot, lane by lane in parent-first order."""
-    slots = dyn.slots
-    lanes = dyn.template_tree_count[template]
-    if lanes <= 0 or lanes > slots.size or world < 0 or world >= dyn.world_count:
-        return False
-    a = slots.articulation + instance
-    b0 = slots.body_start + instance * slots.size
-    j0 = slots.joint_start + instance * slots.size
-    dyn.articulation_template[instance] = template
-    for i in range(dyn.articulation_bodies.shape[1]):
-        dyn.articulation_bodies[instance, i] = -1
-    for i in range(dyn.articulation_joints.shape[1]):
-        dyn.articulation_joints[instance, i] = -1
-
-    origin = wp.transform_get_translation(pose)
-    linear = wp.spatial_top(velocity)
-    angular = wp.spatial_bottom(velocity)
-    tb0 = dyn.template_body_start[template]
-    tj0 = dyn.template_joint_start[template]
-    for lane in range(slots.size):
-        body = b0 + lane
-        joint = j0 + lane
-        if lane >= lanes:
-            # Spare lanes: fixed joints outside the joint range and the depth walk.
-            _write_reduced_joint(
-                dyn,
-                joint,
-                _FIXED_JOINT,
-                wp.where(lane > 0, body - 1, -1),
-                body,
-                wp.transform_identity(),
-                wp.transform_identity(),
-                JointDesc(),
-                -1,
-            )
-            continue
-        template_body = dyn.template_tree_body[template, lane]
-        bdesc = dyn.template_bodies[tb0 + template_body]
-        bdesc.pose = pose * bdesc.pose
-        com = wp.transform_point(bdesc.pose, bdesc.com)
-        bdesc.velocity = wp.spatial_vector(linear + wp.cross(angular, com - origin), angular)
-        bdesc.world = world
-        _write_body(dyn, body, bdesc)
-        dyn.bodies.motion_type[body + 1] = _ARTICULATED
-        slots.body_q[body] = bdesc.pose
-        slots.body_qd[body] = bdesc.velocity
-        slots.body_x_com[body] = wp.transform(bdesc.com, wp.quat_identity())
-        dyn.articulation_bodies[instance, template_body] = body
-
-        local_joint = dyn.template_tree_joint[template, lane]
-        if local_joint < 0:  # floating root: a free joint at the root body's pose
-            free = JointDesc()
-            free.linear_count = 3
-            free.angular_count = 3
-            free.linear_axes = wp.identity(3, dtype=wp.float32)
-            free.angular_axes = wp.identity(3, dtype=wp.float32)
-            free.limit_lower = vec6f(-MAXVAL)
-            free.limit_upper = vec6f(MAXVAL)
-            _write_reduced_joint(
-                dyn, joint, _FREE_JOINT, -1, body, wp.transform_identity(), wp.transform_identity(), free, -1
-            )
-            q = slots.joint_q_start[joint]
-            position = wp.transform_get_translation(bdesc.pose)
-            rotation = wp.transform_get_rotation(bdesc.pose)
-            for k in range(3):
-                slots.joint_q[q + k] = position[k]
-            for k in range(4):
-                slots.joint_q[q + 3 + k] = rotation[k]
-            qd = dyn.joint_qd_start[joint]
-            v = wp.spatial_top(bdesc.velocity)
-            for k in range(3):
-                slots.joint_qd[qd + k] = v[k]
-                slots.joint_qd[qd + 3 + k] = angular[k]
-        else:
-            jdesc = dyn.template_joints[tj0 + local_joint]
-            parent = wp.int32(-1)
-            parent_xform = pose * jdesc.parent_xform
-            if jdesc.parent >= 0:
-                parent = dyn.articulation_bodies[instance, jdesc.parent]
-                parent_xform = jdesc.parent_xform
-            _write_reduced_joint(
-                dyn,
-                joint,
-                slots.template_joint_type[tj0 + local_joint],
-                parent,
-                body,
-                parent_xform,
-                jdesc.child_xform,
-                jdesc,
-                tj0 + local_joint,
-            )
-            dyn.articulation_joints[instance, local_joint] = joint
-
-    _write_slot_topology(dyn, template, a, j0, b0, lanes)
-
-    tree_group = _ARTICULATION_GROUP - instance  # no collisions within an instance
-    for k in range(slots.instance_shapes.shape[1]):
-        slots.instance_shapes[instance, k] = -1
-    ok = wp.bool(True)
-    for i in range(dyn.template_shape_start[template], dyn.template_shape_start[template + 1]):
-        sdesc = dyn.template_shapes[i]
-        sdesc.collision_group = tree_group
-        shape = add_shape(dyn, dyn.articulation_bodies[instance, dyn.template_shape_body[i]], sdesc)
-        slots.instance_shapes[instance, i - dyn.template_shape_start[template]] = shape
-        ok = ok and shape >= 0
-    return ok
-
-
-@wp.func
 def _write_slot_topology(
-    dyn: DynamicsData, template: wp.int32, a: wp.int32, j0: wp.int32, b0: wp.int32, lanes: wp.int32
+    trees: _TreeTemplates,
+    slots: ReducedSlots,
+    template: wp.int32,
+    a: wp.int32,
+    j0: wp.int32,
+    b0: wp.int32,
+    lanes: wp.int32,
+    size: wp.int32,
 ):
     """Rewrite the slot's rows of the reduced solver's tables for the template tree.
 
     Lanes are parent first, so lanes sorted by depth are already in lane order, and each body's
     root path is no longer than the placeholder chain's at that lane.
     """
-    slots = dyn.slots
     slots.articulation_end[a] = slots.articulation_start[a] + lanes
     base = slots.depth_start[a, 0]
     for d in range(slots.depth_start.shape[1]):
         below = wp.int32(0)
         for lane in range(lanes):
-            if dyn.template_tree_depth[template, lane] < d:
+            if trees.depth[template, lane] < d:
                 below += 1
         slots.depth_start[a, d] = base + below
     for lane in range(lanes):
         slots.depth_joint[base + lane] = j0 + lane
-        parent = dyn.template_tree_parent[template, lane]
+        parent = trees.parent[template, lane]
         parent_lane = wp.int32(0)
         if parent >= 0:
             parent_first = parent
-            while (
-                parent_first > 0
-                and dyn.template_tree_depth[template, parent_first - 1] == dyn.template_tree_depth[template, parent]
-            ):
+            while parent_first > 0 and trees.depth[template, parent_first - 1] == trees.depth[template, parent]:
                 parent_first -= 1
             parent_lane = parent - parent_first
         slots.parent_lane[j0 + lane] = parent_lane
     child_base = slots.child_start[j0]
-    for lane in range(slots.size):
-        slots.child_start[j0 + lane] = child_base + dyn.template_tree_child_start[template, wp.min(lane, lanes)]
-    for c in range(dyn.template_tree_child_start[template, lanes]):
-        child_lane = dyn.template_tree_child_index[template, c]
+    for lane in range(size):
+        slots.child_start[j0 + lane] = child_base + trees.child_start[template, wp.min(lane, lanes)]
+    for c in range(trees.child_start[template, lanes]):
+        child_lane = trees.child_index[template, c]
         slots.child_joint[child_base + c] = j0 + child_lane
         slots.child_depth_index[child_base + c] = base + child_lane
     # Exact root paths, packed into the slot's path region.
     cursor = slots.body_path_start[b0]
-    for lane in range(slots.size):
+    for lane in range(size):
         slots.body_path_start[b0 + lane] = cursor
         if lane < lanes:
-            depth = dyn.template_tree_depth[template, lane]
+            depth = trees.depth[template, lane]
             node = lane
             for k in range(depth + 1):
                 slots.body_path_joint[cursor + depth - k] = j0 + node
-                node = dyn.template_tree_parent[template, node]
+                node = trees.parent[template, node]
             cursor += depth + 1
 
 
-@wp.func
-def is_articulation_active(dyn: DynamicsData, instance: wp.int32) -> wp.bool:
-    """Whether ``instance`` is an articulation that is not being removed."""
-    if instance < 0 or instance >= dyn.articulation_pool.state.shape[0]:
-        return False
-    state = dyn.articulation_pool.state[instance]
-    return state == _ACTIVE or state == _ADDED
-
-
-@wp.func
-def articulation_body(dyn: DynamicsData, instance: wp.int32, index: wp.int32) -> wp.int32:
-    """Model body of ``instance`` that template body ``index`` became, or ``-1``."""
-    return dyn.articulation_bodies[instance, index]
-
-
-@wp.func
-def articulation_joint(dyn: DynamicsData, instance: wp.int32, index: wp.int32) -> wp.int32:
-    """Model joint of ``instance`` that template joint ``index`` became, or ``-1``; free root joints are not counted."""
-    return dyn.articulation_joints[instance, index]
-
-
-# ---------------------------------------------------------------------------
-# Commit
-# ---------------------------------------------------------------------------
-
-
-@wp.func
-def _resolve(state: wp.array[wp.int32], slot: wp.int32, active: wp.array[wp.int32], free: wp.array[wp.int32]):
-    """Advance one slot's state; returns the state it had."""
-    old = state[slot]
-    new = old
-    if old == _ADDED:
-        new = _ACTIVE
-    elif old == _REMOVED:
-        new = _QUARANTINE
-    elif old == _QUARANTINE:
-        new = _FREE
-    state[slot] = new
-    active[slot] = wp.where(new == _ACTIVE, 1, 0)
-    free[slot] = wp.where(new == _FREE, 1, 0)
-    return old
-
-
 @wp.kernel(enable_backward=False)
-def _cascade_shapes_kernel(dyn: DynamicsData):
-    """Remove the shapes of removed bodies."""
-    slot = wp.tid()
-    body = dyn.shape_body[dyn.shape_pool.start + slot]
-    body_slot = body - dyn.body_pool.start
-    if body_slot >= 0 and body_slot < dyn.body_pool.state.shape[0]:
-        if dyn.body_pool.state[body_slot] == _REMOVED:
-            _pool_release(dyn.shape_pool, dyn.shape_pool.start + slot)
-
-
-@wp.func
-def _body_removed(dyn: DynamicsData, body: wp.int32) -> wp.bool:
-    slot = body - dyn.body_pool.start
-    if slot < 0 or slot >= dyn.body_pool.state.shape[0]:
-        return False
-    return dyn.body_pool.state[slot] == _REMOVED
-
-
-@wp.kernel(enable_backward=False)
-def _cascade_joints_kernel(dyn: DynamicsData):
-    """Remove the joints of removed bodies."""
-    joint = dyn.joint_pool.start + wp.tid()
-    if _body_removed(dyn, dyn.joint_parent[joint]) or _body_removed(dyn, dyn.joint_child[joint]):
-        _pool_release(dyn.joint_pool, joint)
-
-
-@wp.kernel(enable_backward=False)
-def _commit_joints_kernel(dyn: DynamicsData, active: wp.array[wp.int32], free: wp.array[wp.int32]):
-    slot = wp.tid()
-    if _resolve(dyn.joint_pool.state, slot, active, free) != _REMOVED:
+def _spawn_reduced_kernel(
+    dyn: DynamicsData, trees: _TreeTemplates, bodies: _BodyRows, joints: _JointRows, slots: ReducedSlots
+):
+    """Lay each added reduced instance's template tree into its slot, one thread per lane."""
+    tid = wp.tid()
+    size = dyn.slot_size
+    instance = tid // size
+    lane = tid - instance * size
+    if dyn.articulation_pool.state[instance] != _ADDED:
         return
-    joint = dyn.joint_pool.start + slot
-    cid = dyn.joint_cid[joint]
-    dyn.joint_pgs_enabled[cid] = 0
-    dyn.constraints.bilateral.row_count[cid] = 0
-    dyn.constraints.d6.row_count[cid] = 0
-    dyn.joint_enabled[joint] = False
-    dyn.generic_linear_count[joint] = 0
-    dyn.generic_angular_count[joint] = 0
-    for k in range(_ROWS):
-        dyn.row_dynamic[joint * _ROWS + k] = False
-    child = dyn.joint_child[joint]
-    if dyn.body_filter_parent[child] == dyn.joint_parent[joint]:
-        dyn.body_filter_parent[child] = _NO_FILTER
-
-
-@wp.kernel(enable_backward=False)
-def _commit_bodies_kernel(dyn: DynamicsData, active: wp.array[wp.int32], free: wp.array[wp.int32]):
-    slot = wp.tid()
-    if _resolve(dyn.body_pool.state, slot, active, free) != _REMOVED:
+    template = dyn.articulation_template[instance]
+    lanes = dyn.template_tree_count[template]
+    b0 = dyn.slot_body_start + instance * size
+    j0 = dyn.slot_joint_start + instance * size
+    body = b0 + lane
+    joint = j0 + lane
+    if lane == 0:
+        _write_slot_topology(trees, slots, template, slots.articulation + instance, j0, b0, lanes, size)
+    if lane >= lanes:
+        # Spare lanes: fixed joints outside the joint range and the depth walk.
+        _write_reduced_joint(
+            joints,
+            slots,
+            joint,
+            _FIXED_JOINT,
+            wp.where(lane > 0, body - 1, -1),
+            body,
+            wp.transform_identity(),
+            wp.transform_identity(),
+            JointDesc(),
+            -1,
+        )
         return
-    # A removed body becomes an inert static slot until it is reused.
-    body = dyn.body_pool.start + slot
-    dyn.body_mass[body] = 0.0
-    dyn.body_inv_mass[body] = 0.0
-    dyn.body_inertia[body] = wp.mat33(0.0)
-    dyn.body_inv_inertia[body] = wp.mat33(0.0)
-    dyn.body_flags[body] = 0
-    p = body + 1
-    write_body_properties(dyn.bodies, p, 0.0, wp.mat33(0.0), dyn.body_com[body], False, 0)
-    dyn.bodies.velocity[p] = wp.vec3(0.0)
-    dyn.bodies.angular_velocity[p] = wp.vec3(0.0)
-    dyn.bodies.force[p] = wp.vec3(0.0)
-    dyn.bodies.torque[p] = wp.vec3(0.0)
-    dyn.bodies.island_root[p] = -1
-    dyn.bodies.frames_below_threshold[p] = 0
-    dyn.body_fresh[p] = 0
+    pose = dyn.articulation_pose[instance]
+    velocity = dyn.articulation_velocity[instance]
+    template_body = dyn.template_tree_body[template, lane]
+    bdesc = _spawn_body(
+        dyn.template_bodies[dyn.template_body_start[template] + template_body],
+        pose,
+        velocity,
+        dyn.articulation_world[instance],
+    )
+    _write_body(bodies, body, bdesc)
+    bodies.bodies.motion_type[body + 1] = _ARTICULATED
+    slots.body_q[body] = bdesc.pose
+    slots.body_qd[body] = bdesc.velocity
+    slots.body_x_com[body] = wp.transform(bdesc.com, wp.quat_identity())
+
+    local_joint = dyn.template_tree_joint[template, lane]
+    if local_joint < 0:  # floating root: a free joint at the root body's pose
+        free = JointDesc()
+        free.linear_count = 3
+        free.angular_count = 3
+        free.linear_axes = wp.identity(3, dtype=wp.float32)
+        free.angular_axes = wp.identity(3, dtype=wp.float32)
+        free.limit_lower = vec6f(-MAXVAL)
+        free.limit_upper = vec6f(MAXVAL)
+        _write_reduced_joint(
+            joints, slots, joint, _FREE_JOINT, -1, body, wp.transform_identity(), wp.transform_identity(), free, -1
+        )
+        q = slots.joint_q_start[joint]
+        position = wp.transform_get_translation(bdesc.pose)
+        rotation = wp.transform_get_rotation(bdesc.pose)
+        for k in range(3):
+            slots.joint_q[q + k] = position[k]
+        for k in range(4):
+            slots.joint_q[q + 3 + k] = rotation[k]
+        qd = joints.qd_start[joint]
+        v = wp.spatial_top(bdesc.velocity)
+        w = wp.spatial_bottom(bdesc.velocity)
+        for k in range(3):
+            slots.joint_qd[qd + k] = v[k]
+            slots.joint_qd[qd + 3 + k] = w[k]
+    else:
+        tj = dyn.template_joint_start[template] + local_joint
+        jdesc = dyn.template_joints[tj]
+        parent = wp.int32(-1)
+        parent_xform = pose * jdesc.parent_xform
+        if jdesc.parent >= 0:
+            parent = dyn.articulation_bodies[instance, jdesc.parent]
+            parent_xform = jdesc.parent_xform
+        _write_reduced_joint(
+            joints,
+            slots,
+            joint,
+            slots.template_joint_type[tj],
+            parent,
+            body,
+            parent_xform,
+            jdesc.child_xform,
+            jdesc,
+            tj,
+        )
+
+
+@wp.func
+def _empty_slot(slots: ReducedSlots, joint_type: wp.array[wp.int32], instance: wp.int32):
+    """Detach a slot from the reduced solver: no joints, no depth lanes, a fixed root."""
+    a = slots.articulation + instance
+    start = slots.articulation_start[a]
+    slots.articulation_end[a] = start
+    joint_type[start] = _FIXED_JOINT  # keeps the momentum restore away from the empty range
+    base = slots.depth_start[a, 0]
+    for d in range(slots.depth_start.shape[1]):
+        slots.depth_start[a, d] = base
 
 
 @wp.kernel(enable_backward=False)
-def _wake_orphaned_islands_kernel(dyn: DynamicsData):
-    """Wake sleeping bodies whose island root was just removed, so the slot cannot alias them."""
-    p = wp.tid()
-    root = dyn.bodies.island_root[p]
-    root_slot = root - 1 - dyn.body_pool.start
-    if root >= 0 and root_slot >= 0 and root_slot < dyn.body_pool.state.shape[0]:
-        if dyn.body_pool.state[root_slot] == _QUARANTINE:
-            dyn.bodies.island_root[p] = -1
-            dyn.bodies.frames_below_threshold[p] = 0
+def _empty_slots_kernel(slots: ReducedSlots, joint_type: wp.array[wp.int32]):
+    _empty_slot(slots, joint_type, wp.tid())
 
 
 @wp.kernel(enable_backward=False)
-def _empty_slots_kernel(dyn: DynamicsData):
-    _empty_slot(dyn, wp.tid())
-
-
-@wp.kernel(enable_backward=False)
-def _commit_articulations_kernel(dyn: DynamicsData, active: wp.array[wp.int32], free: wp.array[wp.int32]):
+def _commit_articulations_kernel(
+    dyn: DynamicsData,
+    slots: ReducedSlots,
+    joint_type: wp.array[wp.int32],
+    active: wp.array[wp.int32],
+    free: wp.array[wp.int32],
+):
     slot = wp.tid()
-    old = _resolve(dyn.articulation_pool.state, slot, active, free)
-    if dyn.slots.size > 0:
+    old = _resolve(dyn.articulation_pool, slot, active, free)
+    if dyn.slot_size > 0:
+        if old == _REMOVED:
+            _empty_slot(slots, joint_type, slot)
         # Leaving quarantine: no contact of the slot's last occupant can be solved anymore.
-        dyn.slots.clear[slot] = wp.where(old == _QUARANTINE, 1, 0)
+        slots.clear[slot] = wp.where(old == _QUARANTINE, 1, 0)
 
 
 @wp.kernel(enable_backward=False)
-def _clear_slot_contact_cache_kernel(dyn: DynamicsData):
+def _clear_slot_contact_cache_kernel(slots: ReducedSlots, size: wp.int32):
     """Forget the cached contact rows of slots that left quarantine, before their reuse."""
     tid = wp.tid()
-    slots = dyn.slots
     slot = tid // slots.cache_rows
     row = tid - slot * slots.cache_rows
     if slots.clear[slot] == 0:
         return
-    dofs = 6 * slots.size
+    dofs = 6 * size
     first = slots.dof_start + slot * dofs
     for dof in range(first, first + dofs):
         slots.packed_jacobian[row, dof] = 0.0
@@ -1426,21 +1570,6 @@ def _clear_slot_contact_cache_kernel(dyn: DynamicsData):
     cache_row = (slots.articulation + slot) * slots.cache_rows + row
     slots.previous_row_body[cache_row] = -1
     slots.previous_row_body_pair[cache_row] = -1
-
-
-@wp.kernel(enable_backward=False)
-def _commit_shapes_kernel(dyn: DynamicsData, active: wp.array[wp.int32], free: wp.array[wp.int32]):
-    slot = wp.tid()
-    old = _resolve(dyn.shape_pool.state, slot, active, free)
-    shape = dyn.shape_pool.start + slot
-    if old == _ADDED:
-        dyn.shape_flags[shape] = dyn.shape_pending_flags[slot]
-        dyn.world_map_dirty[0] = 1
-    elif old == _REMOVED:
-        dyn.shape_flags[shape] = dyn.shape_flags[shape] & ~_COLLIDE_FLAGS
-        dyn.shape_body[shape] = -1
-        dyn.phoenx_shape_body[shape] = 0
-        dyn.world_map_dirty[0] = 1
 
 
 @wp.kernel(enable_backward=False)
@@ -1493,6 +1622,13 @@ class _HostPool:
         )
 
 
+def _bind(struct, source, names, prefix: str = ""):
+    """Point the struct fields ``names`` at the arrays ``source.<prefix><name>``."""
+    for name in names:
+        setattr(struct, name, getattr(source, prefix + name))
+    return struct
+
+
 class Dynamics:
     """Runtime creation state of a :class:`~newton.solvers.SolverPhoenX`, exposed as ``solver.dynamics``.
 
@@ -1509,104 +1645,136 @@ class Dynamics:
         self.joints = _HostPool(capacity.joint_start, capacity.joint_count, device)
         self.articulations = _HostPool(0, capacity.articulation_count, device)
         self._sleeping = solver._sleeping_enabled
+        self._solver = solver
         world = solver.world
+        self._world = world
 
         d = DynamicsData()
         d.body_pool = self.bodies.data
         d.shape_pool = self.shapes.data
-        d.error_count = wp.zeros(1, dtype=wp.int32, device=device)
-        for name in ("body_mass", "body_inv_mass", "body_inertia", "body_inv_inertia", "body_com", "body_flags"):
-            setattr(d, name, getattr(model, name))
-        d.body_world = model.body_world
-        d.bodies = solver.bodies
-        d.body_fresh = solver._body_fresh
-        for name in (
-            "shape_type",
-            "shape_transform",
-            "shape_scale",
-            "shape_body",
-            "shape_world",
-            "shape_flags",
-            "shape_collision_group",
-            "shape_margin",
-            "shape_gap",
-            "shape_is_solid",
-            "shape_collision_radius",
-            "shape_source_ptr",
-            "shape_heightfield_index",
-        ):
-            setattr(d, name, getattr(model, name))
-        d.shape_mu = model.shape_material_mu
-        d.shape_restitution = model.shape_material_restitution
-        d.shape_aabb_lower = model.shape_collision_aabb_lower
-        d.shape_aabb_upper = model.shape_collision_aabb_upper
-        d.shape_interior_point = model._shape_interior_point
-        d.shape_voxel_resolution = model._shape_voxel_resolution
-        d.shape_support_data = model._shape_support_data
-        d.shape_sdf_index = model._shape_sdf_index
-        d.shape_edge_range = model._shape_edge_range
-        d.shape_mesh_properties = model._shape_mesh_properties
-        d.shape_mesh_boundary_start = model._shape_mesh_boundary_start
-        d.shape_pending_flags = wp.zeros(max(1, capacity.shape_count), dtype=wp.int32, device=device)
-        d.phoenx_shape_body = solver._shape_body
-        d.shape_no_response = world.shape_no_response
-        d.materials = world._materials
-        d.friction_combine_mode = wp.int32(friction_combine_mode)
-        d.world_map_dirty = collision_pipeline._dynamic_world_map_dirty
-        d.world_count = wp.int32(max(1, int(model.world_count)))
-
         d.joint_pool = self.joints.data
-        d.constraints = world.constraints
-        d.joint_pgs_enabled = world._joint_pgs_enabled
-        d.body_filter_parent = solver._body_filter_parent
+        d.articulation_pool = self.articulations.data
+        d.error_count = wp.zeros(1, dtype=wp.int32, device=device)
+        d.world_count = wp.int32(max(1, int(model.world_count)))
+        d.body_count = wp.int32(model.body_count)
+        d.body_world = model.body_world
+        d.shape_type = model.shape_type
+        d.staged_bodies = wp.empty(max(1, capacity.body_count), dtype=BodyDesc, device=device)
+        d.staged_shapes = wp.empty(max(1, capacity.shape_count), dtype=ShapeDesc, device=device)
+        d.staged_shape_body = wp.zeros(max(1, capacity.shape_count), dtype=wp.int32, device=device)
+        d.staged_joints = wp.empty(max(1, capacity.joint_count), dtype=JointDesc, device=device)
         d.joint_cid = solver._joint_constraints.joint_idx_to_cid
-        if capacity.joint_count or capacity.slot_size:
-            for name in (
-                "joint_type",
-                "joint_parent",
-                "joint_child",
-                "joint_X_p",
-                "joint_X_c",
-                "joint_dof_dim",
-                "joint_enabled",
-                "joint_qd_start",
-                "joint_target_q_start",
-                "joint_axis",
-                "joint_limit_lower",
-                "joint_limit_upper",
-                "joint_velocity_limit",
-                "joint_friction",
-                "joint_armature",
-                "joint_damping",
-                "joint_target_mode",
-                "joint_target_ke",
-                "joint_target_kd",
-                "joint_effort_limit",
-                "joint_gear",
-            ):
-                setattr(d, name, getattr(model, name))
-        if capacity.joint_count:
-            rows = solver._direct_equality_system
-            for name in (
-                "generic_linear_axes",
-                "generic_angular_axes",
-                "generic_linear_count",
-                "generic_angular_count",
-                "row_dynamic",
-                "row_dof",
-                "row_direct_drive",
-                "row_bounded_drive",
-                "row_target_q",
-                "previous_coordinate",
-                "coordinate_revolutions",
-            ):
-                setattr(d, name, getattr(rows, name))
-        self._world = world
-        self._solver = solver
         d.constraint_wrench = wp.zeros(max(1, world.num_constraints), dtype=wp.spatial_vector, device=device)
+
+        body_rows = _bind(_BodyRows(), model, ("mass", "inv_mass", "inertia", "inv_inertia", "com", "flags"), "body_")
+        body_rows.bodies = solver.bodies
+        body_rows.fresh = solver._body_fresh
+        self._body_rows = body_rows
+
+        shape_rows = _bind(
+            _ShapeRows(),
+            model,
+            (
+                "type",
+                "transform",
+                "scale",
+                "body",
+                "world",
+                "flags",
+                "collision_group",
+                "margin",
+                "gap",
+                "is_solid",
+                "collision_radius",
+                "source_ptr",
+                "heightfield_index",
+            ),
+            "shape_",
+        )
+        _bind(
+            shape_rows,
+            model,
+            (
+                "interior_point",
+                "voxel_resolution",
+                "support_data",
+                "sdf_index",
+                "edge_range",
+                "mesh_properties",
+                "mesh_boundary_start",
+            ),
+            "_shape_",
+        )
+        shape_rows.body_world = model.body_world
+        shape_rows.mu = model.shape_material_mu
+        shape_rows.restitution = model.shape_material_restitution
+        shape_rows.aabb_lower = model.shape_collision_aabb_lower
+        shape_rows.aabb_upper = model.shape_collision_aabb_upper
+        shape_rows.phoenx_body = solver._shape_body
+        shape_rows.no_response = world.shape_no_response
+        shape_rows.materials = world._materials
+        shape_rows.friction_combine_mode = wp.int32(friction_combine_mode)
+        shape_rows.world_map_dirty = collision_pipeline._dynamic_world_map_dirty
+        self._shape_rows = shape_rows
+
+        joint_rows = _JointRows()
+        if capacity.joint_count or capacity.slot_size:
+            _bind(
+                joint_rows,
+                model,
+                (
+                    "type",
+                    "parent",
+                    "child",
+                    "X_p",
+                    "X_c",
+                    "dof_dim",
+                    "enabled",
+                    "qd_start",
+                    "target_q_start",
+                    "axis",
+                    "limit_lower",
+                    "limit_upper",
+                    "velocity_limit",
+                    "friction",
+                    "armature",
+                    "damping",
+                    "target_mode",
+                    "target_ke",
+                    "target_kd",
+                    "effort_limit",
+                    "gear",
+                ),
+                "joint_",
+            )
+        self._joint_rows = joint_rows
+        block_rows = _BlockRows()
+        if capacity.joint_count:
+            _bind(
+                block_rows,
+                solver._direct_equality_system,
+                (
+                    "generic_linear_axes",
+                    "generic_angular_axes",
+                    "generic_linear_count",
+                    "generic_angular_count",
+                    "row_dynamic",
+                    "row_dof",
+                    "row_direct_drive",
+                    "row_bounded_drive",
+                    "row_target_q",
+                    "previous_coordinate",
+                    "coordinate_revolutions",
+                ),
+            )
+            block_rows.joint_cid = d.joint_cid
+            block_rows.constraints = world.constraints
+            block_rows.pgs_enabled = world._joint_pgs_enabled
+            block_rows.body_filter_parent = solver._body_filter_parent
+        self._block_rows = block_rows
+
         self._init_articulations(d, capacity.articulation_templates, device)
         self.data = d
-        self._empty_slots()
 
         # Prototypes only carry geometry; they never collide or render.
         prototypes = list(capacity.prototype_shapes)
@@ -1614,10 +1782,9 @@ class Dynamics:
             flags = model.shape_flags.numpy()
             flags[prototypes] &= ~(int(_COLLIDE_FLAGS) | (1 << 0))  # also clear VISIBLE
             model.shape_flags.assign(flags)
-            d.world_map_dirty.fill_(1)
+            shape_rows.world_map_dirty.fill_(1)
 
     def _init_articulations(self, d: DynamicsData, templates, device) -> None:
-        d.articulation_pool = self.articulations.data
         bodies, shapes, shape_body, joints = [], [], [], []
         starts = ([0], [0], [0])
         for template in templates:
@@ -1666,9 +1833,14 @@ class Dynamics:
         count = max(1, self.articulations.capacity)
         max_bodies = max([len(t["bodies"]) for t in templates] + [1])
         max_joints = max([len(t["joints"]) for t in templates] + [1])
+        max_shapes = max([len(t["shapes"]) for t in templates] + [1])
         d.articulation_template = wp.full(count, -1, dtype=wp.int32, device=device)
         d.articulation_bodies = wp.full((count, max_bodies), -1, dtype=wp.int32, device=device)
         d.articulation_joints = wp.full((count, max_joints), -1, dtype=wp.int32, device=device)
+        d.articulation_pose = wp.zeros(count, dtype=wp.transform, device=device)
+        d.articulation_velocity = wp.zeros(count, dtype=wp.spatial_vector, device=device)
+        d.articulation_world = wp.zeros(count, dtype=wp.int32, device=device)
+        d.instance_shapes = wp.full((count, max_shapes), -1, dtype=wp.int32, device=device)
 
         # Exact joint trees, when the solver brings a runtime projector.
         projector = getattr(self._solver, "_runtime_tree_projector", None)
@@ -1693,38 +1865,33 @@ class Dynamics:
             child_index[t, : len(tree["child_index"])] = tree["child_index"]
         rows = max(1, len(templates))
         pad = lambda a: np.concatenate([a, np.zeros((rows - len(a), *a.shape[1:]), a.dtype)])  # noqa: E731
-        d.template_tree_count, d.template_tree_floating, d.template_tree_max_depth = (
-            wp.array(pad(a), dtype=wp.int32, device=device) for a in (tree_count, floating, max_depth)
+        array = lambda a: wp.array(pad(a), dtype=wp.int32, device=device)  # noqa: E731
+        d.template_tree_count, d.template_tree_body, d.template_tree_joint = (
+            array(a) for a in (tree_count, tree_body, tree_joint)
         )
-        (
-            d.template_tree_body,
-            d.template_tree_joint,
-            d.template_tree_depth,
-            d.template_tree_parent,
-            d.template_tree_child_start,
-            d.template_tree_child_index,
-        ) = (
-            wp.array(pad(a), dtype=wp.int32, device=device)
-            for a in (tree_body, tree_joint, depth, parent, child_start, child_index)
+        trees = _TreeTemplates()
+        trees.floating, trees.max_depth, trees.depth, trees.parent, trees.child_start, trees.child_index = (
+            array(a) for a in (floating, max_depth, depth, parent, child_start, child_index)
         )
-        if projector is not None:
-            d.tree = projector.data
-        else:
-            d.tree = GeneralMaximalTreeProjectorData()
-            d.tree.body_count = wp.zeros(0, dtype=wp.int32, device=device)
+        self._trees = trees
+        self._tree = projector.data if projector is not None else None
+        d.tree_body_count = (
+            projector.data.body_count if projector is not None else wp.zeros(0, dtype=wp.int32, device=device)
+        )
         d.body_articulation = wp.full(max(1, self.bodies.capacity), -1, dtype=wp.int32, device=device)
         d.joint_articulation = wp.full(max(1, self.joints.capacity), -1, dtype=wp.int32, device=device)
-        d.slots = self._init_slots(templates, max_shapes=max([len(t["shapes"]) for t in templates] + [1]))
+        d.slot_size = wp.int32(self.capacity.slot_size)
+        d.slot_body_start = wp.int32(self.capacity.slot_body_start if self.capacity.slot_size else 0)
+        d.slot_joint_start = wp.int32(self.capacity.slot_joint_start if self.capacity.slot_size else 0)
+        self._slots = self._init_slots(templates)
 
-    def _init_slots(self, templates, max_shapes: int) -> ReducedSlots:
+    def _init_slots(self, templates) -> ReducedSlots:
         """Bind reduced instance slots to the reduced solver's tables and empty every slot."""
         capacity = self.capacity
         device = self._solver.model.device
         slots = ReducedSlots()
-        slots.size = 0
         self._clear_slot_caches = False
         if not capacity.slot_size:
-            slots.instance_shapes = wp.zeros((1, 1), dtype=wp.int32, device=device)
             return slots
         reduced = self._solver._reduced_articulation
         system, data = reduced.system, reduced.bodies.reduced
@@ -1732,9 +1899,6 @@ class Dynamics:
         first = np.flatnonzero(starts == capacity.slot_joint_start)
         if first.size != 1:
             raise RuntimeError("reduced articulation slots were not found in the reduced solver")
-        slots.size = capacity.slot_size
-        slots.body_start = capacity.slot_body_start
-        slots.joint_start = capacity.slot_joint_start
         slots.articulation = int(first[0])
         slots.articulation_start = data.articulation_start
         slots.articulation_end = data.articulation_end
@@ -1746,16 +1910,9 @@ class Dynamics:
         slots.child_depth_index = system.advance_child_depth_index
         slots.body_path_start = data.body_path_start
         slots.body_path_joint = data.body_path_joint
-        slots.body_x_com = system.body_x_com
-        slots.joint_s = system.joint_s
-        slots.joint_s_publish = system.joint_s_publish
-        slots.joint_q = reduced.state.joint_q
-        slots.joint_qd = reduced.state.joint_qd
-        slots.body_q = reduced.state.body_q
-        slots.body_qd = reduced.state.body_qd
-        slots.joint_q_start = reduced.model.joint_q_start
-        slots.joint_limit_ke = reduced.model.joint_limit_ke
-        slots.joint_limit_kd = reduced.model.joint_limit_kd
+        _bind(slots, system, ("body_x_com", "joint_s", "joint_s_publish"))
+        _bind(slots, reduced.state, ("joint_q", "joint_qd", "body_q", "body_qd"))
+        _bind(slots, reduced.model, ("joint_q_start", "joint_limit_ke", "joint_limit_kd"))
         joints = [j for t in templates for j in t["joints"]]
         rows = max(1, len(joints))
         joint_type, joint_q = np.zeros(rows, np.int32), np.zeros((rows, 7), np.float32)
@@ -1769,7 +1926,6 @@ class Dynamics:
         slots.template_joint_q = wp.array(joint_q, dtype=wp.float32, device=device)
         slots.template_joint_limit_ke = wp.array(limit_ke, dtype=wp.float32, device=device)
         slots.template_joint_limit_kd = wp.array(limit_kd, dtype=wp.float32, device=device)
-        slots.instance_shapes = wp.full((capacity.articulation_count, max_shapes), -1, dtype=wp.int32, device=device)
         slots.clear = wp.zeros(capacity.articulation_count, dtype=wp.int32, device=device)
         slots.dof_start = int(reduced.model.joint_qd_start.numpy()[capacity.slot_joint_start])
         contacts = reduced.contact_block_system
@@ -1780,17 +1936,13 @@ class Dynamics:
             slots.previous_row_body = contacts.packed_previous_row_body
             slots.previous_row_body_pair = contacts.packed_previous_row_body_pair
             slots.cache_rows = contacts.packed_previous_row_body.shape[0] // contacts.articulation_count
+        wp.launch(
+            _empty_slots_kernel,
+            dim=capacity.articulation_count,
+            inputs=[slots, self._joint_rows.type],
+            device=device,
+        )
         return slots
-
-    def _empty_slots(self) -> None:
-        """Detach every reduced instance slot; runs once the dynamics data is complete."""
-        if self.capacity.slot_size:
-            wp.launch(
-                _empty_slots_kernel,
-                dim=self.capacity.articulation_count,
-                inputs=[self.data],
-                device=self.data.error_count.device,
-            )
 
     def update_joint_wrenches(self) -> None:
         """Refresh the joint reactions read by :func:`joint_wrench`; call after a step, capturable."""
@@ -1802,32 +1954,56 @@ class Dynamics:
         return self.data.error_count
 
     def _commit(self) -> None:
-        """Apply staged additions and removals at the start of a step."""
-        device = self.data.error_count.device
-        if self.articulations.capacity:
+        """Write staged additions and apply removals at the start of a step, one thread per slot."""
+        d = self.data
+        device = d.error_count.device
+        count = self.articulations.capacity
+        if count:
+            # Instances are laid out while still marked added; the state commit follows.
+            if self.capacity.slot_size:
+                wp.launch(
+                    _spawn_reduced_kernel,
+                    dim=count * self.capacity.slot_size,
+                    inputs=[d, self._trees, self._body_rows, self._joint_rows, self._slots],
+                    device=device,
+                )
+            elif self._tree is not None:
+                wp.launch(
+                    _layout_trees_kernel,
+                    dim=count * (_TREE_LANES + 1),
+                    inputs=[d, self._trees, self._tree],
+                    device=device,
+                )
             wp.launch(
                 _commit_articulations_kernel,
-                dim=self.articulations.capacity,
-                inputs=[self.data, self.articulations.active, self.articulations.free],
+                dim=count,
+                inputs=[d, self._slots, self._joint_rows.type, self.articulations.active, self.articulations.free],
                 device=device,
             )
             if self._clear_slot_caches:
                 wp.launch(
                     _clear_slot_contact_cache_kernel,
-                    dim=self.articulations.capacity * self.data.slots.cache_rows,
-                    inputs=[self.data],
+                    dim=count * self._slots.cache_rows,
+                    inputs=[self._slots, d.slot_size],
                     device=device,
                 )
             self.articulations.rebuild_lists()
         # Cascades read the removed bodies before their commit quarantines them.
         if self.shapes.capacity:
-            wp.launch(_cascade_shapes_kernel, dim=self.shapes.capacity, inputs=[self.data], device=device)
+            wp.launch(
+                _cascade_shapes_kernel, dim=self.shapes.capacity, inputs=[d, self._shape_rows.body], device=device
+            )
         if self.joints.capacity:
-            wp.launch(_cascade_joints_kernel, dim=self.joints.capacity, inputs=[self.data], device=device)
+            wp.launch(
+                _cascade_joints_kernel,
+                dim=self.joints.capacity,
+                inputs=[d, self._joint_rows.parent, self._joint_rows.child],
+                device=device,
+            )
             wp.launch(
                 _commit_joints_kernel,
                 dim=self.joints.capacity,
-                inputs=[self.data, self.joints.active, self.joints.free],
+                inputs=[d, self._joint_rows, self._block_rows, self.joints.active, self.joints.free],
                 device=device,
             )
             self.joints.rebuild_lists()
@@ -1835,14 +2011,15 @@ class Dynamics:
             wp.launch(
                 _commit_bodies_kernel,
                 dim=self.bodies.capacity,
-                inputs=[self.data, self.bodies.active, self.bodies.free],
+                inputs=[d, self._body_rows, self.bodies.active, self.bodies.free],
                 device=device,
             )
             if self._sleeping:
+                bodies = self._body_rows.bodies
                 wp.launch(
                     _wake_orphaned_islands_kernel,
-                    dim=self.data.bodies.island_root.shape[0],
-                    inputs=[self.data],
+                    dim=bodies.island_root.shape[0],
+                    inputs=[d.body_pool, bodies],
                     device=device,
                 )
             self.bodies.rebuild_lists()
@@ -1850,7 +2027,7 @@ class Dynamics:
             wp.launch(
                 _commit_shapes_kernel,
                 dim=self.shapes.capacity,
-                inputs=[self.data, self.shapes.active, self.shapes.free],
+                inputs=[d, self._shape_rows, self.shapes.active, self.shapes.free],
                 device=device,
             )
             self.shapes.rebuild_lists()

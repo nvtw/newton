@@ -9,6 +9,7 @@ collides and steps, so the tests cover the capturable end-to-end path.
 
 from __future__ import annotations
 
+import ctypes
 import unittest
 
 import numpy as np
@@ -103,6 +104,21 @@ def _spawn_hull_kernel(dyn: phoenx.DynamicsData, prototype: int, scale: float, o
     out[1] = phoenx.add_shape(dyn, body, shape)
 
 
+@wp.func
+def _add_welded_box(dyn: phoenx.DynamicsData, out: wp.array[int]):
+    """A box fixed to the world; a helper that forwards ``dyn`` one more level."""
+    box = _add_box(dyn, wp.vec3(0.5, 0.0, 2.0), 0)
+    out[0] = box
+    out[1] = phoenx.add_joint(dyn, phoenx.joint_desc(-1, box, wp.transform_identity(), wp.transform_identity()))
+
+
+@wp.kernel
+def _spawn_and_remove_kernel(dyn: phoenx.DynamicsData, out: wp.array[int]):
+    """Add a welded box and remove the body again before the next step commits it."""
+    _add_welded_box(dyn, out)
+    phoenx.remove_body(dyn, out[0])
+
+
 @wp.kernel
 def _remove_joint_kernel(dyn: phoenx.DynamicsData, joints: wp.array[int]):
     phoenx.remove_joint(dyn, joints[wp.tid()])
@@ -152,6 +168,14 @@ class _Scene:
 
     def body_q(self, bodies) -> np.ndarray:
         return self.state_0.body_q.numpy()[np.asarray(bodies)]
+
+
+class TestDynamicsHandle(unittest.TestCase):
+    def test_device_handle_stays_small(self):
+        # Warp passes structs to functions by value; once a struct exceeds about 8 KB, forwarding
+        # it through nested functions (a user helper calling add_body) copies it through local
+        # memory on every call, which made each add_body cost tens of microseconds.
+        self.assertLess(ctypes.sizeof(phoenx.DynamicsData.ctype), 8192)
 
 
 @unittest.skipUnless(wp.is_cuda_available(), "runtime creation tests require CUDA graph capture")
@@ -249,6 +273,24 @@ class TestDynamicBodies(unittest.TestCase):
         scene.run(3)
         for pool in (scene.dyn.bodies, scene.dyn.shapes, scene.dyn.joints):
             np.testing.assert_array_equal(pool.data.counts.numpy()[:2], [0, 1])
+
+    def test_rows_removed_before_their_commit_are_never_written(self):
+        scene = _Scene(bodies=1, shapes=1, joints=1)
+        ids = wp.zeros(2, dtype=int)
+        wp.launch(_spawn_and_remove_kernel, dim=1, inputs=[scene.dyn.data, ids])
+        mass = scene.model.body_mass.numpy()[ids.numpy()[0]]
+        scene.run(2)  # cancelled, then out of quarantine
+        for pool in (scene.dyn.bodies, scene.dyn.shapes, scene.dyn.joints):
+            np.testing.assert_array_equal(pool.data.counts.numpy()[:2], [0, 1])
+        self.assertEqual(scene.model.body_mass.numpy()[ids.numpy()[0]], mass)
+        self.assertEqual(int(scene.dyn.error_count.numpy()[0]), 0)
+
+        # The slots are handed out again and simulate normally.
+        bodies = wp.zeros(1, dtype=int)
+        wp.launch(_spawn_column_kernel, dim=1, inputs=[scene.dyn.data, wp.array([0.0], dtype=float), 0.3, bodies])
+        self.assertEqual(int(bodies.numpy()[0]), int(ids.numpy()[0]))
+        scene.run(90)
+        self.assertAlmostEqual(float(scene.body_q(bodies.numpy())[0, 2]), _HALF, delta=3.0e-3)
 
     def test_unsupported_configurations_raise(self):
         builder = newton.ModelBuilder()

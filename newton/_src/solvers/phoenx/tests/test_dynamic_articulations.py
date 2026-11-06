@@ -238,9 +238,9 @@ class TestDynamicArticulations(unittest.TestCase):
         scene = _Scene(bodies=12, shapes=12, joints=12, articulations=1, templates=[_hanging_chain_template()])
         instance = scene.spawn([0], [(_LINK, 0.0, 4.0)])[0]
         scene.run(20)
-        self.assertEqual(int(scene.solver.dynamics.data.tree.body_count.numpy()[instance]), 12)
+        self.assertEqual(int(scene.solver.dynamics.data.tree_body_count.numpy()[instance]), 12)
         wp.launch(_remove_joint_kernel, dim=1, inputs=[scene.dyn.data, int(instance), 6])
-        self.assertEqual(int(scene.solver.dynamics.data.tree.body_count.numpy()[instance]), 0)
+        self.assertEqual(int(scene.solver.dynamics.data.tree_body_count.numpy()[instance]), 0)
         scene.run(60)
         q = scene.state_0.body_q.numpy()[scene.bodies(instance, 12)]
         self.assertTrue(np.isfinite(q).all())
