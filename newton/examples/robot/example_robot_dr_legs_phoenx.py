@@ -218,7 +218,7 @@ class Example:
         dr_legs.default_shape_cfg.kf = 1.0e3
         dr_legs.default_shape_cfg.mu = 0.75
 
-        asset_path = newton.utils.download_asset("disneyresearch")
+        asset_path = newton.utils.download_asset("disneyresearch", ref="261cd1f429619d8ef4f546bd788ab9dea906b5e1")
         asset_file = str(asset_path / "dr_legs/usd" / "dr_legs_with_meshes_and_boxes.usda")
 
         stage = Usd.Stage.Open(asset_file)
@@ -386,17 +386,19 @@ class Example:
         if anim.shape[1] != len(_ANIMATION_JOINT_PATHS):
             raise RuntimeError(f"animation has {anim.shape[1]} channels, expected {len(_ANIMATION_JOINT_PATHS)}")
         joint_label = list(self.model.joint_label)
-        joint_qd_start = self.model.joint_qd_start.numpy()
+        # ``joint_target_q`` is laid out per joint coordinate (the free root
+        # joint has 7 entries), so index it with ``joint_target_q_start``.
+        target_q_start = self.model.joint_target_q_start.numpy()
         try:
-            channel_dofs = np.array(
-                [joint_qd_start[joint_label.index(path)] for path in _ANIMATION_JOINT_PATHS],
+            channel_targets = np.array(
+                [target_q_start[joint_label.index(path)] for path in _ANIMATION_JOINT_PATHS],
                 dtype=np.int32,
             )
         except ValueError as e:
             raise RuntimeError(f"animation joint not found in model.joint_label: {e}") from e
-        n_dof_per_world = self.model.joint_dof_count // self.world_count
-        world_offsets = np.arange(self.world_count, dtype=np.int32) * n_dof_per_world
-        animation_indices = channel_dofs[None, :] + world_offsets[:, None]
+        n_target_per_world = self.control.joint_target_q.shape[0] // self.world_count
+        world_offsets = np.arange(self.world_count, dtype=np.int32) * n_target_per_world
+        animation_indices = channel_targets[None, :] + world_offsets[:, None]
 
         self._animation_n_frames = anim.shape[0]
         self._animation_fps = 100.0
@@ -461,6 +463,18 @@ class Example:
         self.viewer.log_contacts(self.contacts, self.state_0)
         self.viewer.end_frame()
 
+    def test_post_step(self) -> None:
+        """Record the range of motion of the animated joints of the first robot."""
+        if not self._animation_enabled:
+            return
+        if not hasattr(self, "_animated_q_range"):
+            labels = list(self.model.joint_label)
+            q_start = self.model.joint_q_start.numpy()
+            self._animated_q = np.asarray([q_start[labels.index(path)] for path in _ANIMATION_JOINT_PATHS])
+            self._animated_q_range = [np.full(len(self._animated_q), np.inf), np.full(len(self._animated_q), -np.inf)]
+        q = self.state_0.joint_q.numpy()[self._animated_q]
+        self._animated_q_range = [np.minimum(self._animated_q_range[0], q), np.maximum(self._animated_q_range[1], q)]
+
     def test_final(self) -> None:
         body_q = self.state_0.body_q.numpy()
         body_qd = self.state_0.body_qd.numpy()
@@ -474,6 +488,17 @@ class Example:
             raise AssertionError("joint_qd contains non-finite values")
         if float(np.min(body_q[:, 2])) < -0.10:
             raise AssertionError("DR Legs fell below the ground tolerance")
+        # Walking keeps the pelvis near 0.23 m; a collapsed robot rests near 0.05 m.
+        pelvis = body_q[:: self.model.body_count // self.world_count, 2]
+        if float(np.min(pelvis)) < 0.15:
+            raise AssertionError(f"a DR Legs robot collapsed: lowest pelvis at {float(np.min(pelvis)):.3f} m")
+        if self._animation_enabled and hasattr(self, "_animated_q_range"):
+            # Walking swings every animated joint by about 0.35 rad or more within 100 frames.
+            motion = self._animated_q_range[1] - self._animated_q_range[0]
+            if float(np.min(motion)) < 0.1:
+                raise AssertionError(
+                    f"the animation does not drive its joints: smallest swing {float(np.min(motion)):.3f} rad"
+                )
 
     @staticmethod
     def create_parser():
@@ -596,10 +621,19 @@ class Example:
 
 if __name__ == "__main__":
     parser = Example.create_parser()
+    # The ray-traced viewer draws every visual mesh as one instance; size its
+    # instance table for the rendered robots (34 shapes each) plus headroom.
+    known, _ = parser.parse_known_args()
+    rendered = (
+        known.world_count if known.visible_world_count <= 0 else min(known.world_count, known.visible_world_count)
+    )
+    parser.set_defaults(optix_max_instances=max(16384, 40 * rendered + 4096))
     viewer, args = newton.examples.init(parser)
-    # viewer._paused = True
-    viewer.show_visual = False
-    viewer.show_inertia_boxes = True
+    if args.viewer != "optix":
+        # Rasterizing thousands of mesh-heavy robots is slow; inertia boxes
+        # keep the GL viewer interactive. OptiX instances the meshes cheaply.
+        viewer.show_visual = False
+        viewer.show_inertia_boxes = True
 
     example = Example(viewer, args)
 
