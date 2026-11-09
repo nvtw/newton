@@ -130,6 +130,8 @@ class _MatchData:
     # shape 1's contact points, saved by the previous frame's save kernel.
     prev_keys: wp.array[wp.int64]
     prev_pos_world: wp.array[wp.vec3]
+    prev_point0: wp.array[wp.vec3]
+    prev_point1: wp.array[wp.vec3]
     prev_normal: wp.array[wp.vec3]
     prev_count: wp.array[wp.int32]
     # ``[buffer id, contact generation]`` of the previous frame.
@@ -177,6 +179,21 @@ class _MatchData:
     pair_key_stride: wp.int64
 
 
+@wp.func
+def _previous_midpoint(data: _MatchData, old: int, body0: int, body1: int):
+    """Transport sticky witnesses with their bodies before measuring drift."""
+    midpoint = data.prev_pos_world[old]
+    if data.sticky != 0:
+        p0 = data.prev_point0[old]
+        p1 = data.prev_point1[old]
+        if body0 >= 0:
+            p0 = wp.transform_point(data.body_q[body0], p0)
+        if body1 >= 0:
+            p1 = wp.transform_point(data.body_q[body1], p1)
+        midpoint = wp.float32(0.5) * (p0 + p1)
+    return midpoint
+
+
 @wp.kernel(enable_backward=False)
 def _match_contacts_kernel(data: _MatchData):
     """Pass 1: pick each new contact's closest prev candidate and stake
@@ -219,10 +236,8 @@ def _match_contacts_kernel(data: _MatchData):
 
     target_key = data.new_keys[source]
 
-    # World-space midpoint of the two contact points (symmetric in shape 0 /
-    # shape 1).  Matches the quantity persisted by ``_save_sorted_state_kernel``
-    # for the previous frame, so both sides of ``diff`` below measure the same
-    # physical quantity.
+    # World-space midpoint, symmetric in the two endpoints. Sticky candidates
+    # are transported to the current poses before comparison below.
     p0 = data.new_point0[source]
     bid0 = data.shape_body[data.new_shape0[source]]
     if bid0 == -1:
@@ -264,7 +279,7 @@ def _match_contacts_kernel(data: _MatchData):
     best_idx = int(-1)
     best_dist_sq = float(data.pos_threshold_sq)
     for old_idx in range(range_lo, range_hi):
-        old_pos = data.prev_pos_world[old_idx]
+        old_pos = _previous_midpoint(data, old_idx, bid0, bid1)
         diff = new_pos_w - old_pos
         dist_sq = wp.dot(diff, diff)
         # Sticky anchors age through surface slip, not normal compression.
@@ -395,7 +410,7 @@ def _contact_claim_priority(data: _MatchData, k: int, old: int):
         p0 = wp.transform_point(data.body_q[b0], p0)
     if b1 >= 0:
         p1 = wp.transform_point(data.body_q[b1], p1)
-    diff = wp.float32(0.5) * (p0 + p1) - data.prev_pos_world[old]
+    diff = wp.float32(0.5) * (p0 + p1) - _previous_midpoint(data, old, b0, b1)
     dist = wp.dot(diff, diff)
     if data.sticky != 0:
         normal_dist = wp.dot(diff, data.new_normal[source])
@@ -634,8 +649,8 @@ class ContactMatcher:
         shape_index_bits: Number of sort-key bits reserved for each shape index.
         sub_key_bits: Number of low sort-key bits reserved for each contact sub-key.
         pos_threshold: Maximum midpoint drift [m] for a match. Sticky matching
-            measures drift in the current contact plane; other modes use 3-D
-            world-space distance.
+            measures drift from transported body-local witnesses in the current
+            contact plane; other modes use 3-D world-space distance.
         normal_dot_threshold: Minimum normal dot product for a match.
         contact_report: Whether to retain matched flags for reports.
         sticky: Whether to retain canonical sticky geometry history.
@@ -811,9 +826,10 @@ class ContactMatcher:
 
         Distance is measured between world-space contact midpoints
         (``0.5 * (world(point0) + world(point1))``) so the metric is symmetric
-        in shape 0 / shape 1. Sticky matching projects midpoint drift onto
-        the current contact plane; its normal validity is handled separately
-        by the fresh margin-aware gap.
+        in shape 0 / shape 1. Sticky matching transforms previous body-local
+        witnesses with the current poses before projecting midpoint drift onto
+        the contact plane. Thus shared body translation does not expire history.
+        Normal validity is handled separately by the fresh margin-aware gap.
 
         Args:
             sort_keys: Current-frame int64 sort keys.
@@ -837,6 +853,8 @@ class ContactMatcher:
         data = _MatchData()
         data.prev_keys = self._prev_sorted_keys
         data.prev_pos_world = self._prev_pos_world
+        data.prev_point0 = self._prev_point0 if self._sticky else self._prev_pos_world
+        data.prev_point1 = self._prev_point1 if self._sticky else self._prev_pos_world
         data.prev_normal = self._prev_normal
         data.prev_count = self._prev_count
         data.prev_frame = self._prev_frame

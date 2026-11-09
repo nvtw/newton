@@ -28,6 +28,8 @@ def fixture(old_x, new_x, new_keys=None, permutation=None, device="cpu"):
     normals = np.tile([0.0, 0.0, 1.0], (n, 1)).astype(np.float32)
     m._prev_sorted_keys.assign(keys)
     m._prev_pos_world.assign(positions)
+    m._prev_point0.assign(positions)
+    m._prev_point1.assign(positions)
     m._prev_normal.assign(normals)
     m._prev_count.assign(np.array([len(old_x)], dtype=np.int32))
     positions = np.zeros((n, 3), dtype=np.float32)

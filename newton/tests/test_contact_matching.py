@@ -461,10 +461,8 @@ def test_save_empty_history_with_more_worlds_than_capacity(test, device):
     """Clear every reset mask entry and save empty history even at zero capacity."""
     with wp.ScopedDevice(device):
         for capacity in (0, 1):
-            sorter = ContactSorter(capacity)
             matcher = ContactMatcher(
                 capacity,
-                sorter=sorter,
                 shape_world=wp.zeros(1, dtype=wp.int32),
                 world_count=4,
                 shape_index_bits=1,
@@ -1082,6 +1080,37 @@ def test_sticky_matched_rows_preserved(test, device):
             )
 
 
+def test_sticky_common_translation(test, device, use_capture=False):
+    """Shared transport retains body-local contact history across frames."""
+    with wp.ScopedDevice(device):
+        builder = newton.ModelBuilder()
+        for z in (0.0, 0.198):
+            body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, z)))
+            builder.add_shape_sphere(body=body, radius=0.1)
+        model = builder.finalize(device=device)
+        state = model.state()
+        pipeline = newton.CollisionPipeline(model, broad_phase="nxn", contact_matching="sticky")
+        contacts = pipeline.contacts()
+        test.assertEqual(_collide_once(pipeline, state, contacts), 1)
+        points = [getattr(contacts, f"rigid_contact_point{i}").numpy()[0].copy() for i in (0, 1)]
+        if use_capture:
+            with wp.ScopedCapture(device=device) as capture:
+                pipeline.collide(state, contacts)
+        for _ in range(3):
+            q = state.body_q.numpy()
+            q[:, 0] += 0.01
+            q[:, 1] -= 0.02
+            state.body_q.assign(q)
+            if use_capture:
+                wp.capture_launch(capture.graph)
+            else:
+                pipeline.collide(state, contacts)
+            test.assertEqual(int(contacts.rigid_contact_count.numpy()[0]), 1)
+            test.assertEqual(int(contacts.rigid_contact_match_index.numpy()[0]), 0)
+            for i in (0, 1):
+                np.testing.assert_array_equal(getattr(contacts, f"rigid_contact_point{i}").numpy()[0], points[i])
+
+
 def test_sticky_position_threshold_uses_contact_plane(test, device):
     """Sticky drift is measured tangentially while latest remains 3-D."""
     from newton._src.geometry.contact_match import ContactMatcher  # noqa: PLC0415
@@ -1226,10 +1255,14 @@ def _check_sticky_rotated_witness(test, device, *, plane_first, threshold, use_c
             pipeline.collide(state, contacts)
         test.assertEqual(count, int(contacts.rigid_contact_count.numpy()[0]))
         match_index = contacts.rigid_contact_match_index.numpy()[:count]
-        # Sticky matching retains penetrating anchors; separated rows are new contacts.
-        test.assertTrue(np.all(match_index[penetrating] >= 0), "Penetrating contacts must still match")
+        # Large rotation moves the transported midpoint outside the matching
+        # radius; small witness drift can still preserve identity and geometry.
+        if expect_replay:
+            test.assertTrue(np.all(match_index[penetrating] >= 0))
+        else:
+            np.testing.assert_array_equal(match_index[penetrating], MATCH_BROKEN)
         np.testing.assert_array_equal(match_index[separated], MATCH_BROKEN)
-        test.assertEqual(int(contacts.rigid_contact_new_count.numpy()[0]), int(np.count_nonzero(separated)))
+        test.assertEqual(int(contacts.rigid_contact_new_count.numpy()[0]), int(np.count_nonzero(match_index < 0)))
         for field in fields:
             current = getattr(contacts, f"rigid_contact_{field}").numpy()[:count]
             if expect_replay:
@@ -1616,6 +1649,18 @@ add_function_test(
     "test_sticky_matched_rows_preserved",
     test_sticky_matched_rows_preserved,
     devices=devices,
+)
+add_function_test(
+    TestContactMatchingSticky,
+    "test_sticky_common_translation",
+    test_sticky_common_translation,
+    devices=devices,
+)
+add_function_test(
+    TestContactMatchingSticky,
+    "test_sticky_common_translation_cuda_graph",
+    partial(test_sticky_common_translation, use_capture=True),
+    devices=cuda_devices,
 )
 add_function_test(
     TestContactMatchingSticky,
