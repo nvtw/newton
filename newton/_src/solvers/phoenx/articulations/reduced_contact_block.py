@@ -24,6 +24,7 @@ from newton._src.solvers.phoenx.articulations.reduced_contact import (
 from newton._src.solvers.phoenx.body import BodyContainer, ReducedArticulationData, mat33_from_sym6
 from newton._src.solvers.phoenx.constraints.constraint_block import (
     BLOCK_LAMBDA_INF,
+    BlockVector2Update,
     block_solve_accumulated_inverse_bounded_1,
 )
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
@@ -2639,6 +2640,50 @@ def _make_solve_generalized_contact_tile_ops(max_dofs: int):
 
 
 @wp.func
+def _patch_normal_row_update(
+    bias: wp.float32,
+    lambda_old: wp.float32,
+    velocity: wp.float32,
+    inverse_mass: wp.float32,
+    use_bias: wp.bool,
+    idt: wp.float32,
+    mass_coeff: wp.float32,
+    impulse_coeff: wp.float32,
+    sor_boost: wp.float32,
+) -> wp.vec3:
+    """Project one point's normal row of a friction patch from its stored bias and impulse.
+
+    ``inverse_mass`` is the row's ``J M^-1 J^T``. Returns the impulse increment, the
+    new accumulated impulse, and the normal load the patch's friction cone sees.
+    """
+    speculative = bias > wp.float32(0.0)
+    if (speculative and not use_bias) or not (inverse_mass > wp.float32(1.0e-12)):
+        return wp.vec3(0.0, lambda_old, 0.0)
+    if not use_bias:
+        bias = wp.float32(0.0)
+    row_mass_coeff = mass_coeff
+    row_impulse_coeff = impulse_coeff
+    if speculative:
+        row_mass_coeff = wp.float32(1.0)
+        row_impulse_coeff = wp.float32(0.0)
+    effective_mass = wp.float32(1.0) / inverse_mass
+    normal_update = block_solve_accumulated_inverse_bounded_1(
+        effective_mass,
+        velocity + bias,
+        lambda_old,
+        row_mass_coeff,
+        row_impulse_coeff,
+        sor_boost,
+        wp.float32(0.0),
+        BLOCK_LAMBDA_INF,
+    )
+    load = normal_update.lambda_new
+    if speculative and bias > idt * wp.float32(0.002):
+        load = wp.float32(0.0)
+    return wp.vec3(normal_update.delta, normal_update.lambda_new, load)
+
+
+@wp.func
 def _solve_patch_normal_row(
     cc: ContactContainer,
     contact: wp.int32,
@@ -2655,34 +2700,55 @@ def _solve_patch_normal_row(
     ``inverse_mass`` is the row's ``J M^-1 J^T``. Returns the impulse increment and
     the normal load the patch's friction cone sees.
     """
-    bias = cc_get_bias(cc, contact)
-    speculative = bias > wp.float32(0.0)
-    if (speculative and not use_bias) or not (inverse_mass > wp.float32(1.0e-12)):
-        return wp.vec2(0.0)
-    if not use_bias:
-        bias = wp.float32(0.0)
-    row_mass_coeff = mass_coeff
-    row_impulse_coeff = impulse_coeff
-    if speculative:
-        row_mass_coeff = wp.float32(1.0)
-        row_impulse_coeff = wp.float32(0.0)
-    effective_mass = wp.float32(1.0) / inverse_mass
     lambda_old = cc_get_normal_lambda(cc, contact)
-    normal_update = block_solve_accumulated_inverse_bounded_1(
-        effective_mass,
-        velocity + bias,
+    update = _patch_normal_row_update(
+        cc_get_bias(cc, contact),
         lambda_old,
-        row_mass_coeff,
-        row_impulse_coeff,
+        velocity,
+        inverse_mass,
+        use_bias,
+        idt,
+        mass_coeff,
+        impulse_coeff,
         sor_boost,
-        wp.float32(0.0),
-        BLOCK_LAMBDA_INF,
     )
-    cc_set_normal_lambda(cc, contact, normal_update.lambda_new)
-    load = normal_update.lambda_new
-    if speculative and bias > idt * wp.float32(0.002):
-        load = wp.float32(0.0)
-    return wp.vec2(normal_update.delta, load)
+    if update[1] != lambda_old:
+        cc_set_normal_lambda(cc, contact, update[1])
+    return wp.vec2(update[0], update[2])
+
+
+@wp.func
+def _patch_tangent_rows_update(
+    lambda_old: wp.vec2f,
+    velocity: wp.vec2f,
+    bias_t: wp.vec2f,
+    inverse_mass: wp.vec3,
+    normal_load_sum: wp.float32,
+    friction: wp.float32,
+    friction_dynamic: wp.float32,
+    sor_boost: wp.float32,
+) -> BlockVector2Update:
+    """Project the two tangent rows of a friction patch from its accumulated impulse.
+
+    ``inverse_mass`` holds the tangent block ``J M^-1 J^T`` as ``(k00, k01, k11)`` and
+    ``bias_t`` the mean tangent bias of the patch's points.
+    """
+    k00 = inverse_mass[0]
+    k01 = inverse_mass[1]
+    k11 = inverse_mass[2]
+    det = k00 * k11 - k01 * k01
+    effective = wp.mat22f(0.0, 0.0, 0.0, 0.0)
+    if det > wp.float32(1.0e-12):
+        inv_det = wp.float32(1.0) / det
+        effective = wp.mat22f(
+            k11 * inv_det,
+            -k01 * inv_det,
+            -k01 * inv_det,
+            k00 * inv_det,
+        )
+    return contact_patch_project_velocity_update(
+        lambda_old, velocity, bias_t, effective, normal_load_sum, friction, friction_dynamic, sor_boost
+    )
 
 
 @wp.func
@@ -2723,24 +2789,11 @@ def _solve_patch_tangent_rows(
         column_point += wp.int32(1)
     inv_count = wp.float32(1.0) / wp.float32(column_points)
     bias_t *= inv_count
-    k00 = inverse_mass[0]
-    k01 = inverse_mass[1]
-    k11 = inverse_mass[2]
-    det = k00 * k11 - k01 * k01
-    effective = wp.mat22f(0.0, 0.0, 0.0, 0.0)
-    if det > wp.float32(1.0e-12):
-        inv_det = wp.float32(1.0) / det
-        effective = wp.mat22f(
-            k11 * inv_det,
-            -k01 * inv_det,
-            -k01 * inv_det,
-            k00 * inv_det,
-        )
-    tangent_update = contact_patch_project_velocity_update(
+    tangent_update = _patch_tangent_rows_update(
         patch_lambda[packed_articulation, column_ordinal],
         velocity,
         bias_t,
-        effective,
+        inverse_mass,
         normal_load_sum,
         contact_get_friction(columns, column),
         contact_get_friction_dynamic(columns, column),

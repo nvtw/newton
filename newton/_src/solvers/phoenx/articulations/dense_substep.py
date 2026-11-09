@@ -89,8 +89,8 @@ from newton._src.solvers.phoenx.articulations.reduced_contact_block import (
     _POINTS_PER_PAGE,
     _gather_packed_contact_points,
     _gather_packed_patch_points,
-    _solve_patch_normal_row,
-    _solve_patch_tangent_rows,
+    _patch_normal_row_update,
+    _patch_tangent_rows_update,
     _solve_reduced_contact_point,
     _store_point_row_effective_mass,
     _sync_contact_warp,
@@ -100,6 +100,8 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     ContactColumnContainer,
     ContactViews,
     contact_get_contact_count,
+    contact_get_friction,
+    contact_get_friction_dynamic,
 )
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     DEFAULT_DAMPING_RATIO,
@@ -108,9 +110,15 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
 )
 from newton._src.solvers.phoenx.constraints.contact_container import (
     ContactContainer,
+    cc_get_bias,
+    cc_get_bias_t1,
+    cc_get_bias_t2,
     cc_get_normal_lambda,
     cc_get_tangent1_lambda,
     cc_get_tangent2_lambda,
+    cc_set_normal_lambda,
+    cc_set_tangent1_lambda,
+    cc_set_tangent2_lambda,
 )
 
 PAGE_ROWS = 24
@@ -365,10 +373,11 @@ def make_dense_substep_kernel(
     # recurrences and the contact pages share one region; the rates and a solve vector follow.
     tree_words = 3 * _MOTION_STRIDE * _LANES
     # The first PAGE_ROWS lanes own contact rows: their vectors z by path position, the DOFs
-    # of those positions as bytes, and their start velocities. The solve vector ends with a
+    # of those positions as bytes, their start velocities, z . z, and the points' normal loads.
+    # The solve vector ends with a
     # spare DOF that the padding of short paths addresses.
     row_words = PAGE_ROWS * path_capacity
-    contact_words = row_words + (row_words + 3) // 4 + PAGE_ROWS
+    contact_words = row_words + (row_words + 3) // 4 + 2 * PAGE_ROWS + _CHUNK_POINTS
     qd_offset = max(tree_words, contact_words, _INERTIA_STRIDE * joint_capacity)
     scratch_words = qd_offset + 2 * max_dofs + 1
     ops = make_dense_tree_ops(max_dofs, joint_capacity, entry_capacity, subtree_capacity, scratch_words)
@@ -387,6 +396,8 @@ def make_dense_substep_kernel(
     z_base = layout.scratch
     z_dof_byte = 4 * (z_base + row_words)
     start_velocity_base = z_base + row_words + (row_words + 3) // 4
+    row_mass_base = start_velocity_base + PAGE_ROWS
+    point_load_base = row_mass_base + PAGE_ROWS
     gather = _gather_packed_patch_points if patch else _gather_packed_contact_points
     qd_base = layout.scratch + qd_offset
     rhs_base = qd_base + max_dofs
@@ -625,6 +636,49 @@ def make_dense_substep_kernel(
             column = point_column[packed_articulation, chunk[0] + lane]
             point_normal = normal[packed_articulation, chunk[0] + lane]
             point_tangent = tangent0[packed_articulation, chunk[0] + lane]
+        # Patch friction sweeps without global memory: a point's lane keeps its normal row's
+        # bias and impulse, and the lane of a column's first tangent row keeps the column's
+        # points, mean tangent bias, friction, and impulse.
+        bias_n = wp.float32(0.0)
+        lambda_n = wp.float32(0.0)
+        column_first = wp.int32(0)
+        column_points = wp.int32(0)
+        column_ordinal = wp.int32(0)
+        column_owner = wp.bool(False)
+        bias_t = wp.vec2f(0.0, 0.0)
+        friction = wp.float32(0.0)
+        friction_dynamic = wp.float32(0.0)
+        lambda_t = wp.vec2f(0.0, 0.0)
+        if wp.static(patch):
+            if lane < chunk_points:
+                bias_n = cc_get_bias(cc, contact)
+                lambda_n = cc_get_normal_lambda(cc, contact)
+            elif lane < row_count and ((lane - chunk_points) & wp.int32(1)) == wp.int32(0):
+                column_owner = wp.bool(True)
+                column_ordinal = chunk[2] + ((lane - chunk_points) >> wp.int32(1))
+                # The chunk's columns start after the points of a column that began earlier.
+                walk = chunk[0]
+                while walk < chunk[1] and walk > wp.int32(0):
+                    if point_column[packed_articulation, walk] != point_column[packed_articulation, walk - 1]:
+                        break
+                    walk += wp.int32(1)
+                for _earlier in range(column_ordinal - chunk[2]):
+                    earlier_column = point_column[packed_articulation, walk]
+                    while walk < point_total and point_column[packed_articulation, walk] == earlier_column:
+                        walk += wp.int32(1)
+                column_first = walk
+                patch_column = point_column[packed_articulation, walk]
+                while walk < point_total and point_column[packed_articulation, walk] == patch_column:
+                    if use_bias:
+                        column_contact = point_contact[packed_articulation, walk]
+                        bias_t[0] += cc_get_bias_t1(cc, column_contact)
+                        bias_t[1] += cc_get_bias_t2(cc, column_contact)
+                    column_points += wp.int32(1)
+                    walk += wp.int32(1)
+                bias_t *= wp.float32(1.0) / wp.float32(column_points)
+                friction = contact_get_friction(columns, patch_column)
+                friction_dynamic = contact_get_friction_dynamic(columns, patch_column)
+                lambda_t = patch_lambda[packed_articulation, column_ordinal]
 
         # Row r: J_r along the root path of its body, its velocity J_r qd plus the gathered
         # external part, then z_r = L^-T J_r^T leaves first, padded with zeros on the spare DOF.
@@ -662,6 +716,7 @@ def make_dense_substep_kernel(
                 _store(shared, wp.int32(z_base) + wp.int32(PAGE_ROWS) * position + lane, wp.float32(0.0))
                 _store_u8(shared, wp.int32(z_dof_byte) + wp.int32(PAGE_ROWS) * position + lane, wp.int32(max_dofs))
             _store(shared, wp.int32(start_velocity_base) + lane, velocity)
+            _store(shared, wp.int32(row_mass_base) + lane, inverse_mass)
             if wp.static(not patch):
                 _store_point_row_effective_mass(
                     bodies,
@@ -720,9 +775,9 @@ def make_dense_substep_kernel(
                 if wp.static(patch):
                     delta_n = wp.float32(0.0)
                     if lane == point:
-                        update = _solve_patch_normal_row(
-                            cc,
-                            contact,
+                        update = _patch_normal_row_update(
+                            bias_n,
+                            lambda_n,
                             velocity + row_dot(shared, point),
                             inverse_mass,
                             use_bias,
@@ -732,7 +787,10 @@ def make_dense_substep_kernel(
                             sor_boost,
                         )
                         delta_n = update[0]
-                        normal_load[packed_articulation, chunk[0] + point] = update[1]
+                        lambda_n = update[1]
+                        _store(shared, wp.int32(point_load_base) + point, update[2])
+                        # Columns that continue in another chunk read the load from there.
+                        normal_load[packed_articulation, chunk[0] + point] = update[2]
                     add_row(shared, lane, point, _lane_float(delta_n, point))
                 else:
                     row = wp.int32(3) * point
@@ -768,47 +826,51 @@ def make_dense_substep_kernel(
                     add_row(shared, lane, row + wp.int32(2), _lane_float(delta[2], point))
             if wp.static(patch):
                 # The chunk's columns' tangent rows, after the normals; they read the normal loads.
-                point = chunk[0]
-                while point < chunk[1] and point > wp.int32(0):
-                    if point_column[packed_articulation, point] != point_column[packed_articulation, point - 1]:
-                        break
-                    point += wp.int32(1)
-                ordinal = chunk[2]
-                while point < chunk[1]:
-                    patch_column = point_column[packed_articulation, point]
-                    row = chunk_points + wp.int32(2) * (ordinal - chunk[2])
+                for column_offset in range(chunk[3] - chunk[2]):
+                    row = chunk_points + wp.int32(2) * wp.int32(column_offset)
                     delta_t = wp.vec2f(0.0, 0.0)
-                    if lane == wp.int32(0):
-                        delta_t = _solve_patch_tangent_rows(
-                            columns,
-                            cc,
-                            patch_column,
-                            point,
-                            point_total,
-                            packed_articulation,
-                            ordinal,
-                            point_contact,
-                            point_column,
-                            normal_load,
-                            patch_lambda,
+                    if lane == row:
+                        load_sum = wp.float32(0.0)
+                        for offset in range(column_points):
+                            column_point = column_first + wp.int32(offset)
+                            if column_point < chunk[1]:
+                                load_sum += _load(shared, wp.int32(point_load_base) + column_point - chunk[0])
+                            else:
+                                load_sum += normal_load[packed_articulation, column_point]
+                        tangent_update = _patch_tangent_rows_update(
+                            lambda_t,
                             wp.vec2f(
                                 _load(shared, wp.int32(start_velocity_base) + row) + row_dot(shared, row),
                                 _load(shared, wp.int32(start_velocity_base) + row + wp.int32(1))
                                 + row_dot(shared, row + wp.int32(1)),
                             ),
+                            bias_t,
                             wp.vec3(
-                                row_product(shared, row, row),
+                                _load(shared, wp.int32(row_mass_base) + row),
                                 row_product(shared, row, row + wp.int32(1)),
-                                row_product(shared, row + wp.int32(1), row + wp.int32(1)),
+                                _load(shared, wp.int32(row_mass_base) + row + wp.int32(1)),
                             ),
-                            use_bias,
+                            load_sum,
+                            friction,
+                            friction_dynamic,
                             sor_boost,
                         )
-                    add_row(shared, lane, row, _lane_float(delta_t[0], 0))
-                    add_row(shared, lane, row + wp.int32(1), _lane_float(delta_t[1], 0))
-                    ordinal += wp.int32(1)
-                    while point < point_total and point_column[packed_articulation, point] == patch_column:
-                        point += wp.int32(1)
+                        delta_t = tangent_update.delta
+                        lambda_t = tangent_update.lambda_new
+                    add_row(shared, lane, row, _lane_float(delta_t[0], row))
+                    add_row(shared, lane, row + wp.int32(1), _lane_float(delta_t[1], row))
+        if wp.static(patch):
+            # Store the swept impulses; a patch shares its impulse evenly among its points.
+            if sweeps > wp.int32(0):
+                if lane < chunk_points:
+                    cc_set_normal_lambda(cc, contact, lambda_n)
+                elif column_owner:
+                    patch_lambda[packed_articulation, column_ordinal] = lambda_t
+                    point_lambda = lambda_t * (wp.float32(1.0) / wp.float32(column_points))
+                    for offset in range(column_points):
+                        column_contact = point_contact[packed_articulation, column_first + wp.int32(offset)]
+                        cc_set_tangent1_lambda(cc, column_contact, point_lambda[0])
+                        cc_set_tangent2_lambda(cc, column_contact, point_lambda[1])
 
         # M^-1 J^T lambda = L^-1 w.
         solve_lower(shared, wp.int32(rhs_base), n, lane)
