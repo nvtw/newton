@@ -180,18 +180,26 @@ class _MatchData:
 
 
 @wp.func
-def _previous_midpoint(data: _MatchData, old: int, body0: int, body1: int):
-    """Transport sticky witnesses with their bodies before measuring drift."""
-    midpoint = data.prev_pos_world[old]
-    if data.sticky != 0:
-        p0 = data.prev_point0[old]
-        p1 = data.prev_point1[old]
-        if body0 >= 0:
-            p0 = wp.transform_point(data.body_q[body0], p0)
-        if body1 >= 0:
-            p1 = wp.transform_point(data.body_q[body1], p1)
-        midpoint = wp.float32(0.5) * (p0 + p1)
-    return midpoint
+def _match_distance_sq(data: _MatchData, old: int, p0w: wp.vec3, p1w: wp.vec3, body0: int, body1: int):
+    """Squared drift [m^2] of a current contact from previous contact ``old``.
+
+    Sticky matching transports the previous body-local witnesses with their
+    bodies and takes the larger drift of the two. Compression moves the
+    witnesses apart along the normal but keeps each on its own surface, so it
+    does not age a match; a witness that jumps to another feature of its body,
+    such as the opposite face of a thin plate, does. Other modes compare
+    world-space midpoints.
+    """
+    if data.sticky == 0:
+        diff = wp.float32(0.5) * (p0w + p1w) - data.prev_pos_world[old]
+        return wp.dot(diff, diff)
+    q0 = data.prev_point0[old]
+    q1 = data.prev_point1[old]
+    if body0 >= 0:
+        q0 = wp.transform_point(data.body_q[body0], q0)
+    if body1 >= 0:
+        q1 = wp.transform_point(data.body_q[body1], q1)
+    return wp.max(wp.length_sq(p0w - q0), wp.length_sq(p1w - q1))
 
 
 @wp.kernel(enable_backward=False)
@@ -236,8 +244,7 @@ def _match_contacts_kernel(data: _MatchData):
 
     target_key = data.new_keys[source]
 
-    # World-space midpoint, symmetric in the two endpoints. Sticky candidates
-    # are transported to the current poses before comparison below.
+    # World-space witnesses of the new contact; see _match_distance_sq.
     p0 = data.new_point0[source]
     bid0 = data.shape_body[data.new_shape0[source]]
     if bid0 == -1:
@@ -252,7 +259,6 @@ def _match_contacts_kernel(data: _MatchData):
     else:
         p1w = wp.transform_point(data.body_q[bid1], p1)
 
-    new_pos_w = 0.5 * (p0w + p1w)
     new_n = data.new_normal[source]
     fresh_gap = wp.dot(p1w - p0w, new_n) - (data.new_margin0[source] + data.new_margin1[source])
     if data.sticky != 0 and fresh_gap > wp.float32(0.0):
@@ -279,16 +285,7 @@ def _match_contacts_kernel(data: _MatchData):
     best_idx = int(-1)
     best_dist_sq = float(data.pos_threshold_sq)
     for old_idx in range(range_lo, range_hi):
-        old_pos = _previous_midpoint(data, old_idx, bid0, bid1)
-        diff = new_pos_w - old_pos
-        dist_sq = wp.dot(diff, diff)
-        # Sticky anchors age through surface slip, not normal compression.
-        if data.sticky != 0:
-            normal_dist = wp.dot(diff, new_n)
-            dist_sq = wp.max(dist_sq - normal_dist * normal_dist, wp.float32(0.0))
-        old_n = data.prev_normal[old_idx]
-        ndot = wp.dot(new_n, old_n)
-
+        dist_sq = _match_distance_sq(data, old_idx, p0w, p1w, bid0, bid1)
         if dist_sq <= best_dist_sq:
             old_n = data.prev_normal[old_idx]
             ndot = wp.dot(new_n, old_n)
@@ -410,12 +407,7 @@ def _contact_claim_priority(data: _MatchData, k: int, old: int):
         p0 = wp.transform_point(data.body_q[b0], p0)
     if b1 >= 0:
         p1 = wp.transform_point(data.body_q[b1], p1)
-    diff = wp.float32(0.5) * (p0 + p1) - _previous_midpoint(data, old, b0, b1)
-    dist = wp.dot(diff, diff)
-    if data.sticky != 0:
-        normal_dist = wp.dot(diff, data.new_normal[source])
-        dist = wp.max(dist - normal_dist * normal_dist, wp.float32(0))
-    return _pack_claim(dist, data.new_keys[source])
+    return _pack_claim(_match_distance_sq(data, old, p0, p1, b0, b1), data.new_keys[source])
 
 
 @wp.func
@@ -649,8 +641,8 @@ class ContactMatcher:
         shape_index_bits: Number of sort-key bits reserved for each shape index.
         sub_key_bits: Number of low sort-key bits reserved for each contact sub-key.
         pos_threshold: Maximum midpoint drift [m] for a match. Sticky matching
-            measures drift from transported body-local witnesses in the current
-            contact plane; other modes use 3-D world-space distance.
+            measures the larger drift of the two body-local witnesses, transported
+            with their bodies; other modes use 3-D world-space midpoint distance.
         normal_dot_threshold: Minimum normal dot product for a match.
         contact_report: Whether to retain matched flags for reports.
         sticky: Whether to retain canonical sticky geometry history.
@@ -826,10 +818,11 @@ class ContactMatcher:
 
         Distance is measured between world-space contact midpoints
         (``0.5 * (world(point0) + world(point1))``) so the metric is symmetric
-        in shape 0 / shape 1. Sticky matching transforms previous body-local
-        witnesses with the current poses before projecting midpoint drift onto
-        the contact plane. Thus shared body translation does not expire history.
-        Normal validity is handled separately by the fresh margin-aware gap.
+        in shape 0 / shape 1. Sticky matching instead transforms the previous
+        body-local witnesses with the current poses and measures each witness's
+        drift on its own body, so shared body motion and normal compression keep
+        history while a jump to another feature expires it. Normal validity is
+        handled separately by the fresh margin-aware gap.
 
         Args:
             sort_keys: Current-frame int64 sort keys.

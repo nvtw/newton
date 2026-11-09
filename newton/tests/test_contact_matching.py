@@ -1111,14 +1111,15 @@ def test_sticky_common_translation(test, device, use_capture=False):
                 np.testing.assert_array_equal(getattr(contacts, f"rigid_contact_point{i}").numpy()[0], points[i])
 
 
-def test_sticky_position_threshold_uses_contact_plane(test, device):
-    """Sticky drift is measured tangentially while latest remains 3-D."""
+def test_sticky_position_threshold_uses_body_witnesses(test, device):
+    """Sticky drift follows each witness on its own body while latest remains 3-D."""
     from newton._src.geometry.contact_match import ContactMatcher  # noqa: PLC0415
 
     capacity = 1
     threshold = 0.0005
 
-    def match(displacement, *, sticky, separation=0.0, margin=0.0):
+    def match(*, sticky, body_z=0.0, point0=(0.0, 0.0, 0.0), point1=(0.0, 0.0, 0.0), margin=0.0):
+        """Match a ground (shape 0) to body (shape 1) contact saved at the origin with the body at rest."""
         matcher = ContactMatcher(
             capacity=capacity,
             shape_world=wp.full(2, -1, dtype=wp.int32, device=device),
@@ -1132,23 +1133,23 @@ def test_sticky_position_threshold_uses_contact_plane(test, device):
         matcher._prev_pos_world.assign(np.zeros((1, 3), dtype=np.float32))
         matcher._prev_normal.assign(np.array([[0.0, 0.0, 1.0]], dtype=np.float32))
         matcher._prev_count.assign(np.array([1], dtype=np.int32))
+        if sticky:
+            matcher._prev_point0.assign(np.zeros((1, 3), dtype=np.float32))
+            matcher._prev_point1.assign(np.zeros((1, 3), dtype=np.float32))
 
-        point0 = np.array([displacement], dtype=np.float32)
-        point1 = point0.copy()
-        point1[0, 2] += separation
         match_index = wp.full(capacity, MATCH_NOT_FOUND, dtype=wp.int32, device=device)
         matcher.match(
             sort_keys=wp.zeros(capacity, dtype=wp.int64, device=device),
             contact_count=wp.array([1], dtype=wp.int32, device=device),
-            point0=wp.array(point0, dtype=wp.vec3, device=device),
-            point1=wp.array(point1, dtype=wp.vec3, device=device),
+            point0=wp.array([point0], dtype=wp.vec3, device=device),
+            point1=wp.array([point1], dtype=wp.vec3, device=device),
             shape0=wp.zeros(capacity, dtype=wp.int32, device=device),
             shape1=wp.ones(capacity, dtype=wp.int32, device=device),
             normal=wp.array([[0.0, 0.0, 1.0]], dtype=wp.vec3, device=device),
             margin0=wp.full(capacity, margin, dtype=wp.float32, device=device),
             margin1=wp.zeros(capacity, dtype=wp.float32, device=device),
-            body_q=wp.array([wp.transform_identity()], dtype=wp.transform, device=device),
-            shape_body=wp.full(2, -1, dtype=wp.int32, device=device),
+            body_q=wp.array([wp.transform((0.0, 0.0, body_z), wp.quat_identity())], dtype=wp.transform, device=device),
+            shape_body=wp.array([-1, 0], dtype=wp.int32, device=device),
             match_index_out=match_index,
             buffer_id=1,
             match_generation_out=wp.zeros(1, dtype=wp.int32, device=device),
@@ -1157,20 +1158,23 @@ def test_sticky_position_threshold_uses_contact_plane(test, device):
         return int(match_index.numpy()[0])
 
     with wp.ScopedDevice(device):
-        # Motion well beyond 0.5 mm along the normal does not age a sticky
-        # anchor. Its validity in that direction is governed by fresh gap and
-        # margins. Latest matching retains its world-space 3-D identity metric.
-        normal_displacement = (0.0, 0.0, 0.002)
-        test.assertEqual(match(normal_displacement, sticky=True), 0)
-        test.assertEqual(match(normal_displacement, sticky=False), MATCH_BROKEN)
+        # Compression moves the body, not its witness on the body: a sticky
+        # anchor survives 2 mm of normal approach. Latest matching keeps its
+        # world-space 3-D midpoint metric.
+        test.assertEqual(match(sticky=True, body_z=-0.002), 0)
+        test.assertEqual(match(sticky=False, body_z=-0.002), MATCH_BROKEN)
 
-        # Normal separation is independent of tangential drift: the configured
-        # margin can retain the anchor, but separation beyond it cannot.
-        test.assertEqual(match(normal_displacement, sticky=True, separation=0.002, margin=0.003), 0)
-        test.assertEqual(match(normal_displacement, sticky=True, separation=0.002), MATCH_BROKEN)
+        # Normal separation is governed by the fresh gap: the configured margin
+        # can retain the anchor, but separation beyond it cannot.
+        test.assertEqual(match(sticky=True, body_z=0.002, margin=0.003), 0)
+        test.assertEqual(match(sticky=True, body_z=0.002), MATCH_BROKEN)
 
-        # The same displacement in the contact plane invalidates sticky reuse.
-        test.assertEqual(match((0.002, 0.0, 0.0), sticky=True), MATCH_BROKEN)
+        # A witness that jumps along the normal to another feature of its body,
+        # such as the opposite face of a thin plate, expires the anchor.
+        test.assertEqual(match(sticky=True, point1=(0.0, 0.0, -0.002)), MATCH_BROKEN)
+
+        # So does drift in the contact plane.
+        test.assertEqual(match(sticky=True, point0=(0.002, 0.0, 0.0), point1=(0.002, 0.0, 0.0)), MATCH_BROKEN)
 
 
 def _build_rolling_cylinder_scene(device, *, plane_first):
@@ -1664,8 +1668,8 @@ add_function_test(
 )
 add_function_test(
     TestContactMatchingSticky,
-    "test_sticky_position_threshold_uses_contact_plane",
-    test_sticky_position_threshold_uses_contact_plane,
+    "test_sticky_position_threshold_uses_body_witnesses",
+    test_sticky_position_threshold_uses_body_witnesses,
     devices=devices,
 )
 add_function_test(
