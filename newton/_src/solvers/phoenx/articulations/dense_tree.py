@@ -49,7 +49,7 @@ from newton._src.solvers.phoenx.articulations.reduced_contact_block import (
 from newton._src.solvers.phoenx.body import BodyContainer, DenseTreeData
 from newton._src.solvers.phoenx.constraints.contact_container import ContactContainer
 
-DENSE_DOF_BUCKETS = (16, 32, 48, 64)
+DENSE_DOF_BUCKETS = (16, 24, 32, 40, 48, 56, 64)
 """Compile-time DOF capacities of the dense backend; larger trees keep the articulated-body path."""
 
 _LANES = 32

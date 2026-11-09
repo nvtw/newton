@@ -363,7 +363,7 @@ def make_dense_substep_kernel(
     """
     # Scratch after the factor's tables: the composite inertias while factoring, then the tree
     # recurrences and the contact pages share one region; the rates and a solve vector follow.
-    tree_words = 4 * _MOTION_STRIDE * _LANES
+    tree_words = 3 * _MOTION_STRIDE * _LANES
     # The first PAGE_ROWS lanes own contact rows: their vectors z by path position, the DOFs
     # of those positions as bytes, and their start velocities. The solve vector ends with a
     # spare DOF that the padding of short paths addresses.
@@ -379,8 +379,9 @@ def make_dense_substep_kernel(
     restore = ops.restore
     solve_mass = ops.solve
     solve_lower = ops.solve_lower
+    # The link frames are formed before and after the recurrences on the three spatial arrays.
     pose_base = layout.scratch
-    first_base = pose_base + _MOTION_STRIDE * _LANES
+    first_base = layout.scratch
     second_base = first_base + _MOTION_STRIDE * _LANES
     third_base = second_base + _MOTION_STRIDE * _LANES
     z_base = layout.scratch
