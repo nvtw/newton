@@ -245,6 +245,49 @@ mechanism is a serial chain; a point-by-point shuffle chain measured
 uniform splitting 1 or 2 diverged; splitting by manifolds per mechanism
 sank through parts.
 
+## Dense reduced backend (2026-11-09)
+
+`reduced_backend="dense"` factors each tree's generalized mass as `M = L^T L`
+on one warp (CRBA, leaves-first elimination without fill-in, rows in path
+layout) and plugs into the reduced pipeline at its operator seams: the factor,
+the advance's generalized solve, and contact rows `J`, `W = M^-1 J^T`. Gather,
+point/patch PGS tiles, publish, and the midpoint step are shared.
+
+G1 RL recipe (patch friction, 3 substeps x (2 + 1 relax)), standing, solo GPU:
+
+| Worlds | `aba` env steps/s | `dense` env steps/s | Ratio |
+| --- | --- | --- | --- |
+| 4,096 (two interleaved rounds) | 1.4027M / 1.4026M | 1.4662M / 1.4665M | 1.045 |
+| 8,192 | 1.738M | 1.751M | 1.007 |
+
+nsys GPU time per substep at 4,096 worlds (us, matched state, 4 contacts per
+world): rows 185.5 -> 148.4, factor 124.2 -> 99.7, advance + fused advance and
+publish 211.3 -> 240.6, everything shared 367 -> 367; total 888 -> 856.
+
+Kernel lessons (clock64 phase timers, nsys):
+
+- Every per-articulation inner loop was latency-bound: per-world topology
+  pointer chases (`joint_parent -> body_joint -> joint_qd_start`) cost
+  ~600 cycles per step, and interleaved shared stores serialize following
+  loads. Stage per-articulation inputs with fixed-count unrolled loads, keep
+  topology in per-template tables, and write passes in pull form (loads only
+  in inner loops, independent partial sums).
+- Dense inverses lose: register Gauss-Jordan (n^3 issue-bound) took 198 us
+  and shared-memory left-looking Cholesky 110 us per G1 factor at 4,096
+  worlds versus 62 us for the two articulated-body factor kernels. The
+  tree-sparse factor by height levels takes 50 us: the root's six free-joint
+  DOFs see every other DOF as a descendant, and 16 height levels remain
+  sequential.
+- Relax passes must refactor at the integrated pose. Reusing the substep's
+  factor raised the G1 drive-convergence joint error versus the 20x8
+  reference from 0.024 to 0.028 rad RMS and the foot tangent/normal error
+  from 1.6 to 8.5; refactoring matches the ABA backend (0.024 rad, 1.9).
+- Remaining cost is the shared reduced pipeline: gather, PGS tiles, publish,
+  and initialization take 367 of 856 us, and the advance depth walks another
+  241 us. Operator replacement alone cannot reach 1.5x, and the gain shrinks
+  at 8,192 worlds where the issue-heavier dense kernels saturate; a larger
+  win needs the fused two-kernel substep of the design study.
+
 ## Batched humanoid comparison
 
 Measured 2026-08-04 on an RTX PRO 6000 Blackwell with 20,000 worlds,

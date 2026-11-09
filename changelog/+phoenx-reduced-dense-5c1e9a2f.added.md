@@ -1,0 +1,1 @@
+Add `reduced_backend="dense"` to `SolverPhoenX` reduced articulations, which factors each tree's generalized mass with a tree-sparse dense factorization on one warp instead of articulated-body recurrences; trees beyond 64 DOFs keep the articulated-body path.

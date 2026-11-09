@@ -1361,6 +1361,65 @@ def _bind_rows_dtype_annotations(func, rows_dtype, *names):
     return func
 
 
+@wp.func
+def _store_point_row_effective_mass(
+    bodies: BodyContainer,
+    cc: ContactContainer,
+    point_contact: wp.array2d[wp.int32],
+    packed_articulation: wp.int32,
+    row: wp.int32,
+    body: wp.int32,
+    wrench: wp.spatial_vector,
+    body_pair: wp.int32,
+    wrench_pair: wp.spatial_vector,
+    inverse_mass: wp.float32,
+    prepare: wp.bool,
+):
+    """Store a point row's effective mass from its articulated inverse mass ``J M^-1 J^T``."""
+    unconstrained = wp.float32(0.0)
+    for side in range(2):
+        side_body = body
+        side_wrench = wrench
+        if side == 1:
+            side_body = body_pair
+            side_wrench = wrench_pair
+        if side_body >= wp.int32(0):
+            slot = side_body + wp.int32(1)
+            linear = wp.spatial_top(side_wrench)
+            com = wp.transform_get_translation(bodies.reduced.body_q_com[side_body])
+            angular = wp.spatial_bottom(side_wrench) - wp.cross(com, linear)
+            inertia = mat33_from_sym6(bodies.inverse_inertia_world[slot])
+            unconstrained += bodies.inverse_mass[slot] * wp.dot(linear, linear) + wp.dot(angular, inertia * angular)
+    # Mobility is quadratic in the generalized contact Jacobian. Allow
+    # 64 float32 ULPs of Jacobian cancellation, squared, so real small
+    # mobility survives while a blocked row cannot acquire huge mass.
+    tolerance = wp.float32(5.820766091346741e-11) * unconstrained
+    effective_mass = wp.float32(0.0)
+    if inverse_mass > wp.max(tolerance, wp.float32(1.0e-12)):
+        effective_mass = wp.float32(1.0) / inverse_mass
+    point = row // wp.int32(3)
+    axis = row - wp.int32(3) * point
+    contact = point_contact[packed_articulation, point]
+    if axis == wp.int32(0):
+        if prepare:
+            bias = cc_get_bias(cc, contact)
+            if bias < wp.float32(0.0) and unconstrained > wp.float32(1.0e-12):
+                # Reuse the response already built for the normal row.
+                bias *= wp.clamp(inverse_mass / unconstrained, wp.float32(0.0), wp.float32(1.0))
+                cc_set_bias(cc, contact, bias)
+        cc_set_eff_n(cc, contact, effective_mass)
+        if effective_mass == wp.float32(0.0):
+            cc_set_normal_lambda(cc, contact, wp.float32(0.0))
+    elif axis == wp.int32(1):
+        cc_set_eff_t1(cc, contact, effective_mass)
+        if effective_mass == wp.float32(0.0):
+            cc_set_tangent1_lambda(cc, contact, wp.float32(0.0))
+    else:
+        cc_set_eff_t2(cc, contact, effective_mass)
+        if effective_mass == wp.float32(0.0):
+            cc_set_tangent2_lambda(cc, contact, wp.float32(0.0))
+
+
 def _make_build_packed_rows_ops(patch_rows: bool = False):
     _rows_dtype = wp.float32
     module = wp.get_module("reduced_contact_rows_packed" + ("_patch" if patch_rows else ""))
@@ -1706,50 +1765,19 @@ def _make_build_packed_rows_ops(patch_rows: bool = False):
                 body_response,
             )
         if wp.static(not patch_rows):
-            unconstrained = wp.float32(0.0)
-            for side in range(2):
-                body = current_body
-                wrench = row_wrench[packed_articulation, row]
-                if side == 1:
-                    body = current_body_pair
-                    wrench = row_wrench_pair[packed_articulation, row]
-                if body >= wp.int32(0):
-                    slot = body + wp.int32(1)
-                    linear = wp.spatial_top(wrench)
-                    com = wp.transform_get_translation(data.body_q_com[body])
-                    angular = wp.spatial_bottom(wrench) - wp.cross(com, linear)
-                    inertia = mat33_from_sym6(bodies.inverse_inertia_world[slot])
-                    unconstrained += bodies.inverse_mass[slot] * wp.dot(linear, linear) + wp.dot(
-                        angular, inertia * angular
-                    )
-            # Mobility is quadratic in the generalized contact Jacobian. Allow
-            # 64 float32 ULPs of Jacobian cancellation, squared, so real small
-            # mobility survives while a blocked row cannot acquire huge mass.
-            tolerance = wp.float32(5.820766091346741e-11) * unconstrained
-            effective_mass = wp.float32(0.0)
-            if inverse_mass > wp.max(tolerance, wp.float32(1.0e-12)):
-                effective_mass = wp.float32(1.0) / inverse_mass
-            point = row // wp.int32(3)
-            axis = row - wp.int32(3) * point
-            contact = point_contact[packed_articulation, point]
-            if axis == wp.int32(0):
-                if prepare:
-                    bias = cc_get_bias(cc, contact)
-                    if bias < wp.float32(0.0) and unconstrained > wp.float32(1.0e-12):
-                        # Reuse the response already built for the normal row.
-                        bias *= wp.clamp(inverse_mass / unconstrained, wp.float32(0.0), wp.float32(1.0))
-                        cc_set_bias(cc, contact, bias)
-                cc_set_eff_n(cc, contact, effective_mass)
-                if effective_mass == wp.float32(0.0):
-                    cc_set_normal_lambda(cc, contact, wp.float32(0.0))
-            elif axis == wp.int32(1):
-                cc_set_eff_t1(cc, contact, effective_mass)
-                if effective_mass == wp.float32(0.0):
-                    cc_set_tangent1_lambda(cc, contact, wp.float32(0.0))
-            else:
-                cc_set_eff_t2(cc, contact, effective_mass)
-                if effective_mass == wp.float32(0.0):
-                    cc_set_tangent2_lambda(cc, contact, wp.float32(0.0))
+            _store_point_row_effective_mass(
+                bodies,
+                cc,
+                point_contact,
+                packed_articulation,
+                row,
+                current_body,
+                row_wrench[packed_articulation, row],
+                current_body_pair,
+                row_wrench_pair[packed_articulation, row],
+                inverse_mass,
+                prepare,
+            )
 
     return wp.kernel(enable_backward=False, module=module)(
         _bind_rows_dtype_annotations(
@@ -2900,6 +2928,8 @@ class ReducedContactBlockSystem:
         self.transpose_kernel = _transpose_generalized_contact_response_kernel
         self.biased_page_launcher = None
         self.relax_page_launcher = None
+        # Dense-backend row builder, see DenseTreeOperator.build_contact_rows.
+        self.dense_rows = None
         self.requires_impulse_response = not (
             self._fallback_impossible_partitioned
             and self._fallback_impossible_rigid_only
@@ -3392,7 +3422,11 @@ class ReducedContactBlockSystem:
                     outputs=[self.row_velocity],
                     device=self.device,
                 )
-            if build_rows:
+            if build_rows and (self.dense_rows is None or self.dense_rows.has_fallback):
+                rows_enabled = self.enabled
+                if self.dense_rows is not None:
+                    # Articulated-body rows serve only the trees the dense backend cannot hold.
+                    rows_enabled = self.dense_rows.fallback_enabled(self.enabled)
                 if self.build_patch_rows_warp_kernel is not None:
                     wp.launch(
                         self.build_patch_rows_warp_kernel,
@@ -3400,7 +3434,7 @@ class ReducedContactBlockSystem:
                         block_dim=128,
                         inputs=[
                             bodies,
-                            self.enabled,
+                            rows_enabled,
                             self.row_count,
                             self.row_body,
                             self.row_wrench,
@@ -3424,7 +3458,7 @@ class ReducedContactBlockSystem:
                         block_dim=48,
                         inputs=[
                             bodies,
-                            self.enabled,
+                            rows_enabled,
                             self.point_count,
                             self.row_count,
                             self.row_body,
@@ -3455,7 +3489,7 @@ class ReducedContactBlockSystem:
                         block_dim=_RESPONSE_TILE,
                         inputs=[
                             bodies,
-                            self.enabled,
+                            rows_enabled,
                             self.point_count,
                             self.row_count,
                             self.page_index,
@@ -3468,6 +3502,9 @@ class ReducedContactBlockSystem:
                     )
 
                 wp.capture_if(self.transpose_active, on_true=transpose_response)
+            if build_rows and self.dense_rows is not None:
+                # Dense trees overwrite the articulated-body rows of a mixed fleet.
+                self.dense_rows.build_contact_rows(self, bodies, cc, prepare)
             if fused_bias:
                 self.biased_page_launcher(columns, bodies, idt, sor_boost, cc, iterations)
                 return

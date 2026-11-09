@@ -22,6 +22,7 @@ from newton._src.solvers.featherstone.kernels import (
     spatial_cross,
     spatial_cross_dual,
 )
+from newton._src.solvers.phoenx.articulations.dense_tree import DenseTreeOperator, dense_tree_solve
 from newton._src.solvers.phoenx.articulations.reduced_contact import (
     flush_deferred_articulation,
     reduced_contact_iterate,
@@ -39,6 +40,7 @@ from newton._src.solvers.phoenx.body import (
     MOTION_ARTICULATED,
     BodyContainer,
     ReducedArticulationData,
+    dense_tree_data_zeros,
 )
 from newton._src.solvers.phoenx.constraints.constraint_contact import ContactColumnContainer, ContactViews
 from newton._src.solvers.phoenx.constraints.contact_container import ContactContainer
@@ -3026,8 +3028,18 @@ def _make_advance_reduced_articulations_warp_ops(
     include_coriolis: bool,
     fuse_publish: bool = False,
     static_tile_width: int = 0,
+    dense: bool = False,
 ):
+    """Build the advance device function and kernel.
+
+    ``dense`` replaces the articulated-body solve by the dense factor of
+    :class:`~newton._src.solvers.phoenx.articulations.dense_tree.DenseTreeOperator`:
+    the reverse pass only accumulates the generalized right-hand side, which
+    the lane group then solves with the stored tree-sparse factor.
+    """
     suffix = "_publish" if fuse_publish else ""
+    if dense:
+        suffix += "_dense"
     module = wp.get_module(
         f"reduced_advance_{int(include_external)}_{int(include_coriolis)}_{static_tile_width}{suffix}"
     )
@@ -3084,6 +3096,10 @@ def _make_advance_reduced_articulations_warp_ops(
         group_mask = wp.uint32(4294967295)
         if tile_width < wp.int32(32):
             group_mask = ((wp.uint32(1) << wp.uint32(tile_width)) - wp.uint32(1)) << wp.uint32(group * tile_width)
+        # Trees the dense backend cannot hold keep the articulated-body recurrences.
+        use_dense = wp.bool(False)
+        if wp.static(dense):
+            use_dense = bodies.reduced.dense.factor_start[articulation] >= wp.int32(0)
 
         local_momentum = wp.vec3(0.0)
         # The root lane keeps a floating root's twist for the step's energy estimate.
@@ -3191,7 +3207,8 @@ def _make_advance_reduced_articulations_warp_ops(
                     if wp.static(not (fuse_publish and static_tile_width > 0)):
                         descendant_slot = joint_child[descendant_slot]
                     subtree_bias += body_bias[descendant_slot]
-                    p += body_work[descendant_slot]
+                    if not use_dense:
+                        p += body_work[descendant_slot]
                 dof_start = joint_qd_start[joint]
                 dof_end = joint_qd_start[joint + wp.int32(1)]
                 dof_count = dof_end - dof_start
@@ -3215,10 +3232,17 @@ def _make_advance_reduced_articulations_warp_ops(
                         ):
                             applied += joint_implicit_force[dof]
                         dof_rhs = applied - wp.dot(joint_s[dof], subtree_bias)
-                        # Integrated advances consume both values locally; publishing them only
-                        # dirties response workspaces before the next solve.
-                        reduced_force[row] = dof_rhs - wp.dot(joint_s[dof], p)
-                        joint_work[dof] = reduced_force[row]
+                        if use_dense:
+                            joint_work[dof] = dof_rhs
+                        else:
+                            # Integrated advances consume both values locally; publishing them only
+                            # dirties response workspaces before the next solve.
+                            reduced_force[row] = dof_rhs - wp.dot(joint_s[dof], p)
+                            joint_work[dof] = reduced_force[row]
+                body_bias[body_slot] = subtree_bias
+                if use_dense:
+                    index += tile_width
+                    continue
                 for row in range(_MAX_JOINT_DOF):
                     if wp.int32(row) < dof_count:
                         for column in range(_MAX_JOINT_DOF):
@@ -3228,10 +3252,23 @@ def _make_advance_reduced_articulations_warp_ops(
                 for column in range(_MAX_JOINT_DOF):
                     if wp.int32(column) < dof_count:
                         propagated += joint_u_matrix[dof_start + wp.int32(column)] * d_inv_u[column]
-                body_bias[body_slot] = subtree_bias
                 body_work[body_slot] = propagated
                 index += tile_width
             _sync_reduced_group(group_mask)
+
+        if use_dense:
+            data = bodies.reduced
+            dense_dof_start = joint_qd_start[data.articulation_start[articulation]]
+            dense_tree_solve(
+                data.dense,
+                articulation,
+                dense_dof_start,
+                lane,
+                tile_width,
+                group_mask,
+                joint_work,
+                generalized_acceleration,
+            )
 
         # Each depth assigns at most one joint per lane, so parent recurrences can
         # stay in the warp instead of round-tripping through response workspaces.
@@ -3268,15 +3305,20 @@ def _make_advance_reduced_articulations_warp_ops(
                 dof_count = dof_end - dof_start
                 rhs = _vec6(0.0)
                 qdd = _vec6(0.0)
-                for row in range(_MAX_JOINT_DOF):
-                    if wp.int32(row) < dof_count:
-                        dof = dof_start + wp.int32(row)
-                        rhs[row] = joint_work[dof] - wp.dot(joint_u_matrix[dof], parent_acceleration)
-                for row in range(_MAX_JOINT_DOF):
-                    if wp.int32(row) < dof_count:
-                        for column in range(_MAX_JOINT_DOF):
-                            if wp.int32(column) < dof_count:
-                                qdd[row] += joint_d_inv[dof_start + wp.int32(row), column] * rhs[column]
+                if use_dense:
+                    for row in range(_MAX_JOINT_DOF):
+                        if wp.int32(row) < dof_count:
+                            qdd[row] = generalized_acceleration[dof_start + wp.int32(row)]
+                else:
+                    for row in range(_MAX_JOINT_DOF):
+                        if wp.int32(row) < dof_count:
+                            dof = dof_start + wp.int32(row)
+                            rhs[row] = joint_work[dof] - wp.dot(joint_u_matrix[dof], parent_acceleration)
+                    for row in range(_MAX_JOINT_DOF):
+                        if wp.int32(row) < dof_count:
+                            for column in range(_MAX_JOINT_DOF):
+                                if wp.int32(column) < dof_count:
+                                    qdd[row] += joint_d_inv[dof_start + wp.int32(row), column] * rhs[column]
                 child_acceleration = parent_acceleration
                 joint_velocity = wp.spatial_vector()
                 joint_acceleration = wp.spatial_vector()
@@ -3591,12 +3633,14 @@ def _make_advance_reduced_articulations_warp_kernel(
     include_coriolis: bool,
     fuse_publish: bool = False,
     static_tile_width: int = 0,
+    dense: bool = False,
 ):
     return _make_advance_reduced_articulations_warp_ops(
         include_external=include_external,
         include_coriolis=include_coriolis,
         fuse_publish=fuse_publish,
         static_tile_width=static_tile_width,
+        dense=dense,
     )[1]
 
 
@@ -4011,7 +4055,7 @@ def _solve_reduced_deferred_contacts_kernel(
 class ReducedArticulationSystem:
     """Cached linear-time reduced-coordinate factorization for a Newton model."""
 
-    def __init__(self, model: Model):
+    def __init__(self, model: Model, *, dense: bool = False):
         if model.articulation_count <= 0:
             raise ValueError("reduced articulation system requires at least one articulation")
         self.model = model
@@ -4223,6 +4267,17 @@ class ReducedArticulationSystem:
         midpoint.joint_momentum = wp.zeros(max(1, dof_count), dtype=wp.float32, device=self.device)
         self.midpoint = midpoint
 
+        self.body_joint = wp.array(body_joint_np, device=self.device)
+        self.dense: DenseTreeOperator | None = None
+        if dense:
+            if not self.use_warp_advance:
+                raise ValueError("the dense reduced backend requires CUDA and at most 32 joints per tree depth")
+            self.dense = DenseTreeOperator(model, self)
+            if not self.dense.buckets:
+                raise ValueError(
+                    f"the dense reduced backend holds no articulation: {'; '.join(self.dense.fallback_reasons)}"
+                )
+
         self.refresh_inertial_properties()
 
     def refresh_inertial_properties(self) -> None:
@@ -4298,8 +4353,13 @@ class ReducedArticulationSystem:
         *,
         factorize: bool = True,
         update_kinematics: bool = True,
+        articulated_body: bool = False,
     ) -> None:
-        """Factor the generalized mass and optional implicit joint operator."""
+        """Factor the generalized mass and optional implicit joint operator.
+
+        With the dense backend, ``articulated_body`` also forms the articulated-body
+        factor that :meth:`solve_forces` applies.
+        """
         if control is None:
             wp.copy(self.joint_factor_diagonal, self.model.joint_armature)
             self.joint_implicit_force.zero_()
@@ -4359,6 +4419,10 @@ class ReducedArticulationSystem:
         )
         if not factorize:
             return
+        if self.dense is not None:
+            self.dense.factor_mass()
+            if not (self.dense.requires_aba or articulated_body):
+                return
         if self.use_warp_factor:
             depth_walk_kernel = _FACTOR_REDUCED_WARP_KERNELS[
                 self._use_factor_dof_split,
@@ -4440,7 +4504,7 @@ class ReducedArticulationSystem:
 
     def forward_dynamics(self, state: State, control: Control) -> wp.array[wp.float32]:
         """Compute generalized acceleration from common Newton state and control."""
-        self.factor(state)
+        self.factor(state, articulated_body=True)
         wp.launch(
             _compute_forward_dynamics_rhs_kernel,
             dim=int(self.model.articulation_count),
@@ -4546,6 +4610,7 @@ class ReducedArticulationSystem:
             advance_kernel = _make_advance_reduced_articulations_warp_kernel(
                 include_external=include_external,
                 include_coriolis=include_coriolis,
+                dense=self.dense is not None,
             )
             wp.launch(
                 advance_kernel,
@@ -4734,7 +4799,12 @@ class ReducedPhoenXArticulation:
         *,
         execution_path: str = "reference",
         contact_friction_model: str = "point",
+        backend: str = "aba",
     ):
+        if backend not in ("aba", "dense"):
+            raise ValueError(f"backend must be 'aba' or 'dense', got {backend!r}")
+        if backend == "dense" and execution_path != "reference":
+            raise ValueError("the dense reduced backend requires the reference execution path")
         if execution_path not in ("reference", "persistent"):
             raise ValueError(f"execution_path must be 'reference' or 'persistent', got {execution_path!r}")
         if contact_friction_model not in ("point", "patch"):
@@ -4744,7 +4814,7 @@ class ReducedPhoenXArticulation:
         self.execution_path = execution_path
         self.model = model
         self.bodies = bodies
-        self.system = ReducedArticulationSystem(model)
+        self.system = ReducedArticulationSystem(model, dense=backend == "dense")
         if self.system.runtime_slots and (execution_path != "reference" or not model.device.is_cuda):
             raise ValueError("runtime reduced articulations require CUDA and the reference execution path")
         self.state = model.state()
@@ -4829,6 +4899,8 @@ class ReducedPhoenXArticulation:
             np.asarray(body_path_joint_list, dtype=np.int32),
             device=model.device,
         )
+        dense = self.system.dense
+        reduced.dense = dense.data if dense is not None else dense_tree_data_zeros(model.device)
         bodies.reduced = reduced
         body_is_reduced.assign(body_is_reduced_np)
         tree_joint_mask.assign(tree_joint_mask_np)
@@ -4864,6 +4936,14 @@ class ReducedPhoenXArticulation:
             allow_patch_rows=execution_path != "persistent",
             use_patch_rows=contact_friction_model == "patch",
         )
+        if dense is not None:
+            # Coupled contacts and loop closures still read the articulated-body factor.
+            dense.requires_aba = (
+                dense.has_fallback
+                or self.contact_block_system.requires_impulse_response
+                or bool(self.loop_system.joint_indices_np.size)
+            )
+            self.contact_block_system.dense_rows = dense
         if execution_path == "persistent":
             self.contact_block_system.biased_page_launcher = self._launch_persistent_biased_page
             self.contact_block_system.relax_page_launcher = self._launch_persistent_relax_page
@@ -5123,6 +5203,7 @@ class ReducedPhoenXArticulation:
             include_coriolis=True,
             fuse_publish=True,
             static_tile_width=tile_width,
+            dense=self.system.dense is not None,
         )
         wp.launch(
             kernel,

@@ -88,6 +88,64 @@ def inertia_sym6_unpack_np(s: np.ndarray) -> np.ndarray:
 
 
 @wp.struct
+class DenseTreeData:
+    """Device view of the dense backend's tree-sparse mass factors.
+
+    Each articulation's generalized mass factors as ``M = L^T L`` without
+    fill-in: row ``i`` of ``L`` is nonzero only at the ancestor DOFs of ``i``
+    and at ``i``. Rows are stored in path layout: local DOF ``i`` of an
+    articulation owns entries ``dof_entry[d + i]`` to ``dof_entry[d + i + 1]``,
+    whose local DOFs ``path[p + e]`` run from the root to ``i``, where ``d``
+    and ``p`` are the template offsets of the articulation's topology. The
+    descendants of DOF ``k`` are ``desc_dof[desc_start[d + k] :
+    desc_start[d + k + 1]]`` with row starts ``desc_row``; height and depth
+    levels list the DOFs that triangular solves may process together.
+    """
+
+    factor: wp.array[wp.float32]
+    factor_start: wp.array[wp.int32]
+    articulation_template: wp.array[wp.int32]
+    template_dof_start: wp.array[wp.int32]
+    template_path_start: wp.array[wp.int32]
+    dof_entry: wp.array[wp.int32]
+    path: wp.array[wp.int32]
+    desc_start: wp.array[wp.int32]
+    desc_row: wp.array[wp.int32]
+    desc_dof: wp.array[wp.int32]
+    template_height_start: wp.array[wp.int32]
+    height_start: wp.array[wp.int32]
+    height_dof: wp.array[wp.int32]
+    template_depth_start: wp.array[wp.int32]
+    depth_start: wp.array[wp.int32]
+    depth_dof: wp.array[wp.int32]
+
+
+def dense_tree_data_zeros(device: wp.DeviceLike = None) -> DenseTreeData:
+    """Allocate a disabled placeholder for trees without the dense backend."""
+    data = DenseTreeData()
+    data.factor = wp.zeros(1, dtype=wp.float32, device=device)
+    data.factor_start = wp.full(1, value=-1, dtype=wp.int32, device=device)
+    data.articulation_template = wp.zeros(1, dtype=wp.int32, device=device)
+    data.template_dof_start = wp.zeros(1, dtype=wp.int32, device=device)
+    data.template_path_start = wp.zeros(1, dtype=wp.int32, device=device)
+    for name in (
+        "dof_entry",
+        "path",
+        "desc_start",
+        "desc_row",
+        "desc_dof",
+        "template_height_start",
+        "height_start",
+        "height_dof",
+        "template_depth_start",
+        "depth_start",
+        "depth_dof",
+    ):
+        setattr(data, name, wp.zeros(1, dtype=wp.int32, device=device))
+    return data
+
+
+@wp.struct
 class ReducedArticulationData:
     """Device view of a cached reduced-coordinate inverse-mass operator."""
 
@@ -113,6 +171,7 @@ class ReducedArticulationData:
     body_joint: wp.array[wp.int32]
     body_path_start: wp.array[wp.int32]
     body_path_joint: wp.array[wp.int32]
+    dense: DenseTreeData
 
 
 def reduced_articulation_data_zeros(device: wp.DeviceLike = None) -> ReducedArticulationData:
@@ -140,6 +199,7 @@ def reduced_articulation_data_zeros(device: wp.DeviceLike = None) -> ReducedArti
     data.body_joint = wp.full(1, value=-1, dtype=wp.int32, device=device)
     data.body_path_start = wp.zeros(2, dtype=wp.int32, device=device)
     data.body_path_joint = wp.zeros(1, dtype=wp.int32, device=device)
+    data.dense = dense_tree_data_zeros(device)
     return data
 
 

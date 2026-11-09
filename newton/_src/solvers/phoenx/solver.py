@@ -341,6 +341,7 @@ class SolverPhoenX(SolverBase):
         jacobi_max_colors: int | None = None,
         joint_mode: str = "maximal_direct",
         reduced_articulation_path: str = "reference",
+        reduced_backend: str = "aba",
         direct_joint_mask: np.ndarray | None = None,
         tracking_volumes: Sequence[int] | None = None,
     ):
@@ -532,6 +533,14 @@ class SolverPhoenX(SolverBase):
             reduced_articulation_path: ``"reference"`` uses the established
                 reduced solver. Experimental ``"persistent"`` enables
                 topology-proven cross-phase articulation fusion on CUDA.
+            reduced_backend: Generalized-mass operator of ``joint_mode="reduced"``
+                and ``"hybrid"`` trees. ``"aba"`` uses linear-time articulated-body
+                recurrences and handles any tree. ``"dense"`` assembles each
+                articulation's generalized mass with the composite-rigid-body
+                algorithm and factors it on one warp without fill-in; trees with
+                more than 64 DOFs or joints keep the articulated-body path. It
+                requires CUDA, the ``"reference"`` path, and at most 32 joints per
+                tree depth.
         """
         super().__init__(model)
         if solver_scheme not in ("soft", "tgs"):
@@ -739,7 +748,10 @@ class SolverPhoenX(SolverBase):
             and multi_world_scheduler == "auto"
         ):
             multi_world_scheduler = "fast_tail"
+        if reduced_backend not in ("aba", "dense"):
+            raise ValueError(f"reduced_backend must be 'aba' or 'dense', got {reduced_backend!r}")
         self.reduced_articulation_path = reduced_articulation_path
+        self.reduced_backend = reduced_backend
         self._reduced_articulation: ReducedPhoenXArticulation | None = None
         self._maximal_tree_projector: MaximalTreeProjector | GeneralMaximalTreeProjector | None = None
         self._maximal_contact_response: MaximalContactResponse | None = None
@@ -1153,6 +1165,7 @@ class SolverPhoenX(SolverBase):
                     self.bodies,
                     execution_path=self.reduced_articulation_path,
                     contact_friction_model=contact_friction_model,
+                    backend=self.reduced_backend,
                 )
                 joint_idx_to_cid = self._joint_constraints.joint_idx_to_cid.numpy()
                 joint_pgs_enabled = np.ones(num_joints, dtype=np.int32)
