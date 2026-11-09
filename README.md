@@ -1248,6 +1248,9 @@ contact accuracy are still being investigated.
       <br><code>python -m newton.examples phoenx_articulation_rain</code>
     </td>
     <td align="center" width="33%">
+      <img width="320" src="docs/images/examples/example_phoenx_house_of_cards.jpg" alt="PhoenX house of cards">
+      <br><b>House of cards</b>
+      <br><code>python -m newton.examples phoenx_house_of_cards</code>
     </td>
   </tr>
 </table>
