@@ -1216,12 +1216,17 @@ def make_dense_substep_kernel(
                     _sync_contact_warp()
                 # Chunks of rows that fit the lanes; several chunks alternate within each sweep.
                 chunks = (page_points + wp.int32(_CHUNK_POINTS - 1)) // wp.int32(_CHUNK_POINTS)
+                # Several chunks first apply every chunk's accumulated impulses, then sweep in turn.
                 rounds = wp.int32(1)
                 sweeps = iterations
+                warm_rounds = wp.int32(0)
                 if chunks > wp.int32(1):
                     rounds = iterations
                     sweeps = wp.int32(1)
-                for round_index in range(rounds):
+                    if wp.static(not relax):
+                        warm_rounds = wp.int32(1)
+                for round_offset in range(rounds + warm_rounds):
+                    round_index = round_offset - warm_rounds
                     for chunk_offset in range(chunks):
                         chunk_index = wp.int32(chunk_offset)
                         if (round_index & wp.int32(1)) != wp.int32(0):
@@ -1249,11 +1254,11 @@ def make_dense_substep_kernel(
                             cc,
                             idt,
                             sor_boost,
-                            round_index,
-                            sweeps,
+                            wp.max(round_index, wp.int32(0)),
+                            wp.where(round_index < wp.int32(0), wp.int32(0), sweeps),
                             wp.bool(not relax),
-                            wp.bool(not relax) and round_index == wp.int32(0),
-                            round_index == wp.int32(0),
+                            wp.bool(not relax) and round_offset == wp.int32(0),
+                            round_offset == wp.int32(0),
                             point_count,
                             point_contact,
                             point_column,
