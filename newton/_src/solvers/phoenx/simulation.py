@@ -243,6 +243,7 @@ from newton._src.solvers.phoenx.sleeping_kernels import (
     _phoenx_activity_wake_kernel,
     _phoenx_apply_island_wake_kernel,
     _phoenx_apply_wake_flag_kernel,
+    _phoenx_clear_quiet_contact_warmstart_kernel,
     _phoenx_collapse_sleeping_elements_kernel,
     _phoenx_compute_island_root_per_compact_kernel,
     _phoenx_copy_elements_to_int2d_kernel,
@@ -2730,6 +2731,22 @@ class PhoenXWorld:
         self._kinematic_prepare_step()
         if self._sleeping_enabled:
             self._run_sleeping_pass(shape_body, shape_aabb_lower, shape_aabb_upper)
+            if self._contact_input_active_this_step:
+                # Classify before gating: contacts can wake an island or start its
+                # quiet hysteresis this step. Keep substep-local warm starts intact.
+                wp.launch(
+                    _phoenx_clear_quiet_contact_warmstart_kernel,
+                    dim=max(self.rigid_contact_max, self.max_contact_columns),
+                    inputs=[
+                        self.bodies,
+                        self._contact_views,
+                        self._contact_container,
+                        self._contact_cols,
+                        self._ingest_scratch.num_contact_columns,
+                        wp.int32(self._contact_patch_enabled),
+                    ],
+                    device=self.device,
+                )
         if self._constraint_capacity > 0 and self._partition_active_this_step:
             if not reuse_partition:
                 if self._conditional_world_coloring and self._reuse_rigid_coloring:
@@ -3042,9 +3059,6 @@ class PhoenXWorld:
             cid_of_contact=self._cid_of_contact_cur,
             cc=self._contact_container,
             device=self.device,
-            # Cross-frame contact impulses can keep a nearly quiet stack above
-            # the sleep threshold; substep-local warm-start still applies.
-            carry_impulses=not self._sleeping_enabled,
             direct_shape_pair_runs=not self._enable_body_pair_grouping,
         )
 
@@ -3058,7 +3072,6 @@ class PhoenXWorld:
                 self._contact_offset,
                 shape_type,
                 enable_body_pair_grouping=self._enable_body_pair_grouping,
-                carry_impulses=not self._sleeping_enabled,
                 device=self.device,
             )
 

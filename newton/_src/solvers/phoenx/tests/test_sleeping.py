@@ -26,8 +26,162 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton._src.solvers.phoenx.body import MOTION_DYNAMIC, MOTION_KINEMATIC, body_container_zeros
+from newton._src.solvers.phoenx.constraints.constraint_contact import (
+    ContactColumnContainer,
+    ContactViews,
+    contact_column_container_zeros,
+    contact_set_body1,
+    contact_set_body2,
+)
+from newton._src.solvers.phoenx.constraints.contact_container import (
+    contact_container_copy_current_to_prev,
+    contact_container_zeros,
+)
+from newton._src.solvers.phoenx.constraints.contact_ingest import IngestScratch, gather_contact_warmstart
+from newton._src.solvers.phoenx.constraints.contact_patch_friction import copy_contact_patch_impulses
+from newton._src.solvers.phoenx.sleeping_filter import PhoenXSleepingFilterData, phoenx_sleeping_filter
+from newton._src.solvers.phoenx.sleeping_kernels import (
+    _phoenx_clear_quiet_contact_warmstart_kernel,
+    _phoenx_propagate_sleep_to_bodies_kernel,
+)
 
 GRAVITY = 9.81
+
+
+@wp.kernel(enable_backward=False)
+def _set_sleep_test_columns(
+    columns: ContactColumnContainer,
+    body0: wp.array[wp.int32],
+    body1: wp.array[wp.int32],
+    order: wp.array[wp.int32],
+):
+    column = wp.tid()
+    contact_set_body1(columns, column, body0[order[column]])
+    contact_set_body2(columns, column, body1[order[column]])
+
+
+@wp.kernel(enable_backward=False)
+def _move_transport_platform(frame: wp.array[wp.int32], poses: wp.array[wp.transform]):
+    frame[0] += 1
+    time = wp.max(float(frame[0]) / 60.0 - 2.0, 0.0)
+    position = wp.vec3(1.95 * (1.0 - wp.cos(0.35 * time)), 1.4 * (1.0 - wp.cos(0.2 * time)), 0.003)
+    angle = 0.35 * (1.0 - wp.cos(0.3 * time))
+    poses[0] = wp.transform(position, wp.quat_from_axis_angle(wp.vec3(0, 0, 1), angle))
+
+
+@wp.kernel(enable_backward=False)
+def _record_transport_offsets(
+    frame: wp.array[wp.int32],
+    poses: wp.array[wp.transform],
+    island_root: wp.array[wp.int32],
+    offsets: wp.array2d[wp.vec3],
+    sleep_labels: wp.array2d[wp.int32],
+):
+    cargo = wp.tid()
+    offsets[frame[0] - 1, cargo] = wp.transform_point(
+        wp.transform_inverse(poses[1]), wp.transform_get_translation(poses[cargo + 2])
+    )
+    sleep_labels[frame[0] - 1, cargo] = island_root[cargo + 3]
+
+
+class TestSleepingWarmstart(unittest.TestCase):
+    """Keep active contact history while quiet islands cold-start without losing anchors."""
+
+    def _check_gate(self, device, *, capture):
+        with wp.ScopedDevice(device):
+            bodies = body_container_zeros(5, device=device)
+            bodies.motion_type.assign([0, MOTION_DYNAMIC, MOTION_DYNAMIC, MOTION_DYNAMIC, MOTION_KINEMATIC])
+            bodies.inverse_mass.assign([0.0, 1.0, 1.0, 1.0, 0.0])
+            bodies.island_root.assign([-1, -1, -1, 3, -1])
+            bodies.frames_below_threshold.assign([0, 0, 0, 5, 99])
+            islands = wp.array([-1, 0, 1, -1, 0], dtype=wp.int32)
+            quiet = wp.array([0, 1], dtype=wp.int32)
+            roots = wp.array([1, 2], dtype=wp.int32)
+            body0 = wp.array([0, 0, 0, 4, 2, 0], dtype=wp.int32)
+            body1 = wp.array([1, 2, 3, 1, 1, 2], dtype=wp.int32)
+            # Columns need not follow contact order, as in grouped/colored scenes.
+            order = wp.array([2, 0, 4, 1, 3, 5], dtype=wp.int32)
+            columns = contact_column_container_zeros(6, device=device, enable_patch_friction=True)
+            wp.launch(_set_sleep_test_columns, 6, inputs=[columns, body0, body1, order])
+            count = wp.array([5], dtype=wp.int32)
+            cc = contact_container_zeros(6, device=device)
+            impulses = np.arange(18, dtype=np.float32).reshape(3, 6) + 1
+            cc.impulses.assign(impulses)
+            references = np.arange(72, dtype=np.float32).reshape(12, 6) / 100
+            references[:6] = np.array([0, 0, 1, 1, 0, 0], dtype=np.float32)[:, None]
+            cc.lambdas.assign(references)
+            patch_impulses = np.arange(18, dtype=np.float32).reshape(6, 3) + 1
+            columns.patch.impulse_world.assign(patch_impulses)
+            contacts = ContactViews()
+            contacts.rigid_contact_count = count
+            contacts.rigid_contact_shape0 = body0
+            contacts.rigid_contact_shape1 = body1
+            contacts.shape_body = wp.array(np.arange(5, dtype=np.int32), dtype=wp.int32)
+            contacts.shape_type = wp.full(5, int(newton.GeoType.BOX), dtype=wp.int32)
+            contacts.rigid_contact_normal = wp.full(6, wp.vec3(0, 0, 1), dtype=wp.vec3)
+
+            def classify_and_gate():
+                wp.launch(
+                    _phoenx_propagate_sleep_to_bodies_kernel,
+                    5,
+                    inputs=[bodies, islands, quiet, roots, 5],
+                )
+                wp.launch(
+                    _phoenx_clear_quiet_contact_warmstart_kernel,
+                    6,
+                    inputs=[bodies, contacts, cc, columns, count, 1],
+                )
+
+            if capture:
+                with wp.ScopedCapture(device=device) as captured:
+                    classify_and_gate()
+                wp.capture_launch(captured.graph)
+                wp.capture_launch(captured.graph)
+            else:
+                classify_and_gate()
+            expected = impulses.copy()
+            expected[:, [1, 2, 4]] = 0
+            expected_patch = patch_impulses.copy()
+            expected_patch[[0, 2, 3]] = 0
+            np.testing.assert_array_equal(cc.impulses.numpy(), expected)
+            np.testing.assert_array_equal(cc.lambdas.numpy(), references)
+            np.testing.assert_array_equal(columns.patch.impulse_world.numpy(), expected_patch)
+
+            # Dormant rows were not solved. A subsequent wake and real history gather
+            # must not resurrect their pre-sleep impulses; anchors still match.
+            contact_container_copy_current_to_prev(cc, count, device=device)
+            copy_contact_patch_impulses(columns.patch, count, device=device)
+            np.testing.assert_array_equal(columns.patch.prev_impulse_world.numpy()[:5], expected_patch[:5])
+            bodies.island_root.fill_(-1)
+            bodies.frames_below_threshold.zero_()
+            cc.impulses.fill_(-7.0)
+            scratch = IngestScratch(6, 6, device=device)
+            mapping = wp.array(np.arange(6, dtype=np.int32), dtype=wp.int32)
+            gather_contact_warmstart(
+                scratch,
+                mapping,
+                mapping,
+                wp.zeros(1, dtype=wp.int32),
+                bodies,
+                contacts,
+                0,
+                mapping,
+                cc,
+                device=device,
+                direct_shape_pair_runs=True,
+            )
+            np.testing.assert_array_equal(cc.impulses.numpy()[:, :5], expected[:, :5])
+            np.testing.assert_array_equal(cc.lambdas.numpy()[6:, :5], references[6:, :5])
+
+    def test_quiet_contact_warmstart_preserves_active_history(self):
+        """Clear newly quiet and dormant impulses while retaining active impulses and friction anchors."""
+        self._check_gate("cpu", capture=False)
+
+    @unittest.skipUnless(wp.is_cuda_available(), "CUDA graph capture requires CUDA")
+    def test_quiet_contact_warmstart_graph_replay(self):
+        """Replay sleep classification and selective clearing with stable device history buffers."""
+        self._check_gate("cuda:0", capture=True)
 
 
 def _sleep_flags(solver) -> np.ndarray:
@@ -136,6 +290,99 @@ def _run_frames(solver, state_0, state_1, control, contacts, model, n: int, dt: 
     "SolverPhoenX sleeping tests run on CUDA only.",
 )
 class TestSleepingPipeline(unittest.TestCase):
+    def test_sleeping_preserves_friction_during_compound_support_transport(self):
+        """Keep an independent box stack fixed relative to a gently transported finite-mass support.
+
+        Two stationary seconds exercise settling and sleeping before translation
+        and rotation wake the stack. The peak translation acceleration is below
+        0.25 m/s², well below the 0.65*g static-friction budget. Thirty seconds
+        expose accumulated slip from globally cold-starting awake contacts.
+        """
+        builder = newton.ModelBuilder()
+        cfg = newton.ModelBuilder.ShapeConfig(density=0.0, mu=0.65, gap=0.004)
+        platform = builder.add_body(xform=wp.transform(wp.vec3(0, 0, 0.003), wp.quat_identity()), is_kinematic=True)
+        builder.add_shape_box(platform, xform=wp.transform(wp.vec3(0, 0, -0.05)), hx=1.0, hy=0.8, hz=0.05, cfg=cfg)
+        mass = 25.0
+        inertia = mass / 12.0 * np.array([0.8**2 + 0.15**2, 1.2**2 + 0.15**2, 1.2**2 + 0.8**2])
+        support = builder.add_body(
+            xform=wp.transform(wp.vec3(0, 0, 0.078), wp.quat_identity()),
+            mass=mass,
+            inertia=wp.mat33(np.diag(inertia)),
+        )
+        for y in (-0.35, 0.0, 0.35):
+            builder.add_shape_box(support, xform=wp.transform(wp.vec3(0, y, -0.025)), hx=0.6, hy=0.05, hz=0.05, cfg=cfg)
+        # Each lower box spans several deck slats, exercising several shape-pair
+        # manifolds in one rigid body-pair column.
+        for y in (-0.35, -0.175, 0.0, 0.175, 0.35):
+            builder.add_shape_box(support, xform=wp.transform(wp.vec3(0, y, 0.05)), hx=0.6, hy=0.05, hz=0.025, cfg=cfg)
+        mass = 13.0
+        inertia = mass / 12.0 * np.array([0.36**2 + 0.43**2, 0.55**2 + 0.43**2, 0.55**2 + 0.36**2])
+        for layer in range(2):
+            for x in (-0.3, 0.3):
+                for y in (-0.2, 0.2):
+                    body = builder.add_body(
+                        xform=wp.transform(wp.vec3(x, y, 0.155 + 0.432 * layer), wp.quat_identity()),
+                        mass=mass,
+                        # Uneven cargo requires friction to balance contact torques;
+                        # the body origin is on its bottom face, away from the COM.
+                        com=wp.vec3(0.0, -0.01, 0.215),
+                        inertia=wp.mat33(np.diag(inertia)),
+                    )
+                    builder.add_shape_box(
+                        body, xform=wp.transform(wp.vec3(0, 0, 0.215)), hx=0.275, hy=0.18, hz=0.215, cfg=cfg
+                    )
+        model = builder.finalize()
+        pipeline = newton.CollisionPipeline(
+            model,
+            broad_phase="sap",
+            contact_matching="sticky",
+            speculative_contact_gap_max=0.5,
+            broad_phase_filter=(phoenx_sleeping_filter, PhoenXSleepingFilterData),
+            include_static_kinematic_pairs=False,
+        )
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            collision_pipeline=pipeline,
+            step_layout="single_world",
+            substeps=4,
+            solver_iterations=10,
+            velocity_iterations=2,
+            contact_friction_model="patch",
+            enable_body_pair_grouping=True,
+            sleeping_velocity_threshold=0.02,
+            sleeping_frames_required=60,
+        )
+        state, next_state = model.state(), model.state()
+        control = model.control()
+        contacts = model._collision_pipeline.contacts()
+        frame = wp.zeros(1, dtype=wp.int32)
+        offsets = wp.empty((1800, 8), dtype=wp.vec3)
+        sleep_labels = wp.empty((1800, 8), dtype=wp.int32)
+        with wp.ScopedCapture() as capture:
+            wp.launch(_move_transport_platform, 1, inputs=[frame, state.body_q])
+            solver.wake_on_external_input(state)
+            solver.collide(state, contacts, dt=1.0 / 60.0)
+            solver.step(state, next_state, control, contacts, 1.0 / 60.0)
+            wp.copy(state.body_q, next_state.body_q)
+            wp.copy(state.body_qd, next_state.body_qd)
+            wp.launch(
+                _record_transport_offsets,
+                8,
+                inputs=[frame, state.body_q, solver.bodies.island_root, offsets, sleep_labels],
+            )
+        for _ in range(1800):
+            wp.capture_launch(capture.graph)
+        relative = offsets.numpy()
+        self.assertTrue(np.isfinite(relative).all())
+        labels = sleep_labels.numpy()
+        self.assertTrue((labels[119] >= 0).all(), msg="stationary cargo must sleep before transport")
+        self.assertTrue((labels[179] < 0).all(), msg="moving support must wake every cargo body")
+        settling = np.linalg.norm(relative[59:120, :, :2] - relative[59, :, :2], axis=2)
+        self.assertLess(float(settling.max()), 0.002)
+        drift = np.linalg.norm(relative[119:, :, :2] - relative[119, :, :2], axis=2)
+        self.assertLess(float(drift.max()), 0.002, msg=f"cargo drifted {float(drift.max()) * 1000:.3f} mm")
+        self.assertGreater(float(np.linalg.norm(state.body_q.numpy()[platform, :2])), 1.0)
+
     def test_disabled_zero_allocations(self) -> None:
         """Zero threshold = no island builder, no sleeping scratch."""
         model = _make_box_on_plane()

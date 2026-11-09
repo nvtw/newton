@@ -52,7 +52,18 @@ from newton._src.solvers.phoenx.body import (
     BodyContainer,
     mat33_from_sym6,
 )
-from newton._src.solvers.phoenx.constraints.constraint_contact import ContactViews
+from newton._src.solvers.phoenx.constraints.constraint_contact import (
+    ContactColumnContainer,
+    ContactViews,
+    contact_get_body1,
+    contact_get_body2,
+)
+from newton._src.solvers.phoenx.constraints.contact_container import (
+    ContactContainer,
+    cc_set_normal_lambda,
+    cc_set_tangent1_lambda,
+    cc_set_tangent2_lambda,
+)
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     MAX_BODIES,
     ElementInteractionData,
@@ -64,6 +75,7 @@ __all__ = [
     "_phoenx_activity_wake_kernel",
     "_phoenx_apply_island_wake_kernel",
     "_phoenx_apply_wake_flag_kernel",
+    "_phoenx_clear_quiet_contact_warmstart_kernel",
     "_phoenx_collapse_sleeping_elements_kernel",
     "_phoenx_compute_island_root_per_compact_kernel",
     "_phoenx_copy_elements_to_int2d_kernel",
@@ -84,6 +96,45 @@ __all__ = [
 
 
 _AABB_INIT_LARGE = wp.constant(wp.float32(1.0e30))
+
+
+@wp.func
+def _body_needs_cold_contact_start(bodies: BodyContainer, body: wp.int32) -> wp.bool:
+    if body < 0 or body >= bodies.motion_type.shape[0]:
+        return False
+    if bodies.motion_type[body] != MOTION_DYNAMIC or bodies.inverse_mass[body] == 0.0:
+        return False
+    return bodies.island_root[body] >= 0 or bodies.frames_below_threshold[body] > 0
+
+
+@wp.kernel(enable_backward=False)
+def _phoenx_clear_quiet_contact_warmstart_kernel(
+    bodies: BodyContainer,
+    contacts: ContactViews,
+    cc: ContactContainer,
+    columns: ContactColumnContainer,
+    num_columns: wp.array[wp.int32],
+    patch_enabled: wp.int32,
+):
+    """Cold-start quiet islands after sleep classification, retaining friction anchors.
+
+    Active islands keep matched impulses. Quiet candidates must shed cross-frame
+    impulses to settle; dormant rows must be cleared even when solving skips them,
+    so waking cannot resurrect a cached pre-sleep impulse.
+    """
+    index = wp.tid()
+    if index < contacts.rigid_contact_count[0] and index < cc.impulses.shape[1]:
+        body0 = contacts.shape_body[contacts.rigid_contact_shape0[index]]
+        body1 = contacts.shape_body[contacts.rigid_contact_shape1[index]]
+        if _body_needs_cold_contact_start(bodies, body0) or _body_needs_cold_contact_start(bodies, body1):
+            cc_set_normal_lambda(cc, index, 0.0)
+            cc_set_tangent1_lambda(cc, index, 0.0)
+            cc_set_tangent2_lambda(cc, index, 0.0)
+    if patch_enabled != 0 and index < num_columns[0] and index < columns.patch.impulse_world.shape[0]:
+        if _body_needs_cold_contact_start(bodies, contact_get_body1(columns, index)) or _body_needs_cold_contact_start(
+            bodies, contact_get_body2(columns, index)
+        ):
+            columns.patch.impulse_world[index] = wp.vec3(0.0)
 
 
 # ---------------------------------------------------------------------------

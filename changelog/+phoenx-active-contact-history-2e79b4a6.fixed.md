@@ -1,0 +1,1 @@
+Preserve PhoenX contact warm-start impulses for active bodies when sleeping is enabled, while clearing sleeping and settling contact impulses after sleep classification to avoid stale-history kicks and transport creep.
