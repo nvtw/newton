@@ -99,6 +99,9 @@ _SMALL_ANGLE = wp.constant(1.0e-9)
 _SEPARATION_PROBE = wp.constant(1.0e-3)
 _UNBOUNDED = wp.constant(1.0e30)
 
+RESEARCH_OVERLAP = wp.constant(0.5)
+"""Overlap along a pair's direction, as a fraction of the tolerance, above which placement searches a new one."""
+
 MIN_ROOM_SHARE = wp.constant(0.25)
 """Smallest share of a pair's room a moving side receives at each placement."""
 
@@ -249,6 +252,9 @@ class PenetrationFreeData:
         self.max_constraints = int(max_constraints)
         self.max_work = int(max_work)
         self.device = device
+        sm_count = getattr(wp.get_device(device), "sm_count", 0) or 0
+        self.max_blocks = 8 * sm_count if sm_count > 0 else 0
+        """Grid cap for kernels sized by buffer capacity; their threads stride over mostly empty slots."""
         nb = max(self.body_count, 1)
         nw = max(self.max_work, 1)
         with wp.ScopedDevice(device):
@@ -532,8 +538,12 @@ def place_limits_kernel(
     if bodies[1] >= 0:
         slot = bodies[1] + slot_offset
         posed_b = _posed_feature(constraints.feature[c, 1], positions[slot], orientations[slot])
-    normal, _s_a, _s_b = _best_direction(posed_a, posed_b, constraints.normal[c], tolerance)
-    constraints.normal[c] = normal
+    # A direction only needs replacing once it leaves little room. Search when
+    # the pair overlaps along it by more than half the tolerance.
+    normal = constraints.normal[c]
+    if _world_support(posed_a, normal) + _world_support(posed_b, -normal) > RESEARCH_OVERLAP * tolerance:
+        normal, _s_a, _s_b = _best_direction(posed_a, posed_b, normal, tolerance)
+        constraints.normal[c] = normal
 
     height = wp.vec2(0.0)
     approach = wp.vec2(0.0)
@@ -599,6 +609,7 @@ def launch_place_limits(
             float(data.config.tolerance),
         ],
         device=data.device,
+        max_blocks=data.max_blocks,
     )
 
 
@@ -663,6 +674,7 @@ def launch_limit_motion(
         inputs=[data.constraints, position_start, orientation_start, position_end, orientation_end, int(slot_offset)],
         outputs=[fraction],
         device=data.device,
+        max_blocks=data.max_blocks,
     )
 
 

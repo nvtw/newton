@@ -295,6 +295,22 @@ class TestPenetrationFreePhoenX(unittest.TestCase):
                 self.assertLess(float(body_q[1, 2]), 0.105, "the overhanging cube did not land on the ground")
                 self.assertEqual(run.failure_bits(), 0, run.data.status_messages())
 
+    def test_leaning_mesh_tower_collapses(self):
+        # Each cube overhangs the one below by less than half its width, but
+        # the upper cubes' common center of mass lies beyond the base. Each
+        # cube carries dozens of redundant triangle pairs, which an averaging
+        # velocity limiter under-corrects until truncation locks the tower.
+        builder = newton.ModelBuilder()
+        builder.add_ground_plane()
+        for level in range(5):
+            body = builder.add_body(xform=wp.transform((0.06 * level, 0.0, 0.1 + 0.2 * level), wp.quat_identity()))
+            builder.add_shape_mesh(body, mesh=_box_mesh(0.1, 0.1, 0.1))
+        run = _make_run(builder, penetration_free=PenetrationFreeConfig(), broad_phase="nxn")
+        for _ in range(240):
+            run.step()
+        self.assertLess(float(run.state_0.body_q.numpy()[:, 2].max()), 0.4, "the leaning tower is still standing")
+        self.assertEqual(run.failure_bits(), 0, run.data.status_messages())
+
     def test_box_stack_settles(self):
         builder = newton.ModelBuilder()
         builder.add_ground_plane()

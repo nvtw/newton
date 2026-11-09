@@ -62,8 +62,8 @@ _REFERENCE_ROTATION_TOLERANCE = 1.0e-5
 LIMITER_RESERVE = 0.1
 """Fraction of the tolerance the velocity limiter keeps between a feature and its limit."""
 
-LIMITER_ITERATIONS = 4
-"""Jacobi passes of the velocity limiter per substep."""
+LIMITER_ITERATIONS = 8
+"""Passes of the velocity limiter per substep; each applies the most needed correction of every body."""
 
 
 @wp.kernel(enable_backward=False)
@@ -102,92 +102,107 @@ def _limited_body(bodies: BodyContainer, slot: int) -> bool:
     return bodies.motion_type[slot] == MOTION_DYNAMIC and bodies.island_root[slot] < 0
 
 
+@wp.func
+def _limiter_row(constraints: Constraints, bodies: BodyContainer, c: int, side: int, k: int, dt: float, reserve: float):
+    """Return ``(real, pseudo, n, rn)`` normal impulses for one support point of one pair side.
+
+    Support point ``k = 0`` is extremal at the current orientation and ``k = 1``
+    at the orientation predicted for the end of the substep; a resting face
+    has many extremal points. The real impulse removes approach beyond the
+    room left above ``limit - reserve``; the pseudo impulse moves a feature
+    inside the reserve back out to ``limit - reserve``.
+    """
+    slot = constraints.body[c][side] + 1
+    q = bodies.orientation[slot]
+    w = bodies.angular_velocity[slot]
+    n = side_normal(constraints, c, side)
+    q_support = q
+    if k == 1:
+        q_support = wp.normalize(wp.quat_from_axis_angle(wp.normalize(w + wp.vec3(1.0e-12)), wp.length(w) * dt) * q)
+    r = wp.quat_rotate(q, feature_support_point(constraints.feature[c, side], wp.quat_rotate_inv(q_support, n)))
+    room = constraints.limit[c][side] - reserve - wp.dot(n, bodies.position[slot] + r)
+    rn = wp.cross(r, n)
+    mass = bodies.inverse_mass[slot] + wp.dot(rn, mat33_from_sym6(bodies.inverse_inertia_world[slot]) * rn)
+    real = float(0.0)
+    pseudo = float(0.0)
+    if mass > 0.0:
+        u = wp.dot(n, bodies.velocity[slot]) + wp.dot(rn, w)
+        real = wp.max(u - wp.max(room, 0.0) / dt, 0.0) / mass
+        if room < 0.0:
+            pseudo = wp.max(wp.min(u - real * mass, 0.0) - room / dt, 0.0) / mass
+    return real, pseudo, n, rn, mass
+
+
+@wp.func
+def _limiter_key(constraints: Constraints, bodies: BodyContainer, c: int, side: int, k: int, dt: float, reserve: float):
+    """Return a per-body unique key ordering rows by the velocity correction they need, or 0 if none."""
+    real, pseudo, _n, _rn, mass = _limiter_row(constraints, bodies, c, side, k, dt, reserve)
+    correction = (real + pseudo) * mass
+    if correction <= 0.0:
+        return wp.uint64(0)
+    level = wp.uint64(wp.min(correction * 1.0e7, 2.0e9)) + wp.uint64(1)
+    return (level << wp.uint64(32)) | wp.uint64((c * 2 + side) * 2 + k)
+
+
+@wp.func
+def _limiter_target(constraints: Constraints, bodies: BodyContainer, c: int, side: int) -> int:
+    if c >= pair_count(constraints):
+        return 0
+    slot = constraints.body[c][side] + 1
+    if slot <= 0 or not _limited_body(bodies, slot):
+        return 0
+    return slot
+
+
 @wp.kernel(enable_backward=False)
-def _limit_velocity_kernel(
+def _select_limiter_row_kernel(
     constraints: Constraints,
     bodies: BodyContainer,
     dt: float,
     reserve: float,
-    # outputs
-    acc_v: wp.array[wp.vec3],
-    acc_w: wp.array[wp.vec3],
-    acc_pseudo_v: wp.array[wp.vec3],
-    acc_pseudo_w: wp.array[wp.vec3],
-    acc_count: wp.array[wp.int32],
+    # output
+    best: wp.array[wp.uint64],
 ):
-    """Compute the normal impulses that keep a constraint's support point within its limit after one substep.
-
-    The real impulse removes approach beyond the room left above
-    ``limit - reserve``; the pseudo impulse moves a feature inside the
-    reserve back out to ``limit - reserve``.
-    """
-    c, side = wp.tid()
-    if c >= pair_count(constraints):
+    """Find each body's row needing the largest velocity correction."""
+    c, side, k = wp.tid()
+    slot = _limiter_target(constraints, bodies, c, side)
+    if slot == 0:
         return
-    slot = constraints.body[c][side] + 1
-    if slot <= 0 or not _limited_body(bodies, slot):
-        return
-    q = bodies.orientation[slot]
-    x = bodies.position[slot]
-    w = bodies.angular_velocity[slot]
-    n = side_normal(constraints, c, side)
-    f = constraints.feature[c, side]
-    inv_inertia = mat33_from_sym6(bodies.inverse_inertia_world[slot])
-    inv_mass = bodies.inverse_mass[slot]
-    # Limit the current support point and the one that becomes extremal at the
-    # orientation predicted for the end of the substep; a resting face has many.
-    q_end = wp.normalize(wp.quat_from_axis_angle(wp.normalize(w + wp.vec3(1.0e-12)), wp.length(w) * dt) * q)
-    for k in range(2):
-        q_support = q
-        if k == 1:
-            q_support = q_end
-        r = wp.quat_rotate(q, feature_support_point(f, wp.quat_rotate_inv(q_support, n)))
-        room = constraints.limit[c][side] - reserve - wp.dot(n, x + r)
-        rn = wp.cross(r, n)
-        mass = inv_mass + wp.dot(rn, inv_inertia * rn)
-        if mass > 0.0:
-            u = wp.dot(n, bodies.velocity[slot]) + wp.dot(rn, w)
-            real = wp.max(u - wp.max(room, 0.0) / dt, 0.0) / mass
-            pseudo = float(0.0)
-            if room < 0.0:
-                pseudo = wp.max(wp.min(u - real * mass, 0.0) - room / dt, 0.0) / mass
-            if real > 0.0 or pseudo > 0.0:
-                wp.atomic_add(acc_v, slot, -inv_mass * real * n)
-                wp.atomic_add(acc_w, slot, -real * (inv_inertia * rn))
-                wp.atomic_add(acc_pseudo_v, slot, -inv_mass * pseudo * n)
-                wp.atomic_add(acc_pseudo_w, slot, -pseudo * (inv_inertia * rn))
-                wp.atomic_add(acc_count, slot, 1)
+    key = _limiter_key(constraints, bodies, c, side, k, dt, reserve)
+    if key != wp.uint64(0):
+        wp.atomic_max(best, slot, key)
 
 
 @wp.kernel(enable_backward=False)
-def _apply_velocity_limit_kernel(
+def _apply_limiter_row_kernel(
+    constraints: Constraints,
     bodies: BodyContainer,
-    acc_v: wp.array[wp.vec3],
-    acc_w: wp.array[wp.vec3],
-    acc_pseudo_v: wp.array[wp.vec3],
-    acc_pseudo_w: wp.array[wp.vec3],
-    acc_count: wp.array[wp.int32],
+    dt: float,
+    reserve: float,
+    best: wp.array[wp.uint64],
     # outputs
     pseudo_v: wp.array[wp.vec3],
     pseudo_w: wp.array[wp.vec3],
 ):
-    """Apply the averaged limiter impulses and remember the pseudo part for removal after integration."""
-    i = wp.tid()
-    count = acc_count[i]
-    if count == 0:
+    """Apply each body's selected row and clear the selection for the next pass."""
+    slot = wp.tid()
+    key = best[slot]
+    if key == wp.uint64(0):
         return
-    scale = 1.0 / float(count)
-    dpv = acc_pseudo_v[i] * scale
-    dpw = acc_pseudo_w[i] * scale
-    bodies.velocity[i] = bodies.velocity[i] + acc_v[i] * scale + dpv
-    bodies.angular_velocity[i] = bodies.angular_velocity[i] + acc_w[i] * scale + dpw
-    pseudo_v[i] = pseudo_v[i] + dpv
-    pseudo_w[i] = pseudo_w[i] + dpw
-    acc_v[i] = wp.vec3(0.0)
-    acc_w[i] = wp.vec3(0.0)
-    acc_pseudo_v[i] = wp.vec3(0.0)
-    acc_pseudo_w[i] = wp.vec3(0.0)
-    acc_count[i] = 0
+    best[slot] = wp.uint64(0)
+    row = int(key & wp.uint64(0xFFFFFFFF))
+    c = row // 4
+    side = (row // 2) % 2
+    k = row % 2
+    real, pseudo, n, rn, _mass = _limiter_row(constraints, bodies, c, side, k, dt, reserve)
+    inv_inertia = mat33_from_sym6(bodies.inverse_inertia_world[slot])
+    inv_mass = bodies.inverse_mass[slot]
+    dpv = -inv_mass * pseudo * n
+    dpw = -pseudo * (inv_inertia * rn)
+    bodies.velocity[slot] = bodies.velocity[slot] - inv_mass * real * n + dpv
+    bodies.angular_velocity[slot] = bodies.angular_velocity[slot] - real * (inv_inertia * rn) + dpw
+    pseudo_v[slot] = pseudo_v[slot] + dpv
+    pseudo_w[slot] = pseudo_w[slot] + dpw
 
 
 @wp.kernel(enable_backward=False)
@@ -271,13 +286,7 @@ class PhoenXPenetrationFree:
         self.fraction = wp.ones(n, dtype=wp.float32, device=device)
         self.pseudo_v = wp.zeros(n, dtype=wp.vec3, device=device)
         self.pseudo_w = wp.zeros(n, dtype=wp.vec3, device=device)
-        self._accumulators = [
-            wp.zeros(n, dtype=wp.vec3, device=device),
-            wp.zeros(n, dtype=wp.vec3, device=device),
-            wp.zeros(n, dtype=wp.vec3, device=device),
-            wp.zeros(n, dtype=wp.vec3, device=device),
-            wp.zeros(n, dtype=wp.int32, device=device),
-        ]
+        self._best_row = wp.zeros(n, dtype=wp.uint64, device=device)
 
     def check_reference(self, data: PenetrationFreeData, body_q: wp.array, bodies: BodyContainer) -> None:
         """Flag a state that does not continue from the last certified commit."""
@@ -315,18 +324,22 @@ class PhoenXPenetrationFree:
             return
         launch_place_limits(data, bodies.position, bodies.orientation, bodies.velocity, bodies.angular_velocity, 1)
         reserve = LIMITER_RESERVE * float(data.config.tolerance)
+        rows = (data.constraints.body.shape[0], 2, 2)
+        inputs = [data.constraints, bodies, float(dt), reserve]
+        self._best_row.zero_()
         for _ in range(LIMITER_ITERATIONS):
             wp.launch(
-                _limit_velocity_kernel,
-                dim=(data.constraints.body.shape[0], 2),
-                inputs=[data.constraints, bodies, float(dt), reserve],
-                outputs=self._accumulators,
+                _select_limiter_row_kernel,
+                dim=rows,
+                inputs=inputs,
+                outputs=[self._best_row],
                 device=self.device,
+                max_blocks=data.max_blocks,
             )
             wp.launch(
-                _apply_velocity_limit_kernel,
+                _apply_limiter_row_kernel,
                 dim=self.num_bodies,
-                inputs=[bodies, *self._accumulators],
+                inputs=[*inputs, self._best_row],
                 outputs=[self.pseudo_v, self.pseudo_w],
                 device=self.device,
             )
