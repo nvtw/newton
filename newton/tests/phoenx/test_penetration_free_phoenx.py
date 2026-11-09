@@ -274,6 +274,27 @@ class TestPenetrationFreePhoenX(unittest.TestCase):
         _, lowest, _, _ = self._drop_all_shapes("box", None)
         self.assertLess(float(lowest.min()), -0.05, "baseline no longer penetrates the thin box")
 
+    def test_overhanging_cube_tips_off(self):
+        # A cube resting with its center of mass beyond its support's edge must
+        # tip off. The face-to-face separating plane alone forbids the tipping,
+        # so this needs per-update re-certification and room for a side at rest.
+        for kind in ("box", "mesh"):
+            with self.subTest(kind=kind):
+                builder = newton.ModelBuilder()
+                builder.add_ground_plane()
+                for x, z in ((0.0, 0.1), (0.15, 0.3)):
+                    body = builder.add_body(xform=wp.transform((x, 0.0, z), wp.quat_identity()))
+                    if kind == "box":
+                        builder.add_shape_box(body, hx=0.1, hy=0.1, hz=0.1)
+                    else:
+                        builder.add_shape_mesh(body, mesh=_box_mesh(0.1, 0.1, 0.1))
+                run = _make_run(builder, penetration_free=PenetrationFreeConfig(), broad_phase="nxn")
+                for _ in range(120):
+                    run.step()
+                body_q = run.state_0.body_q.numpy()
+                self.assertLess(float(body_q[1, 2]), 0.105, "the overhanging cube did not land on the ground")
+                self.assertEqual(run.failure_bits(), 0, run.data.status_messages())
+
     def test_box_stack_settles(self):
         builder = newton.ModelBuilder()
         builder.add_ground_plane()

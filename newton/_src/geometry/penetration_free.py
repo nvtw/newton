@@ -55,6 +55,7 @@ from .simplex_solver import create_solve_closest_distance
 from .support_function import (
     TRIANGLE_PRISM_EXTRUSION,
     GenericShapeData,
+    GeoTypeEx,
     SupportMapDataProvider,
     extract_shape_data,
     support_map,
@@ -96,6 +97,13 @@ _SUPPORT_ABSOLUTE_SLACK = wp.constant(1.0e-7)
 _SMALL_ANGLE = wp.constant(1.0e-9)
 # Extra separation [m] when probing an overlapping pair's closest features with GJK.
 _SEPARATION_PROBE = wp.constant(1.0e-3)
+_UNBOUNDED = wp.constant(1.0e30)
+
+MIN_ROOM_SHARE = wp.constant(0.25)
+"""Smallest share of a pair's room a moving side receives at each placement."""
+
+RELEASE_OVERLAP = wp.constant(0.5)
+"""Overlap beyond the tolerance, as a fraction of it, at which a pair is released to the force contacts."""
 
 MOTION_SAMPLES = wp.constant(4)
 """Number of intervals over which a substep motion's support height is certified."""
@@ -136,11 +144,12 @@ class PenetrationFreeConfig:
     separating direction of the pair. Solvers without support reject the
     resulting :class:`~newton.Contacts` buffer.
 
-    The guarantee assumes the configuration at detection time is valid: pairs
-    that already overlap by more than :attr:`tolerance` are only prevented from
-    overlapping further. Motion that exceeds a constraint or a budget is
-    truncated, which can remove kinetic energy and stall fast bodies until the
-    next collision detection.
+    The guarantee covers pairs that overlap by at most :attr:`tolerance` at
+    detection time. Pairs that already overlap more, for example bodies
+    created interpenetrating, are released to the solver's contacts and
+    counted in :attr:`PenetrationFreeData.recovery_count` until a later
+    detection finds them within the tolerance. Motion that exceeds a
+    constraint or a budget is truncated, which can remove kinetic energy.
 
     .. experimental::
 
@@ -280,7 +289,7 @@ class PenetrationFreeData:
 
     @property
     def recovery_count(self) -> wp.array:
-        """Number of feature pairs that already overlapped by more than the tolerance."""
+        """Number of feature pairs released because they overlapped by more than the tolerance."""
         return self.constraints.recovery_count
 
     def reset(self) -> None:
@@ -502,39 +511,65 @@ def place_limits_kernel(
     slot_offset: int,
     tolerance: float,
 ):
-    """Re-divide each pair's room at the current poses in proportion to the sides' approach speeds.
+    """Re-certify each pair's direction at the current poses and re-divide its room.
 
-    The room ``tolerance - overlap`` along the fixed pair normal goes to the
-    sides that approach it, so a side moving away or sliding along the
-    plane is never truncated. If the overlap is within the tolerance before
-    placement, the new limits keep it there; otherwise they freeze it.
+    The new direction is the best of the current separating directions and
+    the previous one, so the overlap along it never exceeds the overlap the
+    previous limits allowed. The room ``tolerance - overlap`` then goes to the
+    sides in proportion to their approach speeds, so a side moving away or
+    sliding along the plane is never truncated. Overlap within the tolerance
+    stays within it; larger overlap is frozen.
     """
     c = wp.tid()
     if c >= pair_count(constraints):
         return
     bodies = constraints.body[c]
+    posed_a = _posed_feature(constraints.feature[c, 0], wp.vec3(0.0), wp.quat_identity())
+    posed_b = _posed_feature(constraints.feature[c, 1], wp.vec3(0.0), wp.quat_identity())
+    if bodies[0] >= 0:
+        slot = bodies[0] + slot_offset
+        posed_a = _posed_feature(constraints.feature[c, 0], positions[slot], orientations[slot])
+    if bodies[1] >= 0:
+        slot = bodies[1] + slot_offset
+        posed_b = _posed_feature(constraints.feature[c, 1], positions[slot], orientations[slot])
+    normal, _s_a, _s_b = _best_direction(posed_a, posed_b, constraints.normal[c], tolerance)
+    constraints.normal[c] = normal
+
     height = wp.vec2(0.0)
     approach = wp.vec2(0.0)
     for side in range(2):
+        n = side_normal(constraints, c, side)
+        f = constraints.feature[c, side]
         b = bodies[side]
         if b < 0:
-            height[side] = constraints.fixed_support[c][side]
+            if _is_infinite_plane(_feature_geom(f)) != 0:
+                height[side] = constraints.fixed_support[c][side]
+            else:
+                height[side] = feature_support(f, n)
         else:
             slot = b + slot_offset
-            n = side_normal(constraints, c, side)
             q = orientations[slot]
             n_body = wp.quat_rotate_inv(q, n)
-            f = constraints.feature[c, side]
             height[side] = wp.dot(n, positions[slot]) + feature_support(f, n_body)
             r = wp.quat_rotate(q, feature_support_point(f, n_body))
             speed = wp.dot(n, velocities[slot] + wp.cross(angular_velocities[slot], r))
-            # A moving side always keeps a small share so it is never pinned.
-            approach[side] = wp.max(speed, 0.0) + 1.0e-6
-    room = wp.max(tolerance - height[0] - height[1], 0.0)
-    total = approach[0] + approach[1]
+            approach[side] = wp.max(speed, 0.0)
+    room = tolerance - height[0] - height[1]
+    if room < -RELEASE_OVERLAP * tolerance:
+        # Overlap far beyond the tolerance cannot come from certified motion,
+        # only from prescribed motion or a reset; release the pair.
+        constraints.limit[c] = wp.vec2(_UNBOUNDED, _UNBOUNDED)
+        return
+    room = wp.max(room, 0.0)
     share = 0.5
-    if total > 0.0:
-        share = approach[0] / total
+    if bodies[0] < 0:
+        share = 0.0
+    elif bodies[1] < 0:
+        share = 1.0
+    elif approach[0] + approach[1] > 0.0:
+        # Each moving side keeps a quarter of the room: a side at rest must be
+        # able to start moving, or the other side's jitter would pin it.
+        share = MIN_ROOM_SHARE + (1.0 - 2.0 * MIN_ROOM_SHARE) * approach[0] / (approach[0] + approach[1])
     constraints.limit[c] = wp.vec2(height[0] + share * room, height[1] + (1.0 - share) * room)
 
 
@@ -706,6 +741,37 @@ def _shape_core_radius(geom: GenericShapeData, local_aabb_lower: wp.vec3, local_
 
 
 @wp.func
+def _is_infinite_plane(geom: GenericShapeData) -> int:
+    if geom.shape_type == GeoType.PLANE and geom.scale[0] == 0.0 and geom.scale[1] == 0.0:
+        return 1
+    return 0
+
+
+@wp.func
+def _face_normal(geom: GenericShapeData, rot: wp.quat) -> wp.vec3:
+    """Return the outward unit normal of a mesh or heightfield triangle, zero for other features."""
+    if geom.shape_type != GeoTypeEx.TRIANGLE and geom.shape_type != GeoTypeEx.TRIANGLE_PRISM:
+        return wp.vec3(0.0)
+    face = wp.cross(geom.scale, geom.auxiliary)
+    if wp.length(face) <= 0.0:
+        return wp.vec3(0.0)
+    return wp.quat_rotate(rot, wp.normalize(face))
+
+
+@wp.func
+def _posed_feature(f: ConstraintFeature, x: wp.vec3, q: wp.quat) -> _Feature:
+    """Return a constraint feature placed at the center-of-mass pose ``(x, q)`` of its body."""
+    p = _Feature()
+    p.geom = _feature_geom(f)
+    p.pos = x + wp.quat_rotate(q, f.local_pos)
+    p.rot = q * f.local_rot
+    p.infinite_plane = _is_infinite_plane(p.geom)
+    p.face_normal = _face_normal(p.geom, p.rot)
+    p.local = f
+    return p
+
+
+@wp.func
 def _make_feature(
     scene: GenerationScene, shape: int, geom: GenericShapeData, pos: wp.vec3, rot: wp.quat, core_radius: float
 ) -> _Feature:
@@ -724,10 +790,8 @@ def _make_feature(
         X = scene.body_q[b]
         com = wp.transform_point(X, scene.body_com[b])
         rb = wp.transform_get_rotation(X)
-    f.infinite_plane = 0
-    f.face_normal = wp.vec3(0.0)
-    if geom.shape_type == GeoType.PLANE and geom.scale[0] == 0.0 and geom.scale[1] == 0.0:
-        f.infinite_plane = 1
+    f.infinite_plane = _is_infinite_plane(geom)
+    f.face_normal = _face_normal(geom, rot)
     local = ConstraintFeature()
     local.local_pos = wp.quat_rotate_inv(rb, pos - com)
     local.local_rot = wp.quat_inverse(rb) * rot
@@ -773,11 +837,7 @@ def _triangle_feature(scene: GenerationScene, shape: int, tri: int) -> _Feature:
         wp.max(wp.length(geom.scale), wp.length(geom.auxiliary)),
         wp.max(wp.length(down), wp.max(wp.length(geom.scale + down), wp.length(geom.auxiliary + down))),
     )
-    f = _make_feature(scene, shape, geom, v0, rot, core)
-    face = wp.cross(geom.scale, geom.auxiliary)
-    if wp.length(face) > 0.0:
-        f.face_normal = wp.quat_rotate(rot, wp.normalize(face))
-    return f
+    return _make_feature(scene, shape, geom, v0, rot, core)
 
 
 @wp.func
@@ -804,89 +864,106 @@ def _emit_pair(a: _Feature, b: _Feature, normal: wp.vec3, height: wp.vec2, limit
 
 
 @wp.func
-def _process_feature_pair(a: _Feature, b: _Feature, tolerance: float, out: Constraints):
-    """Certify a direction ``n`` separating two convex features and emit their half-space constraints.
+def _best_direction(a: _Feature, b: _Feature, hint: wp.vec3, tolerance: float):
+    """Return ``(normal, s_a, s_b)``: the direction from ``A`` to ``B`` with the largest separation.
 
-    The limits split the available clearance along ``n`` in proportion to the
-    bodies' motion budgets, so the features never overlap along ``n`` by more
-    than ``tolerance``. Features that already overlap more only may not
-    overlap further.
+    ``s_a`` is ``A``'s upper and ``s_b`` is ``B``'s lower support along it.
+    Candidates are the GJK/MPR direction, a GJK refinement of shallow
+    overlaps, triangle face normals, and ``hint`` (an earlier certified
+    direction, so re-certification never increases the overlap). When no
+    candidate separates the pair by more than the tolerance, a face normal
+    that separates within it wins: along it the overlap bounds how deep the
+    other feature's vertices sink below the surface, which a lateral
+    direction would not.
     """
-    if (a.body < 0 and b.body < 0) or (a.infinite_plane != 0 and b.infinite_plane != 0):
-        return
+    if a.infinite_plane != 0:
+        # An infinite plane is a half-space; its support along its own normal is its offset.
+        normal = wp.quat_rotate(a.rot, wp.vec3(0.0, 0.0, 1.0))
+        return normal, wp.dot(normal, a.pos) + a.local.margin, -_world_support(b, -normal)
+    if b.infinite_plane != 0:
+        normal = -wp.quat_rotate(b.rot, wp.vec3(0.0, 0.0, 1.0))
+        return normal, _world_support(a, normal), wp.dot(normal, b.pos) - b.local.margin
+
+    provider = SupportMapDataProvider()
+    overlap, _gjk_distance, _gjk_point, n = _solve_gjk(a.geom, b.geom, a.rot, b.rot, a.pos, b.pos, 0.0, provider)
+    refined = wp.vec3(0.0)
+    if overlap:
+        _hit, signed_distance, _mpr_point, n_mpr = _solve_mpr(a.geom, b.geom, a.rot, b.rot, a.pos, b.pos, 0.0, provider)
+        n = n_mpr
+        # MPR normals of shallow overlaps are approximate. Separate B along
+        # the estimate and let exact GJK find the closest features.
+        if wp.length(n) > 0.5:
+            shift = wp.normalize(n) * (2.0 * wp.max(-signed_distance, 0.0) + _SEPARATION_PROBE)
+            separated, _d, _p, n_sep = _solve_gjk(a.geom, b.geom, a.rot, b.rot, a.pos, b.pos + shift, 0.0, provider)
+            if not separated:
+                refined = n_sep
+    if wp.length(n) <= 0.5:
+        n = b.pos - a.pos
 
     normal = wp.vec3(0.0, 0.0, 1.0)
     s_a = float(0.0)
     s_b = float(0.0)
-    if a.infinite_plane != 0 or b.infinite_plane != 0:
-        # An infinite plane is a half-space; its support along its own normal is its offset.
-        if a.infinite_plane != 0:
-            normal = wp.quat_rotate(a.rot, wp.vec3(0.0, 0.0, 1.0))
-            s_a = wp.dot(normal, a.pos) + a.local.margin
-            s_b = -_world_support(b, -normal)
-        else:
-            normal = -wp.quat_rotate(b.rot, wp.vec3(0.0, 0.0, 1.0))
-            s_a = _world_support(a, normal)
-            s_b = wp.dot(normal, b.pos) - b.local.margin
-    else:
-        provider = SupportMapDataProvider()
-        overlap, _gjk_distance, _gjk_point, n = _solve_gjk(a.geom, b.geom, a.rot, b.rot, a.pos, b.pos, 0.0, provider)
-        refined = wp.vec3(0.0)
-        if overlap:
-            _hit, signed_distance, _mpr_point, n_mpr = _solve_mpr(
-                a.geom, b.geom, a.rot, b.rot, a.pos, b.pos, 0.0, provider
-            )
-            n = n_mpr
-            # MPR normals of shallow overlaps are approximate. Separate B along
-            # the estimate and let exact GJK find the closest features.
-            if wp.length(n) > 0.5:
-                shift = wp.normalize(n) * (2.0 * wp.max(-signed_distance, 0.0) + _SEPARATION_PROBE)
-                separated, _d, _p, n_sep = _solve_gjk(a.geom, b.geom, a.rot, b.rot, a.pos, b.pos + shift, 0.0, provider)
-                if not separated:
-                    refined = n_sep
-        if wp.length(n) <= 0.5:
-            n = b.pos - a.pos
-        # Keep the candidate direction with the largest separation. A triangle's
-        # face normal wins whenever it separates within the tolerance: along it
-        # the overlap bounds how deep the other feature's vertices sink below
-        # the surface, which a lateral direction would not.
-        best_score = float(-1.0e30)
-        for k in range(6):
-            candidate = n
-            if k == 2 or k == 3:
-                candidate = refined
-            elif k == 4:
-                candidate = a.face_normal
-            elif k == 5:
-                candidate = -b.face_normal
-            if wp.length(candidate) > 0.5:
-                candidate = wp.normalize(candidate)
-                if k == 1 or k == 3:
-                    candidate = -candidate
-                c_a = _world_support(a, candidate)
-                c_b = -_world_support(b, -candidate)
-                score = c_b - c_a
-                if k >= 4 and score >= -tolerance:
-                    score += 1.0e6
-                if score > best_score:
-                    best_score = score
-                    normal = candidate
-                    s_a = c_a
-                    s_b = c_b
+    best_gap = float(-1.0e30)
+    face_normal = wp.vec3(0.0)
+    face_a = float(0.0)
+    face_b = float(0.0)
+    best_face_gap = float(-1.0e30)
+    for k in range(7):
+        candidate = n
+        if k == 2 or k == 3:
+            candidate = refined
+        elif k == 4:
+            candidate = a.face_normal
+        elif k == 5:
+            candidate = -b.face_normal
+        elif k == 6:
+            candidate = hint
+        if wp.length(candidate) > 0.5:
+            candidate = wp.normalize(candidate)
+            if k == 1 or k == 3:
+                candidate = -candidate
+            c_a = _world_support(a, candidate)
+            c_b = -_world_support(b, -candidate)
+            gap = c_b - c_a
+            if gap > best_gap:
+                best_gap = gap
+                normal = candidate
+                s_a = c_a
+                s_b = c_b
+            if (k == 4 or k == 5) and gap > best_face_gap:
+                best_face_gap = gap
+                face_normal = candidate
+                face_a = c_a
+                face_b = c_b
+    # Only touching or crossing triangles need the face normal; a clearly
+    # separating direction must stay free, or a triangle could never move past
+    # the infinite extension of a face it is beside.
+    if best_gap <= tolerance and best_face_gap >= -tolerance:
+        return face_normal, face_a, face_b
+    return normal, s_a, s_b
 
+
+@wp.func
+def _process_feature_pair(a: _Feature, b: _Feature, tolerance: float, out: Constraints):
+    """Certify a direction separating two convex features and emit them as a pair.
+
+    The initial limits split the clearance along the direction in proportion
+    to the bodies' motion budgets; solvers re-place them every update.
+    """
+    if (a.body < 0 and b.body < 0) or (a.infinite_plane != 0 and b.infinite_plane != 0):
+        return
+    normal, s_a, s_b = _best_direction(a, b, wp.vec3(0.0), tolerance)
     gap = s_b - s_a
     if gap > a.budget + b.budget:
         return  # The motion budgets alone keep this pair apart.
-
     available = gap + tolerance
     if available < 0.0:
+        # Released to the force contacts until a later detection certifies it again.
         wp.atomic_add(out.recovery_count, 0, 1)
-        available = 0.0
+        return
     w_a = float(0.5)
     if a.budget + b.budget > 0.0:
         w_a = a.budget / (a.budget + b.budget)
-    # Side heights are supports along each side's normal; solvers re-place
-    # the limits every update, this budget-weighted split is the initial one.
     height = wp.vec2(s_a, -s_b)
     _emit_pair(a, b, normal, height, height + wp.vec2(w_a * available, (1.0 - w_a) * available), out)
 
