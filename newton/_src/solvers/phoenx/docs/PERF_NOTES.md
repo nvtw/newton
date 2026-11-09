@@ -288,6 +288,42 @@ Kernel lessons (clock64 phase timers, nsys):
   at 8,192 worlds where the issue-heavier dense kernels saturate; a larger
   win needs the fused two-kernel substep of the design study.
 
+### Fused dense substep (2026-11-09)
+
+Trees whose contacts are all private run a substep in two kernels per dense
+bucket, one warp per articulation (`articulations/dense_substep.py`): biased
+(frames, implicit diagonal, factor, external solve, contacts, velocity-product
+step, integration, publication) and relax (refactor at the integrated pose,
+bias-free contacts, rate publication). Contacts run in contact space on
+`A = Z^T Z`, `z_r = L^-T J_r^T` on each row's root path.
+
+G1 RL recipe, solo RTX PRO 6000, env steps/s (ABA -> fused):
+
+| Worlds | Point friction | Patch friction |
+| --- | --- | --- |
+| 4,096 | 1.193M -> 1.730M (1.45x) | 1.408M -> 1.767M (1.25x) |
+| 8,192 | 1.305M -> 1.908M (1.46x) | 1.733M -> 1.945M (1.12x) |
+
+Lessons (clock64 phase timers, nsys):
+
+- Composing the reduced pipeline's existing global-memory device functions
+  into one kernel was slower than the separate kernels (1,250 vs 830 us per
+  substep): every depth level chained dependent L2 loads (`_deferred_point_
+  velocity` alone walked the root path per contact point). Tree recurrences on
+  shared memory, host-packed 8/16-bit template tables staged by one copy, and
+  generalized row velocities removed most of it.
+- The kernels are throughput-bound, not latency-bound: 752 worlds (4 warps per
+  SM) take 99 us for the biased kernel like 64 worlds, 1,504 worlds take 201
+  us. Launch bounds (spills) and two articulations per warp (depth-position
+  lanes, 21.5 KB shared per warp: 451 vs 418 us at 4,096) were both slower;
+  the per-lane register joint data of the 32-lane kernel is the cheaper form.
+- Per-warp cycles at 4,096 worlds (patch): biased 278k (contacts 66k,
+  velocity product 60k, external solve 41k, publish 29k, configure 24k,
+  integrate 22k, factor 22k with reuse), relax 149k (factor 46k, contacts 53k,
+  configure 22k, frames 20k). Relax factors stay at the integrated pose; the
+  next biased kernel reuses them when the implicit diagonal is unchanged,
+  which needed `state_is_continuation` steps to keep the factor.
+
 ## Batched humanoid comparison
 
 Measured 2026-08-04 on an RTX PRO 6000 Blackwell with 20,000 worlds,
