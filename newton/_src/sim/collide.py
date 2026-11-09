@@ -3081,6 +3081,8 @@ class CollisionPipeline:
             validate_penetration_free_model(model)
             self._penetration_free = penetration_free
             self._penetration_free_capacities = penetration_free_capacities(model, penetration_free)
+            sm_count = getattr(wp.get_device(device), "sm_count", 0) or 0
+            self._pf_max_blocks = 8 * sm_count if sm_count > 0 else 0
             with wp.ScopedDevice(device):
                 self._pf_empty_heightfield_index = wp.full(max(model.shape_count, 1), -1, dtype=wp.int32)
                 self._pf_empty_heightfield_data = wp.zeros(1, dtype=HeightfieldData)
@@ -3884,6 +3886,7 @@ class CollisionPipeline:
         scene.shape_aabb_upper_local = model.shape_collision_aabb_upper
         scene.aabb_lower = self.narrow_phase.shape_aabb_lower
         scene.aabb_upper = self.narrow_phase.shape_aabb_upper
+        scene.shape_gap = model.shape_gap
         has_heightfields = model.heightfield_data is not None and model.heightfield_data.shape[0] > 0
         scene.heightfield_index = (
             model.shape_heightfield_index if has_heightfields else self._pf_empty_heightfield_index
@@ -3894,7 +3897,10 @@ class CollisionPipeline:
         scene.body_com = model.body_com
         scene.body_budget = data.body_budget
         out = data.constraints
-        launch = {"device": self.device, "record_tape": False}
+        # These kernels are sized by buffer capacity but usually find far fewer
+        # items; bounded grids stride over the capacity instead of scheduling
+        # mostly idle blocks of a register-heavy kernel.
+        launch = {"device": self.device, "record_tape": False, "max_blocks": self._pf_max_blocks}
         wp.launch(
             generate_pair_constraints_kernel,
             dim=scene.pairs.shape[0],

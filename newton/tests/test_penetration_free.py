@@ -59,7 +59,7 @@ def _rotating_box_fraction_kernel(
     angle: float,
     limit: float,
     half: wp.vec3,
-    lipschitz: float,
+    reach: float,
     out_fraction: wp.array[float],
 ):
     # A box with its center of mass on the plane normal axis rotates about
@@ -74,14 +74,14 @@ def _rotating_box_fraction_kernel(
     feature.local_rot = wp.quat_identity()
     feature.shape_type = 7  # GeoType.BOX
     feature.scale = half
-    feature.lipschitz = lipschitz
+    feature.reach = reach
     out_fraction[0] = halfspace_motion_fraction(feature, normal, limit, x0, q0, dx, axis, theta)
 
 
 class TestPenetrationFreeCertification(unittest.TestCase):
     def test_rotation_crossing_and_returning_is_truncated(self):
         half = np.array([0.5, 0.5, 0.1], dtype=np.float32)
-        lipschitz = float(np.linalg.norm(half))
+        reach = float(np.linalg.norm(half))
         # Support of -z at rotation phi is 0.5 |sin phi| + 0.1 |cos phi|; it peaks near phi = pi/2.
         limit = 0.3
         angle = math.pi  # end support 0.1 < limit, peak 0.5 > limit
@@ -89,7 +89,7 @@ class TestPenetrationFreeCertification(unittest.TestCase):
         wp.launch(
             _rotating_box_fraction_kernel,
             dim=1,
-            inputs=[angle, limit, wp.vec3(*half), lipschitz],
+            inputs=[angle, limit, wp.vec3(*half), reach],
             outputs=[out],
             device="cpu",
         )

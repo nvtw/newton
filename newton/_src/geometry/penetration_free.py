@@ -29,10 +29,9 @@ cannot meet.
 A solver certifies a candidate motion from ``(c0, q0)`` to ``(c1, q1)`` along
 the screw path that translates the center of mass linearly and rotates about a
 fixed axis through it. For a feature within radius ``rho`` of the center of
-mass, the support function is ``rho``-Lipschitz in the direction, so ``h`` changes
-at most at rate ``|n . dc| + rho |theta| |a x n|`` along the path. Exact samples
-of ``h`` combined with that rate bound certify the whole path (see
-:func:`halfspace_motion_fraction`). Solvers commit only the admissible fraction
+mass, the height of each of its points has second derivative at most
+``theta^2 rho`` along that path. Exact samples of ``h`` combined with that
+curvature bound certify the whole path (see :func:`halfspace_motion_fraction`). Solvers commit only the admissible fraction
 of each motion, which also keeps the accumulated travel within the budget.
 
 This module holds solver-independent pieces: the configuration, the buffers
@@ -95,9 +94,17 @@ _STATUS_NAMES = {
 _SUPPORT_RELATIVE_SLACK = wp.constant(4.0e-6)
 _SUPPORT_ABSOLUTE_SLACK = wp.constant(1.0e-7)
 _SMALL_ANGLE = wp.constant(1.0e-9)
+# Extra separation [m] when probing an overlapping pair's closest features with GJK.
+_SEPARATION_PROBE = wp.constant(1.0e-3)
 
-MOTION_SAMPLES = wp.constant(8)
+MOTION_SAMPLES = wp.constant(4)
 """Number of intervals over which a substep motion's support height is certified."""
+
+MOTION_BISECTIONS = wp.constant(8)
+"""Bisection steps locating the admissible prefix of the first uncertified interval."""
+
+TRUNCATION_BACKOFF = wp.constant(0.9)
+"""Fraction of the remaining room a truncated motion may use."""
 
 _SUPPORTED_GEO_TYPES = frozenset(
     {
@@ -185,7 +192,7 @@ class ConstraintFeature:
     scale: wp.vec3
     aux: wp.vec3
     margin: float
-    lipschitz: float
+    reach: float
     """Radius [m] about the center of mass bounding the feature minus its spherical rounding."""
 
 
@@ -274,8 +281,19 @@ class PenetrationFreeData:
 
 
 def penetration_free_capacities(model, config: PenetrationFreeConfig) -> tuple[int, int]:
-    """Return default ``(max_constraints, max_triangle_work)`` capacities for ``model``."""
-    default = max(4096, 128 * int(model.shape_count))
+    """Return default ``(max_constraints, max_triangle_work)`` capacities for ``model``.
+
+    Triangle pairs dominate mesh-heavy scenes, so the defaults grow with the
+    number of triangles on moving mesh shapes.
+    """
+    shape_body = model.shape_body.numpy() if model.shape_count else []
+    shape_type = model.shape_type.numpy() if model.shape_count else []
+    moving_triangles = sum(
+        len(src.indices) // 3
+        for src, t, b in zip(model.shape_source, shape_type, shape_body, strict=False)
+        if int(t) == int(GeoType.MESH) and int(b) >= 0 and src is not None
+    )
+    default = max(4096, 128 * int(model.shape_count), 128 * moving_triangles)
     return int(config.max_constraints or default), int(config.max_triangle_work or default)
 
 
@@ -368,7 +386,7 @@ def feature_support(f: ConstraintFeature, direction_body: wp.vec3) -> float:
     Includes the margin and a conservative float32 roundoff slack.
     """
     value = wp.dot(direction_body, f.local_pos) + _support(_feature_geom(f), f.local_rot, direction_body) + f.margin
-    magnitude = wp.length(f.local_pos) + f.lipschitz + wp.length(f.scale) + wp.abs(f.margin)
+    magnitude = wp.length(f.local_pos) + f.reach + wp.length(f.scale) + wp.abs(f.margin)
     return value + _SUPPORT_RELATIVE_SLACK * magnitude + _SUPPORT_ABSOLUTE_SLACK
 
 
@@ -394,25 +412,45 @@ def halfspace_motion_fraction(
 ) -> float:
     """Return the admissible fraction of a screw motion for one half-space constraint.
 
-    The support height ``h(t)`` is evaluated exactly at
-    :data:`MOTION_SAMPLES` + 1 equally spaced fractions. Its rate of change is
-    bounded by ``S = |n . dx| + rho |theta| |a x n|``, so between two samples
-    ``h(t) <= (h_i + h_{i+1}) / 2 + S delta / 2``. The returned fraction keeps
-    this certified bound at or below ``max(limit, h(0))``: a feature that
-    starts above its limit may move but never rise further.
+    Along the screw path, the height ``n . x(t)`` of every feature point within
+    ``rho`` of the center of mass has second derivative at most
+    ``M = theta^2 rho`` (translation is linear in ``t``). The support height
+    ``h(t)`` is their maximum, so on an interval of length ``s`` it is bounded
+    by the larger endpoint value plus ``M s^2 / 8``. ``h`` is evaluated exactly
+    at :data:`MOTION_SAMPLES` + 1 fractions; the first interval that may exceed
+    ``limit`` is bisected, aiming at :data:`TRUNCATION_BACKOFF` of the
+    remaining room so truncated bodies keep slack for later motion.
+
+    A feature that starts at or above its limit, such as a pair that already
+    overlapped by more than the tolerance at detection, may move as long as
+    its sampled heights never rise above ``h(0)``. Between samples it may then
+    exceed ``h(0)`` by at most ``M delta^2 / 8``, a second-order excursion that
+    does not accumulate because every substep restarts from exact heights.
+    Without this, any rotation would freeze such a feature permanently.
     """
-    rate = wp.abs(wp.dot(normal, dx)) + f.lipschitz * angle * wp.length(wp.cross(axis, normal))
-    if rate <= 0.0:
-        return 1.0
-    h_prev = _feature_height(f, normal, x0, q0, dx, axis, angle, 0.0)
-    bound = wp.max(limit, h_prev)
+    curvature = 0.125 * angle * angle * f.reach
+    h_start = _feature_height(f, normal, x0, q0, dx, axis, angle, 0.0)
+    bound = limit
+    if h_start >= limit:
+        bound = h_start
+        curvature = 0.0
     delta = 1.0 / float(MOTION_SAMPLES)
+    h_prev = h_start
     for i in range(MOTION_SAMPLES):
         t0 = float(i) * delta
         h_next = _feature_height(f, normal, x0, q0, dx, axis, angle, t0 + delta)
-        if 0.5 * (h_prev + h_next) + 0.5 * rate * delta > bound:
-            # Admissible prefix of this interval from the Lipschitz bound at its start.
-            return wp.clamp(t0 + wp.max(bound - h_prev, 0.0) / rate, t0, t0 + delta)
+        if wp.max(h_prev, h_next) + curvature * delta * delta > bound:
+            target = h_prev + TRUNCATION_BACKOFF * (bound - h_prev)
+            lo = float(0.0)
+            hi = delta
+            for _ in range(MOTION_BISECTIONS):
+                mid = 0.5 * (lo + hi)
+                h_mid = _feature_height(f, normal, x0, q0, dx, axis, angle, t0 + mid)
+                if wp.max(h_prev, h_mid) + curvature * mid * mid <= target:
+                    lo = mid
+                else:
+                    hi = mid
+            return t0 + lo
         h_prev = h_next
     return 1.0
 
@@ -496,6 +534,7 @@ class GenerationScene:
     shape_aabb_upper_local: wp.array[wp.vec3]
     aabb_lower: wp.array[wp.vec3]
     aabb_upper: wp.array[wp.vec3]
+    shape_gap: wp.array[float]
     heightfield_index: wp.array[wp.int32]
     heightfield_data: wp.array[HeightfieldData]
     heightfield_elevations: wp.array[wp.float32]
@@ -514,6 +553,8 @@ class _Feature:
     body: int
     budget: float
     infinite_plane: int
+    face_normal: wp.vec3
+    """Outward unit normal of a triangle feature, zero for other features."""
     local: ConstraintFeature
 
 
@@ -562,6 +603,7 @@ def _make_feature(
         com = wp.transform_point(X, scene.body_com[b])
         rb = wp.transform_get_rotation(X)
     f.infinite_plane = 0
+    f.face_normal = wp.vec3(0.0)
     if geom.shape_type == GeoType.PLANE and geom.scale[0] == 0.0 and geom.scale[1] == 0.0:
         f.infinite_plane = 1
     local = ConstraintFeature()
@@ -571,7 +613,7 @@ def _make_feature(
     local.scale = geom.scale
     local.aux = geom.auxiliary
     local.margin = scene.geom_data[shape][3]
-    local.lipschitz = wp.length(local.local_pos) + core_radius
+    local.reach = wp.length(local.local_pos) + core_radius
     f.local = local
     return f
 
@@ -609,7 +651,11 @@ def _triangle_feature(scene: GenerationScene, shape: int, tri: int) -> _Feature:
         wp.max(wp.length(geom.scale), wp.length(geom.auxiliary)),
         wp.max(wp.length(down), wp.max(wp.length(geom.scale + down), wp.length(geom.auxiliary + down))),
     )
-    return _make_feature(scene, shape, geom, v0, rot, core)
+    f = _make_feature(scene, shape, geom, v0, rot, core)
+    face = wp.cross(geom.scale, geom.auxiliary)
+    if wp.length(face) > 0.0:
+        f.face_normal = wp.quat_rotate(rot, wp.normalize(face))
+    return f
 
 
 @wp.func
@@ -648,40 +694,63 @@ def _process_feature_pair(a: _Feature, b: _Feature, tolerance: float, out: Const
         return
 
     normal = wp.vec3(0.0, 0.0, 1.0)
-    if a.infinite_plane != 0:
-        normal = wp.quat_rotate(a.rot, wp.vec3(0.0, 0.0, 1.0))
-    elif b.infinite_plane != 0:
-        normal = -wp.quat_rotate(b.rot, wp.vec3(0.0, 0.0, 1.0))
+    s_a = float(0.0)
+    s_b = float(0.0)
+    if a.infinite_plane != 0 or b.infinite_plane != 0:
+        # An infinite plane is a half-space; its support along its own normal is its offset.
+        if a.infinite_plane != 0:
+            normal = wp.quat_rotate(a.rot, wp.vec3(0.0, 0.0, 1.0))
+            s_a = wp.dot(normal, a.pos) + a.local.margin
+            s_b = -_world_support(b, -normal)
+        else:
+            normal = -wp.quat_rotate(b.rot, wp.vec3(0.0, 0.0, 1.0))
+            s_a = _world_support(a, normal)
+            s_b = wp.dot(normal, b.pos) - b.local.margin
     else:
         provider = SupportMapDataProvider()
         overlap, _gjk_distance, _gjk_point, n = _solve_gjk(a.geom, b.geom, a.rot, b.rot, a.pos, b.pos, 0.0, provider)
+        refined = wp.vec3(0.0)
         if overlap:
-            _hit, _mpr_distance, _mpr_point, n_mpr = _solve_mpr(
+            _hit, signed_distance, _mpr_point, n_mpr = _solve_mpr(
                 a.geom, b.geom, a.rot, b.rot, a.pos, b.pos, 0.0, provider
             )
             n = n_mpr
-        if wp.length(n) > 0.5:
-            normal = wp.normalize(n)
-        elif wp.length(b.pos - a.pos) > 0.0:
-            normal = wp.normalize(b.pos - a.pos)
-
-    # Upper support of A and lower support of B along the normal. An infinite
-    # plane is a half-space whose support along its own normal is its offset.
-    s_a = _world_support(a, normal)
-    if a.infinite_plane != 0:
-        s_a = wp.dot(normal, a.pos) + a.local.margin
-    s_b = -_world_support(b, -normal)
-    if b.infinite_plane != 0:
-        s_b = wp.dot(normal, b.pos) - b.local.margin
-
-    # The solvers' direction may come out reversed; keep the larger separation.
-    if a.infinite_plane == 0 and b.infinite_plane == 0:
-        s_a_reversed = _world_support(a, -normal)
-        s_b_reversed = -_world_support(b, normal)
-        if s_b_reversed - s_a_reversed > s_b - s_a:
-            normal = -normal
-            s_a = s_a_reversed
-            s_b = s_b_reversed
+            # MPR normals of shallow overlaps are approximate. Separate B along
+            # the estimate and let exact GJK find the closest features.
+            if wp.length(n) > 0.5:
+                shift = wp.normalize(n) * (2.0 * wp.max(-signed_distance, 0.0) + _SEPARATION_PROBE)
+                separated, _d, _p, n_sep = _solve_gjk(a.geom, b.geom, a.rot, b.rot, a.pos, b.pos + shift, 0.0, provider)
+                if not separated:
+                    refined = n_sep
+        if wp.length(n) <= 0.5:
+            n = b.pos - a.pos
+        # Keep the candidate direction with the largest separation. A triangle's
+        # face normal wins whenever it separates within the tolerance: along it
+        # the overlap bounds how deep the other feature's vertices sink below
+        # the surface, which a lateral direction would not.
+        best_score = float(-1.0e30)
+        for k in range(6):
+            candidate = n
+            if k == 2 or k == 3:
+                candidate = refined
+            elif k == 4:
+                candidate = a.face_normal
+            elif k == 5:
+                candidate = -b.face_normal
+            if wp.length(candidate) > 0.5:
+                candidate = wp.normalize(candidate)
+                if k == 1 or k == 3:
+                    candidate = -candidate
+                c_a = _world_support(a, candidate)
+                c_b = -_world_support(b, -candidate)
+                score = c_b - c_a
+                if k >= 4 and score >= -tolerance:
+                    score += 1.0e6
+                if score > best_score:
+                    best_score = score
+                    normal = candidate
+                    s_a = c_a
+                    s_b = c_b
 
     gap = s_b - s_a
     if gap > a.budget + b.budget:
@@ -782,13 +851,31 @@ def _pair_shapes(scene: GenerationScene, item: wp.vec4i):
 
 
 @wp.func
+def _shape_budget(scene: GenerationScene, shape: int) -> float:
+    b = scene.shape_body[shape]
+    if b < 0:
+        return 0.0
+    return scene.body_budget[b]
+
+
+@wp.func
 def _search_growth(scene: GenerationScene, shape: int) -> float:
     """Return how far a shape's features may reach beyond its geometry during the update."""
-    growth = scene.geom_data[shape][3] + scene.tolerance
-    b = scene.shape_body[shape]
-    if b >= 0:
-        growth += scene.body_budget[b]
-    return growth
+    return scene.geom_data[shape][3] + scene.tolerance + _shape_budget(scene, shape)
+
+
+@wp.func
+def _geometry_aabb(scene: GenerationScene, shape: int):
+    """Return the broad-phase AABB without the force-contact detection gap; it still bounds shape and margin."""
+    gap = wp.vec3(scene.shape_gap[shape])
+    return scene.aabb_lower[shape] + gap, scene.aabb_upper[shape] - gap
+
+
+@wp.func
+def _aabb_distance(lo_a: wp.vec3, hi_a: wp.vec3, lo_b: wp.vec3, hi_b: wp.vec3) -> float:
+    """Return a lower bound on the distance between the contents of two AABBs."""
+    d = wp.max(wp.max(lo_a - hi_b, lo_b - hi_a), wp.vec3(0.0))
+    return wp.length(d)
 
 
 @wp.func
@@ -820,14 +907,20 @@ def generate_pair_constraints_kernel(
         return
     if scene.shape_body[sa] < 0 and scene.shape_body[sb] < 0:
         return
+    # Pairs the motion budgets alone keep apart need neither directions nor triangles.
+    lo_a, hi_a = _geometry_aabb(scene, sa)
+    lo_b, hi_b = _geometry_aabb(scene, sb)
+    if _aabb_distance(lo_a, hi_a, lo_b, hi_b) > _shape_budget(scene, sa) + _shape_budget(scene, sb):
+        return
     if _is_triangle_source(scene.shape_type[sa]) or _is_triangle_source(scene.shape_type[sb]):
         item = wp.vec4i(tid, 0, 0, -1)
         if not _is_triangle_source(scene.shape_type[sa]):
             item[2] = 1
         src, other = _pair_shapes(scene, item)
-        grow = wp.vec3(_search_growth(scene, src) + _search_growth(scene, other))
-        lower = scene.aabb_lower[other] - grow
-        upper = scene.aabb_upper[other] + grow
+        lower, upper = _geometry_aabb(scene, other)
+        grow = wp.vec3(_search_growth(scene, src) + _shape_budget(scene, other))
+        lower = lower - grow
+        upper = upper + grow
         _enumerate_triangles(scene, src, lower, upper, item, 1, work_items, work_count, 0, out)
         return
     _process_feature_pair(_shape_feature(scene, sa), _shape_feature(scene, sb), scene.tolerance, out)
@@ -848,21 +941,23 @@ def generate_triangle_constraints_kernel(
     item = work_items[tid]
     src, other = _pair_shapes(scene, item)
     ft = _triangle_feature(scene, src, item[1])
-    if not _is_triangle_source(scene.shape_type[other]):
-        _process_ordered(ft, _shape_feature(scene, other), item[2], scene.tolerance, out)
-        return
-    if scene.shape_type[src] == GeoType.HFIELD and scene.shape_type[other] == GeoType.HFIELD:
-        wp.atomic_or(out.status, 0, STATUS_UNSUPPORTED_GEOMETRY)
-        return
-    grow = _search_growth(scene, src) + _search_growth(scene, other)
     lower = wp.vec3(0.0)
     upper = wp.vec3(0.0)
     for axis in range(3):
         d = wp.vec3(0.0)
         d[axis] = 1.0
-        upper[axis] = _world_support(ft, d) + grow
-        lower[axis] = -_world_support(ft, -d) - grow
-    _enumerate_triangles(scene, other, lower, upper, item, 3, work_pairs, work_count, 1, out)
+        upper[axis] = _world_support(ft, d)
+        lower[axis] = -_world_support(ft, -d)
+    if not _is_triangle_source(scene.shape_type[other]):
+        lo_o, hi_o = _geometry_aabb(scene, other)
+        if _aabb_distance(lower, upper, lo_o, hi_o) <= ft.budget + _shape_budget(scene, other):
+            _process_ordered(ft, _shape_feature(scene, other), item[2], scene.tolerance, out)
+        return
+    if scene.shape_type[src] == GeoType.HFIELD and scene.shape_type[other] == GeoType.HFIELD:
+        wp.atomic_or(out.status, 0, STATUS_UNSUPPORTED_GEOMETRY)
+        return
+    grow = wp.vec3(ft.budget + _search_growth(scene, other))
+    _enumerate_triangles(scene, other, lower - grow, upper + grow, item, 3, work_pairs, work_count, 1, out)
 
 
 @wp.kernel(enable_backward=False)
