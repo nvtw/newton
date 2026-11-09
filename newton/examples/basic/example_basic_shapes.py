@@ -198,6 +198,11 @@ class Example:
         self.state_1 = self.model.state()
         self.control = self.model.control()
 
+        # Input state of the last substep, used to place rendered contacts.
+        self.contact_state = newton.State()
+        self.contact_state.body_q = wp.clone(self.state_0.body_q)
+        self.contact_state.body_qd = wp.clone(self.state_0.body_qd)
+
         if self.solver_type == "kamino":
             self.collision_interval = 2
             self.collision_pipeline = newton.CollisionPipeline(
@@ -247,17 +252,21 @@ class Example:
                         self.contacts,
                         dt=self.collision_interval * self.sim_dt,
                     )
+
+                last_substep = substep == self.sim_substeps - 1
+                if last_substep:
+                    wp.copy(self.contact_state.body_q, self.state_0.body_q)
+                    wp.copy(self.contact_state.body_qd, self.state_0.body_qd)
+
                 self.solver.step(
                     self.state_0,
                     self.state_1,
                     self.control,
                     self.contacts,
                     self.sim_dt,
-                    observables=self.solver_observables if substep == self.sim_substeps - 1 else None,
+                    observables=self.solver_observables if last_substep else None,
                 )
-
-                # swap states
-                self.state_0, self.state_1 = self.state_1, self.state_0
+                self._advance_state(last_substep)
             return
 
         # Run collision once per frame and reuse the contact set across all
@@ -267,11 +276,19 @@ class Example:
         self.state_0.clear_forces()
         self.viewer.apply_forces(self.state_0)
         self.collision_pipeline.collide(self.state_0, self.contacts)
+        wp.copy(self.contact_state.body_q, self.state_0.body_q)
+        wp.copy(self.contact_state.body_qd, self.state_0.body_qd)
 
-        for _ in range(self.sim_substeps):
+        for substep in range(self.sim_substeps):
             self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.sim_dt)
+            self._advance_state(substep == self.sim_substeps - 1)
 
-            # swap states
+    def _advance_state(self, last_substep: bool):
+        # With an odd substep count, copy instead of swapping on the last
+        # substep so every CUDA graph replay starts from state_0.
+        if self.sim_substeps % 2 == 1 and last_substep:
+            self.state_0.assign(self.state_1)
+        else:
             self.state_0, self.state_1 = self.state_1, self.state_0
 
     def step(self):
@@ -362,7 +379,7 @@ class Example:
         self.viewer.begin_frame(self.sim_time)
         self.viewer.log_state(self.state_0)
         if self.contacts is not None:
-            self.viewer.log_contacts(self.contacts, self.state_1, observables=self.solver_observables)
+            self.viewer.log_contacts(self.contacts, self.contact_state, observables=self.solver_observables)
         self.viewer.end_frame()
 
 

@@ -870,7 +870,7 @@ class BroadPhaseSAP:
                 segmented sorting; a single segment uses equivalent ordinary radix sorting.
                 Use ``"tile"`` for tile-based
                 sorting via ``wp.tile_sort``, or ``"auto"`` to use one of
-                three bounded tile sizes for medium-sized worlds.
+                five bounded tile sizes for worlds with up to 512 shapes.
             tile_block_dim: Block dimension for tile-based sorting (optional, auto-calculated if None).
                 If None, will be set to next power of 2 >= ``max_shapes_per_world``, capped at 512.
                 Minimum value is 32 (required by wp.tile_sort). If provided, will be clamped to [32, 1024].
@@ -954,6 +954,9 @@ class BroadPhaseSAP:
             self.num_regular_worlds = int(regular_worlds)
             self.world_count = self.num_regular_worlds + 1
             self.max_shapes_per_world = int(bound)
+            # Auto tile sorting may round max_shapes_per_world up; the world
+            # map is sized by the requested bound, so it caps rebuilt slices.
+            self._dynamic_world_shape_bound = int(bound)
             self._single_segment_identity_map = False
             self.world_index_map = wp.zeros(self.world_count * self.max_shapes_per_world, dtype=wp.int32, device=device)
             self.world_slice_ends = wp.zeros(self.world_count, dtype=wp.int32, device=device)
@@ -961,10 +964,18 @@ class BroadPhaseSAP:
             self._world_shape_counts = wp.zeros(self.world_count, dtype=wp.int32, device=device)
             self._world_overflow = wp.zeros(1, dtype=wp.int32, device=device)
 
+        # The collision pipeline uses auto mode. Restrict it to five fixed
+        # tile sizes so arbitrary model sizes cannot create arbitrary kernel
+        # variants. Small worlds avoid segmented-sort overhead with 32/64 tiles;
+        # empty and large worlds retain the general segmented sort.
         if self.sort_type == "auto":
-            if 64 <= self.max_shapes_per_world <= 512:
+            if 1 <= self.max_shapes_per_world <= 512:
                 self.sort_type = "tile"
-                if self.max_shapes_per_world <= 128:
+                if self.max_shapes_per_world <= 32:
+                    self.max_shapes_per_world = 32
+                elif self.max_shapes_per_world < 64:
+                    self.max_shapes_per_world = 64
+                elif self.max_shapes_per_world <= 128:
                     self.max_shapes_per_world = 128
                 elif self.max_shapes_per_world <= 256:
                     self.max_shapes_per_world = 256
@@ -1158,7 +1169,7 @@ class BroadPhaseSAP:
         wp.launch(
             _world_map_slices_kernel,
             dim=1,
-            inputs=[dirty, self._world_shape_counts, self.num_regular_worlds, self.max_shapes_per_world],
+            inputs=[dirty, self._world_shape_counts, self.num_regular_worlds, self._dynamic_world_shape_bound],
             outputs=[self.world_slice_ends, self._world_overflow],
             device=device,
         )

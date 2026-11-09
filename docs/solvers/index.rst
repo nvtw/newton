@@ -72,6 +72,7 @@ Supported Features
    :header-rows: 1
    :widths: auto
    :stub-columns: 0
+
    * - Solver
      - :abbr:`Integration (Available methods for integrating the dynamics)`
      - Rigid bodies
@@ -173,7 +174,7 @@ Supported Features
 
 .. experimental::
     :class:`~newton.solvers.SolverSteel`'s public API and behavior may change without prior notice.
-    Its default ``solve_mode="matrix_free"`` requires a CUDA device; ``solve_mode="split"`` runs on CPU and CUDA with the base feature set.
+    Its matrix-free solve runs on CPU and CUDA; contact torsion, contact compliance, joint friction, the non-default ``friction_mode`` values and sleeping with ``solve_mode="colored"`` require CUDA, and ``solve_mode="colored"`` runs the serial propagation sweep on CPU.
 
 .. experimental::
     :class:`~newton.solvers.SolverKamino`'s public API and behavior may change without prior notice.
@@ -244,6 +245,7 @@ constraints, with unified compliant ALM by default and a deprecated legacy AVBD 
    :header-rows: 1
    :widths: auto
    :stub-columns: 1
+
    * - Joint type
      - :class:`~newton.solvers.SolverFeatherstone`
      - :class:`~newton.solvers.SolverSteel`
@@ -334,6 +336,7 @@ constraints, with unified compliant ALM by default and a deprecated legacy AVBD 
    :header-rows: 1
    :widths: auto
    :stub-columns: 1
+
    * - Property
      - :class:`~newton.solvers.SolverFeatherstone`
      - :class:`~newton.solvers.SolverSteel`
@@ -345,7 +348,7 @@ constraints, with unified compliant ALM by default and a deprecated legacy AVBD 
      - :class:`~newton.solvers.SolverKamino`
    * - :attr:`~newton.Model.joint_enabled`
      - |no|
-     - |no| :sup:`16`
+     - |no| :sup:`15`
      - |yes|
      - |yes|
      - |no|
@@ -363,7 +366,7 @@ constraints, with unified compliant ALM by default and a deprecated legacy AVBD 
      - |yes|
    * - :attr:`~newton.Model.joint_stiffness` / :attr:`~newton.Model.joint_rest_q`
      - REVOLUTE, PRISMATIC, D6
-     - |no|
+     - REVOLUTE, PRISMATIC, D6
      - REVOLUTE, PRISMATIC, D6
      - |no|
      - Scalar joints and isotropic BALL springs
@@ -371,7 +374,7 @@ constraints, with unified compliant ALM by default and a deprecated legacy AVBD 
      - |no|
    * - :attr:`~newton.Model.joint_friction`
      - |no|
-     - |yes| :sup:`21`
+     - |yes| :sup:`16`
      - |no|
      - |no|
      - |yes|
@@ -428,6 +431,7 @@ motion; see :ref:`passive-joint-springs` for details.
    :header-rows: 1
    :widths: auto
    :stub-columns: 1
+
    * - Feature
      - :class:`~newton.solvers.SolverFeatherstone`
      - :class:`~newton.solvers.SolverSteel`
@@ -471,6 +475,7 @@ motion; see :ref:`passive-joint-springs` for details.
    :header-rows: 1
    :widths: auto
    :stub-columns: 1
+
    * - Feature
      - :class:`~newton.solvers.SolverFeatherstone`
      - :class:`~newton.solvers.SolverSteel`
@@ -505,7 +510,7 @@ motion; see :ref:`passive-joint-springs` for details.
      - |no|
      - |no|
      - |no|
-     - |yes| :sup:`15`
+     - |yes| :sup:`21`
      - |no|
 
 | :sup:`3` Featherstone eliminates follower degrees of freedom from its reduced dynamics and transfers follower forces and inertia to the reference joint.
@@ -520,13 +525,13 @@ motion; see :ref:`passive-joint-springs` for details.
 | :sup:`12` PhoenX joint friction and authored limit gains are currently limited to axial revolute/prismatic rows.
 | :sup:`13` PhoenX supports axial revolute/prismatic limits, maximal DISTANCE bounds, and angular limits on supported D6 reductions; finite Cartesian linear limits are unsupported.
 | :sup:`14` PhoenX supports axial velocity limits on revolute and prismatic joints.
-| :sup:`16` Steel rejects models with disabled articulation joints instead of ignoring them; a disabled loop-closing joint starts as a released closure.
-| :sup:`21` Steel enforces dry joint friction of PRISMATIC, REVOLUTE, BALL, and D6 DOFs as one bounded constraint row per DOF when constructed with ``enable_joint_friction=True`` and ``solve_mode="matrix_free"`` (off by default, experimental); ``steel:joint_friction_load_coefficient`` adds the load-proportional joint friction of PhysX articulations before PhysX 5.6.
+| :sup:`15` Steel rejects models with disabled articulation joints instead of ignoring them; a disabled loop-closing joint starts as a released closure.
+| :sup:`16` Steel enforces dry joint friction of PRISMATIC, REVOLUTE, BALL, and D6 DOFs as one bounded constraint row per DOF when constructed with ``enable_joint_friction=True`` on CUDA (off by default, experimental); ``steel:joint_friction_load_coefficient`` adds the load-proportional joint friction of PhysX articulations before PhysX 5.6.
 | :sup:`17` Steel enforces joint limits as hard unilateral constraint rows when constructed with ``enable_joint_limits=True`` (off by default).
 | :sup:`18` Steel clamps the explicit joint drive force to the effort limit. With the default ``drive_mode="augmented"`` the implicit stiffness and damping response is unbounded, so under a large external load the drive reaction can exceed the limit; the PGS drive rows of ``drive_mode="rows"`` bound the complete reaction.
-| :sup:`19` Steel enforces velocity limits of PRISMATIC, REVOLUTE, and D6 DOFs when constructed with ``enable_joint_velocity_limits=True`` and ``solve_mode="matrix_free"``. With ``drive_mode="rows"``, driven DOFs are clamped at the end of every solver iteration instead of using velocity-limit rows (``fuse_joint_velocity_limits``).
-| :sup:`20` With ``solve_mode="matrix_free"``, Steel enforces each mimic relationship within one articulation as one bilateral constraint row per follower coordinate; mimics of BALL, FREE, and DISTANCE joints and mimics across articulations are rejected. It also enforces loop-closing BALL joints as point constraints, and loop-closing REVOLUTE joints as point constraints plus two hinge-axis constraints. ``solve_mode="split"`` rejects mimic relationships and loop-closing joints; the propagation contact responses (``articulated_contact_response``) reject loop-closing joints and solve mimic rows iteratively.
-| :sup:`15` See :ref:`Particle-body attachments` for authoring and semantics. Attachments spanning two
+| :sup:`19` Steel enforces velocity limits of PRISMATIC, REVOLUTE, and D6 DOFs when constructed with ``enable_joint_velocity_limits=True``. With ``drive_mode="rows"``, driven DOFs are clamped at the end of every solver iteration instead of using velocity-limit rows (``fuse_joint_velocity_limits``).
+| :sup:`20` Steel enforces each mimic relationship within one articulation as one bilateral constraint row per follower coordinate; mimics of BALL, FREE, and DISTANCE joints and mimics across articulations are rejected. It also enforces loop-closing BALL joints as point constraints, loop-closing REVOLUTE joints as point constraints plus two hinge-axis constraints, and loop-closing FIXED joints as point constraints plus three rotation constraints. The propagation contact response (``articulated_contact_response="propagation"``) rejects loop-closing joints and solves mimic rows iteratively.
+| :sup:`21` See :ref:`Particle-body attachments` for authoring and semantics. Attachments spanning two
   solvers are coupled by :class:`~newton.solvers.experimental.coupled.SolverCoupledADMM` instead.
 
 .. _Particle-body attachments:
