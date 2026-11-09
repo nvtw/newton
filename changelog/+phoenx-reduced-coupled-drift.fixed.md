@@ -1,0 +1,1 @@
+Fix energy gain of fast free-flying ball-jointed chains in reduced-coordinate `SolverPhoenX` articulations: the switch to the variational midpoint step now measures the explicit step's energy drift for the whole tree, including the coupling between links, instead of each link's own gyroscopic motion.
