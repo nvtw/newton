@@ -4080,7 +4080,11 @@ class PhoenXWorld:
             and next_substep < self.substeps
             and next_substep % self.prepare_refresh_stride != 0
         )
-        if self._contact_input_active_this_step and (rebase_levers or advance_gap):
+        # A fused reduced substep owns every contact row and gathers them again at the
+        # integrated pose, which rewrites the levers, biases, and effective masses.
+        reduced = self._reduced_articulation
+        fused_rows = reduced is not None and reduced.fused_substep is not None
+        if self._contact_input_active_this_step and (rebase_levers or advance_gap) and not fused_rows:
             # Color-packed rigid manifolds are short. A lane per column avoids
             # loading both bodies' state once for every mostly idle row lane.
             rows_per_column = 1 if self._colored_contact_headers else (32 if self.device.is_cuda else 1)
