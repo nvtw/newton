@@ -2765,6 +2765,8 @@ class PhoenXWorld:
             # dispatcher.
             idt = wp.float32(1.0 / self.substep_dt)
             self._dispatcher.solve(idt)
+            if self._penetration_free_data is not None:
+                self._penetration_free.limit_velocities(self._penetration_free_data, self.bodies, self.substep_dt)
             self._integrate_positions()
             if self._maximal_tree_projector is not None and not self._direct_tree_contacts:
                 # Position-level tree projection: pull post-integrate poses

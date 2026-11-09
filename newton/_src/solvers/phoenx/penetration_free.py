@@ -10,6 +10,14 @@ against the half-space constraints and motion budgets produced by
 each body's screw motion. Truncated bodies keep the TGS invariant
 ``x1 = x0 + v dt`` by scaling their velocities with the same fraction.
 
+Before integration, a velocity limiter removes the part of each dynamic
+body's velocity that would carry a constrained feature past its limit, and
+pushes features closer than :data:`LIMITER_RESERVE` of the tolerance to their
+limit back out with a pseudo-velocity that is removed after integration.
+Unlike truncation, it keeps tangential and rotational motion, so resting piles
+slide and topple instead of jamming. Truncation stays the rigorous
+certificate for whatever the limiter's linearization misses.
+
 Kinematic bodies follow prescribed targets and cannot be truncated. Their
 substep motion is checked after interpolation and violations are recorded in
 the status mask.
@@ -24,7 +32,9 @@ from newton._src.geometry.penetration_free import (
     STATUS_FATAL_MASK,
     STATUS_KINEMATIC_VIOLATION,
     STATUS_REFERENCE_MISMATCH,
+    Constraints,
     PenetrationFreeData,
+    feature_support_point,
     launch_limit_motion,
     motion_budget_fraction,
     screw_motion_delta,
@@ -35,6 +45,7 @@ from newton._src.solvers.phoenx.body import (
     MOTION_DYNAMIC,
     MOTION_KINEMATIC,
     BodyContainer,
+    mat33_from_sym6,
     sym6_from_mat33,
 )
 from newton._src.solvers.phoenx.helpers.math_helpers import rotate_inertia
@@ -44,6 +55,12 @@ __all__ = ["PhoenXPenetrationFree"]
 # Relative pose tolerance for matching an imported state against the last committed pose.
 _REFERENCE_POSITION_TOLERANCE = 1.0e-5
 _REFERENCE_ROTATION_TOLERANCE = 1.0e-5
+
+LIMITER_RESERVE = 0.1
+"""Fraction of the tolerance the velocity limiter keeps between a feature and its limit."""
+
+LIMITER_ITERATIONS = 4
+"""Jacobi passes of the velocity limiter per substep."""
 
 
 @wp.kernel(enable_backward=False)
@@ -77,6 +94,99 @@ def _check_reference_kernel(
         wp.atomic_or(status, 0, STATUS_REFERENCE_MISMATCH)
 
 
+@wp.func
+def _limited_body(bodies: BodyContainer, slot: int) -> bool:
+    return bodies.motion_type[slot] == MOTION_DYNAMIC and bodies.island_root[slot] < 0
+
+
+@wp.kernel(enable_backward=False)
+def _limit_velocity_kernel(
+    constraints: Constraints,
+    bodies: BodyContainer,
+    dt: float,
+    reserve: float,
+    # outputs
+    acc_v: wp.array[wp.vec3],
+    acc_w: wp.array[wp.vec3],
+    acc_pseudo_v: wp.array[wp.vec3],
+    acc_pseudo_w: wp.array[wp.vec3],
+    acc_count: wp.array[wp.int32],
+):
+    """Compute the normal impulses that keep a constraint's support point within its limit after one substep.
+
+    The real impulse removes approach beyond the room left above
+    ``limit - reserve``; the pseudo impulse moves a feature inside the
+    reserve back out to ``limit - reserve``.
+    """
+    c = wp.tid()
+    if c >= wp.min(constraints.count[0], constraints.body.shape[0]):
+        return
+    slot = constraints.body[c] + 1
+    if not _limited_body(bodies, slot):
+        return
+    q = bodies.orientation[slot]
+    x = bodies.position[slot]
+    w = bodies.angular_velocity[slot]
+    n = constraints.normal[c]
+    f = constraints.feature[c]
+    inv_inertia = mat33_from_sym6(bodies.inverse_inertia_world[slot])
+    inv_mass = bodies.inverse_mass[slot]
+    # Limit the current support point and the one that becomes extremal at the
+    # orientation predicted for the end of the substep; a resting face has many.
+    q_end = wp.normalize(wp.quat_from_axis_angle(wp.normalize(w + wp.vec3(1.0e-12)), wp.length(w) * dt) * q)
+    for k in range(2):
+        q_support = q
+        if k == 1:
+            q_support = q_end
+        r = wp.quat_rotate(q, feature_support_point(f, wp.quat_rotate_inv(q_support, n)))
+        room = constraints.limit[c] - reserve - wp.dot(n, x + r)
+        rn = wp.cross(r, n)
+        mass = inv_mass + wp.dot(rn, inv_inertia * rn)
+        if mass > 0.0:
+            u = wp.dot(n, bodies.velocity[slot]) + wp.dot(rn, w)
+            real = wp.max(u - wp.max(room, 0.0) / dt, 0.0) / mass
+            pseudo = float(0.0)
+            if room < 0.0:
+                pseudo = wp.max(wp.min(u - real * mass, 0.0) - room / dt, 0.0) / mass
+            if real > 0.0 or pseudo > 0.0:
+                wp.atomic_add(acc_v, slot, -inv_mass * real * n)
+                wp.atomic_add(acc_w, slot, -real * (inv_inertia * rn))
+                wp.atomic_add(acc_pseudo_v, slot, -inv_mass * pseudo * n)
+                wp.atomic_add(acc_pseudo_w, slot, -pseudo * (inv_inertia * rn))
+                wp.atomic_add(acc_count, slot, 1)
+
+
+@wp.kernel(enable_backward=False)
+def _apply_velocity_limit_kernel(
+    bodies: BodyContainer,
+    acc_v: wp.array[wp.vec3],
+    acc_w: wp.array[wp.vec3],
+    acc_pseudo_v: wp.array[wp.vec3],
+    acc_pseudo_w: wp.array[wp.vec3],
+    acc_count: wp.array[wp.int32],
+    # outputs
+    pseudo_v: wp.array[wp.vec3],
+    pseudo_w: wp.array[wp.vec3],
+):
+    """Apply the averaged limiter impulses and remember the pseudo part for removal after integration."""
+    i = wp.tid()
+    count = acc_count[i]
+    if count == 0:
+        return
+    scale = 1.0 / float(count)
+    dpv = acc_pseudo_v[i] * scale
+    dpw = acc_pseudo_w[i] * scale
+    bodies.velocity[i] = bodies.velocity[i] + acc_v[i] * scale + dpv
+    bodies.angular_velocity[i] = bodies.angular_velocity[i] + acc_w[i] * scale + dpw
+    pseudo_v[i] = pseudo_v[i] + dpv
+    pseudo_w[i] = pseudo_w[i] + dpw
+    acc_v[i] = wp.vec3(0.0)
+    acc_w[i] = wp.vec3(0.0)
+    acc_pseudo_v[i] = wp.vec3(0.0)
+    acc_pseudo_w[i] = wp.vec3(0.0)
+    acc_count[i] = 0
+
+
 @wp.kernel(enable_backward=False)
 def _commit_dynamic_kernel(
     bodies: BodyContainer,
@@ -85,11 +195,17 @@ def _commit_dynamic_kernel(
     body_budget: wp.array[wp.float32],
     body_radius: wp.array[wp.float32],
     body_used: wp.array[wp.float32],
+    pseudo_v: wp.array[wp.vec3],
+    pseudo_w: wp.array[wp.vec3],
 ):
-    """Commit the admissible fraction of each dynamic body's substep motion."""
+    """Commit the admissible fraction of each dynamic body's substep motion and drop limiter pseudo-velocity."""
     i = wp.tid()
-    if i == 0 or bodies.motion_type[i] != MOTION_DYNAMIC or bodies.island_root[i] >= 0:
+    if i == 0 or not _limited_body(bodies, i):
         return
+    bodies.velocity[i] = bodies.velocity[i] - pseudo_v[i]
+    bodies.angular_velocity[i] = bodies.angular_velocity[i] - pseudo_w[i]
+    pseudo_v[i] = wp.vec3(0.0)
+    pseudo_w[i] = wp.vec3(0.0)
     b = i - 1
     x0 = bodies.position_prev_substep[i]
     q0 = bodies.orientation_prev_substep[i]
@@ -148,7 +264,17 @@ class PhoenXPenetrationFree:
     def __init__(self, num_bodies: int, device):
         self.device = device
         self.num_bodies = int(num_bodies)
-        self.fraction = wp.ones(max(self.num_bodies, 1), dtype=wp.float32, device=device)
+        n = max(self.num_bodies, 1)
+        self.fraction = wp.ones(n, dtype=wp.float32, device=device)
+        self.pseudo_v = wp.zeros(n, dtype=wp.vec3, device=device)
+        self.pseudo_w = wp.zeros(n, dtype=wp.vec3, device=device)
+        self._accumulators = [
+            wp.zeros(n, dtype=wp.vec3, device=device),
+            wp.zeros(n, dtype=wp.vec3, device=device),
+            wp.zeros(n, dtype=wp.vec3, device=device),
+            wp.zeros(n, dtype=wp.vec3, device=device),
+            wp.zeros(n, dtype=wp.int32, device=device),
+        ]
 
     def check_reference(self, data: PenetrationFreeData, body_q: wp.array, bodies: BodyContainer) -> None:
         """Flag a state that does not continue from the last certified commit."""
@@ -180,6 +306,27 @@ class PhoenXPenetrationFree:
             self.fraction,
         )
 
+    def limit_velocities(self, data: PenetrationFreeData, bodies: BodyContainer, dt: float) -> None:
+        """Remove velocity that would carry dynamic features past their limits during the next substep."""
+        if self.num_bodies <= 1 or data.body_count == 0:
+            return
+        reserve = LIMITER_RESERVE * float(data.config.tolerance)
+        for _ in range(LIMITER_ITERATIONS):
+            wp.launch(
+                _limit_velocity_kernel,
+                dim=data.constraints.body.shape[0],
+                inputs=[data.constraints, bodies, float(dt), reserve],
+                outputs=self._accumulators,
+                device=self.device,
+            )
+            wp.launch(
+                _apply_velocity_limit_kernel,
+                dim=self.num_bodies,
+                inputs=[bodies, *self._accumulators],
+                outputs=[self.pseudo_v, self.pseudo_w],
+                device=self.device,
+            )
+
     def constrain_dynamic(self, data: PenetrationFreeData, bodies: BodyContainer) -> None:
         """Truncate the integrated substep motion of dynamic bodies."""
         if self.num_bodies <= 1 or data.body_count == 0:
@@ -188,7 +335,16 @@ class PhoenXPenetrationFree:
         wp.launch(
             _commit_dynamic_kernel,
             dim=self.num_bodies,
-            inputs=[bodies, self.fraction, data.status, data.body_budget, data.body_radius, data.body_used],
+            inputs=[
+                bodies,
+                self.fraction,
+                data.status,
+                data.body_budget,
+                data.body_radius,
+                data.body_used,
+                self.pseudo_v,
+                self.pseudo_w,
+            ],
             device=self.device,
         )
 

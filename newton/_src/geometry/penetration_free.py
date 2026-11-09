@@ -397,6 +397,14 @@ def feature_support(f: ConstraintFeature, direction_body: wp.vec3) -> float:
 
 
 @wp.func
+def feature_support_point(f: ConstraintFeature, direction_body: wp.vec3) -> wp.vec3:
+    """Return a feature point of maximal support along a body-frame direction, relative to the center of mass."""
+    d_local = wp.quat_rotate_inv(f.local_rot, direction_body)
+    p = support_map(_feature_geom(f), d_local, SupportMapDataProvider())
+    return f.local_pos + wp.quat_rotate(f.local_rot, p) + direction_body * f.margin
+
+
+@wp.func
 def _feature_height(
     f: ConstraintFeature, normal: wp.vec3, x0: wp.vec3, q0: wp.quat, dx: wp.vec3, axis: wp.vec3, angle: float, t: float
 ) -> float:
