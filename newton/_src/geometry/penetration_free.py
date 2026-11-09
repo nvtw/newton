@@ -149,7 +149,13 @@ class PenetrationFreeConfig:
     """
 
     tolerance: float = 1.0e-3
-    """Maximum penetration depth [m] permitted between two shapes."""
+    """Maximum penetration depth [m] permitted between two shapes.
+
+    Choose it above the penetration the solver's contact model settles at
+    under load. A soft contact that rests deeper than its share of the
+    tolerance keeps its bodies at their limits, where truncation stalls
+    sliding and toppling until the contacts relax.
+    """
 
     budget_velocity_scale: float = 2.0
     """Multiplier on the predicted travel ``(|v| + |omega| r) dt`` that sets each body's motion budget [unitless]."""
