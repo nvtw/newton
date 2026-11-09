@@ -198,6 +198,7 @@ from newton._src.solvers.phoenx.official_contacts import (
     pack_soft_contact_suffix_kernel,
 )
 from newton._src.solvers.phoenx.particle import ParticleContainer, particle_container_zeros
+from newton._src.solvers.phoenx.penetration_free import PhoenXPenetrationFree
 from newton._src.solvers.phoenx.simulation_kernels import (
     _BLOCK_WORLD_SOLVE_INNER_SWEEPS,
     _PER_WORLD_COLORING_BLOCK_DIM,
@@ -722,6 +723,10 @@ class PhoenXWorld:
         )
         self._reduced_articulation = None
         self._maximal_tree_projector = None
+        # Penetration-free certification data for the current step (see
+        # :meth:`set_penetration_free`), and the per-world launch scratch.
+        self._penetration_free_data = None
+        self._penetration_free = None
         self._maximal_contact_response: MaximalContactResponse | None = None
         self._maximal_contact_schedule: MaximalContactRunSchedule | None = None
         self._direct_contact_response: DirectContactResponse | None = None
@@ -2766,6 +2771,10 @@ class PhoenXWorld:
                 # back onto the joint manifold so the prepare-time Baumgarte
                 # bias only has to absorb one substep of drift.
                 self._maximal_tree_projector.project_positions()
+            if self._penetration_free_data is not None:
+                # Commit only the certified fraction of every dynamic body's
+                # substep motion, after all position writers have run.
+                self._penetration_free.constrain_dynamic(self._penetration_free_data, self.bodies)
             if self._reduced_articulation is not None:
                 self._reduced_articulation.end_substep(
                     self.substep_dt,
@@ -2786,6 +2795,8 @@ class PhoenXWorld:
             self._refresh_world_inertia()
             alpha = float(k + 1) * inv_n
             self._kinematic_interpolate_substep(alpha)
+            if self._penetration_free_data is not None and self._num_kinematic_bodies > 0:
+                self._penetration_free.verify_kinematic(self._penetration_free_data, self.bodies)
             self._apply_global_damping()
             if vel_accum is not None and omega_accum is not None and self.num_bodies > 0:
                 # ``substep_average`` velocity readout: accumulate
@@ -5323,6 +5334,30 @@ class PhoenXWorld:
             ],
             device=self.device,
         )
+
+    def set_penetration_free(self, data) -> None:
+        """Certify rigid substep motion against ``data`` in subsequent steps, or stop when ``None``.
+
+        Raises:
+            ValueError: If the world contains position-level writers or
+                reduced-coordinate articulations, whose pose updates bypass
+                the certification hook.
+        """
+        if data is None:
+            self._penetration_free_data = None
+            return
+        if self._reduced_articulation is not None:
+            raise ValueError("penetration-free collisions do not support reduced-coordinate articulations")
+        if (
+            self.num_cloth_triangles > 0
+            or self.num_cloth_bending > 0
+            or self.num_soft_tetrahedra > 0
+            or self.num_soft_hexahedra > 0
+        ):
+            raise ValueError("penetration-free collisions do not support cloth or soft-body constraints")
+        if self._penetration_free is None:
+            self._penetration_free = PhoenXPenetrationFree(self.num_bodies, self.device)
+        self._penetration_free_data = data
 
     def _integrate_positions(self) -> None:
         """x += v*dt; q = dq(w*dt) * q for dynamic bodies. Kinematic poses
