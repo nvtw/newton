@@ -190,6 +190,25 @@ _DEFAULT_CONTACT_MASS_COEFF = wp.constant(wp.float32(0.9417003989219666))
 _DEFAULT_CONTACT_IMPULSE_COEFF = wp.constant(wp.float32(0.05829954519867897))
 
 
+#: Normal-row speed caps [m/s]: depenetration push and speculative approach.
+_CONTACT_MAX_PUSH_SPEED = wp.constant(wp.float32(2.0))
+_CONTACT_MAX_APPROACH_SPEED = wp.constant(wp.float32(10.0))
+
+
+@wp.func
+def contact_normal_bias(gap: wp.float32, idt: wp.float32, bias_rate: wp.float32) -> wp.float32:
+    """Normal velocity bias [m/s] of a contact row with signed ``gap`` [m].
+
+    A separated (speculative) row admits the approach speed that closes the
+    gap within the substep; a penetrating row pushes out at the soft-contact
+    rate.
+    """
+    bias = gap * bias_rate
+    if gap > wp.float32(0.0):
+        bias = gap * idt
+    return wp.clamp(bias, -_CONTACT_MAX_PUSH_SPEED, _CONTACT_MAX_APPROACH_SPEED)
+
+
 @wp.func
 def _default_contact_solver_coefficients(idt: wp.float32):
     """Return default contact mass/impulse coefficients."""
@@ -338,8 +357,18 @@ def rebase_ordinary_contact_relax_kernel(
     contact_offset: wp.int32,
     packed_headers: wp.bool,
     rows_per_column: wp.int32,
+    rebase_levers: wp.bool,
+    advance_gap: wp.bool,
+    idt: wp.float32,
 ):
-    """Retain each prepared world impulse point as body COMs advance."""
+    """Update prepared rows for the substep's integrated rigid motion.
+
+    ``rebase_levers`` retains each prepared world impulse point as body COMs
+    advance. ``advance_gap`` moves each row's gap by the normal displacement of
+    the material points at the impulse point and refreshes its normal bias, so a
+    following substep that reuses the prepared rows neither admits an approach
+    that was already spent nor keeps pushing out a resolved penetration.
+    """
     cid, lane = wp.tid()
     if cid >= column_count[0]:
         return
@@ -354,6 +383,25 @@ def rebase_ordinary_contact_relax_kernel(
     b2 = contact_get_body2(columns, cid)
     shift1 = bodies.position_prev_substep[b1] - bodies.position[b1]
     shift2 = bodies.position_prev_substep[b2] - bodies.position[b2]
+    first = contact_get_contact_first(columns, cid)
+    count = contact_get_contact_count(columns, cid)
+    if advance_gap and cc.gap.shape[0] > 0:
+        # Substep rotation of each body; its translation is ``-shift``.
+        rotation1 = body_load_orientation(bodies, b1) * wp.quat_inverse(bodies.orientation_prev_substep[b1])
+        rotation2 = body_load_orientation(bodies, b2) * wp.quat_inverse(bodies.orientation_prev_substep[b2])
+        bias_rate, _mass_coeff, _impulse_coeff = soft_constraint_coefficients(
+            DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, wp.float32(1.0) / idt
+        )
+        for k in range(first + lane, first + count, rows_per_column):
+            r1 = cc_get_r0(cc, k)
+            r2 = cc_get_r1(cc, k)
+            moved1 = wp.quat_rotate(rotation1, r1) - r1 - shift1
+            moved2 = wp.quat_rotate(rotation2, r2) - r2 - shift2
+            gap = cc.gap[k] + wp.dot(moved2 - moved1, cc_get_normal(cc, k))
+            cc.gap[k] = gap
+            cc_set_bias(cc, k, contact_normal_bias(gap, idt, bias_rate))
+    if not rebase_levers:
+        return
     factor1 = wp.float32(1.0)
     factor2 = wp.float32(1.0)
     if mass_splitting:
@@ -363,8 +411,6 @@ def rebase_ordinary_contact_relax_kernel(
     inverse_mass2 = bodies.inverse_mass[b2] * factor2
     inverse_inertia1 = mat33_from_sym6(bodies.inverse_inertia_world[b1]) * factor1
     inverse_inertia2 = mat33_from_sym6(bodies.inverse_inertia_world[b2]) * factor2
-    first = contact_get_contact_first(columns, cid)
-    count = contact_get_contact_count(columns, cid)
     # Rebase rows independently; no impulse or body velocity is modified.
     for k in range(first + lane, first + count, rows_per_column):
         r1 = cc_get_r0(cc, k) + shift1
@@ -465,8 +511,6 @@ def _make_contact_prepare_for_iteration_at(
         # need scaling for scene_scale >> 1.
         friction_bias_factor = wp.float32(0.08)
         friction_slop = wp.float32(0.001)
-        max_push_speed = wp.float32(2.0)
-        max_approach_speed = wp.float32(10.0)
         slip_threshold = wp.float32(0.002)
 
         mu_s_col = contact_get_friction(constraints, cid)
@@ -747,11 +791,9 @@ def _make_contact_prepare_for_iteration_at(
             # speculative contact from activating during later substeps.
             solver_gap = effective_gap
             use_start_gap = _contact_uses_stale_anchor_start_gap(contacts, k)
-            if solver_gap > wp.float32(0.0):
-                bias_val = solver_gap * idt
-            else:
-                bias_val = effective_gap * bias_rate
-            bias_val = wp.clamp(bias_val, -max_push_speed, max_approach_speed)
+            bias_val = contact_normal_bias(effective_gap, idt, bias_rate)
+            if cc.gap.shape[0] > 0:
+                cc.gap[k] = effective_gap
 
             if wp.static(not cloth_support):
                 friction_p0 = position1 + wp.quat_rotate(orientation1, cc_get_friction_anchor0(cc, k) - body_com1)

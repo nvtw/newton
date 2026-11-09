@@ -162,6 +162,10 @@ class ContactContainer:
     #: container cannot carry it. Written by prepare and read by iterate only when the contacts
     #: have surface velocities, so other scenes never touch it.
     surface_target: wp.array[wp.vec2f]
+    #: Signed normal gap [m] of each prepared row, advanced by the rigid motion
+    #: of every substep that reuses the prepared rows; empty when every
+    #: substep prepares its rows.
+    gap: wp.array[wp.float32]
 
 
 @wp.kernel(enable_backward=False)
@@ -560,9 +564,12 @@ def cc_set_r1(cc: ContactContainer, k: wp.int32, v: wp.vec3f):
 def contact_container_zeros(
     rigid_contact_max: int,
     device: wp.DeviceLike = None,
+    *,
+    track_gap: bool = False,
 ) -> ContactContainer:
     """Allocate a zero-initialised :class:`ContactContainer`. ``rigid_contact_max``
-    must match Newton's Contacts buffer."""
+    must match Newton's Contacts buffer. ``track_gap`` allocates the row gaps
+    needed when substeps reuse prepared rows."""
     n = max(1, int(rigid_contact_max))
     cc = ContactContainer()
     cc.impulses = wp.zeros((CC_IMPULSE_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
@@ -571,6 +578,7 @@ def contact_container_zeros(
     cc.prev_lambdas = wp.zeros((CC_RIGID_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
     cc.derived = wp.zeros((CC_DERIVED_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
     cc.surface_target = wp.zeros(n, dtype=wp.vec2f, device=device)
+    cc.gap = wp.zeros(n if track_gap else 0, dtype=wp.float32, device=device)
     return cc
 
 
@@ -579,6 +587,7 @@ def contact_solve_container_zeros(
     device: wp.DeviceLike = None,
     *,
     rigid_only: bool = False,
+    track_gap: bool = False,
 ) -> ContactContainer:
     """Allocate only the rows consumed by rigid contact iterate/relax."""
     n = max(1, int(rigid_contact_max))
@@ -592,6 +601,7 @@ def contact_solve_container_zeros(
     cc.lambdas = wp.zeros((lambda_rows, n), dtype=wp.float32, device=device)
     cc.derived = wp.zeros((CC_DERIVED_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
     cc.surface_target = wp.empty(0, dtype=wp.vec2f, device=device)
+    cc.gap = wp.zeros(n if track_gap else 0, dtype=wp.float32, device=device)
     return cc
 
 

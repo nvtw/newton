@@ -1188,8 +1188,11 @@ class PhoenXWorld:
         # ContactColumnContainer: keyed by local cid (column header).
         self._contact_body_entries = None  # gathered warm start, allocated last when eligible
         if self.max_contact_columns > 0:
+            # Substeps that reuse prepared rows advance each row's gap by the
+            # substep's rigid motion, so its normal bias stays physical.
+            track_gap = self.prepare_refresh_stride > 1
             self._contact_container: ContactContainer = contact_container_zeros(
-                self.rigid_contact_max, device=self.device
+                self.rigid_contact_max, device=self.device, track_gap=track_gap and not self._colored_contact_rows
             )
             self._contact_cols: ContactColumnContainer = contact_column_container_zeros(
                 self.max_contact_columns,
@@ -1211,6 +1214,7 @@ class PhoenXWorld:
                 contact_solve_container_zeros(
                     self.rigid_contact_max,
                     rigid_only=self._singleworld_rigid_direct(),
+                    track_gap=track_gap,
                     device=self.device,
                 )
                 if self._colored_contact_rows
@@ -3988,12 +3992,18 @@ class PhoenXWorld:
 
     def _refresh_owned_relax_geometry(self, idt: wp.float32) -> None:
         """Refresh maximal constraint responses at the integrated configuration."""
-        if (
-            self._active_velocity_iterations > 0
-            and self._contact_input_active_this_step
-            and not self.num_particles
-            and not self._contact_patch_enabled
-        ):
+        rebase_levers = (
+            self._active_velocity_iterations > 0 and not self.num_particles and not self._contact_patch_enabled
+        )
+        # The next substep reuses this substep's prepared rows: advance their
+        # gaps by the motion just integrated.
+        next_substep = self._current_substep_index + 1
+        advance_gap = (
+            self.prepare_refresh_stride > 1
+            and next_substep < self.substeps
+            and next_substep % self.prepare_refresh_stride != 0
+        )
+        if self._contact_input_active_this_step and (rebase_levers or advance_gap):
             # Color-packed rigid manifolds are short. A lane per column avoids
             # loading both bodies' state once for every mostly idle row lane.
             rows_per_column = 1 if self._colored_contact_headers else (32 if self.device.is_cuda else 1)
@@ -4016,6 +4026,9 @@ class PhoenXWorld:
                     wp.int32(self._contact_offset),
                     wp.bool(self._colored_contact_headers),
                     wp.int32(rows_per_column),
+                    wp.bool(rebase_levers),
+                    wp.bool(advance_gap),
+                    idt,
                 ],
                 device=self.device,
             )

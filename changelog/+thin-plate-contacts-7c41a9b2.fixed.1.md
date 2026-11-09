@@ -1,0 +1,1 @@
+Fix PhoenX substeps that reuse prepared contact rows (`prepare_refresh_stride` > 1, chosen automatically from eight substeps) keeping the gap of the last prepare, which let speculative contacts approach several times their gap and kept pushing out resolved penetrations.
