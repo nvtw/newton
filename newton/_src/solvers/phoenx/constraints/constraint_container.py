@@ -10,6 +10,9 @@ drives dispatch.
 
 from __future__ import annotations
 
+import functools
+import math
+
 import warp as wp
 
 from newton._src.solvers.phoenx.constraints.bilateral_joint_data import BilateralJointData
@@ -58,6 +61,8 @@ __all__ = [
     "constraint_set_type",
     "constraint_write_multiplier",
     "constraint_write_multiplier_vec3",
+    "contact_soft_coefficient_values",
+    "contact_spring_omega_dt",
     "pd_coefficients",
     "read_float",
     "read_int",
@@ -639,6 +644,71 @@ def soft_constraint_coefficients(
     a2 = dt * omega * a1
     a3 = 1.0 / (1.0 + a2)
     return omega / a1, a2 * a3, a3
+
+
+def _contact_spring_stable(omega_dt: float, solver_iterations: int, velocity_iterations: int) -> bool:
+    """Whether a resting stack keeps a stable fixed point; see :func:`contact_spring_omega_dt`."""
+    a1 = 2.0 * float(DEFAULT_DAMPING_RATIO.value) + omega_dt
+    a2 = omega_dt * a1
+    bias_dt = omega_dt / a1
+    retained = (a2 / (1.0 + a2)) ** solver_iterations
+    return bias_dt * retained <= 1.0 - retained + velocity_iterations / a2
+
+
+@functools.cache
+def contact_spring_omega_dt(solver_iterations: int, velocity_iterations: int) -> float:
+    """Stiffest stable contact spring ``omega * dt`` [rad] for a sweep schedule.
+
+    Each substep warm starts the stored impulses, runs ``solver_iterations``
+    biased Gauss-Seidel sweeps of the soft rows (Box2D v3 coefficients with
+    damping ratio :data:`DEFAULT_DAMPING_RATIO`: bias rate ``beta / dt``, mass
+    coefficient ``m``, impulse coefficient ``i``), integrates, and runs
+    ``velocity_iterations`` unbiased relax sweeps. Project one eigenmode of
+    the diagonally scaled Delassus operator, with eigenvalue ``d`` (the
+    fraction of a row's impulse that reaches the mode in one sweep), onto its
+    gap ``c``, gap rate ``u`` and impulse ``lambda``. A sweep then updates
+    ``dlambda = -m (u + beta c) - i lambda`` and ``du = d dlambda``, and
+    a relax sweep ``dlambda = -u``. Converged (``d -> 1``) modes are damped
+    for any frequency, but a stack's slowest modes have ``d << 1``. Expanding
+    the substep map's eigenvalues in ``d`` gives ``mu = 1 +- j sqrt(d m beta /
+    i) + O(d)`` with ``|mu|^2 = 1 + d G + O(d^2)``, where ``G <= 0`` iff::
+
+        beta * r <= 1 - r + velocity_iterations * i / m,   r = m**solver_iterations
+
+    ``r`` is the share of the warm-started impulse that the soft rows keep
+    over the biased sweeps. The left side is the penetration correction those
+    retained impulses keep driving; the right side the damping from the
+    released impulse and from relax. The bound depends only on the schedule
+    (not on the structure) and is returned clamped to the Nyquist limit
+    ``pi``: 4 + 1 sweeps allow ``0.780 pi`` (Kapla arena unstable at ``pi``,
+    stable at ``0.75 pi``), 1 + 1 sweeps ``0.472 pi`` (Box2D's quarter of the
+    substep rate), and 7 or more biased sweeps with one relax sweep ``pi``.
+    """
+    n = max(0, int(solver_iterations))
+    m = max(0, int(velocity_iterations))
+    if _contact_spring_stable(math.pi, n, m):
+        return math.pi
+    lo, hi = 0.0, math.pi
+    for _ in range(60):
+        mid = 0.5 * (lo + hi)
+        if _contact_spring_stable(mid, n, m):
+            lo = mid
+        else:
+            hi = mid
+    return lo
+
+
+def contact_soft_coefficient_values(solver_iterations: int, velocity_iterations: int) -> tuple[float, float, float]:
+    """Return ``(bias_rate * dt, mass_coeff, impulse_coeff)`` of maximal contact rows.
+
+    The spring is :data:`DEFAULT_HERTZ_CONTACT` capped at
+    :func:`contact_spring_omega_dt`; at that cap ``omega * dt`` is fixed, so
+    the coefficients do not depend on ``dt``.
+    """
+    omega_dt = contact_spring_omega_dt(solver_iterations, velocity_iterations)
+    a1 = 2.0 * float(DEFAULT_DAMPING_RATIO.value) + omega_dt
+    a2 = omega_dt * a1
+    return omega_dt / a1, a2 / (1.0 + a2), 1.0 / (1.0 + a2)
 
 
 @wp.func

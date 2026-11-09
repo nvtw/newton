@@ -25,12 +25,9 @@ from newton._src.solvers.phoenx.body import (
     mat33_from_sym6,
 )
 from newton._src.solvers.phoenx.constraints.constraint_container import (
-    DEFAULT_DAMPING_RATIO,
-    DEFAULT_HERTZ_CONTACT,
     ConstraintBodies,
     assert_constraint_header,
     constraint_bodies_make,
-    soft_constraint_coefficients,
 )
 from newton._src.solvers.phoenx.constraints.contact_container import (
     CC_DERIVED_DWORDS_PER_CONTACT,
@@ -56,6 +53,7 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_get_tangent1_lambda,
     cc_get_tangent2_lambda,
     cc_set_start_gap,
+    cc_soft_coefficients,
 )
 from newton._src.solvers.phoenx.constraints.contact_patch_friction import (
     ContactPatchFriction,
@@ -1028,10 +1026,7 @@ def _make_contact_iterate_at_multi(has_soft_contact_pd: bool):
         mu_s = contact_get_friction(constraints, cid)
         mu_k = contact_get_friction_dynamic(constraints, cid)
 
-        dt_substep = wp.float32(1.0) / idt
-        _bias_rate, mass_coeff, impulse_coeff = soft_constraint_coefficients(
-            DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, dt_substep
-        )
+        _bias_rate, mass_coeff, impulse_coeff = cc_soft_coefficients(cc, idt)
 
         # ``contact_iterate_at_multi`` is only invoked from the multi-world
         # fast-tail kernel, where mass splitting is rejected at construction

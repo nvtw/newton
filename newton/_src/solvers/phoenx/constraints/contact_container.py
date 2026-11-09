@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import warp as wp
 
+from newton._src.solvers.phoenx.constraints.constraint_container import contact_soft_coefficient_values
 from newton._src.solvers.phoenx.helpers.array_access import read2d_f32, write2d_f32
 
 __all__ = [
@@ -76,8 +77,10 @@ __all__ = [
     "cc_set_tangent1",
     "cc_set_tangent1_lambda",
     "cc_set_tangent2_lambda",
+    "cc_soft_coefficients",
     "contact_container_clear_reset_worlds",
     "contact_container_copy_current_to_prev",
+    "contact_container_set_sweeps",
     "contact_container_zeros",
     "contact_solve_container_zeros",
 ]
@@ -166,6 +169,26 @@ class ContactContainer:
     #: of every substep that reuses the prepared rows; empty when every
     #: substep prepares its rows.
     gap: wp.array[wp.float32]
+    #: Soft normal-row coefficients of the maximal contact spring: bias rate
+    #: times the substep ``dt``, mass and impulse coefficients. They follow the
+    #: sweep schedule (:func:`contact_container_set_sweeps`), so kernels read
+    #: them as launch constants.
+    soft_bias_dt: wp.float32
+    soft_mass_coeff: wp.float32
+    soft_impulse_coeff: wp.float32
+
+
+@wp.func
+def cc_soft_coefficients(cc: ContactContainer, idt: wp.float32):
+    """Return ``(bias_rate, mass_coeff, impulse_coeff)`` of the contact rows at substep rate ``idt``."""
+    return cc.soft_bias_dt * idt, cc.soft_mass_coeff, cc.soft_impulse_coeff
+
+
+def contact_container_set_sweeps(cc: ContactContainer, solver_iterations: int, velocity_iterations: int) -> None:
+    """Set the contact spring for a sweep schedule; see :func:`contact_spring_omega_dt`."""
+    cc.soft_bias_dt, cc.soft_mass_coeff, cc.soft_impulse_coeff = contact_soft_coefficient_values(
+        solver_iterations, velocity_iterations
+    )
 
 
 @wp.kernel(enable_backward=False)
@@ -566,10 +589,13 @@ def contact_container_zeros(
     device: wp.DeviceLike = None,
     *,
     track_gap: bool = False,
+    solver_iterations: int = 8,
+    velocity_iterations: int = 1,
 ) -> ContactContainer:
     """Allocate a zero-initialised :class:`ContactContainer`. ``rigid_contact_max``
     must match Newton's Contacts buffer. ``track_gap`` allocates the row gaps
-    needed when substeps reuse prepared rows."""
+    needed when substeps reuse prepared rows. The sweep counts set the contact
+    spring (:func:`contact_container_set_sweeps`)."""
     n = max(1, int(rigid_contact_max))
     cc = ContactContainer()
     cc.impulses = wp.zeros((CC_IMPULSE_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
@@ -579,6 +605,7 @@ def contact_container_zeros(
     cc.derived = wp.zeros((CC_DERIVED_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
     cc.surface_target = wp.zeros(n, dtype=wp.vec2f, device=device)
     cc.gap = wp.zeros(n if track_gap else 0, dtype=wp.float32, device=device)
+    contact_container_set_sweeps(cc, solver_iterations, velocity_iterations)
     return cc
 
 
@@ -588,6 +615,8 @@ def contact_solve_container_zeros(
     *,
     rigid_only: bool = False,
     track_gap: bool = False,
+    solver_iterations: int = 8,
+    velocity_iterations: int = 1,
 ) -> ContactContainer:
     """Allocate only the rows consumed by rigid contact iterate/relax."""
     n = max(1, int(rigid_contact_max))
@@ -602,6 +631,7 @@ def contact_solve_container_zeros(
     cc.derived = wp.zeros((CC_DERIVED_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
     cc.surface_target = wp.empty(0, dtype=wp.vec2f, device=device)
     cc.gap = wp.zeros(n if track_gap else 0, dtype=wp.float32, device=device)
+    contact_container_set_sweeps(cc, solver_iterations, velocity_iterations)
     return cc
 
 

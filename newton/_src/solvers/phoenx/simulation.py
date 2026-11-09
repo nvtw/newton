@@ -98,6 +98,7 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     CC_RIGID_DWORDS_PER_CONTACT,
     ContactContainer,
     contact_container_copy_current_to_prev,
+    contact_container_set_sweeps,
     contact_container_zeros,
     contact_solve_container_zeros,
 )
@@ -2566,6 +2567,21 @@ class PhoenXWorld:
             return 0
         return self.velocity_iterations
 
+    def _set_contact_spring(self) -> None:
+        """Match the contact spring to the configured sweeps.
+
+        The stiffest spring that keeps a resting stack stable depends on how
+        many biased and relax sweeps each substep runs; see
+        :func:`contact_spring_omega_dt`. Substeps without relax bound it when
+        relaxation runs only on the final substep.
+        """
+        relax = self.velocity_iterations
+        if self.velocity_relaxation == "final_substep" and self.substeps > 1:
+            relax = 0
+        contact_container_set_sweeps(self._contact_container, self.solver_iterations, relax)
+        if self._contact_container_solve is not self._contact_container:
+            contact_container_set_sweeps(self._contact_container_solve, self.solver_iterations, relax)
+
     def step(
         self,
         dt: float,
@@ -2612,6 +2628,7 @@ class PhoenXWorld:
 
         self.step_dt = dt
         self.substep_dt = dt / self.substeps
+        self._set_contact_spring()
 
         if self.enable_column_timers:
             self._zero_column_timers()

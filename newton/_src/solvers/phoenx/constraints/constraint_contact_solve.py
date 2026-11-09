@@ -53,12 +53,9 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     contact_set_packed_body_properties,
 )
 from newton._src.solvers.phoenx.constraints.constraint_container import (
-    DEFAULT_DAMPING_RATIO,
-    DEFAULT_HERTZ_CONTACT,
     ConstraintBodies,
     constraint_bodies_make,
     pd_coefficients,
-    soft_constraint_coefficients,
 )
 from newton._src.solvers.phoenx.constraints.contact_container import (
     ContactContainer,
@@ -104,6 +101,7 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_set_r1,
     cc_set_tangent1_lambda,
     cc_set_tangent2_lambda,
+    cc_soft_coefficients,
 )
 from newton._src.solvers.phoenx.constraints.contact_endpoint import (
     contact_endpoint_apply_impulse_cached as contact_endpoint_apply_impulse,
@@ -184,12 +182,6 @@ __all__ = [
 ]
 
 
-# The default contact hertz is Nyquist-clamped whenever idt <= 2*hertz.
-# In that regime the Box2D mass/impulse coefficients are independent of dt.
-_DEFAULT_CONTACT_MASS_COEFF = wp.constant(wp.float32(0.9417003989219666))
-_DEFAULT_CONTACT_IMPULSE_COEFF = wp.constant(wp.float32(0.05829954519867897))
-
-
 #: Normal-row speed caps [m/s]: depenetration push and speculative approach.
 _CONTACT_MAX_PUSH_SPEED = wp.constant(wp.float32(2.0))
 _CONTACT_MAX_APPROACH_SPEED = wp.constant(wp.float32(10.0))
@@ -210,14 +202,9 @@ def contact_normal_bias(gap: wp.float32, idt: wp.float32, bias_rate: wp.float32)
 
 
 @wp.func
-def _default_contact_solver_coefficients(idt: wp.float32):
+def _default_contact_solver_coefficients(cc: ContactContainer, idt: wp.float32):
     """Return default contact mass/impulse coefficients."""
-    if idt <= wp.float32(2.0) * DEFAULT_HERTZ_CONTACT:
-        return _DEFAULT_CONTACT_MASS_COEFF, _DEFAULT_CONTACT_IMPULSE_COEFF
-    dt_substep = wp.float32(1.0) / idt
-    _bias_rate, mass_coeff, impulse_coeff = soft_constraint_coefficients(
-        DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, dt_substep
-    )
+    _bias_rate, mass_coeff, impulse_coeff = cc_soft_coefficients(cc, idt)
     return mass_coeff, impulse_coeff
 
 
@@ -389,9 +376,7 @@ def rebase_ordinary_contact_relax_kernel(
         # Substep rotation of each body; its translation is ``-shift``.
         rotation1 = body_load_orientation(bodies, b1) * wp.quat_inverse(bodies.orientation_prev_substep[b1])
         rotation2 = body_load_orientation(bodies, b2) * wp.quat_inverse(bodies.orientation_prev_substep[b2])
-        bias_rate, _mass_coeff, _impulse_coeff = soft_constraint_coefficients(
-            DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, wp.float32(1.0) / idt
-        )
+        bias_rate, _mass_coeff, _impulse_coeff = cc_soft_coefficients(cc, idt)
         for k in range(first + lane, first + count, rows_per_column):
             r1 = cc_get_r0(cc, k)
             r2 = cc_get_r1(cc, k)
@@ -503,9 +488,7 @@ def _make_contact_prepare_for_iteration_at(
             contact_count = wp.int32(1)
 
         dt_substep = wp.float32(1.0) / idt
-        bias_rate, _mass_coeff, _impulse_coeff = soft_constraint_coefficients(
-            DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, dt_substep
-        )
+        bias_rate, _mass_coeff, _impulse_coeff = cc_soft_coefficients(cc, idt)
 
         # Friction bias + speed caps. Scale-invariant; numeric caps would
         # need scaling for scene_scale >> 1.
@@ -1476,7 +1459,7 @@ def _make_contact_iterate_at(
         mass_coeff = wp.float32(1.0)
         impulse_coeff = wp.float32(0.0)
         if wp.static(use_bias):
-            mass_coeff, impulse_coeff = _default_contact_solver_coefficients(idt)
+            mass_coeff, impulse_coeff = _default_contact_solver_coefficients(cc, idt)
 
         if wp.static(cloth_support):
             side0_kind = contact_get_side0_kind(constraints, cid)
