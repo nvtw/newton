@@ -3840,6 +3840,7 @@ class CollisionPipeline:
             inputs=[
                 state.body_q,
                 state.body_qd,
+                model.body_flags,
                 data.body_radius,
                 float(dt),
                 float(config.budget_velocity_scale),

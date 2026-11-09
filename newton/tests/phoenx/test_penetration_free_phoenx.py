@@ -148,8 +148,10 @@ def _add_ground(builder: newton.ModelBuilder, ground: str) -> None:
 class _CapturedRun:
     """Collide-and-step loop replayed from one captured CUDA graph per frame."""
 
-    def __init__(self, model, pipeline, solver, state):
+    def __init__(self, model, pipeline, solver, state, pre_frame=None):
         self.device = require_cuda_graph_capture("Penetration-free PhoenX tests")
+        self.pre_frame = pre_frame
+        self.status_seen = 0
         self.model = model
         self.pipeline = pipeline
         self.solver = solver
@@ -159,6 +161,8 @@ class _CapturedRun:
         self.graph = None
 
     def _frame(self):
+        if self.pre_frame is not None:
+            self.pre_frame(self.state_0)
         self.pipeline.collide(self.state_0, self.contacts, dt=_DT)
         self.solver.step(self.state_0, self.state_1, None, self.contacts, _DT)
         wp.copy(self.state_0.body_q, self.state_1.body_q)
@@ -168,11 +172,18 @@ class _CapturedRun:
     def step(self):
         if self.graph is None:
             self._frame()
+            self._record_status()
             with wp.ScopedCapture(device=self.device) as capture:
                 self._frame()
             self.graph = capture.graph
-            return
-        wp.capture_launch(self.graph)
+        else:
+            wp.capture_launch(self.graph)
+        self._record_status()
+
+    def _record_status(self):
+        # Every detection clears the status, so collect it after each frame.
+        if self.data is not None:
+            self.status_seen |= int(self.data.status.numpy()[0])
 
     @property
     def data(self):
@@ -180,10 +191,16 @@ class _CapturedRun:
 
     def failure_bits(self) -> int:
         """Return raised status bits that void the guarantee; budget exhaustion only stalls motion."""
-        return int(self.data.status.numpy()[0]) & (int(STATUS_FATAL_MASK) | int(STATUS_KINEMATIC_VIOLATION))
+        return self.status_seen & (int(STATUS_FATAL_MASK) | int(STATUS_KINEMATIC_VIOLATION))
 
 
-def _make_run(builder, *, penetration_free, broad_phase="sap"):
+@wp.kernel(enable_backward=False)
+def _advance_body_x_kernel(body_q: wp.array[wp.transform], body: int, dx: float):
+    X = body_q[body]
+    body_q[body] = wp.transform(wp.transform_get_translation(X) + wp.vec3(dx, 0.0, 0.0), wp.transform_get_rotation(X))
+
+
+def _make_run(builder, *, penetration_free, broad_phase="sap", pre_frame=None):
     model = builder.finalize(device=require_cuda_graph_capture("Penetration-free PhoenX tests"))
     pipeline = newton.CollisionPipeline(
         model,
@@ -192,26 +209,31 @@ def _make_run(builder, *, penetration_free, broad_phase="sap"):
         penetration_free=penetration_free,
     )
     solver = SolverPhoenX(model, collision_pipeline=pipeline)
-    return _CapturedRun(model, pipeline, solver, model.state())
+    return _CapturedRun(model, pipeline, solver, model.state(), pre_frame)
 
 
 class TestPenetrationFreePhoenX(unittest.TestCase):
     def _head_on_spheres(self, penetration_free):
-        builder = newton.ModelBuilder(gravity=wp.vec3(0.0))
+        # Two worlds occupy the same space: the batched multi-world path must
+        # certify each world and never pair bodies across worlds.
+        world = newton.ModelBuilder(gravity=wp.vec3(0.0))
         for x in (-1.0, 1.0):
-            body = builder.add_body(xform=wp.transform((x, 0.0, 0.0), wp.quat_identity()))
-            builder.add_shape_sphere(body, radius=0.1)
+            body = world.add_body(xform=wp.transform((x, 0.0, 0.0), wp.quat_identity()))
+            world.add_shape_sphere(body, radius=0.1)
+        builder = newton.ModelBuilder(gravity=wp.vec3(0.0))
+        builder.replicate(world, 2)
         run = _make_run(builder, penetration_free=penetration_free, broad_phase="nxn")
         qd = run.state_0.body_qd.numpy()
-        qd[0, 0], qd[1, 0] = 120.0, -120.0
+        qd[0::2, 0], qd[1::2, 0] = 120.0, -120.0
         run.state_0.body_qd.assign(qd)
         min_gap = math.inf
         crossed = False
         for _ in range(20):
             run.step()
             x = run.state_0.body_q.numpy()[:, 0]
-            min_gap = min(min_gap, abs(x[1] - x[0]) - 0.2)
-            crossed |= bool(x[0] > x[1])
+            for left in (0, 2):
+                min_gap = min(min_gap, abs(x[left + 1] - x[left]) - 0.2)
+                crossed |= bool(x[left] > x[left + 1])
         return run, min_gap, crossed
 
     def test_head_on_spheres_tunnel_without_mode(self):
@@ -222,7 +244,7 @@ class TestPenetrationFreePhoenX(unittest.TestCase):
         run, min_gap, crossed = self._head_on_spheres(PenetrationFreeConfig(tolerance=_TOLERANCE))
         self.assertFalse(crossed)
         self.assertGreaterEqual(min_gap, -_TOLERANCE - _MEASURE_SLACK)
-        self.assertEqual(run.failure_bits(), 0, run.data.status_messages())
+        self.assertEqual(run.failure_bits(), 0, f"status bits seen: {run.status_seen:#x}")
 
     def _drop_all_shapes(self, ground: str, penetration_free):
         builder = newton.ModelBuilder()
@@ -256,7 +278,7 @@ class TestPenetrationFreePhoenX(unittest.TestCase):
                     # Truncation must not hold a polyhedron balanced on an edge.
                     vertices_z = (params[0] @ _rotation_matrix(body_q[i, 3:]).T)[:, 2] + body_q[i, 2]
                     self.assertGreaterEqual(int(np.sum(vertices_z < 5.0e-3)), 3)
-        self.assertEqual(run.failure_bits(), 0, run.data.status_messages())
+        self.assertEqual(run.failure_bits(), 0, f"status bits seen: {run.status_seen:#x}")
 
     def test_shapes_on_plane(self):
         self._check_ground("plane")
@@ -293,7 +315,7 @@ class TestPenetrationFreePhoenX(unittest.TestCase):
                     run.step()
                 body_q = run.state_0.body_q.numpy()
                 self.assertLess(float(body_q[1, 2]), 0.105, "the overhanging cube did not land on the ground")
-                self.assertEqual(run.failure_bits(), 0, run.data.status_messages())
+                self.assertEqual(run.failure_bits(), 0, f"status bits seen: {run.status_seen:#x}")
 
     def test_leaning_mesh_tower_collapses(self):
         # Each cube overhangs the one below by less than half its width, but
@@ -309,7 +331,7 @@ class TestPenetrationFreePhoenX(unittest.TestCase):
         for _ in range(240):
             run.step()
         self.assertLess(float(run.state_0.body_q.numpy()[:, 2].max()), 0.4, "the leaning tower is still standing")
-        self.assertEqual(run.failure_bits(), 0, run.data.status_messages())
+        self.assertEqual(run.failure_bits(), 0, f"status bits seen: {run.status_seen:#x}")
 
     def test_box_stack_settles(self):
         builder = newton.ModelBuilder()
@@ -329,7 +351,7 @@ class TestPenetrationFreePhoenX(unittest.TestCase):
         np.testing.assert_allclose(body_q[:, 2], expected, atol=5.0 * _TOLERANCE)
         np.testing.assert_allclose(body_q[:, :2], 0.0, atol=1.0e-3)
         self.assertLess(float(np.max(np.abs(body_qd))), 0.05)
-        self.assertEqual(run.failure_bits(), 0, run.data.status_messages())
+        self.assertEqual(run.failure_bits(), 0, f"status bits seen: {run.status_seen:#x}")
 
     def test_kinematic_violation_is_reported(self):
         builder = newton.ModelBuilder(gravity=wp.vec3(0.0))
@@ -350,6 +372,36 @@ class TestPenetrationFreePhoenX(unittest.TestCase):
         state_0.body_q.assign(q)
         solver.step(state_0, state_1, None, contacts, _DT)
         self.assertTrue(int(contacts._penetration_free.status.numpy()[0]) & int(STATUS_KINEMATIC_VIOLATION))
+
+    def test_kinematic_pusher_keeps_tolerance(self):
+        # A kinematic box drives into a resting box at 3 m/s. The prescribed
+        # side must be granted its travel and the pushed box must keep clear,
+        # without a kinematic violation or penetration beyond the tolerance.
+        builder = newton.ModelBuilder()
+        builder.add_ground_plane()
+        pusher = builder.add_body(xform=wp.transform((-0.5, 0.0, 0.1), wp.quat_identity()), is_kinematic=True)
+        builder.add_shape_box(pusher, hx=0.1, hy=0.1, hz=0.1)
+        pushed = builder.add_body(xform=wp.transform((0.0, 0.0, 0.1), wp.quat_identity()))
+        builder.add_shape_box(pushed, hx=0.1, hy=0.1, hz=0.1)
+
+        def advance(state):
+            wp.launch(
+                _advance_body_x_kernel, dim=1, inputs=[state.body_q, pusher, 3.0 * _DT], device=state.body_q.device
+            )
+
+        run = _make_run(builder, penetration_free=PenetrationFreeConfig(), broad_phase="nxn", pre_frame=advance)
+        corners = _box_mesh_data(0.1, 0.1, 0.1)[0]
+        deepest = 0.0
+        for _ in range(60):
+            run.step()
+            body_q = run.state_0.body_q.numpy()
+            for i, j in ((0, 1), (1, 0)):
+                vertices = body_q[i, :3] + corners @ _rotation_matrix(body_q[i, 3:]).T
+                local = (vertices - body_q[j, :3]) @ _rotation_matrix(body_q[j, 3:])
+                deepest = max(deepest, float(np.max(np.min(0.1 - np.abs(local), axis=1))))
+        self.assertLessEqual(deepest, 5.0e-3 + _MEASURE_SLACK)
+        self.assertGreater(float(run.state_0.body_q.numpy()[pushed, 0]), 1.0, "the box was not pushed")
+        self.assertEqual(run.failure_bits(), 0, f"status bits seen: {run.status_seen:#x}")
 
     def test_constraint_overflow_holds_only_affected_bodies(self):
         # Four spheres hover 4 mm above the ground, inside their motion budgets,

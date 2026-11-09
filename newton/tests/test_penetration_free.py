@@ -47,6 +47,23 @@ class TestPenetrationFreeContract(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "infinite plane"):
             newton.CollisionPipeline(model, penetration_free=PenetrationFreeConfig())
 
+    def test_overlapping_bodies_are_released(self):
+        # Boxes created 3 cm deep in each other overlap far beyond the
+        # tolerance: their pair goes to the solver's contacts instead of
+        # constraining motion, and the release is counted.
+        builder = newton.ModelBuilder(gravity=wp.vec3(0.0))
+        for x in (0.0, 0.17):
+            body = builder.add_body(xform=wp.transform((x, 0.0, 0.0), wp.quat_identity()))
+            builder.add_shape_box(body, hx=0.1, hy=0.1, hz=0.1)
+        model = builder.finalize(device="cpu")
+        pipeline = newton.CollisionPipeline(model, broad_phase="nxn", penetration_free=PenetrationFreeConfig())
+        contacts = pipeline.contacts()
+        pipeline.collide(model.state(), contacts)
+        data = contacts._penetration_free
+        self.assertEqual(int(data.recovery_count.numpy()[0]), 1)
+        self.assertEqual(int(data.constraint_count.numpy()[0]), 0)
+        self.assertEqual(data.status_messages(), [])
+
     def test_invalid_config_is_rejected(self):
         with self.assertRaises(ValueError):
             PenetrationFreeConfig(tolerance=-1.0).validate()

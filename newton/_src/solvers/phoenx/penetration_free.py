@@ -323,7 +323,17 @@ class PhoenXPenetrationFree:
         """Re-place the pair limits, then remove velocity that would carry dynamic features past them."""
         if self.num_bodies <= 1 or data.body_count == 0:
             return
-        launch_place_limits(data, bodies.position, bodies.orientation, bodies.velocity, bodies.angular_velocity, 1)
+        launch_place_limits(
+            data,
+            bodies.position,
+            bodies.orientation,
+            bodies.velocity,
+            bodies.angular_velocity,
+            bodies.motion_type,
+            int(MOTION_KINEMATIC),
+            1,
+            dt,
+        )
         reserve = LIMITER_RESERVE * float(data.config.tolerance)
         rows = (data.constraints.body.shape[0], 2, 2)
         inputs = [data.constraints, bodies, float(dt), reserve]

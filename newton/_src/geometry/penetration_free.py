@@ -47,6 +47,7 @@ from dataclasses import dataclass
 import numpy as np
 import warp as wp
 
+from ..sim.enums import BodyFlags
 from ..utils.heightfield import HeightfieldData, get_triangle_shape_from_heightfield
 from .collision_core import get_triangle_shape_from_mesh
 from .flags import ShapeFlags
@@ -523,8 +524,11 @@ def place_limits_kernel(
     orientations: wp.array[wp.quat],
     velocities: wp.array[wp.vec3],
     angular_velocities: wp.array[wp.vec3],
+    motion_type: wp.array[wp.int32],
+    prescribed: int,
     slot_offset: int,
     tolerance: float,
+    dt: float,
 ):
     """Re-certify each pair's direction at the current poses and re-divide its room.
 
@@ -532,8 +536,10 @@ def place_limits_kernel(
     the previous one, so the overlap along it never exceeds the overlap the
     previous limits allowed. The room ``tolerance - overlap`` then goes to the
     sides in proportion to their approach speeds, so a side moving away or
-    sliding along the plane is never truncated. Overlap within the tolerance
-    stays within it; larger overlap is frozen.
+    sliding along the plane is never truncated. A prescribed side (slots whose
+    ``motion_type`` equals ``prescribed``) facing a moving one acts as a moving
+    wall: it is granted its predicted travel over ``dt`` and the other side
+    must keep clear of it. Overlap far beyond the tolerance releases the pair.
     """
     c = wp.tid()
     if c >= pair_count(constraints):
@@ -589,7 +595,20 @@ def place_limits_kernel(
         # Each moving side keeps a quarter of the room: a side at rest must be
         # able to start moving, or the other side's jitter would pin it.
         share = MIN_ROOM_SHARE + (1.0 - 2.0 * MIN_ROOM_SHARE) * approach[0] / (approach[0] + approach[1])
-    constraints.limit[c] = wp.vec2(height[0] + share * room, height[1] + (1.0 - share) * room)
+    limit = wp.vec2(height[0] + share * room, height[1] + (1.0 - share) * room)
+    if bodies[0] >= 0 and bodies[1] >= 0:
+        prescribed_a = motion_type[bodies[0] + slot_offset] == prescribed
+        prescribed_b = motion_type[bodies[1] + slot_offset] == prescribed
+        if prescribed_a != prescribed_b:
+            p = 0
+            if prescribed_b:
+                p = 1
+            # The prescribed side keeps its predicted travel plus the usual
+            # minimum share of the room left after it.
+            travel = dt * approach[p]
+            limit[p] = height[p] + travel + MIN_ROOM_SHARE * wp.max(room - travel, 0.0)
+            limit[1 - p] = tolerance - limit[p]
+    constraints.limit[c] = limit
 
 
 def launch_place_limits(
@@ -598,12 +617,15 @@ def launch_place_limits(
     orientations: wp.array,
     velocities: wp.array,
     angular_velocities: wp.array,
+    motion_type: wp.array,
+    prescribed: int,
     slot_offset: int,
+    dt: float,
 ) -> None:
     """Re-place every pair's limits at the given center-of-mass poses and velocities.
 
-    Call once per position update, before limiting the motion; see
-    :func:`place_limits_kernel`.
+    Call once per position update of length ``dt``, before limiting the
+    motion; see :func:`place_limits_kernel`.
     """
     wp.launch(
         place_limits_kernel,
@@ -614,8 +636,11 @@ def launch_place_limits(
             orientations,
             velocities,
             angular_velocities,
+            motion_type,
+            int(prescribed),
             int(slot_offset),
             float(data.config.tolerance),
+            float(dt),
         ],
         device=data.device,
         max_blocks=data.max_blocks,
@@ -1245,6 +1270,7 @@ def body_radius_kernel(
 def body_budget_kernel(
     body_q: wp.array[wp.transform],
     body_qd: wp.array[wp.spatial_vector],
+    body_flags: wp.array[wp.int32],
     body_radius: wp.array[wp.float32],
     dt: float,
     velocity_scale: float,
@@ -1255,11 +1281,18 @@ def body_budget_kernel(
     body_used: wp.array[wp.float32],
     body_tracked_q: wp.array[wp.transform],
 ):
-    """Set each body's motion budget from its predicted travel and snapshot the detection reference."""
+    """Set each body's motion budget from its predicted travel and snapshot the detection reference.
+
+    Kinematic bodies follow targets that detection cannot predict from their
+    velocity, so they receive the largest budget.
+    """
     b = wp.tid()
     twist = body_qd[b]
     speed = wp.length(wp.spatial_top(twist)) + wp.length(wp.spatial_bottom(twist)) * body_radius[b]
-    body_budget[b] = wp.clamp(velocity_scale * speed * dt, min_budget, max_budget)
+    budget = wp.clamp(velocity_scale * speed * dt, min_budget, max_budget)
+    if (body_flags[b] & BodyFlags.KINEMATIC) != 0:
+        budget = max_budget
+    body_budget[b] = budget
     body_used[b] = 0.0
     body_tracked_q[b] = body_q[b]
 
