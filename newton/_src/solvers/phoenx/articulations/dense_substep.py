@@ -341,7 +341,8 @@ def make_dense_substep_kernel(
     # Scratch after the factor's tables: the composite inertias while factoring, then the tree
     # recurrences and the contact pages share one region; the rates and a solve vector follow.
     tree_words = 4 * _MOTION_STRIDE * _LANES
-    contact_words = _LANES * (path_capacity + PAGE_ROWS + 2)
+    # Rows and matrix columns belong to the first PAGE_ROWS lanes.
+    contact_words = PAGE_ROWS * (path_capacity + PAGE_ROWS) + 2 * _LANES
     qd_offset = max(tree_words, contact_words, _INERTIA_STRIDE * joint_capacity)
     scratch_words = qd_offset + 2 * max_dofs
     ops = make_dense_tree_ops(max_dofs, joint_capacity, entry_capacity, subtree_capacity, scratch_words)
@@ -357,8 +358,8 @@ def make_dense_substep_kernel(
     second_base = first_base + _MOTION_STRIDE * _LANES
     third_base = second_base + _MOTION_STRIDE * _LANES
     z_base = layout.scratch
-    a_base = z_base + _LANES * path_capacity
-    lambda_base = a_base + _LANES * PAGE_ROWS
+    a_base = z_base + PAGE_ROWS * path_capacity
+    lambda_base = a_base + PAGE_ROWS * PAGE_ROWS
     leaf_byte = 4 * (lambda_base + _LANES)
     gather = _gather_packed_patch_points if patch else _gather_packed_contact_points
     qd_base = layout.scratch + qd_offset
@@ -597,18 +598,18 @@ def make_dense_substep_kernel(
                     k = _load_u8(shared, wp.int32(path) + path_entry + position)
                     value = wp.dot(_load_motion(shared, wp.int32(motion_base) + wp.int32(_MOTION_STRIDE) * k), wrench)
                     velocity += value * _load(shared, wp.int32(qd_base) + k)
-                    _store(shared, wp.int32(z_base) + wp.int32(_LANES) * position + lane, value)
+                    _store(shared, wp.int32(z_base) + wp.int32(PAGE_ROWS) * position + lane, value)
                 for reverse in range(path_length):
                     position = path_length - wp.int32(1) - reverse
-                    value = _load(shared, wp.int32(z_base) + wp.int32(_LANES) * position + lane)
+                    value = _load(shared, wp.int32(z_base) + wp.int32(PAGE_ROWS) * position + lane)
                     for later in range(position + wp.int32(1), path_length):
                         i = _load_u8(shared, wp.int32(path) + path_entry + later)
                         value -= _load(shared, _load_u16(shared, wp.int32(dof_entry) + i) + position) * _load(
-                            shared, wp.int32(z_base) + wp.int32(_LANES) * later + lane
+                            shared, wp.int32(z_base) + wp.int32(PAGE_ROWS) * later + lane
                         )
                     k = _load_u8(shared, wp.int32(path) + path_entry + position)
                     value /= _load(shared, _load_u16(shared, wp.int32(dof_entry) + k + wp.int32(1)) - wp.int32(1))
-                    _store(shared, wp.int32(z_base) + wp.int32(_LANES) * position + lane, value)
+                    _store(shared, wp.int32(z_base) + wp.int32(PAGE_ROWS) * position + lane, value)
                     inverse_mass += value * value
             if wp.static(not patch):
                 _store_point_row_effective_mass(
@@ -645,10 +646,11 @@ def make_dense_substep_kernel(
             for run_row in range(row, end):
                 product = wp.float32(0.0)
                 for position in range(common):
-                    product += _load(shared, wp.int32(z_base) + wp.int32(_LANES) * position + run_row) * _load(
-                        shared, wp.int32(z_base) + wp.int32(_LANES) * position + lane
+                    product += _load(shared, wp.int32(z_base) + wp.int32(PAGE_ROWS) * position + run_row) * _load(
+                        shared, wp.int32(z_base) + wp.int32(PAGE_ROWS) * position + lane
                     )
-                _store(shared, wp.int32(a_base) + wp.int32(_LANES) * run_row + lane, product)
+                if lane < wp.int32(PAGE_ROWS):
+                    _store(shared, wp.int32(a_base) + wp.int32(PAGE_ROWS) * run_row + lane, product)
             row = end
         _sync_contact_warp()
 
@@ -673,7 +675,9 @@ def make_dense_substep_kernel(
                     else:
                         lambda_row = cc_get_tangent2_lambda(cc, row_contact)
             for r in range(row_count):
-                velocity += _load(shared, wp.int32(a_base) + wp.int32(_LANES) * r + lane) * _lane_float(lambda_row, r)
+                velocity += _load(shared, wp.int32(a_base) + wp.int32(PAGE_ROWS) * r + lane) * _lane_float(
+                    lambda_row, r
+                )
         mass_coeff = wp.float32(1.0)
         impulse_coeff = wp.float32(0.0)
         if use_bias:
@@ -694,7 +698,7 @@ def make_dense_substep_kernel(
                             cc,
                             contact,
                             row_velocity_n,
-                            _load(shared, wp.int32(a_base) + wp.int32(_LANES + 1) * point),
+                            _load(shared, wp.int32(a_base) + wp.int32(PAGE_ROWS + 1) * point),
                             use_bias,
                             idt,
                             mass_coeff,
@@ -704,7 +708,7 @@ def make_dense_substep_kernel(
                         delta_n = update[0]
                         normal_load[packed_articulation, chunk[0] + point] = update[1]
                     delta_n = _lane_float(delta_n, point)
-                    velocity += _load(shared, wp.int32(a_base) + wp.int32(_LANES) * point + lane) * delta_n
+                    velocity += _load(shared, wp.int32(a_base) + wp.int32(PAGE_ROWS) * point + lane) * delta_n
                     if lane == point:
                         lambda_row += delta_n
                 else:
@@ -725,11 +729,11 @@ def make_dense_substep_kernel(
                             point_tangent,
                             row_velocities,
                             wp.vec3(
-                                _load(shared, wp.int32(a_base) + wp.int32(_LANES) * row + row + wp.int32(1)),
-                                _load(shared, wp.int32(a_base) + wp.int32(_LANES) * row + row + wp.int32(2)),
+                                _load(shared, wp.int32(a_base) + wp.int32(PAGE_ROWS) * row + row + wp.int32(1)),
+                                _load(shared, wp.int32(a_base) + wp.int32(PAGE_ROWS) * row + row + wp.int32(2)),
                                 _load(
                                     shared,
-                                    wp.int32(a_base) + wp.int32(_LANES) * (row + wp.int32(1)) + row + wp.int32(2),
+                                    wp.int32(a_base) + wp.int32(PAGE_ROWS) * (row + wp.int32(1)) + row + wp.int32(2),
                                 ),
                             ),
                             use_bias,
@@ -742,9 +746,9 @@ def make_dense_substep_kernel(
                         _lane_float(delta[0], point), _lane_float(delta[1], point), _lane_float(delta[2], point)
                     )
                     velocity += (
-                        _load(shared, wp.int32(a_base) + wp.int32(_LANES) * row + lane) * delta[0]
-                        + _load(shared, wp.int32(a_base) + wp.int32(_LANES) * (row + wp.int32(1)) + lane) * delta[1]
-                        + _load(shared, wp.int32(a_base) + wp.int32(_LANES) * (row + wp.int32(2)) + lane) * delta[2]
+                        _load(shared, wp.int32(a_base) + wp.int32(PAGE_ROWS) * row + lane) * delta[0]
+                        + _load(shared, wp.int32(a_base) + wp.int32(PAGE_ROWS) * (row + wp.int32(1)) + lane) * delta[1]
+                        + _load(shared, wp.int32(a_base) + wp.int32(PAGE_ROWS) * (row + wp.int32(2)) + lane) * delta[2]
                     )
                     if lane >= row and lane < row + wp.int32(3):
                         lambda_row += delta[lane - row]
@@ -777,17 +781,18 @@ def make_dense_substep_kernel(
                             patch_lambda,
                             tangent_velocity,
                             wp.vec3(
-                                _load(shared, wp.int32(a_base) + wp.int32(_LANES + 1) * row),
-                                _load(shared, wp.int32(a_base) + wp.int32(_LANES) * row + row + wp.int32(1)),
-                                _load(shared, wp.int32(a_base) + wp.int32(_LANES + 1) * (row + wp.int32(1))),
+                                _load(shared, wp.int32(a_base) + wp.int32(PAGE_ROWS + 1) * row),
+                                _load(shared, wp.int32(a_base) + wp.int32(PAGE_ROWS) * row + row + wp.int32(1)),
+                                _load(shared, wp.int32(a_base) + wp.int32(PAGE_ROWS + 1) * (row + wp.int32(1))),
                             ),
                             use_bias,
                             sor_boost,
                         )
                     delta_t = wp.vec2f(_lane_float(delta_t[0], 0), _lane_float(delta_t[1], 0))
                     velocity += (
-                        _load(shared, wp.int32(a_base) + wp.int32(_LANES) * row + lane) * delta_t[0]
-                        + _load(shared, wp.int32(a_base) + wp.int32(_LANES) * (row + wp.int32(1)) + lane) * delta_t[1]
+                        _load(shared, wp.int32(a_base) + wp.int32(PAGE_ROWS) * row + lane) * delta_t[0]
+                        + _load(shared, wp.int32(a_base) + wp.int32(PAGE_ROWS) * (row + wp.int32(1)) + lane)
+                        * delta_t[1]
                     )
                     if lane == row:
                         lambda_row += delta_t[0]
@@ -815,7 +820,7 @@ def make_dense_substep_kernel(
                         if _load_u8(shared, wp.int32(path) + other_entry + depth) == k:
                             for run_row in range(row, end):
                                 value += _load(shared, wp.int32(lambda_base) + run_row) * _load(
-                                    shared, wp.int32(z_base) + wp.int32(_LANES) * depth + run_row
+                                    shared, wp.int32(z_base) + wp.int32(PAGE_ROWS) * depth + run_row
                                 )
                 row = end
             _store(shared, wp.int32(rhs_base) + k, value)
