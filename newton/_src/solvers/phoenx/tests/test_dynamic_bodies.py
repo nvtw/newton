@@ -124,6 +124,22 @@ def _remove_joint_kernel(dyn: phoenx.DynamicsData, joints: wp.array[int]):
     phoenx.remove_joint(dyn, joints[wp.tid()])
 
 
+@wp.kernel
+def _add_slider_drive_kernel(dyn: phoenx.DynamicsData, body: int, x: float, joints: wp.array[int]):
+    """Attach a horizontal position servo to an existing resting box."""
+    desc = phoenx.joint_desc(
+        -1,
+        body,
+        wp.transform(wp.vec3(x, 0.0, _HALF), wp.quat_identity()),
+        wp.transform_identity(),
+    )
+    desc.linear_count = 1
+    desc.target_mode[0] = int(newton.JointTargetMode.POSITION)
+    desc.target_ke[0] = 1000.0
+    desc.target_kd[0] = 50.0
+    joints[0] = phoenx.add_joint(dyn, desc)
+
+
 class _Scene:
     """Ground plane plus reserved rows, stepped by one captured collide + step graph."""
 
@@ -273,6 +289,35 @@ class TestDynamicBodies(unittest.TestCase):
         scene.run(3)
         for pool in (scene.dyn.bodies, scene.dyn.shapes, scene.dyn.joints):
             np.testing.assert_array_equal(pool.data.counts.numpy()[:2], [0, 1])
+
+    def test_runtime_servo_wakes_sleeping_body_and_releases_it(self):
+        """Wake a sleeping box with an inserted servo and allow sleep after removal and reuse."""
+        scene = _Scene(bodies=1, shapes=1, joints=1, sleeping_velocity_threshold=0.05, sleeping_frames_required=5)
+        bodies = wp.zeros(1, dtype=int)
+        joints = wp.zeros(1, dtype=int)
+        wp.launch(_spawn_column_kernel, dim=1, inputs=[scene.dyn.data, wp.array([0.0], dtype=float), _HALF, bodies])
+        scene.run(60)
+        body = int(bodies.numpy()[0])
+        self.assertGreaterEqual(int(scene.solver.bodies.island_root.numpy()[body + 1]), 0)
+        joint = scene.dyn.capacity.joint_start
+        target = int(scene.model.joint_target_q_start.numpy()[joint])
+        targets = scene.control.joint_target_q.numpy()
+        targets[target] = 0.2
+        scene.control.joint_target_q.assign(targets)
+
+        # Reuse the captured graph and the same quarantined joint slot for both commands.
+        for _ in range(2):
+            x = float(scene.body_q([body])[0, 0])
+            wp.launch(_add_slider_drive_kernel, dim=1, inputs=[scene.dyn.data, body, x, joints])
+            self.assertEqual(int(joints.numpy()[0]), joint)
+            scene.run(30)
+            self.assertEqual(int(scene.solver.bodies.island_root.numpy()[body + 1]), -1)
+            self.assertGreater(float(scene.body_q([body])[0, 0]) - x, 0.1)
+            wp.launch(_remove_joint_kernel, dim=1, inputs=[scene.dyn.data, joints])
+            scene.run(60)
+            self.assertGreaterEqual(int(scene.solver.bodies.island_root.numpy()[body + 1]), 0)
+            np.testing.assert_array_equal(scene.dyn.joints.data.counts.numpy()[:2], [0, 1])
+        self.assertEqual(int(scene.dyn.error_count.numpy()[0]), 0)
 
     def test_rows_removed_before_their_commit_are_never_written(self):
         scene = _Scene(bodies=1, shapes=1, joints=1)

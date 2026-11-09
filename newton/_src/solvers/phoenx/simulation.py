@@ -238,6 +238,8 @@ from newton._src.solvers.phoenx.sleeping_filter import (
     phoenx_sleeping_filter,
 )
 from newton._src.solvers.phoenx.sleeping_kernels import (
+    _phoenx_activity_score_kernel,
+    _phoenx_activity_wake_kernel,
     _phoenx_apply_island_wake_kernel,
     _phoenx_apply_wake_flag_kernel,
     _phoenx_collapse_sleeping_elements_kernel,
@@ -254,6 +256,7 @@ from newton._src.solvers.phoenx.sleeping_kernels import (
     _phoenx_seed_uf_num_interactions_kernel,
     _phoenx_self_wake_fanin_kernel,
     _phoenx_shape_aabb_fanin_kernel,
+    _phoenx_surface_activity_kernel,
 )
 from newton._src.solvers.phoenx.solver_config import (
     FUSE_TAIL_BLOCK_DIM,
@@ -523,8 +526,6 @@ class PhoenXWorld:
             raise NotImplementedError(
                 "contact_friction_model='patch' currently supports maximal rigid standard-PGS worlds without mass splitting"
             )
-        if self._contact_patch_enabled and float(sleeping_velocity_threshold) > 0.0:
-            raise NotImplementedError("contact_friction_model='patch' does not yet support sleeping")
 
         #: Opt-in per-column wall-clock profiler. When ``True``, PGS
         #: dispatches atomic-add their elapsed us into the column's
@@ -1299,6 +1300,12 @@ class PhoenXWorld:
         self._sleeping_velocity_threshold: float = sleeping_threshold
         self._sleeping_frames_required: int = sleeping_frames
         self._sleeping_enabled: bool = sleeping_threshold > 0.0
+        self._sleeping_forced_awake = (
+            wp.zeros(self.num_bodies, dtype=wp.int32, device=self.device) if self._sleeping_enabled else None
+        )
+        self._sleeping_activity = (
+            wp.zeros(self.num_bodies, dtype=wp.int32, device=self.device) if self._sleeping_enabled else None
+        )
         self._island_builder: UnionFindIslandBuilder | None = None
         self._island_interaction_bodies: wp.array2d[wp.int32] | None = None
         self._island_max_velocity: wp.array[wp.float32] | None = None
@@ -1635,6 +1642,9 @@ class PhoenXWorld:
         filter_data = build_phoenx_sleeping_filter_data(
             sleeping_enabled=self._sleeping_enabled,
             phoenx_body_offset=int(phoenx_body_offset),
+            shape_mesh_properties=collision_pipeline.model._shape_mesh_properties
+            if collision_pipeline._rigid_contact_surface_velocity
+            else None,
             shape_body=shape_body if self._sleeping_enabled else None,
             body_island_root=self.bodies.island_root if self._sleeping_enabled else None,
             body_motion_type=self.bodies.motion_type if self._sleeping_enabled else None,
@@ -2981,6 +2991,7 @@ class PhoenXWorld:
                 rigid_contact_stiffness=self._ingest_scratch.sorted_stiffness,
                 rigid_contact_damping=self._ingest_scratch.sorted_damping,
                 rigid_contact_friction=self._ingest_scratch.sorted_friction,
+                rigid_contact_surface_velocity=self._ingest_scratch.sorted_surface_velocity,
             )
         else:
             self._contact_views = contact_views_make(
@@ -3034,6 +3045,7 @@ class PhoenXWorld:
                 self._contact_offset,
                 shape_type,
                 enable_body_pair_grouping=self._enable_body_pair_grouping,
+                carry_impulses=not self._sleeping_enabled,
                 device=self.device,
             )
 
@@ -3360,6 +3372,20 @@ class PhoenXWorld:
         if self._island_root_per_compact is not None:
             self._island_root_per_compact.fill_(self.num_bodies)
 
+        # Driven mechanisms and velocity-bearing surfaces can receive new
+        # commands without a change in rigid-body pose. Keep their islands active.
+        wp.copy(self._sleeping_activity, self._sleeping_forced_awake)
+        properties = (
+            self._sleeping_filter_data.shape_mesh_properties if self._sleeping_filter_data is not None else None
+        )
+        if self._contact_input_active_this_step and properties is not None and properties.shape[0] > 0:
+            wp.launch(
+                _phoenx_surface_activity_kernel,
+                dim=self.rigid_contact_max,
+                inputs=[self._contact_views, properties, self._sleeping_activity],
+                device=self.device,
+            )
+
         # --- Per-body union AABB (for the spin term of the score). ---
         wp.launch(
             _phoenx_init_body_aabb_kernel,
@@ -3398,6 +3424,12 @@ class PhoenXWorld:
                     wp.float32(self.step_dt),
                 ],
                 outputs=[self._wake_flag],
+                device=self.device,
+            )
+            wp.launch(
+                _phoenx_activity_wake_kernel,
+                dim=self.num_bodies,
+                inputs=[self.bodies, self._sleeping_activity, self._wake_flag],
                 device=self.device,
             )
             wp.launch(
@@ -3489,6 +3521,17 @@ class PhoenXWorld:
                 wp.float32(self._sleeping_velocity_threshold),
             ],
             outputs=[self._island_max_velocity],
+            device=self.device,
+        )
+        wp.launch(
+            _phoenx_activity_score_kernel,
+            dim=self.num_bodies,
+            inputs=[
+                self._sleeping_activity,
+                self._island_builder.set_nr,
+                wp.float32(self._sleeping_velocity_threshold),
+                self._island_max_velocity,
+            ],
             device=self.device,
         )
         wp.launch(

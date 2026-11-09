@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import warp as wp
 
+from newton._src.geometry.flags import MeshProperties
 from newton._src.solvers.phoenx.body import MOTION_STATIC
 
 __all__ = [
@@ -26,6 +27,7 @@ class PhoenXSleepingFilterData:
     body_filter_parent: wp.array[wp.int32]
     phoenx_body_offset: wp.int32
     shape_body: wp.array[wp.int32]
+    shape_mesh_properties: wp.array[wp.int32]
     body_island_root: wp.array[wp.int32]
     body_motion_type: wp.array[wp.int32]
 
@@ -43,6 +45,12 @@ def phoenx_sleeping_filter(pair: wp.vec2i, data: PhoenXSleepingFilterData) -> wp
             return wp.int32(0)
     if data.enabled == wp.int32(0):
         return wp.int32(1)
+    # Surface velocities may change while their owning rigid body is static.
+    if data.shape_mesh_properties.shape[0] > 0:
+        if (data.shape_mesh_properties[pair[0]] | data.shape_mesh_properties[pair[1]]) & int(
+            MeshProperties.SURFACE_VELOCITY
+        ):
+            return wp.int32(1)
     slot_a = wp.int32(0)
     slot_b = wp.int32(0)
     if body_a >= 0:
@@ -65,6 +73,7 @@ def build_phoenx_sleeping_filter_data(
     body_motion_type: wp.array[wp.int32] | None,
     device: wp.context.Devicelike,
     body_filter_parent: wp.array[wp.int32] | None = None,
+    shape_mesh_properties: wp.array[wp.int32] | None = None,
 ) -> PhoenXSleepingFilterData:
     """Build broad-phase filter data, using inert sentinels when disabled."""
 
@@ -72,6 +81,9 @@ def build_phoenx_sleeping_filter_data(
     data.enabled = wp.int32(1 if sleeping_enabled else 0)
     data.body_filter_parent = (
         body_filter_parent if body_filter_parent is not None else wp.empty(0, dtype=wp.int32, device=device)
+    )
+    data.shape_mesh_properties = (
+        shape_mesh_properties if shape_mesh_properties is not None else wp.empty(0, dtype=wp.int32, device=device)
     )
     data.phoenx_body_offset = wp.int32(int(phoenx_body_offset))
     data.shape_body = shape_body if shape_body is not None else wp.zeros(1, dtype=wp.int32, device=device)

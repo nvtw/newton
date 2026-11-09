@@ -314,6 +314,28 @@ class TestCompoundContactGrouping(unittest.TestCase):
         contacts = model.contacts()
         newton.eval_fk(model, model.joint_q, model.joint_qd, state_0)
         model.collide(state_0, contacts)
+        original_count = int(contacts.rigid_contact_count.numpy()[0])
+        self.assertGreater(original_count, _BODY_PAIR_CONTACT_CAP)
+        # Reverse alternate endpoints to exercise canonical orientation and
+        # transport a distinct velocity through selection and compaction.
+        for attr0, attr1 in (
+            ("rigid_contact_shape0", "rigid_contact_shape1"),
+            ("rigid_contact_point0", "rigid_contact_point1"),
+            ("rigid_contact_margin0", "rigid_contact_margin1"),
+        ):
+            a, b = getattr(contacts, attr0).numpy(), getattr(contacts, attr1).numpy()
+            a[1:original_count:2], b[1:original_count:2] = b[1:original_count:2].copy(), a[1:original_count:2].copy()
+            getattr(contacts, attr0).assign(a)
+            getattr(contacts, attr1).assign(b)
+        normals = contacts.rigid_contact_normal.numpy()
+        normals[1:original_count:2] *= -1
+        contacts.rigid_contact_normal.assign(normals)
+        source_velocity = np.zeros((contacts.rigid_contact_max, 3), dtype=np.float32)
+        source_velocity[:original_count, 0] = np.arange(original_count) * 0.01
+        source_velocity[:original_count, 1] = np.arange(original_count) * -0.003
+        contacts.rigid_contact_surface_velocity = wp.array(source_velocity, dtype=wp.vec3, device=model.device)
+        raw_shape0 = contacts.rigid_contact_shape0.numpy()
+        raw_shape1 = contacts.rigid_contact_shape1.numpy()
         solver.step(state_0, state_1, model.control(), contacts, 1.0 / 240.0)
 
         scratch = solver.world._ingest_scratch
@@ -336,6 +358,10 @@ class TestCompoundContactGrouping(unittest.TestCase):
             count = int(scratch.pair_count.numpy()[pair])
             destinations = np.arange(first, first + count)
             np.testing.assert_array_equal(inv_sort_perm[sort_perm[destinations]], destinations)
+            sources = sort_perm[destinations]
+            reverse = shape_body[raw_shape0[sources]] > shape_body[raw_shape1[sources]]
+            expected_velocity = source_velocity[sources] * np.where(reverse, -1.0, 1.0)[:, None]
+            np.testing.assert_allclose(scratch.sorted_surface_velocity.numpy()[destinations], expected_velocity)
             retained_points.extend(
                 point0[contact] if shape_body[shape0[contact]] >= 0 else point1[contact] for contact in destinations
             )

@@ -142,6 +142,7 @@ def _gather_contact_patch_warmstart_kernel(
     num_contact_columns: wp.array[wp.int32],
     shape_type: wp.array[wp.int32],
     allow_shape_pair_columns: wp.int32,
+    carry_impulses: wp.int32,
     rigid_contact_match_index: wp.array[wp.int32],
     prev_cid_of_contact: wp.array[wp.int32],
     reuse_contact_indices: wp.array[wp.int32],
@@ -164,7 +165,7 @@ def _gather_contact_patch_warmstart_kernel(
     patch.eligible[column] = eligible
 
     impulse = wp.vec3f(0.0, 0.0, 0.0)
-    if reuse_contact_indices[0] != wp.int32(0):
+    if carry_impulses != wp.int32(0) and reuse_contact_indices[0] != wp.int32(0):
         first = pair_first[pair]
         count = pair_count[pair]
         for i in range(count):
@@ -247,6 +248,7 @@ def gather_contact_patch_warmstart(
     shape_type: wp.array[wp.int32],
     *,
     enable_body_pair_grouping: bool,
+    carry_impulses: bool = True,
     device: wp.DeviceLike = None,
 ) -> None:
     """Gather each current patch impulse through persistent contact matches.
@@ -267,6 +269,7 @@ def gather_contact_patch_warmstart(
             scratch.num_contact_columns,
             shape_type,
             int(not enable_body_pair_grouping),
+            int(carry_impulses),
             rigid_contact_match_index,
             prev_cid_of_contact,
             reuse_contact_indices,

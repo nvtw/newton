@@ -69,6 +69,7 @@ from newton._src.solvers.phoenx.sleeping_filter import (
     build_phoenx_sleeping_filter_data,
     phoenx_sleeping_filter,
 )
+from newton._src.solvers.phoenx.sleeping_kernels import _phoenx_joint_activity_kernel
 from newton._src.solvers.phoenx.solver_config import PHOENX_CONTACT_MATCHING
 from newton._src.solvers.solver import SolverBase
 
@@ -277,6 +278,13 @@ class SolverPhoenX(SolverBase):
     added to ``state.body_f``, which :meth:`step` imports into PhoenX's
     force accumulators before integrating.
 
+    Moving mesh surfaces:
+        Per-vertex mesh velocities are supported by the soft single-world
+        maximal solve with point or patch friction and optional body-pair
+        grouping. Mesh contacts retain per-contact point friction in patch
+        mode. Colored contact rows/headers and other solve layouts are not
+        supported for moving surfaces.
+
     Contact force observables:
         Request :attr:`~newton.solvers.SolverBase.ObservableKind.CONTACT_F` with
         :meth:`observables` and pass the container to :meth:`step` to receive the
@@ -475,6 +483,8 @@ class SolverPhoenX(SolverBase):
             sleeping_frames_required: Frames an island must stay below
                 threshold before being flagged sleeping. Default 30
                 (~0.5 s @ 60 Hz). Wake-up is always single-frame.
+                Islands with configured servo gains or contacts on surface-velocity
+                meshes stay awake so subsequent drive commands remain responsive.
                 ``0`` recovers single-frame sleep.
             joint_mode: Joint representation and solve strategy. ``"maximal_direct"``
                 (default) keeps independent-body dynamics, solves structural
@@ -1042,6 +1052,9 @@ class SolverPhoenX(SolverBase):
                 body_motion_type=self.bodies.motion_type,
                 device=self.device,
                 body_filter_parent=self._body_filter_parent if dynamic_capacity is not None else None,
+                shape_mesh_properties=model._shape_mesh_properties
+                if model._collision_pipeline._rigid_contact_surface_velocity
+                else None,
             )
             model._collision_pipeline.set_broad_phase_filter_data(filter_data)
             self._sleeping_filter_data = filter_data
@@ -1273,19 +1286,18 @@ class SolverPhoenX(SolverBase):
             volume_mask[np.asarray(tracking_volumes if tracking_volumes is not None else [], dtype=np.int64)] = 1
             self.world.shape_no_response = wp.array(volume_mask, dtype=wp.int32, device=self.device)
         if self._collision_pipeline is not None and self._collision_pipeline._rigid_contact_surface_velocity:
-            # Conveyor surfaces drive the point-friction rows of the canonical contact solve.
+            # Mesh contacts use point rows, including patch mode's nonconvex
+            # fallback. Grouped contacts preserve the sampled velocity field.
             if (
                 step_layout != "single_world"
                 or solver_scheme != "soft"
                 or articulation_mode != "maximal"
-                or contact_friction_model != "point"
                 or colored_contact_rows
                 or colored_contact_headers
-                or use_body_pair_grouping
             ):
                 raise ValueError(
-                    "Surface-velocity contacts require the soft single-world maximal point-friction solve "
-                    "without colored contact rows or body-pair grouping"
+                    "Surface-velocity contacts require the soft single-world maximal solve "
+                    "without colored contact rows or headers"
                 )
 
         if model.shape_material_mu is not None and model.shape_count > 0:
@@ -1780,6 +1792,26 @@ class SolverPhoenX(SolverBase):
                 state_is_continuation=continue_reduced_state,
                 state_kinematics_valid=state_kinematics_valid,
             )
+
+        if self._sleeping_enabled:
+            # Read live joint rows after runtime commits, including reused slots.
+            self.world._sleeping_forced_awake.zero_()
+            if self.model.joint_count:
+                wp.launch(
+                    _phoenx_joint_activity_kernel,
+                    dim=self.model.joint_count,
+                    inputs=[
+                        self.bodies,
+                        self.model.joint_enabled,
+                        self.model.joint_qd_start,
+                        self.model.joint_target_ke,
+                        self.model.joint_target_kd,
+                        self.model.joint_parent,
+                        self.model.joint_child,
+                    ],
+                    outputs=[self.world._sleeping_forced_awake],
+                    device=self.device,
+                )
 
         # FD readout snapshots the imported (state_in-aligned) pose so the
         # post-step delta covers the full outer dt.

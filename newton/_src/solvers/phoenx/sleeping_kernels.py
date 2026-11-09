@@ -44,6 +44,7 @@ all sleep-aware orchestration lives here.
 
 import warp as wp
 
+from newton._src.geometry.flags import MeshProperties
 from newton._src.solvers.phoenx.body import (
     MOTION_DYNAMIC,
     MOTION_KINEMATIC,
@@ -51,6 +52,7 @@ from newton._src.solvers.phoenx.body import (
     BodyContainer,
     mat33_from_sym6,
 )
+from newton._src.solvers.phoenx.constraints.constraint_contact import ContactViews
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     MAX_BODIES,
     ElementInteractionData,
@@ -58,6 +60,8 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
 from newton._src.solvers.phoenx.islands.island_builder import MAX_BODIES_PER_INTERACTION
 
 __all__ = [
+    "_phoenx_activity_score_kernel",
+    "_phoenx_activity_wake_kernel",
     "_phoenx_apply_island_wake_kernel",
     "_phoenx_apply_wake_flag_kernel",
     "_phoenx_collapse_sleeping_elements_kernel",
@@ -69,11 +73,13 @@ __all__ = [
     "_phoenx_inject_chain_edges_kernel",
     "_phoenx_island_fanin_external_input_kernel",
     "_phoenx_island_max_velocity_kernel",
+    "_phoenx_joint_activity_kernel",
     "_phoenx_mark_sleeping_islands_kernel",
     "_phoenx_propagate_sleep_to_bodies_kernel",
     "_phoenx_seed_uf_num_interactions_kernel",
     "_phoenx_self_wake_fanin_kernel",
     "_phoenx_shape_aabb_fanin_kernel",
+    "_phoenx_surface_activity_kernel",
 ]
 
 
@@ -590,3 +596,71 @@ def _phoenx_collapse_sleeping_elements_kernel(
         if b < num_bodies and bodies.island_root[b] >= wp.int32(0):
             el.bodies[j] = wp.int32(-1)
     elements[tid] = el
+
+
+@wp.kernel(enable_backward=False)
+def _phoenx_joint_activity_kernel(
+    bodies: BodyContainer,
+    enabled: wp.array[wp.bool],
+    dof_start: wp.array[wp.int32],
+    stiffness: wp.array[wp.float32],
+    damping: wp.array[wp.float32],
+    parent: wp.array[wp.int32],
+    child: wp.array[wp.int32],
+    activity: wp.array[wp.int32],
+):
+    """Keep live servo islands responsive across runtime joint insertion and removal."""
+    joint = wp.tid()
+    if not enabled[joint]:
+        return
+    driven = bool(False)
+    for dof in range(dof_start[joint], dof_start[joint + 1]):
+        if stiffness[dof] > 0.0 or damping[dof] > 0.0:
+            driven = True
+    if driven:
+        for endpoint in range(2):
+            body = parent[joint] + 1
+            if endpoint == 1:
+                body = child[joint] + 1
+            # Reduced articulation slots never sleep and may retain joint gains
+            # after removal. Only independent dynamic bodies are sleep eligible.
+            if body > 0 and bodies.motion_type[body] == MOTION_DYNAMIC:
+                wp.atomic_max(activity, body, 1)
+
+
+@wp.kernel(enable_backward=False)
+def _phoenx_surface_activity_kernel(
+    contacts: ContactViews, properties: wp.array[wp.int32], activity: wp.array[wp.int32]
+):
+    i = wp.tid()
+    if i >= contacts.rigid_contact_count[0]:
+        return
+    a = contacts.rigid_contact_shape0[i]
+    b = contacts.rigid_contact_shape1[i]
+    if a < 0 or b < 0:
+        return
+    if (properties[a] | properties[b]) & int(MeshProperties.SURFACE_VELOCITY):
+        for shape in range(2):
+            body = contacts.shape_body[a]
+            if shape == 1:
+                body = contacts.shape_body[b]
+            if body > 0:
+                wp.atomic_max(activity, body, 1)
+
+
+@wp.kernel(enable_backward=False)
+def _phoenx_activity_wake_kernel(bodies: BodyContainer, activity: wp.array[wp.int32], wake: wp.array[wp.int32]):
+    body = wp.tid()
+    root = bodies.island_root[body]
+    if activity[body] != 0 and root >= 0:
+        wp.atomic_max(wake, root, 1)
+
+
+@wp.kernel(enable_backward=False)
+def _phoenx_activity_score_kernel(
+    activity: wp.array[wp.int32], sets: wp.array[wp.int32], threshold: wp.float32, score: wp.array[wp.float32]
+):
+    body = wp.tid()
+    island = sets[body]
+    if activity[body] != 0 and island >= 0:
+        wp.atomic_max(score, island, threshold * 2.0)

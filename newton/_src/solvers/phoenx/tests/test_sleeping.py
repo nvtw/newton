@@ -163,6 +163,30 @@ class TestSleepingPipeline(unittest.TestCase):
         # Body 0 (newton index) = slot 1 in PhoenX.
         self.assertEqual(_is_sleeping(solver, 1), 0)
 
+    def test_servo_responds_after_idle(self) -> None:
+        """Keep servo islands responsive to new commands after a stationary interval."""
+        for friction in ("point", "patch"):
+            with self.subTest(friction=friction):
+                builder = newton.ModelBuilder()
+                body = builder.add_link(mass=1.0, inertia=wp.mat33(np.eye(3)))
+                builder.add_shape_box(body, hx=0.1, hy=0.1, hz=0.1, cfg=newton.ModelBuilder.ShapeConfig(density=0))
+                joint = builder.add_joint_prismatic(
+                    -1, body, axis=newton.Axis.X, target_ke=1000.0, target_kd=100.0, limit_lower=-1.0, limit_upper=1.0
+                )
+                builder.add_articulation([joint])
+                model = builder.finalize()
+                solver = newton.solvers.SolverPhoenX(
+                    model, substeps=4, sleeping_velocity_threshold=0.02, contact_friction_model=friction
+                )
+                state, next_state = model.state(), model.state()
+                control = model.control()
+                contacts = model.contacts()
+                state, next_state = _run_frames(solver, state, next_state, control, contacts, model, n=90, dt=1.0 / 60)
+                self.assertEqual(_is_sleeping(solver, body + 1), 0)
+                control.joint_target_q.fill_(0.4)
+                state, next_state = _run_frames(solver, state, next_state, control, contacts, model, n=60, dt=1.0 / 60)
+                self.assertAlmostEqual(float(state.body_q.numpy()[body, 0]), 0.4, delta=0.02)
+
     def test_box_settles_and_sleeps(self) -> None:
         """A box dropped on a plane is flagged sleeping after settling."""
         threshold = 0.05  # m/s combined linear + scaled angular
@@ -294,50 +318,53 @@ class TestSleepingPipeline(unittest.TestCase):
         in that case the body is allowed to re-sleep after the solve.
         The important contract is the pre-collide wake.
         """
-        threshold = 0.05
-        model = _make_box_on_plane(box_z=0.3)
-        solver = newton.solvers.SolverPhoenX(
-            model,
-            substeps=8,
-            solver_iterations=16,
-            sleeping_velocity_threshold=threshold,
-        )
-        state_0 = model.state()
-        state_1 = model.state()
-        control = model.control()
-        contacts = model.contacts()
+        for friction in ("point", "patch"):
+            with self.subTest(friction=friction):
+                threshold = 0.05
+                model = _make_box_on_plane(box_z=0.3)
+                solver = newton.solvers.SolverPhoenX(
+                    model,
+                    substeps=8,
+                    solver_iterations=16,
+                    sleeping_velocity_threshold=threshold,
+                    contact_friction_model=friction,
+                )
+                state_0 = model.state()
+                state_1 = model.state()
+                control = model.control()
+                contacts = model.contacts()
 
-        dt = 1.0 / 60.0
-        # Let the box settle and fall asleep.
-        state_0, state_1 = _run_frames(solver, state_0, state_1, control, contacts, model, n=120, dt=dt)
-        self.assertEqual(
-            _is_sleeping(solver, 1),
-            1,
-            msg="box must be sleeping before the wake test",
-        )
+                dt = 1.0 / 60.0
+                # Let the box settle and fall asleep.
+                state_0, state_1 = _run_frames(solver, state_0, state_1, control, contacts, model, n=120, dt=dt)
+                self.assertEqual(
+                    _is_sleeping(solver, 1),
+                    1,
+                    msg="box must be sleeping before the wake test",
+                )
 
-        # Apply a deliberately small +z force whose predicted dv
-        # (F * invm * dt) stays below the sleep threshold. Explicit user
-        # force is still a wake request; otherwise near-static picking
-        # can leave a body asleep until the spring grows large enough.
-        # body_f spatial-vector layout (matching the PhoenX import kernel)
-        # is (force_xyz, torque_xyz); index 2 is force_z.
-        body_f = np.zeros((1, 6), dtype=np.float32)
-        body_f[0, 2] = 1.0
-        state_0.body_f.assign(body_f)
+                # Apply a deliberately small +z force whose predicted dv
+                # (F * invm * dt) stays below the sleep threshold. Explicit user
+                # force is still a wake request; otherwise near-static picking
+                # can leave a body asleep until the spring grows large enough.
+                # body_f spatial-vector layout (matching the PhoenX import kernel)
+                # is (force_xyz, torque_xyz); index 2 is force_z.
+                body_f = np.zeros((1, 6), dtype=np.float32)
+                body_f[0, 2] = 1.0
+                state_0.body_f.assign(body_f)
 
-        solver.wake_on_external_input(state_0)
-        self.assertEqual(
-            _is_sleeping(solver, 1),
-            0,
-            msg="external force via state.body_f must wake before collision detection",
-        )
+                solver.wake_on_external_input(state_0)
+                self.assertEqual(
+                    _is_sleeping(solver, 1),
+                    0,
+                    msg="external force via state.body_f must wake before collision detection",
+                )
 
-        # Step manually to skip the ``clear_forces`` at the top of
-        # ``_run_frames`` -- that zeroes ``state.body_f`` before
-        # solver.step gets to import it, which would defeat the test.
-        model.collide(state_0, contacts)
-        solver.step(state_0, state_1, control, contacts, dt)
+                # Step manually to skip the ``clear_forces`` at the top of
+                # ``_run_frames`` -- that zeroes ``state.body_f`` before
+                # solver.step gets to import it, which would defeat the test.
+                model.collide(state_0, contacts)
+                solver.step(state_0, state_1, control, contacts, dt)
 
     def test_small_external_force_can_resleep_when_quiet(self) -> None:
         """Tiny user force wakes sleeping bodies, but must not pin an

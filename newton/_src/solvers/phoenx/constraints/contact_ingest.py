@@ -136,6 +136,8 @@ class IngestScratch:
         "sorted_shape0",
         "sorted_shape1",
         "sorted_stiffness",
+        "sorted_surface_velocity",
+        "surface_velocity_sentinel",
     )
 
     def __init__(
@@ -177,6 +179,9 @@ class IngestScratch:
         # the boundary scan emits one column per body pair instead of per shape
         # pair (collapses a 2x2 compound's 4 colours to 1). int64 radix sort
         # needs 2*N ping-pong buffers.
+        # Allocate the optional velocity stream only when contacts carry it.
+        self.surface_velocity_sentinel = wp.empty(0, dtype=wp.vec3f, device=device)
+        self.sorted_surface_velocity = self.surface_velocity_sentinel
         if enable_body_pair_grouping:
             n_sort = 2 * max(1, self.rigid_contact_max)
             n_perm = max(1, self.rigid_contact_max)
@@ -371,6 +376,7 @@ def _gather_sorted_contacts_kernel(
     src_stiffness: wp.array[wp.float32],
     src_damping: wp.array[wp.float32],
     src_friction: wp.array[wp.float32],
+    src_surface_velocity: wp.array[wp.vec3f],
     # ``prev_inv_sort_perm[prev_newton_k] = prev_sorted_k``. Used to
     # translate Newton-order match indices to the prev frame's
     # PhoenX-sorted index space, since ``cc.prev_*`` is keyed by the
@@ -388,6 +394,7 @@ def _gather_sorted_contacts_kernel(
     sorted_stiffness: wp.array[wp.float32],
     sorted_damping: wp.array[wp.float32],
     sorted_friction: wp.array[wp.float32],
+    sorted_surface_velocity: wp.array[wp.vec3f],
 ):
     """Permute Newton's narrow-phase arrays into PhoenX-sorted order.
 
@@ -419,6 +426,11 @@ def _gather_sorted_contacts_kernel(
         sorted_match_index[tid] = raw_match
     # All rows in a body-pair column must use the same endpoint frames.
     sorted_normal[tid] = -src_normal[newton_k] if reverse else src_normal[newton_k]
+    if tid < sorted_surface_velocity.shape[0]:
+        velocity = wp.vec3f(0.0)
+        if newton_k < src_surface_velocity.shape[0]:
+            velocity = src_surface_velocity[newton_k]
+        sorted_surface_velocity[tid] = -velocity if reverse else velocity
     sorted_point0[tid] = src_point1[newton_k] if reverse else src_point0[newton_k]
     sorted_point1[tid] = src_point0[newton_k] if reverse else src_point1[newton_k]
     sorted_margin0[tid] = src_margin1[newton_k] if reverse else src_margin0[newton_k]
@@ -648,6 +660,7 @@ def _compact_body_pair_manifolds_kernel(
     stiffness: wp.array[wp.float32],
     damping: wp.array[wp.float32],
     friction: wp.array[wp.float32],
+    surface_velocity: wp.array[wp.vec3f],
     sort_perm: wp.array[wp.int32],
     selected_contact: wp.array[wp.uint64],
     inv_sort_perm: wp.array[wp.int32],
@@ -708,6 +721,8 @@ def _compact_body_pair_manifolds_kernel(
         stiffness[destination] = stiffness[source]
         damping[destination] = damping[source]
         friction[destination] = friction[source]
+        if destination < surface_velocity.shape[0]:
+            surface_velocity[destination] = surface_velocity[source]
         sort_perm[destination] = sort_perm[source]
         pair_id[destination] = pair + wp.int32(1)
         inv_sort_perm[sort_perm[destination]] = destination
@@ -1375,6 +1390,12 @@ def ingest_contacts(
                 "IngestScratch built with the same flag; got a scratch "
                 "object without compound-grouping arrays."
             )
+        surface_velocity = getattr(contacts, "rigid_contact_surface_velocity", None)
+        if surface_velocity is not None and surface_velocity.shape[0] > 0:
+            if scratch.sorted_surface_velocity.shape[0] < rigid_contact_max:
+                scratch.sorted_surface_velocity = wp.empty(rigid_contact_max, dtype=wp.vec3f, device=device)
+        else:
+            surface_velocity = scratch.surface_velocity_sentinel
         # ---- Compound-body grouping path -----------------------------
         #
         # Sort contacts by body-pair key, gather narrow-phase data into
@@ -1439,6 +1460,7 @@ def ingest_contacts(
                 if getattr(contacts, "rigid_contact_damping", None) is not None
                 else wp.zeros(0, dtype=wp.float32, device=device),
                 contact_friction,
+                surface_velocity,
                 scratch.prev_inv_sort_perm,
             ],
             outputs=[
@@ -1453,6 +1475,7 @@ def ingest_contacts(
                 scratch.sorted_stiffness,
                 scratch.sorted_damping,
                 scratch.sorted_friction,
+                scratch.sorted_surface_velocity,
             ],
             device=device,
         )
@@ -1621,6 +1644,7 @@ def ingest_contacts(
                 scratch.sorted_stiffness,
                 scratch.sorted_damping,
                 scratch.sorted_friction,
+                scratch.sorted_surface_velocity,
                 scratch.sort_perm,
                 scratch.selected_contact,
                 scratch.inv_sort_perm,
