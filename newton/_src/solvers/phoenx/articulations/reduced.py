@@ -1270,39 +1270,29 @@ def _compute_reduced_local_kinematics_kernel(
 
 
 @wp.func
-def initialize_reduced_joint(
+def initialize_reduced_rates(
     joint: wp.int32,
     joint_type: wp.array[wp.int32],
     joint_child: wp.array[wp.int32],
-    joint_q: wp.array[wp.float32],
-    joint_q_start: wp.array[wp.int32],
     joint_qd_start: wp.array[wp.int32],
-    joint_axis: wp.array[wp.vec3],
-    joint_dof_dim: wp.array2d[wp.int32],
     joint_qd_public: wp.array[wp.float32],
     joint_anchor_local: wp.array[wp.transform],
     body_q_com: wp.array[wp.transform],
-    body_mass: wp.array[wp.float32],
-    body_inertia: wp.array[wp.mat33],
     joint_qd_internal: wp.array[wp.float32],
-    body_i_s: wp.array[_sym_mat66],
-    joint_s: wp.array[wp.spatial_vector],
 ) -> None:
-    """Form one joint's motion subspace, its child's spatial inertia, and its internal rates at the current pose."""
+    """Form one joint's internal rates from its public rates at the current pose."""
     qd_start = joint_qd_start[joint]
     qd_end = joint_qd_start[joint + wp.int32(1)]
     for dof in range(qd_start, qd_end):
         joint_qd_internal[dof] = joint_qd_public[dof]
 
-    child = joint_child[joint]
-    body_i_s[child] = _pack_transformed_body_inertia(body_q_com[child], body_mass[child], body_inertia[child])
-
-    x_wpj = joint_anchor_local[joint]
     kind = joint_type[joint]
     if kind == JointType.FREE or kind == JointType.DISTANCE:
         # Newton exposes the relative child-COM velocity in the parent-anchor
         # frame. ABA uses the velocity at that frame origin. Convert in the
         # articulation-local frame so large world translations never enter.
+        child = joint_child[joint]
+        x_wpj = joint_anchor_local[joint]
         anchor_rotation = wp.transform_get_rotation(x_wpj)
         child_com_offset = wp.quat_rotate_inv(
             anchor_rotation,
@@ -1323,13 +1313,46 @@ def initialize_reduced_joint(
         joint_qd_internal[qd_start + wp.int32(1)] = velocity_origin[1]
         joint_qd_internal[qd_start + wp.int32(2)] = velocity_origin[2]
 
+
+@wp.func
+def initialize_reduced_joint(
+    joint: wp.int32,
+    joint_type: wp.array[wp.int32],
+    joint_child: wp.array[wp.int32],
+    joint_q: wp.array[wp.float32],
+    joint_q_start: wp.array[wp.int32],
+    joint_qd_start: wp.array[wp.int32],
+    joint_axis: wp.array[wp.vec3],
+    joint_dof_dim: wp.array2d[wp.int32],
+    joint_qd_public: wp.array[wp.float32],
+    joint_anchor_local: wp.array[wp.transform],
+    body_q_com: wp.array[wp.transform],
+    body_mass: wp.array[wp.float32],
+    body_inertia: wp.array[wp.mat33],
+    joint_qd_internal: wp.array[wp.float32],
+    body_i_s: wp.array[_sym_mat66],
+    joint_s: wp.array[wp.spatial_vector],
+) -> None:
+    """Form one joint's motion subspace, its child's spatial inertia, and its internal rates at the current pose."""
+    initialize_reduced_rates(
+        joint,
+        joint_type,
+        joint_child,
+        joint_qd_start,
+        joint_qd_public,
+        joint_anchor_local,
+        body_q_com,
+        joint_qd_internal,
+    )
+    child = joint_child[joint]
+    body_i_s[child] = _pack_transformed_body_inertia(body_q_com[child], body_mass[child], body_inertia[child])
     jcalc_motion(
-        kind,
+        joint_type[joint],
         joint_axis,
         joint_q,
         joint_dof_dim[joint, 0],
         joint_dof_dim[joint, 1],
-        x_wpj,
+        joint_anchor_local[joint],
         joint_qd_internal,
         joint_q_start[joint],
         joint_qd_start[joint],

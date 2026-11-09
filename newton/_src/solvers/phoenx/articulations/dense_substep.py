@@ -82,6 +82,7 @@ from newton._src.solvers.phoenx.articulations.reduced import (
     _vec6,
     configure_implicit_joint_dynamics,
     initialize_reduced_joint,
+    initialize_reduced_rates,
 )
 from newton._src.solvers.phoenx.articulations.reduced_contact_block import (
     _CACHED_PAGE_COUNT,
@@ -1051,10 +1052,12 @@ def make_dense_substep_kernel(
         )
 
         # Frames, implicit joint operator, motion subspaces, and spatial inertias at the coordinates.
-        # A biased step that follows a relax step at the same pose starts from its frames and factor.
+        # The biased step leaves the frames, motion subspaces, and spatial inertias of its
+        # integrated pose, which the relax step and a following biased step at that pose reuse.
+        frames_current = reuse_factor or wp.static(relax)
         local = wp.transform_identity()
         origin = wp.vec3(0.0)
-        if reuse_factor:
+        if frames_current:
             if tree.joint >= wp.int32(0):
                 local = body_q_local[tree.child]
             origin = articulation_origin[articulation]
@@ -1106,24 +1109,36 @@ def make_dense_substep_kernel(
                 if wp.int32(offset) < tree.dof_count:
                     if factor_diagonal[tree.qd_start + offset] != previous_diagonal[offset]:
                         diagonal_changed = wp.bool(True)
-            initialize_reduced_joint(
-                tree.joint,
-                joint_type,
-                joint_child,
-                joint_q,
-                joint_q_start,
-                joint_qd_start,
-                joint_axis,
-                joint_dof_dim,
-                joint_qd_public,
-                joint_anchor_local,
-                body_q_com,
-                body_mass,
-                body_inertia,
-                joint_qd,
-                body_i_s,
-                joint_s,
-            )
+            if frames_current:
+                initialize_reduced_rates(
+                    tree.joint,
+                    joint_type,
+                    joint_child,
+                    joint_qd_start,
+                    joint_qd_public,
+                    joint_anchor_local,
+                    body_q_com,
+                    joint_qd,
+                )
+            else:
+                initialize_reduced_joint(
+                    tree.joint,
+                    joint_type,
+                    joint_child,
+                    joint_q,
+                    joint_q_start,
+                    joint_qd_start,
+                    joint_axis,
+                    joint_dof_dim,
+                    joint_qd_public,
+                    joint_anchor_local,
+                    body_q_com,
+                    body_mass,
+                    body_inertia,
+                    joint_qd,
+                    body_i_s,
+                    joint_s,
+                )
         _sync_contact_warp()
         k = lane
         while k < n:
@@ -1540,11 +1555,10 @@ def make_dense_substep_kernel(
             )
             for offset in range(tree.dof_count):
                 local_dof = tree.qd_start + offset - dof_start
-                _store_spatial(
-                    shared,
-                    wp.int32(motion_base) + wp.int32(_MOTION_STRIDE) * local_dof,
-                    joint_s_publish[tree.qd_start + offset],
-                )
+                subspace = joint_s_publish[tree.qd_start + offset]
+                joint_s[tree.qd_start + offset] = subspace
+                _store_spatial(shared, wp.int32(motion_base) + wp.int32(_MOTION_STRIDE) * local_dof, subspace)
+            body_i_s[tree.child] = _pack_transformed_body_inertia(body_q_com[tree.child], tree.mass, tree.inertia)
         x_com = wp.transform_get_translation(local * body_x_com[tree.child])
         _sync_contact_warp()
         publish_rates(
