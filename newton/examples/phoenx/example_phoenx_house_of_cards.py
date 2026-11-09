@@ -18,6 +18,10 @@ The solver runs sixteen substeps of six iterations. Compared with eight substeps
 halve the penetration that an impact on a light card builds up within one substep and
 quarter the compliance of loaded contacts, which keeps 0.3 mm cards from passing through
 each other; six iterations are the fewest that hold the 0.7 mm house up while it settles.
+Contacts are searched within 2 mm of each card, extended by how far moving cards close
+during a frame; a wider fixed search would pair every card with all of its neighbours and
+slow the solve. ``--contact-hertz`` sets a substep-independent contact stiffness, which
+taller houses (``--levels 6 --contact-hertz 240``) need to stand.
 
 Success criteria: in test mode, the house settles by closing its initial clearances, no
 card creeps more than 0.5 mm while it stands before the impact, all states stay finite,
@@ -42,6 +46,8 @@ LEVELS = 4
 FRICTION = 0.8
 PITCH = 0.85 * CARD_HEIGHT  # tent spacing; flat cards overhang each supporting apex [m]
 CLEARANCE = 1.0e-4  # initial gap between touching cards [m]
+CONTACT_GAP = 0.002  # contact search distance of resting cards [m]
+SPECULATIVE_GAP_MAX = 0.05  # cap on the search distance added for moving cards [m]
 PROJECTILES = 4
 PROJECTILE_RADIUS = 0.012  # [m]
 PROJECTILE_MASS = 0.01  # [kg]
@@ -115,6 +121,7 @@ def _launch_kernel(
     if body >= 0:
         shape = phoenx.shape_desc(wp.int32(newton.GeoType.SPHERE), wp.vec3(radius, 0.0, 0.0))
         shape.mu = wp.float32(FRICTION)
+        shape.gap = wp.float32(CONTACT_GAP)
         phoenx.add_shape(dyn, body, shape)
 
 
@@ -128,11 +135,14 @@ class Example:
         self.impact_frame = round(args.impact_time / self.frame_dt) if args.impact_time >= 0.0 else -1
 
         builder = newton.ModelBuilder()
-        builder.add_ground_plane(cfg=newton.ModelBuilder.ShapeConfig(mu=FRICTION))
+        builder.add_ground_plane(cfg=newton.ModelBuilder.ShapeConfig(mu=FRICTION, gap=CONTACT_GAP))
         thickness = args.card_thickness * 1.0e-3
         self.thickness = thickness
         card = newton.ModelBuilder.ShapeConfig(
-            density=CARD_MASS / (CARD_WIDTH * CARD_HEIGHT * thickness), mu=FRICTION, restitution=0.0
+            density=CARD_MASS / (CARD_WIDTH * CARD_HEIGHT * thickness),
+            mu=FRICTION,
+            restitution=0.0,
+            gap=CONTACT_GAP,
         )
         self.flat = []
         if args.levels < 1:
@@ -149,14 +159,22 @@ class Example:
         builder.reserve_dynamic_capacity(bodies=PROJECTILES, shapes=PROJECTILES)
         self.model = builder.finalize()
 
+        # A small authored gap keeps contacts to touching cards; moving cards extend
+        # their search by their closing distance over the frame.
+        self.pipeline = newton.CollisionPipeline(
+            self.model,
+            contact_matching="sticky",
+            speculative_contact_gap_max=SPECULATIVE_GAP_MAX,
+        )
         self.solver = SolverPhoenX(
             self.model,
+            collision_pipeline=self.pipeline,
             step_layout="single_world",
             substeps=args.substeps,
             solver_iterations=args.iterations,
+            contact_hertz=args.contact_hertz,
         )
         self.dyn = self.solver.dynamics.data
-        self.pipeline = self.model._collision_pipeline
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
         self.control = self.model.control()
@@ -179,7 +197,7 @@ class Example:
             self.graph = capture.graph
 
     def simulate(self):
-        self.pipeline.collide(self.state_0, self.contacts)
+        self.pipeline.collide(self.state_0, self.contacts, dt=self.frame_dt)
         self.state_0.clear_forces()
         self.viewer.apply_forces(self.state_0)
         self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.frame_dt)
@@ -238,7 +256,7 @@ class Example:
         ground = min(
             [0.0] + [float(_rotate(q[i, 3:], signs * half)[:, 2].min() + q[i, 2]) for i in range(self.card_count)]
         )
-        self.pipeline.collide(self.state_0, self.contacts)
+        self.pipeline.collide(self.state_0, self.contacts, dt=self.frame_dt)
         count = int(self.contacts.rigid_contact_count.numpy()[0])
         body0 = self.model.shape_body.numpy()[self.contacts.rigid_contact_shape0.numpy()[:count]]
         body1 = self.model.shape_body.numpy()[self.contacts.rigid_contact_shape1.numpy()[:count]]
@@ -278,6 +296,7 @@ class Example:
         parser.add_argument("--card-thickness", type=float, default=0.7, help="Card thickness [mm].")
         parser.add_argument("--substeps", type=int, default=16, help="Physics substeps per frame.")
         parser.add_argument("--iterations", type=int, default=6, help="Solver iterations per substep.")
+        parser.add_argument("--contact-hertz", type=float, default=None, help="Contact spring frequency [Hz].")
         parser.add_argument("--levels", type=int, default=LEVELS, help="Levels of the house (26 cards at 4).")
         parser.add_argument(
             "--impact-time", type=float, default=6.7, help="Time the projectiles are fired [s]; negative never fires."
