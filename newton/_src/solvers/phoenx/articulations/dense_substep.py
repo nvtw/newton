@@ -987,6 +987,7 @@ def make_dense_substep_kernel(
         iterations: wp.int32,
         contacts_active: wp.bool,
         reuse_factor: wp.bool,
+        reuse_rows: wp.bool,
         joint_type: wp.array[wp.int32],
         joint_parent: wp.array[wp.int32],
         joint_child: wp.array[wp.int32],
@@ -1261,38 +1262,42 @@ def make_dense_substep_kernel(
                 local_points += contact_get_contact_count(columns, schedule_columns[index])
                 index += wp.int32(_LANES)
             total_points = _warp_sum_int(local_points)
-            for page in range((total_points + wp.int32(_POINTS_PER_PAGE - 1)) // wp.int32(_POINTS_PER_PAGE)):
-                gather(
-                    articulation,
-                    lane,
-                    wp.int32(_LANES),
-                    page,
-                    wp.int32(_POINTS_PER_PAGE),
-                    wp.bool(True),
-                    total_points,
-                    wp.bool(False),
-                    schedule_section_end,
-                    schedule_columns,
-                    columns,
-                    bodies,
-                    idt,
-                    wp.bool(True),
-                    cc,
-                    contacts,
-                    point_count,
-                    row_count,
-                    point_contact,
-                    point_column,
-                    point0,
-                    point1,
-                    normal,
-                    tangent0,
-                    row_body,
-                    row_wrench,
-                    row_body_pair,
-                    row_wrench_pair,
-                    row_velocity,
-                )
+            pages = (total_points + wp.int32(_POINTS_PER_PAGE - 1)) // wp.int32(_POINTS_PER_PAGE)
+            # The relax step before left the rows of every page that has storage of its own.
+            gathered = reuse_rows and pages <= wp.int32(_CACHED_PAGE_COUNT)
+            for page in range(pages):
+                if not gathered:
+                    gather(
+                        articulation,
+                        lane,
+                        wp.int32(_LANES),
+                        page,
+                        wp.int32(_POINTS_PER_PAGE),
+                        wp.bool(True),
+                        total_points,
+                        wp.bool(False),
+                        schedule_section_end,
+                        schedule_columns,
+                        columns,
+                        bodies,
+                        idt,
+                        wp.bool(True),
+                        cc,
+                        contacts,
+                        point_count,
+                        row_count,
+                        point_contact,
+                        point_column,
+                        point0,
+                        point1,
+                        normal,
+                        tangent0,
+                        row_body,
+                        row_wrench,
+                        row_body_pair,
+                        row_wrench_pair,
+                        row_velocity,
+                    )
                 _sync_contact_warp()
                 packed_articulation = articulation * wp.int32(_CACHED_PAGE_COUNT) + wp.min(
                     page, wp.int32(_CACHED_PAGE_COUNT - 1)
@@ -1352,7 +1357,8 @@ def make_dense_substep_kernel(
                             wp.where(round_index < wp.int32(0), wp.int32(0), sweeps),
                             wp.bool(not relax),
                             wp.bool(not relax) and round_offset == wp.int32(0),
-                            round_offset == wp.int32(0),
+                            # Reused rows keep the biases the relax step already projected.
+                            round_offset == wp.int32(0) and not gathered,
                             point_count,
                             point_contact,
                             point_column,
@@ -1694,8 +1700,11 @@ class DenseSubstep:
         self.system = articulation.system
         self.dense = self.system.dense
         self.contact = articulation.contact_block_system
+        # The relax step gathers the contact rows at the pose the next biased step starts
+        # from: (substep dt, contact ingest count) of that gather, or None.
+        self._gathered_rows = None
 
-    def _launch(self, world, dt: float, *, relax: bool, reuse_factor: bool = False) -> None:
+    def _launch(self, world, dt: float, *, relax: bool, reuse_factor: bool = False, reuse_rows: bool = False) -> None:
         articulation = self.articulation
         model = articulation.model
         system = self.system
@@ -1726,6 +1735,7 @@ class DenseSubstep:
                     wp.int32(iterations),
                     wp.bool(contacts_active),
                     wp.bool(reuse_factor),
+                    wp.bool(reuse_rows),
                     model.joint_type,
                     model.joint_parent,
                     model.joint_child,
@@ -1812,13 +1822,19 @@ class DenseSubstep:
         """Advance every tree through the biased solve, the velocity-product step, and publication.
 
         ``reuse_factor`` starts from the frames and factor of a relax step at the same pose;
-        trees whose implicit joint diagonal changed refactor.
+        trees whose implicit joint diagonal changed refactor. The contact rows that relax
+        step gathered are reused too when the contacts and the substep ``dt``, which
+        scales their biases, are unchanged since.
         """
-        self._launch(world, dt, relax=False, reuse_factor=reuse_factor)
+        reuse_rows = reuse_factor and self._gathered_rows == (float(dt), world._contact_ingest_count)
+        self._gathered_rows = None
+        self._launch(world, dt, relax=False, reuse_factor=reuse_factor, reuse_rows=reuse_rows)
 
     def relax(self, world, dt: float) -> None:
         """Refactor at the integrated pose, apply the bias-free contact correction, and store the factor."""
         self._launch(world, dt, relax=True)
+        if world._reduced_contacts_active_this_step and world.max_contact_columns > 0:
+            self._gathered_rows = (float(dt), world._contact_ingest_count)
 
 
 __all__ = ["PAGE_ROWS", "DenseSubstep", "dense_substep_blockers", "make_dense_substep_kernel"]

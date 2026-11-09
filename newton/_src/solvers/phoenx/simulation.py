@@ -742,6 +742,8 @@ class PhoenXWorld:
         self._contact_input_active_this_step = False
         self._regular_pgs_active_this_step = True
         self._reduced_contacts_active_this_step = False
+        #: Counts contact ingests, so cached contact rows can tell whether they predate one.
+        self._contact_ingest_count = 0
         self._reduced_constraints_active_this_step = False
         self._has_reduced_loops = False
         self._partition_active_this_step = True
@@ -2669,6 +2671,7 @@ class PhoenXWorld:
         # within-frame contact warm-start is preserved -- the lambdas in the
         # reused columns are exactly the prior substep's converged values.
         if not reuse_partition:
+            self._contact_ingest_count += 1
             self._ingest_and_warmstart_contacts(contacts, shape_body, shape_type)
             if self._colored_singleton_contact_lanes:
                 # Soft-contact PD uses the existing contact iteration path.
