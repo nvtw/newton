@@ -313,6 +313,29 @@ def warm_patch_impulses(
 
 
 @wp.func
+def _root_path_sum(value: wp.spatial_vector, parent: wp.int32, max_depth: wp.int32) -> wp.spatial_vector:
+    """Return the sum of ``value`` over the lane's joint and its ancestors.
+
+    Lanes are joints and ``parent`` is the parent joint's lane, negative at a
+    root. Each round adds the sum held by the lane's current ancestor and then
+    doubles the distance to that ancestor, so the sums along paths of up to
+    ``max_depth`` edges complete in ``log2(max_depth)`` rounds of shuffles.
+    """
+    total = value
+    ancestor = parent
+    reach = wp.int32(1)
+    while reach <= max_depth:
+        source = wp.max(ancestor, wp.int32(0))
+        above = _shuffle_reduced_spatial(total, source, wp.int32(_LANES), _FULL_MASK)
+        next_ancestor = _lane_int(ancestor, source)
+        if ancestor >= wp.int32(0):
+            total += above
+            ancestor = next_ancestor
+        reach += reach
+    return total
+
+
+@wp.func
 def _is_floating(kind: wp.int32) -> wp.bool:
     return kind == JointType.FREE or kind == JointType.DISTANCE
 
@@ -383,7 +406,9 @@ def make_dense_substep_kernel(
         lane: wp.int32,
         articulation: wp.int32,
         max_depth: wp.int32,
-        joint_axis: wp.array[wp.vec3],
+        joint_transform: wp.transform,
+        floating_world: wp.transform,
+        floating_child: wp.bool,
         joint_q: wp.array[wp.float32],
         body_x_com: wp.array[wp.transform],
         articulation_origin: wp.array[wp.vec3],
@@ -391,25 +416,26 @@ def make_dense_substep_kernel(
         body_q_com: wp.array[wp.transform],
         joint_anchor_local: wp.array[wp.transform],
     ):
-        """Form the link frames about the root COM from the coordinates and publish them.
+        """Form the link frames about the root COM from the joint transforms and publish them.
 
         Matches the local kinematics of :func:`_finish_and_publish_reduced_warp_device`.
-        Returns the child's link frame and the world position of the root COM.
+        ``floating_child`` marks a floating joint below the root whose child was
+        integrated to the world pose ``floating_world``; its joint transform
+        follows from its parent's frame and is stored in the coordinates.
+        Returns the child's link frame, the world position of the root COM, and the
+        joint's parent anchor.
         """
-        joint_transform = wp.transform_identity()
         world = wp.transform_identity()
-        if tree.joint >= wp.int32(0):
-            joint_transform = jcalc_transform(
-                tree.kind, joint_axis, tree.qd_start, tree.lin, tree.ang, joint_q, tree.q_start
-            )
-            if tree.parent < wp.int32(0):
-                world = tree.x_p * joint_transform * wp.transform_inverse(tree.x_c)
+        if tree.joint >= wp.int32(0) and tree.parent < wp.int32(0):
+            world = tree.x_p * joint_transform * wp.transform_inverse(tree.x_c)
         origin = wp.transform_point(world, tree.com)
         origin = wp.vec3(_lane_float(origin[0], 0), _lane_float(origin[1], 0), _lane_float(origin[2], 0))
         local = wp.transform_identity()
+        anchor = wp.transform_identity()
+        relative = joint_transform
+        child_anchor_inverse = wp.transform_inverse(tree.x_c)
         for depth in range(max_depth + wp.int32(1)):
             if tree.depth == depth:
-                anchor = wp.transform_identity()
                 if tree.parent < wp.int32(0):
                     rotation = wp.transform_get_rotation(world)
                     local = wp.transform(-wp.quat_rotate(rotation, tree.com), rotation)
@@ -421,15 +447,28 @@ def make_dense_substep_kernel(
                     anchor = (
                         _load_transform(shared, wp.int32(pose_base) + wp.int32(_MOTION_STRIDE) * tree.parent) * tree.x_p
                     )
-                    local = anchor * joint_transform * wp.transform_inverse(tree.x_c)
+                    if floating_child:
+                        anchor_world = wp.transform(
+                            origin + wp.transform_get_translation(anchor), wp.transform_get_rotation(anchor)
+                        )
+                        relative = wp.transform_inverse(anchor_world) * floating_world * tree.x_c
+                    local = anchor * relative * child_anchor_inverse
                 _store_transform(shared, wp.int32(pose_base) + wp.int32(_MOTION_STRIDE) * lane, local)
-                joint_anchor_local[tree.joint] = anchor
-                body_q_local[tree.child] = local
-                body_q_com[tree.child] = local * body_x_com[tree.child]
             _sync_contact_warp()
+        if tree.joint >= wp.int32(0):
+            if floating_child:
+                position = wp.transform_get_translation(relative)
+                orientation = wp.transform_get_rotation(relative)
+                for component in range(3):
+                    joint_q[tree.q_start + component] = position[component]
+                for component in range(4):
+                    joint_q[tree.q_start + 3 + component] = orientation[component]
+            joint_anchor_local[tree.joint] = anchor
+            body_q_local[tree.child] = local
+            body_q_com[tree.child] = local * body_x_com[tree.child]
         if lane == wp.int32(0):
             articulation_origin[articulation] = origin
-        return local, origin
+        return local, origin, anchor
 
     @wp.func
     def joint_twist(shared: wp.uint64, tree: _TreeJoint, dof_start: wp.int32) -> wp.spatial_vector:
@@ -905,13 +944,9 @@ def make_dense_substep_kernel(
                     joint_qd_public[tree.qd_start + 3 + axis] = omega_parent[axis]
         _sync_contact_warp()
         twist = wp.spatial_vector()
-        for depth in range(max_depth + wp.int32(1)):
-            if tree.depth == depth:
-                twist = joint_twist(shared, tree, dof_start)
-                if tree.parent >= wp.int32(0):
-                    twist += _load_motion(shared, wp.int32(first_base) + wp.int32(_MOTION_STRIDE) * tree.parent)
-                _store_spatial(shared, wp.int32(first_base) + wp.int32(_MOTION_STRIDE) * lane, twist)
-            _sync_contact_warp()
+        if tree.joint >= wp.int32(0):
+            twist = joint_twist(shared, tree, dof_start)
+        twist = _root_path_sum(twist, tree.parent, max_depth)
         omega = wp.spatial_bottom(twist)
         velocity_com = wp.spatial_top(twist) + wp.cross(omega, x_com)
         # A floating tree gets its incoming linear momentum back through a uniform boost,
@@ -1067,13 +1102,20 @@ def make_dense_substep_kernel(
                 local = body_q_local[tree.child]
             origin = articulation_origin[articulation]
         else:
-            local, origin = local_kinematics(
+            start_transform = wp.transform_identity()
+            if tree.joint >= wp.int32(0):
+                start_transform = jcalc_transform(
+                    tree.kind, joint_axis, tree.qd_start, tree.lin, tree.ang, joint_q, tree.q_start
+                )
+            local, origin, _anchor = local_kinematics(
                 shared,
                 tree,
                 lane,
                 articulation,
                 max_depth,
-                joint_axis,
+                start_transform,
+                wp.transform_identity(),
+                wp.bool(False),
                 joint_q,
                 body_x_com,
                 articulation_origin,
@@ -1343,9 +1385,11 @@ def make_dense_substep_kernel(
         twist = wp.spatial_vector()
         coriolis = wp.spatial_vector()
         root_velocity = wp.spatial_vector()
+        rates = wp.spatial_vector()
+        if tree.joint >= wp.int32(0):
+            rates = joint_twist(shared, tree, dof_start)
         for depth in range(max_depth + wp.int32(1)):
             if tree.depth == depth:
-                rates = joint_twist(shared, tree, dof_start)
                 twist = rates
                 if tree.parent >= wp.int32(0):
                     twist += _load_motion(shared, wp.int32(first_base) + wp.int32(_MOTION_STRIDE) * tree.parent)
@@ -1472,72 +1516,62 @@ def make_dense_substep_kernel(
         elif lane == wp.int32(0):
             midpoint.flag[articulation] = wp.int32(0)
 
-        # Integrate the coordinates and pose the links root to leaf.
-        for depth in range(max_depth + wp.int32(1)):
-            if tree.depth == depth:
-                parent_anchor = tree.x_p
-                if tree.parent >= wp.int32(0):
-                    parent_anchor = (
-                        _load_transform(shared, wp.int32(pose_base) + wp.int32(_MOTION_STRIDE) * tree.parent) * tree.x_p
-                    )
-                world = wp.transform_identity()
-                if _is_floating(tree.kind) and not integrated:
-                    com_twist = wp.spatial_vector(velocity_com, omega)
-                    if tree.parent < wp.int32(0):
-                        # Move the root COM with its re-referenced velocity, see _carry_floating_root_twist.
-                        com_twist = _transport_root_twist(com_twist, dt)
-                    old = wp.transform(origin + wp.transform_get_translation(local), wp.transform_get_rotation(local))
-                    world = integrate_body_pose_from_com_twist(old, tree.com, com_twist, dt)
-                    joint_transform = wp.transform_inverse(parent_anchor) * world * tree.x_c
-                    position = wp.transform_get_translation(joint_transform)
-                    rotation = wp.transform_get_rotation(joint_transform)
-                    for component in range(3):
-                        joint_q[tree.q_start + component] = position[component]
-                    for component in range(4):
-                        joint_q[tree.q_start + 3 + component] = rotation[component]
-                else:
-                    if not integrated:
-                        jcalc_integrate(
-                            tree.parent,
-                            tree.x_c,
-                            tree.com,
-                            tree.kind,
-                            joint_q,
-                            joint_qd,
-                            zero_generalized_force,
-                            tree.q_start,
-                            tree.qd_start,
-                            tree.lin,
-                            tree.ang,
-                            dt,
-                            joint_q,
-                            joint_qd,
-                        )
-                    world = (
-                        parent_anchor
-                        * jcalc_transform(
-                            tree.kind, joint_axis, tree.qd_start, tree.lin, tree.ang, joint_q, tree.q_start
-                        )
-                        * wp.transform_inverse(tree.x_c)
-                    )
-                _store_transform(shared, wp.int32(pose_base) + wp.int32(_MOTION_STRIDE) * lane, world)
-                body_q[tree.child] = world
-                slot = tree.child + wp.int32(1)
-                rotation = wp.transform_get_rotation(world)
-                bodies.position[slot] = wp.transform_get_translation(world) + wp.quat_rotate(rotation, tree.com)
-                bodies.orientation[slot] = rotation
-            _sync_contact_warp()
+        # Integrate the coordinates. Joints integrate on their own; a floating joint integrates
+        # its child's pose, and a floating root's coordinates follow from it at once.
+        chained = tree.joint >= wp.int32(0) and (integrated or not _is_floating(tree.kind))
+        floating_child = tree.joint >= wp.int32(0) and not chained and tree.parent >= wp.int32(0)
+        joint_transform = wp.transform_identity()
+        world = wp.transform_identity()
+        if chained:
+            if not integrated:
+                jcalc_integrate(
+                    tree.parent,
+                    tree.x_c,
+                    tree.com,
+                    tree.kind,
+                    joint_q,
+                    joint_qd,
+                    zero_generalized_force,
+                    tree.q_start,
+                    tree.qd_start,
+                    tree.lin,
+                    tree.ang,
+                    dt,
+                    joint_q,
+                    joint_qd,
+                )
+            joint_transform = jcalc_transform(
+                tree.kind, joint_axis, tree.qd_start, tree.lin, tree.ang, joint_q, tree.q_start
+            )
+        elif tree.joint >= wp.int32(0):
+            com_twist = wp.spatial_vector(velocity_com, omega)
+            if tree.parent < wp.int32(0):
+                # Move the root COM with its re-referenced velocity, see _carry_floating_root_twist.
+                com_twist = _transport_root_twist(com_twist, dt)
+            old = wp.transform(origin + wp.transform_get_translation(local), wp.transform_get_rotation(local))
+            world = integrate_body_pose_from_com_twist(old, tree.com, com_twist, dt)
+            if tree.parent < wp.int32(0):
+                joint_transform = wp.transform_inverse(tree.x_p) * world * tree.x_c
+                position = wp.transform_get_translation(joint_transform)
+                rotation = wp.transform_get_rotation(joint_transform)
+                for component in range(3):
+                    joint_q[tree.q_start + component] = position[component]
+                for component in range(4):
+                    joint_q[tree.q_start + 3 + component] = rotation[component]
 
-        # Frames and motion subspaces at the new pose, then the rates. A floating root's
-        # rates still read the motion subspaces of the start pose.
+        # Frames about the new root COM in one pass root to leaf, which also poses the links,
+        # then the motion subspaces and the rates. A floating root's rates still read the
+        # motion subspaces of the start pose.
         root_twist = joint_twist(shared, tree, dof_start)
-        local, origin = local_kinematics(
+        local, origin, anchor = local_kinematics(
             shared,
             tree,
             lane,
             articulation,
             max_depth,
-            joint_axis,
+            joint_transform,
+            world,
+            floating_child,
             joint_q,
             body_x_com,
             articulation_origin,
@@ -1546,13 +1580,21 @@ def make_dense_substep_kernel(
             joint_anchor_local,
         )
         if tree.joint >= wp.int32(0):
+            if chained:
+                world = wp.transform(origin + wp.transform_get_translation(local), wp.transform_get_rotation(local))
+            body_q[tree.child] = world
+            slot = tree.child + wp.int32(1)
+            rotation = wp.transform_get_rotation(world)
+            bodies.position[slot] = wp.transform_get_translation(world) + wp.quat_rotate(rotation, tree.com)
+            bodies.orientation[slot] = rotation
+        if tree.joint >= wp.int32(0):
             jcalc_motion(
                 tree.kind,
                 joint_axis,
                 joint_q,
                 tree.lin,
                 tree.ang,
-                joint_anchor_local[tree.joint],
+                anchor,
                 joint_qd,
                 tree.q_start,
                 tree.qd_start,
@@ -1563,7 +1605,9 @@ def make_dense_substep_kernel(
                 subspace = joint_s_publish[tree.qd_start + offset]
                 joint_s[tree.qd_start + offset] = subspace
                 _store_spatial(shared, wp.int32(motion_base) + wp.int32(_MOTION_STRIDE) * local_dof, subspace)
-            body_i_s[tree.child] = _pack_transformed_body_inertia(body_q_com[tree.child], tree.mass, tree.inertia)
+            body_i_s[tree.child] = _pack_transformed_body_inertia(
+                local * body_x_com[tree.child], tree.mass, tree.inertia
+            )
         x_com = wp.transform_get_translation(local * body_x_com[tree.child])
         _sync_contact_warp()
         publish_rates(
