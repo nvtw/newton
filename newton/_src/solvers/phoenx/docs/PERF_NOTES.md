@@ -324,6 +324,60 @@ Lessons (clock64 phase timers, nsys):
   next biased kernel reuses them when the implicit diagonal is unchanged,
   which needed `state_is_continuation` steps to keep the factor.
 
+### Fused dense substep, second pass (2026-11-10)
+
+G1 RL recipe, solo RTX PRO 6000 (188 SMs), env steps/s, ABA -> fused:
+
+| Worlds | Point friction | Patch friction |
+| --- | --- | --- |
+| 4,096 | 1.15M -> 2.79M (2.4x) | 1.37M -> 2.93M (2.1x) |
+| 8,192 | | 1.67M -> 3.05M (1.8x) |
+
+clock64 per tree and substep (patch, nine blocks per SM): biased 170k cycles
+(contacts 62k, external solve 24k, new frames 20k, velocity product 17k),
+relax 117k (factor 48k, contacts 48k). Stiff-PD standing for 10 s matches
+ABA to 0.2 um in every body position for both friction models.
+
+What the measurements showed, in order of effect:
+
+- Kernel time is a step function of the world count: about 80 us (biased) and
+  45 us (relax) per round of blocks, flat from one to seven blocks per SM. The
+  round size is set by shared memory (the device takes eleven 7.7 KB blocks
+  but not eight 11.8 KB blocks per SM) and by 65,536 registers per SM. Storing
+  the contact rows `PAGE_ROWS` wide, sharing the link-frame scratch with the
+  spatial recurrences and DOF buckets in steps of eight took the block from
+  11.8 to 9.0 KB and seven to nine blocks. Per-block time rises about 5% per
+  extra block, so occupancy stops paying near ten blocks.
+- Reading the template tables from global memory instead of staging them
+  (7.7 KB, eleven blocks with `launch_bounds`) lost: the biased kernel went
+  from 98 to 126 us per round with the table address in a register and to
+  161 us with capped registers. Global loads are slow here because the
+  shared-memory carve-out leaves little L1.
+- Divergent per-lane branches cost more than the work under them. Level
+  loops that ran `if tree.depth == depth` cost about 900 cycles per level;
+  letting every lane chain from its parent's stored value at every level
+  (a joint at depth d is final after d levels) is bitwise identical and took
+  the link frames from 28.5k to 20.2k and the explicit step from 11.2k to
+  7.1k cycles.
+- Contact matrix `A = Z^T Z`: 13.5k cycles per kernel to build plus 5.5k to
+  gather `sum lambda z` afterwards. Keeping `w = sum_r lambda_r z_r` by DOF
+  (row velocity = start velocity + `z_r . w`) removes both.
+- Row solves that read and write the contact container inside the
+  Gauss-Seidel chain cost about 1.5k cycles per row; loading biases and
+  impulses per lane before the sweeps and storing them once afterwards took
+  the sweeps from 30.5k to 21.3k cycles. A normal row still costs about 700
+  cycles and a tangent pair 2.5k.
+- Phase timers are not additive: removing a level loop moved most of its
+  cycles into the next phase. Measure a piece by running it twice (when it
+  is idempotent) rather than by ablation, which changes the contact state.
+- Calibration inside the kernel: a shared load in a serial sum 4.7 cycles,
+  with four partial sums 1.2; a dependent `__shfl_sync` 37; a cached global
+  load 22; store plus `__syncwarp` 7; a dependent FMA 4.3.
+- No effect: hoisting global loads out of the level loops, reusing joint
+  transforms and anchors from registers, four-way partial sums in the row
+  dot products, batching the table and factor loads of the row
+  back-substitution, a branch-free lower solve.
+
 ## Batched humanoid comparison
 
 Measured 2026-08-04 on an RTX PRO 6000 Blackwell with 20,000 worlds,
