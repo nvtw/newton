@@ -12,9 +12,17 @@ All buffers are ``[dword, k]`` with k inner for coalesced loads.
 
 from __future__ import annotations
 
+import math
+
 import warp as wp
 
-from newton._src.solvers.phoenx.constraints.constraint_container import contact_soft_coefficient_values
+from newton._src.solvers.phoenx.constraints.constraint_container import (
+    DEFAULT_DAMPING_RATIO,
+    DEFAULT_HERTZ_CONTACT,
+    contact_soft_coefficient_values,
+    contact_spring_omega_dt,
+    soft_constraint_coefficients,
+)
 from newton._src.solvers.phoenx.helpers.array_access import read2d_f32, write2d_f32
 
 __all__ = [
@@ -169,10 +177,12 @@ class ContactContainer:
     #: of every substep that reuses the prepared rows; empty when every
     #: substep prepares its rows.
     gap: wp.array[wp.float32]
-    #: Soft normal-row coefficients of the maximal contact spring: bias rate
-    #: times the substep ``dt``, mass and impulse coefficients. They follow the
-    #: sweep schedule (:func:`contact_container_set_sweeps`), so kernels read
-    #: them as launch constants.
+    #: Nonzero when the sweep schedule caps the maximal contact spring below
+    #: the Nyquist limit (:func:`contact_container_set_sweeps`). The capped
+    #: spring's bias rate times the substep ``dt``, mass and impulse
+    #: coefficients follow as launch constants; uncapped rows keep the
+    #: Nyquist-limited :data:`DEFAULT_HERTZ_CONTACT` spring.
+    soft_capped: wp.int32
     soft_bias_dt: wp.float32
     soft_mass_coeff: wp.float32
     soft_impulse_coeff: wp.float32
@@ -181,11 +191,14 @@ class ContactContainer:
 @wp.func
 def cc_soft_coefficients(cc: ContactContainer, idt: wp.float32):
     """Return ``(bias_rate, mass_coeff, impulse_coeff)`` of the contact rows at substep rate ``idt``."""
+    if cc.soft_capped == 0:
+        return soft_constraint_coefficients(DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, wp.float32(1.0) / idt)
     return cc.soft_bias_dt * idt, cc.soft_mass_coeff, cc.soft_impulse_coeff
 
 
 def contact_container_set_sweeps(cc: ContactContainer, solver_iterations: int, velocity_iterations: int) -> None:
     """Set the contact spring for a sweep schedule; see :func:`contact_spring_omega_dt`."""
+    cc.soft_capped = int(contact_spring_omega_dt(solver_iterations, velocity_iterations) < math.pi)
     cc.soft_bias_dt, cc.soft_mass_coeff, cc.soft_impulse_coeff = contact_soft_coefficient_values(
         solver_iterations, velocity_iterations
     )

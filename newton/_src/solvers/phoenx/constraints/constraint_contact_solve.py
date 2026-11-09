@@ -53,6 +53,7 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     contact_set_packed_body_properties,
 )
 from newton._src.solvers.phoenx.constraints.constraint_container import (
+    DEFAULT_HERTZ_CONTACT,
     ConstraintBodies,
     constraint_bodies_make,
     pd_coefficients,
@@ -201,9 +202,17 @@ def contact_normal_bias(gap: wp.float32, idt: wp.float32, bias_rate: wp.float32)
     return wp.clamp(bias, -_CONTACT_MAX_PUSH_SPEED, _CONTACT_MAX_APPROACH_SPEED)
 
 
+# The uncapped default contact hertz is Nyquist-clamped whenever idt <= 2*hertz.
+# In that regime the Box2D mass/impulse coefficients are independent of dt.
+_DEFAULT_CONTACT_MASS_COEFF = wp.constant(wp.float32(0.9417003989219666))
+_DEFAULT_CONTACT_IMPULSE_COEFF = wp.constant(wp.float32(0.05829954519867897))
+
+
 @wp.func
 def _default_contact_solver_coefficients(cc: ContactContainer, idt: wp.float32):
     """Return default contact mass/impulse coefficients."""
+    if cc.soft_capped == 0 and idt <= wp.float32(2.0) * DEFAULT_HERTZ_CONTACT:
+        return _DEFAULT_CONTACT_MASS_COEFF, _DEFAULT_CONTACT_IMPULSE_COEFF
     _bias_rate, mass_coeff, impulse_coeff = cc_soft_coefficients(cc, idt)
     return mass_coeff, impulse_coeff
 
