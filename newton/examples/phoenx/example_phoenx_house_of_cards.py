@@ -9,7 +9,8 @@ four-level house: ten tents of two leaning cards with six flat cards bridging th
 held up only by friction (mu = 0.8). The house must stand still under gravity, which needs
 accurate static friction at the thin card edges. At 6.7 s four projectiles are created at
 runtime and fired into one side; the failure starts there and propagates through the
-house. The scene follows the house-of-cards benchmark of Song et al., "A Splitting
+house. ``--impact-time`` delays the shot, and a negative value keeps the house standing.
+Drag a card with the right mouse button to pick it. The scene follows the house-of-cards benchmark of Song et al., "A Splitting
 Architecture for Exact Reduced Coulomb Friction" (2026), also shown as a MuJoCo demo.
 ``--card-thickness 0.3`` uses the thickness of real playing cards.
 
@@ -41,7 +42,6 @@ LEVELS = 4
 FRICTION = 0.8
 PITCH = 0.85 * CARD_HEIGHT  # tent spacing; flat cards overhang each supporting apex [m]
 CLEARANCE = 1.0e-4  # initial gap between touching cards [m]
-IMPACT_TIME = 6.7  # [s]
 PROJECTILES = 4
 PROJECTILE_RADIUS = 0.012  # [m]
 PROJECTILE_MASS = 0.01  # [kg]
@@ -82,6 +82,20 @@ def _rotate(quaternion: np.ndarray, vectors: np.ndarray) -> np.ndarray:
 
 
 @wp.kernel
+def _projectile_xforms_kernel(
+    body_q: wp.array[wp.transform],
+    projectiles: wp.array[wp.int32],
+    xforms: wp.array[wp.transform],
+):
+    """Instance transforms of the projectiles; ones not fired yet are parked out of sight."""
+    i = wp.tid()
+    body = projectiles[i]
+    xforms[i] = wp.transform(wp.vec3(0.0, 0.0, -1000.0), wp.quat_identity())
+    if body >= 0:
+        xforms[i] = body_q[body]
+
+
+@wp.kernel
 def _launch_kernel(
     dyn: phoenx.DynamicsData,
     target: wp.vec3,
@@ -110,7 +124,8 @@ class Example:
         self.frame_dt = 1.0 / 60.0
         self.sim_time = 0.0
         self.frame = 0
-        self.impact_frame = round(IMPACT_TIME / self.frame_dt)
+        # A negative impact time never fires.
+        self.impact_frame = round(args.impact_time / self.frame_dt) if args.impact_time >= 0.0 else -1
 
         builder = newton.ModelBuilder()
         builder.add_ground_plane(cfg=newton.ModelBuilder.ShapeConfig(mu=FRICTION))
@@ -144,6 +159,9 @@ class Example:
         self.control = self.model.control()
         self.contacts = self.pipeline.contacts()
         self.projectiles = wp.full(PROJECTILES, -1, dtype=wp.int32)
+        # Runtime bodies are not part of the model the viewer was given, so draw them here.
+        self.projectile_xforms = wp.zeros(PROJECTILES, dtype=wp.transform)
+        self.projectile_colors = wp.full(PROJECTILES, wp.vec3(0.15, 0.35, 0.85), dtype=wp.vec3)
         self.initial_q = self.state_0.body_q.numpy()[: self.card_count].copy()
         self.settled_q = None
         self.max_rest_drift = 0.0
@@ -180,6 +198,15 @@ class Example:
     def render(self):
         self.viewer.begin_frame(self.sim_time)
         self.viewer.log_state(self.state_0)
+        wp.launch(
+            _projectile_xforms_kernel,
+            dim=PROJECTILES,
+            inputs=[self.state_0.body_q, self.projectiles],
+            outputs=[self.projectile_xforms],
+        )
+        self.viewer.log_shapes(
+            "/projectiles", newton.GeoType.SPHERE, (PROJECTILE_RADIUS,), self.projectile_xforms, self.projectile_colors
+        )
         self.viewer.end_frame()
 
     def card_displacement(self, reference: np.ndarray) -> np.ndarray:
@@ -195,7 +222,7 @@ class Example:
             self.settled_q = q[: self.card_count].copy()
             # Settling only closes the initial clearances.
             assert self.card_displacement(self.initial_q).max() < 2.0e-3, "the house did not settle in place"
-        elif self.settled_q is not None and self.frame <= self.impact_frame:
+        elif self.settled_q is not None and (self.impact_frame < 0 or self.frame <= self.impact_frame):
             self.max_rest_drift = max(self.max_rest_drift, float(self.card_displacement(self.settled_q).max()))
             assert self.max_rest_drift < 0.5e-3, f"a standing card crept {1e3 * self.max_rest_drift:.2f} mm"
 
@@ -234,8 +261,9 @@ class Example:
             f"{-1e3 * ground:.3f} mm, deepest card-card overlap {-1e3 * between:.3f} mm"
         )
         assert int(self.solver.dynamics.error_count.numpy()[0]) == 0
-        assert (self.projectiles.numpy() >= 0).all(), "a projectile was not created"
-        assert fallen > 0, "the projectiles did not knock any card down"
+        if 0 <= self.impact_frame < self.frame:
+            assert (self.projectiles.numpy() >= 0).all(), "a projectile was not created"
+            assert fallen > 0, "the projectiles did not knock any card down"
         assert ground > -0.5 * self.thickness, f"a card corner ended {-1e3 * ground:.2f} mm below the ground"
         assert between > -0.5 * self.thickness, f"two cards ended {-1e3 * between:.2f} mm inside each other"
 
@@ -246,6 +274,9 @@ class Example:
         parser.add_argument("--card-thickness", type=float, default=0.7, help="Card thickness [mm].")
         parser.add_argument("--substeps", type=int, default=16, help="Physics substeps per frame.")
         parser.add_argument("--iterations", type=int, default=6, help="Solver iterations per substep.")
+        parser.add_argument(
+            "--impact-time", type=float, default=6.7, help="Time the projectiles are fired [s]; negative never fires."
+        )
         return parser
 
 
