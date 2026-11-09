@@ -10,7 +10,7 @@ import warp as wp
 import newton
 from newton._src.solvers.phoenx.body import BodyContainer
 from newton._src.solvers.phoenx.constraints.constraint_contact import ContactColumnContainer, ContactViews
-from newton._src.solvers.phoenx.constraints.constraint_contact_cloth import (
+from newton._src.solvers.phoenx.constraints.constraint_contact_solve import (
     contact_prepare_for_iteration_lean_no_soft_pd,
 )
 from newton._src.solvers.phoenx.constraints.contact_container import ContactContainer

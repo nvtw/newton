@@ -16,7 +16,7 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     contact_set_friction,
     contact_set_friction_dynamic,
 )
-from newton._src.solvers.phoenx.constraints.constraint_contact_cloth import _make_contact_iterate_at
+from newton._src.solvers.phoenx.constraints.constraint_contact_solve import _make_contact_iterate_at
 from newton._src.solvers.phoenx.constraints.constraint_container import constraint_bodies_make
 from newton._src.solvers.phoenx.constraints.contact_container import ContactContainer
 from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer

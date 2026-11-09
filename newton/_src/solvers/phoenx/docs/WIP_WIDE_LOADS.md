@@ -39,7 +39,7 @@ Fields widened (all lossless — same bytes, fewer load requests):
   common D6 inequality-row orientation loads.
 - `constraints/constraint_contact.py` — `contact_iterate_at_multi` (fast-tail
   multi-sweep contact path): vw pair load/store, quat, sym6.
-- `constraints/constraint_contact_cloth.py` — rigid lean prepare
+- `constraints/constraint_contact_solve.py` — rigid lean prepare
   (`_make_contact_prepare_for_iteration_at`: quat + sym6 + warm-start vw
   scatter), `contact_cached_warmstart_lean`, `_make_contact_iterate_at`
   lean loads + fast writeback.

@@ -10,7 +10,7 @@ import warp as wp
 
 import newton
 from newton._src.solvers.phoenx import simulation as phoenx_simulation
-from newton._src.solvers.phoenx.constraints import constraint_contact_cloth as contact
+from newton._src.solvers.phoenx.constraints import constraint_contact_solve as contact
 from newton._src.solvers.phoenx.constraints.constraint_contact import _OFF_CONTACT_COUNT
 from newton._src.solvers.phoenx.examples.example_kapla_hoberman import Example
 

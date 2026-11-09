@@ -8,7 +8,7 @@ import unittest
 import numpy as np
 import warp as wp
 
-from newton._src.solvers.phoenx.constraints.constraint_contact_cloth import (
+from newton._src.solvers.phoenx.constraints.constraint_contact_solve import (
     _default_contact_solver_coefficients,
 )
 from newton._src.solvers.phoenx.constraints.constraint_container import (

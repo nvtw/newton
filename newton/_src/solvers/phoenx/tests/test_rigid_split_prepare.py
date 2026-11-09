@@ -8,7 +8,7 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton._src.solvers.phoenx.constraints.constraint_contact_cloth import _make_contact_prepare_for_iteration_at
+from newton._src.solvers.phoenx.constraints.constraint_contact_solve import _make_contact_prepare_for_iteration_at
 from newton._src.solvers.phoenx.tests.test_contact_coupling import _total_momentum
 
 

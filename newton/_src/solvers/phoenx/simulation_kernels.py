@@ -55,7 +55,7 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     contact_world_error,
     contact_world_wrench,
 )
-from newton._src.solvers.phoenx.constraints.constraint_contact_cloth import (
+from newton._src.solvers.phoenx.constraints.constraint_contact_solve import (
     _contact_cached_warmstart_split,
     contact_cached_warmstart_lean,
     contact_iterate,

@@ -986,7 +986,7 @@ def contact_set_side1_counts_extra(c: ContactColumnContainer, local_cid: wp.int3
 
 # ---------------------------------------------------------------------------
 # Prepare / iterate (rigid single-sweep) live in
-# :mod:`constraint_contact_cloth`. One factory there generates both rigid
+# :mod:`constraint_contact_solve`. One factory there generates both rigid
 # and cloth-aware variants via ``wp.static(cloth_support)``. This file
 # keeps only the multi-sweep ``*_at_multi`` rigid-only path used by the
 # fast-tail kernels (different register-caching pattern).

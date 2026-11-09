@@ -57,7 +57,7 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     contact_scatter_colored_rows,
     contact_views_make,
 )
-from newton._src.solvers.phoenx.constraints.constraint_contact_cloth import (
+from newton._src.solvers.phoenx.constraints.constraint_contact_solve import (
     _get_parallel_contact_prepare_kernel,
     get_colored_point_prepare_kernel,
     rebase_ordinary_contact_relax_kernel,
