@@ -5034,7 +5034,7 @@ class ReducedPhoenXArticulation:
             self.contact_block_system.biased_page_launcher = self._launch_persistent_biased_page
             self.contact_block_system.relax_page_launcher = self._launch_persistent_relax_page
         # Fused substep of dense trees with private contacts, installed by the solver. A relax
-        # step leaves its factor for the next biased step of the same solver step.
+        # step leaves its factor for the next biased step at the same pose.
         self.fused_substep = None
         self._relaxed_pose_factored = False
         self.owned_joint_mask_np = self.tree_joint_mask_np.copy()
@@ -5058,6 +5058,7 @@ class ReducedPhoenXArticulation:
     def invalidate_kinematics(self) -> None:
         """Force reconstruction after a model-property change."""
         self._kinematics_current = False
+        self._relaxed_pose_factored = False
 
     def import_step(
         self,
@@ -5073,7 +5074,8 @@ class ReducedPhoenXArticulation:
         # their scenes rebuild the buffers every step from the PhoenX body poses, which spawns
         # write, and import only the rows before the slots.
         self._kinematics_current = state_is_continuation and not self.system.runtime_slots
-        self._relaxed_pose_factored = False
+        # A continuation also keeps the factor the last relax step left at this pose.
+        self._relaxed_pose_factored = self._relaxed_pose_factored and self._kinematics_current
         if self.system.runtime_slots:
             wp.launch(
                 _phoenx_body_poses_kernel,
@@ -5615,7 +5617,7 @@ class ReducedPhoenXArticulation:
         if self.fused_substep is not None:
             # The biased solve already ran in begin_substep.
             if relax and world._reduced_contacts_active_this_step:
-                self.fused_substep.relax(world, 1.0 / float(idt))
+                self.fused_substep.relax(world, world.substep_dt)
                 self._relaxed_pose_factored = True
             return
         if relax:
