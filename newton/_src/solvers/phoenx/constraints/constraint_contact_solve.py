@@ -783,6 +783,7 @@ def _make_contact_prepare_for_iteration_at(
             # speculative contact from activating during later substeps.
             solver_gap = effective_gap
             use_start_gap = _contact_uses_stale_anchor_start_gap(contacts, k)
+            friction_inactive = (use_start_gap and solver_gap > wp.float32(0.0)) or effective_gap > wp.float32(0.002)
             bias_val = contact_normal_bias(effective_gap, idt, bias_rate)
             if cc.gap.shape[0] > 0:
                 cc.gap[k] = effective_gap
@@ -797,11 +798,14 @@ def _make_contact_prepare_for_iteration_at(
 
             if wp.static(not cloth_support):
                 drift_sq = drift_t1_raw * drift_t1_raw + drift_t2_raw * drift_t2_raw
-                if solver_gap > wp.float32(0.0) or drift_sq > slip_threshold * slip_threshold:
+                if friction_inactive or drift_sq > slip_threshold * slip_threshold:
                     # These are friction references, never collision witnesses.
                     # Rebase their displacement without discarding the contact's
                     # accumulated impulse. Proximity to the Coulomb limit alone
                     # does not imply sliding; the solve projects the impulse.
+                    # A supported manifold can briefly unload individual witnesses
+                    # within a step. Keep their reference while friction remains
+                    # eligible, including the stricter stale-witness gap rule.
                     point = wp.float32(0.5) * (p0_world + p1_world)
                     anchor0 = body_com1 + wp.quat_rotate_inv(orientation1, point - position1)
                     anchor1 = body_com2 + wp.quat_rotate_inv(orientation2, point - position2)
@@ -822,7 +826,7 @@ def _make_contact_prepare_for_iteration_at(
                         drift_t1_raw = wp.float32(0.0)
                         drift_t2_raw = wp.float32(0.0)
 
-            if (use_start_gap and solver_gap > wp.float32(0.0)) or effective_gap > wp.float32(0.002):
+            if friction_inactive:
                 # Far speculative rows are normal velocity caps, not manifolds.
                 cc_set_normal_lambda(cc, k, wp.float32(0.0))
                 cc_set_tangent1_lambda(cc, k, wp.float32(0.0))

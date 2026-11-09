@@ -1,0 +1,1 @@
+Preserve PhoenX friction anchors while contacts remain inside the existing friction-active range, preventing repeated loss of static-friction correction during temporary witness unloading while retaining separation and moving-surface resets.
