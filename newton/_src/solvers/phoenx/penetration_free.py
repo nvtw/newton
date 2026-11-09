@@ -36,10 +36,13 @@ from newton._src.geometry.penetration_free import (
     PenetrationFreeData,
     feature_support_point,
     launch_limit_motion,
+    launch_place_limits,
     motion_budget_fraction,
+    pair_count,
     screw_motion_delta,
     screw_motion_interpolate,
     screw_motion_travel,
+    side_normal,
 )
 from newton._src.solvers.phoenx.body import (
     MOTION_DYNAMIC,
@@ -118,17 +121,17 @@ def _limit_velocity_kernel(
     ``limit - reserve``; the pseudo impulse moves a feature inside the
     reserve back out to ``limit - reserve``.
     """
-    c = wp.tid()
-    if c >= wp.min(constraints.count[0], constraints.body.shape[0]):
+    c, side = wp.tid()
+    if c >= pair_count(constraints):
         return
-    slot = constraints.body[c] + 1
-    if not _limited_body(bodies, slot):
+    slot = constraints.body[c][side] + 1
+    if slot <= 0 or not _limited_body(bodies, slot):
         return
     q = bodies.orientation[slot]
     x = bodies.position[slot]
     w = bodies.angular_velocity[slot]
-    n = constraints.normal[c]
-    f = constraints.feature[c]
+    n = side_normal(constraints, c, side)
+    f = constraints.feature[c, side]
     inv_inertia = mat33_from_sym6(bodies.inverse_inertia_world[slot])
     inv_mass = bodies.inverse_mass[slot]
     # Limit the current support point and the one that becomes extremal at the
@@ -139,7 +142,7 @@ def _limit_velocity_kernel(
         if k == 1:
             q_support = q_end
         r = wp.quat_rotate(q, feature_support_point(f, wp.quat_rotate_inv(q_support, n)))
-        room = constraints.limit[c] - reserve - wp.dot(n, x + r)
+        room = constraints.limit[c][side] - reserve - wp.dot(n, x + r)
         rn = wp.cross(r, n)
         mass = inv_mass + wp.dot(rn, inv_inertia * rn)
         if mass > 0.0:
@@ -307,14 +310,15 @@ class PhoenXPenetrationFree:
         )
 
     def limit_velocities(self, data: PenetrationFreeData, bodies: BodyContainer, dt: float) -> None:
-        """Remove velocity that would carry dynamic features past their limits during the next substep."""
+        """Re-place the pair limits, then remove velocity that would carry dynamic features past them."""
         if self.num_bodies <= 1 or data.body_count == 0:
             return
+        launch_place_limits(data, bodies.position, bodies.orientation, bodies.velocity, bodies.angular_velocity, 1)
         reserve = LIMITER_RESERVE * float(data.config.tolerance)
         for _ in range(LIMITER_ITERATIONS):
             wp.launch(
                 _limit_velocity_kernel,
-                dim=data.constraints.body.shape[0],
+                dim=(data.constraints.body.shape[0], 2),
                 inputs=[data.constraints, bodies, float(dt), reserve],
                 outputs=self._accumulators,
                 device=self.device,

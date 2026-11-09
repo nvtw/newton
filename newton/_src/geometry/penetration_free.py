@@ -148,13 +148,13 @@ class PenetrationFreeConfig:
         change without prior notice.
     """
 
-    tolerance: float = 1.0e-3
+    tolerance: float = 5.0e-3
     """Maximum penetration depth [m] permitted between two shapes.
 
     Choose it above the penetration the solver's contact model settles at
-    under load. A soft contact that rests deeper than its share of the
-    tolerance keeps its bodies at their limits, where truncation stalls
-    sliding and toppling until the contacts relax.
+    under load; PhoenX contacts rest about 0.5-1 mm deep in a stack of 0.2 m
+    boxes. Contacts that rest at the tolerance keep their bodies at their
+    limits, where truncation slows sliding and toppling.
     """
 
     budget_velocity_scale: float = 2.0
@@ -204,15 +204,24 @@ class ConstraintFeature:
 
 @wp.struct
 class Constraints:
-    """Half-space constraints ``support(feature, normal) <= limit`` of one detection."""
+    """Certified feature pairs of one detection.
+
+    Pair ``c`` separates side 0 (feature ``A``) from side 1 (feature ``B``)
+    along ``normal[c]``, pointing from ``A`` to ``B``. Side ``k`` must keep its
+    support along its side normal (``normal`` for side 0, ``-normal`` for
+    side 1) at or below ``limit[c][k]``. The two limits always sum to at most
+    the tolerance, which bounds the pair's overlap along ``normal``. Static
+    sides (``body = -1``) keep the fixed support ``fixed_support[c][k]``.
+    """
 
     count: wp.array[wp.int32]
     status: wp.array[wp.int32]
     recovery_count: wp.array[wp.int32]
-    body: wp.array[wp.int32]
+    body: wp.array[wp.vec2i]
     normal: wp.array[wp.vec3]
-    limit: wp.array[wp.float32]
-    feature: wp.array[ConstraintFeature]
+    limit: wp.array[wp.vec2]
+    fixed_support: wp.array[wp.vec2]
+    feature: wp.array2d[ConstraintFeature]
 
 
 class PenetrationFreeData:
@@ -239,10 +248,11 @@ class PenetrationFreeData:
             c.status = wp.zeros(1, dtype=wp.int32)
             c.recovery_count = wp.zeros(1, dtype=wp.int32)
             nc = max(self.max_constraints, 1)
-            c.body = wp.zeros(nc, dtype=wp.int32)
+            c.body = wp.zeros(nc, dtype=wp.vec2i)
             c.normal = wp.zeros(nc, dtype=wp.vec3)
-            c.limit = wp.zeros(nc, dtype=wp.float32)
-            c.feature = wp.zeros(nc, dtype=ConstraintFeature)
+            c.limit = wp.zeros(nc, dtype=wp.vec2)
+            c.fixed_support = wp.zeros(nc, dtype=wp.vec2)
+            c.feature = wp.zeros((nc, 2), dtype=ConstraintFeature)
             self.constraints = c
             # Triangle work lists: (pair, source triangle, source is shape b, other triangle).
             self.work_count = wp.zeros(2, dtype=wp.int32)
@@ -265,7 +275,7 @@ class PenetrationFreeData:
 
     @property
     def constraint_count(self) -> wp.array:
-        """Number of emitted half-space constraints, possibly above capacity on overflow."""
+        """Number of emitted feature pairs, possibly above capacity on overflow."""
         return self.constraints.count
 
     @property
@@ -469,6 +479,94 @@ def halfspace_motion_fraction(
     return 1.0
 
 
+@wp.func
+def side_normal(constraints: Constraints, c: int, side: int) -> wp.vec3:
+    """Return the world direction along which side ``side`` of pair ``c`` must keep its support bounded."""
+    if side == 0:
+        return constraints.normal[c]
+    return -constraints.normal[c]
+
+
+@wp.func
+def pair_count(constraints: Constraints) -> int:
+    return wp.min(constraints.count[0], constraints.body.shape[0])
+
+
+@wp.kernel(enable_backward=False)
+def place_limits_kernel(
+    constraints: Constraints,
+    positions: wp.array[wp.vec3],
+    orientations: wp.array[wp.quat],
+    velocities: wp.array[wp.vec3],
+    angular_velocities: wp.array[wp.vec3],
+    slot_offset: int,
+    tolerance: float,
+):
+    """Re-divide each pair's room at the current poses in proportion to the sides' approach speeds.
+
+    The room ``tolerance - overlap`` along the fixed pair normal goes to the
+    sides that approach it, so a side moving away or sliding along the
+    plane is never truncated. If the overlap is within the tolerance before
+    placement, the new limits keep it there; otherwise they freeze it.
+    """
+    c = wp.tid()
+    if c >= pair_count(constraints):
+        return
+    bodies = constraints.body[c]
+    height = wp.vec2(0.0)
+    approach = wp.vec2(0.0)
+    for side in range(2):
+        b = bodies[side]
+        if b < 0:
+            height[side] = constraints.fixed_support[c][side]
+        else:
+            slot = b + slot_offset
+            n = side_normal(constraints, c, side)
+            q = orientations[slot]
+            n_body = wp.quat_rotate_inv(q, n)
+            f = constraints.feature[c, side]
+            height[side] = wp.dot(n, positions[slot]) + feature_support(f, n_body)
+            r = wp.quat_rotate(q, feature_support_point(f, n_body))
+            speed = wp.dot(n, velocities[slot] + wp.cross(angular_velocities[slot], r))
+            # A moving side always keeps a small share so it is never pinned.
+            approach[side] = wp.max(speed, 0.0) + 1.0e-6
+    room = wp.max(tolerance - height[0] - height[1], 0.0)
+    total = approach[0] + approach[1]
+    share = 0.5
+    if total > 0.0:
+        share = approach[0] / total
+    constraints.limit[c] = wp.vec2(height[0] + share * room, height[1] + (1.0 - share) * room)
+
+
+def launch_place_limits(
+    data: PenetrationFreeData,
+    positions: wp.array,
+    orientations: wp.array,
+    velocities: wp.array,
+    angular_velocities: wp.array,
+    slot_offset: int,
+) -> None:
+    """Re-place every pair's limits at the given center-of-mass poses and velocities.
+
+    Call once per position update, before limiting the motion; see
+    :func:`place_limits_kernel`.
+    """
+    wp.launch(
+        place_limits_kernel,
+        dim=data.constraints.body.shape[0],
+        inputs=[
+            data.constraints,
+            positions,
+            orientations,
+            velocities,
+            angular_velocities,
+            int(slot_offset),
+            float(data.config.tolerance),
+        ],
+        device=data.device,
+    )
+
+
 @wp.kernel(enable_backward=False)
 def limit_motion_kernel(
     constraints: Constraints,
@@ -480,21 +578,31 @@ def limit_motion_kernel(
     # output
     fraction: wp.array[wp.float32],
 ):
-    """Lower each body's admissible fraction by every half-space constraint it owns.
+    """Lower each body's admissible fraction by every pair side it owns.
 
     Body poses are center-of-mass poses in the solver's slot layout, where
     Newton body ``b`` lives in slot ``b + slot_offset``. ``fraction`` must be
     initialized to ``1`` before the launch.
     """
-    c = wp.tid()
-    if c >= wp.min(constraints.count[0], constraints.body.shape[0]):
+    c, side = wp.tid()
+    if c >= pair_count(constraints):
         return
-    slot = constraints.body[c] + slot_offset
+    b = constraints.body[c][side]
+    if b < 0:
+        return
+    slot = b + slot_offset
     x0 = position_start[slot]
     q0 = orientation_start[slot]
     dx, axis, angle = screw_motion_delta(x0, q0, position_end[slot], orientation_end[slot])
     t = halfspace_motion_fraction(
-        constraints.feature[c], constraints.normal[c], constraints.limit[c], x0, q0, dx, axis, angle
+        constraints.feature[c, side],
+        side_normal(constraints, c, side),
+        constraints.limit[c][side],
+        x0,
+        q0,
+        dx,
+        axis,
+        angle,
     )
     if t < 1.0:
         wp.atomic_min(fraction, slot, t)
@@ -516,7 +624,7 @@ def launch_limit_motion(
     """
     wp.launch(
         limit_motion_kernel,
-        dim=data.constraints.body.shape[0],
+        dim=(data.constraints.body.shape[0], 2),
         inputs=[data.constraints, position_start, orientation_start, position_end, orientation_end, int(slot_offset)],
         outputs=[fraction],
         device=data.device,
@@ -679,20 +787,20 @@ def _world_support(f: _Feature, direction: wp.vec3) -> float:
 
 
 @wp.func
-def _emit_constraint(f: _Feature, normal: wp.vec3, limit: float, out: Constraints):
-    if f.body < 0:
-        return
-    if f.infinite_plane != 0:
+def _emit_pair(a: _Feature, b: _Feature, normal: wp.vec3, height: wp.vec2, limit: wp.vec2, out: Constraints):
+    if (a.body >= 0 and a.infinite_plane != 0) or (b.body >= 0 and b.infinite_plane != 0):
         wp.atomic_or(out.status, 0, STATUS_UNSUPPORTED_GEOMETRY)
         return
     idx = wp.atomic_add(out.count, 0, 1)
     if idx >= out.body.shape[0]:
         wp.atomic_or(out.status, 0, STATUS_CONSTRAINT_OVERFLOW)
         return
-    out.body[idx] = f.body
+    out.body[idx] = wp.vec2i(a.body, b.body)
     out.normal[idx] = normal
     out.limit[idx] = limit
-    out.feature[idx] = f.local
+    out.fixed_support[idx] = height
+    out.feature[idx, 0] = a.local
+    out.feature[idx, 1] = b.local
 
 
 @wp.func
@@ -777,8 +885,10 @@ def _process_feature_pair(a: _Feature, b: _Feature, tolerance: float, out: Const
     w_a = float(0.5)
     if a.budget + b.budget > 0.0:
         w_a = a.budget / (a.budget + b.budget)
-    _emit_constraint(a, normal, s_a + w_a * available, out)
-    _emit_constraint(b, -normal, -(s_b - (1.0 - w_a) * available), out)
+    # Side heights are supports along each side's normal; solvers re-place
+    # the limits every update, this budget-weighted split is the initial one.
+    height = wp.vec2(s_a, -s_b)
+    _emit_pair(a, b, normal, height, height + wp.vec2(w_a * available, (1.0 - w_a) * available), out)
 
 
 @wp.func

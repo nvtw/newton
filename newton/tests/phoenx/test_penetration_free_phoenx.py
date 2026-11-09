@@ -243,15 +243,19 @@ class TestPenetrationFreePhoenX(unittest.TestCase):
             body_q = run.state_0.body_q.numpy()
             for i, (kind, params) in enumerate(measures):
                 lowest[i] = min(lowest[i], _lowest_point(kind, params, body_q[i]))
-        return run, lowest, run.state_0.body_q.numpy()
+        return run, lowest, run.state_0.body_q.numpy(), measures
 
     def _check_ground(self, ground: str):
-        run, lowest, body_q = self._drop_all_shapes(ground, PenetrationFreeConfig(tolerance=_TOLERANCE))
-        for i, kind in enumerate(_SHAPES):
+        run, lowest, body_q, measures = self._drop_all_shapes(ground, PenetrationFreeConfig(tolerance=_TOLERANCE))
+        for i, (kind, (measure, params)) in enumerate(zip(_SHAPES, measures, strict=True)):
             with self.subTest(shape=kind):
                 self.assertGreaterEqual(lowest[i], -_TOLERANCE - _MEASURE_SLACK)
                 # Bodies come to rest on the ground instead of stalling in the air.
                 self.assertLess(body_q[i, 2], 0.35)
+                if measure == "poly":
+                    # Truncation must not hold a polyhedron balanced on an edge.
+                    vertices_z = (params[0] @ _rotation_matrix(body_q[i, 3:]).T)[:, 2] + body_q[i, 2]
+                    self.assertGreaterEqual(int(np.sum(vertices_z < 5.0e-3)), 3)
         self.assertEqual(run.failure_bits(), 0, run.data.status_messages())
 
     def test_shapes_on_plane(self):
@@ -267,7 +271,7 @@ class TestPenetrationFreePhoenX(unittest.TestCase):
         self._check_ground("heightfield")
 
     def test_shapes_tunnel_through_box_without_mode(self):
-        _, lowest, _ = self._drop_all_shapes("box", None)
+        _, lowest, _, _ = self._drop_all_shapes("box", None)
         self.assertLess(float(lowest.min()), -0.05, "baseline no longer penetrates the thin box")
 
     def test_box_stack_settles(self):
