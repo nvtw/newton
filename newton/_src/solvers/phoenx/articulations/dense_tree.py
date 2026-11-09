@@ -426,6 +426,22 @@ def _store_word(base: wp.uint64, index: wp.int32, value: wp.uint32): ...
 @wp.func_native(
     """
 #if defined(__CUDA_ARCH__)
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        const int other = __shfl_xor_sync(0xffffffffu, value, offset);
+        value = other > value ? other : value;
+    }
+#endif
+    return value;
+"""
+)
+def _warp_max_int(value: wp.int32) -> wp.int32:
+    """Return the largest ``value`` among the lanes of the warp."""
+    ...
+
+
+@wp.func_native(
+    """
+#if defined(__CUDA_ARCH__)
     return __shfl_sync(0xffffffffu, value, source);
 #else
     return value;
@@ -490,7 +506,9 @@ class DenseSharedLayout:
         self.tables_end = (offset + 3) // 4
         # Spatial inertias are loaded as float4 words.
         self.scratch = 4 * ((self.tables_end + 3) // 4)
-        self.size = self.scratch + max(_INERTIA_STRIDE * joint_capacity, scratch_words)
+        # One spare word takes the stores of lanes without a row.
+        self.spare = self.scratch + max(_INERTIA_STRIDE * joint_capacity, scratch_words)
+        self.size = self.spare + 1
 
     def pack_template(self, template: dict) -> np.ndarray:
         """Return the words ``tables`` to ``tables_end`` of a template's shared tables.
@@ -559,6 +577,7 @@ def make_dense_tree_ops(
     level_pair = layout.level_pair
     subtree_start = layout.subtree_start
     path = layout.path
+    spare = layout.spare
     dof_joint = layout.dof_joint
     subtree_joint = layout.subtree_joint
     table_base = layout.tables
@@ -882,53 +901,49 @@ def make_dense_tree_ops(
 
     @wp.func
     def solve_lower(shared: wp.uint64, vector_base: wp.int32, n: wp.int32, lane: wp.int32):
-        """Overwrite a shared vector ``z`` by ``x = L^-1 z`` one column per step, root first.
+        """Overwrite a shared vector ``z`` by ``x = L^-1 z`` level by level, root first.
 
-        Step ``j`` broadcasts ``x_j = z_j / L_jj`` and every descendant ``i`` of
-        ``j`` subtracts ``L_ij x_j``, the entry at the depth of ``j`` in row ``i``.
+        The rows at path depth ``d`` finish ``x_i = z_i / L_ii``; every deeper row
+        then subtracts ``L_ij x_j`` for its one ancestor ``j`` at that depth, the
+        entry at position ``d`` of its row. A level costs a few shared accesses,
+        where broadcasting one column per step cost a shuffle per DOF. Every lane
+        stores its value at every level, so the warp never branches on a depth.
         """
         row0 = load_row(shared, vector_base, n, lane)
         value0 = row0[0]
         entry0 = wp.int32(row0[2])
-        low0 = wp.int32(0)
-        high0 = wp.int32(0)
-        if lane < n:
-            low0 = _load_int(shared, wp.int32(ancestors) + wp.int32(2) * lane)
-            high0 = _load_int(shared, wp.int32(ancestors) + wp.int32(2) * lane + wp.int32(1))
+        depth0 = wp.where(lane < n, wp.int32(row0[3]), wp.int32(-1))
+        slot0 = wp.where(lane < n, vector_base + lane, wp.int32(spare))
         row1 = wp.vec4(0.0)
         value1 = wp.float32(0.0)
         entry1 = wp.int32(0)
-        low1 = wp.int32(0)
-        high1 = wp.int32(0)
+        depth1 = wp.int32(-1)
+        slot1 = wp.int32(spare)
         if wp.static(two_rows):
-            row = lane + wp.int32(_LANES)
-            row1 = load_row(shared, vector_base, n, row)
+            row1 = load_row(shared, vector_base, n, lane + wp.int32(_LANES))
             value1 = row1[0]
             entry1 = wp.int32(row1[2])
-            if row < n:
-                low1 = _load_int(shared, wp.int32(ancestors) + wp.int32(2) * row)
-                high1 = _load_int(shared, wp.int32(ancestors) + wp.int32(2) * row + wp.int32(1))
-        for j in range(n):
-            entry_j = _load_u16(shared, wp.int32(dof_entry) + j)
-            depth_j = _load_u16(shared, wp.int32(dof_entry) + j + wp.int32(1)) - wp.int32(1) - entry_j
-            factor0 = _load(shared, entry0 + depth_j)
-            candidate = value0 * row0[1]
+            depth1 = wp.where(lane + wp.int32(_LANES) < n, wp.int32(row1[3]), wp.int32(-1))
+            slot1 = wp.where(lane + wp.int32(_LANES) < n, vector_base + lane + wp.int32(_LANES), wp.int32(spare))
+        for level in range(_warp_max_int(wp.max(depth0, depth1)) + wp.int32(1)):
+            value0 = wp.where(depth0 == level, value0 * row0[1], value0)
+            _store(shared, slot0, value0)
             if wp.static(two_rows):
-                candidate = wp.where(j >= wp.int32(_LANES), value1 * row1[1], candidate)
-            x = _lane_float(candidate, j & wp.int32(_LANES - 1))
-            bit = j & wp.int32(_LANES - 1)
-            mask = wp.where(j >= wp.int32(_LANES), high0, low0)
-            factor0 = wp.where(((mask >> bit) & wp.int32(1)) != wp.int32(0), factor0, wp.float32(0.0))
-            value0 = wp.where(lane == j, x, value0 - factor0 * x)
+                value1 = wp.where(depth1 == level, value1 * row1[1], value1)
+                _store(shared, slot1, value1)
+            _sync_contact_warp()
+            # Rows at or above this level reread an entry of their own and leave their value.
+            index0 = entry0 + wp.min(level, wp.max(depth0, wp.int32(0)))
+            reduced0 = value0 - _load(shared, index0) * _load(
+                shared, vector_base + _load_u8(shared, wp.int32(path) + index0)
+            )
+            value0 = wp.where(depth0 > level, reduced0, value0)
             if wp.static(two_rows):
-                factor1 = _load(shared, entry1 + depth_j)
-                mask = wp.where(j >= wp.int32(_LANES), high1, low1)
-                factor1 = wp.where(((mask >> bit) & wp.int32(1)) != wp.int32(0), factor1, wp.float32(0.0))
-                value1 = wp.where(lane + wp.int32(_LANES) == j, x, value1 - factor1 * x)
-        store_row(shared, vector_base, n, lane, value0)
-        if wp.static(two_rows):
-            store_row(shared, vector_base, n, lane + wp.int32(_LANES), value1)
-        _sync_contact_warp()
+                index1 = entry1 + wp.min(level, wp.max(depth1, wp.int32(0)))
+                reduced1 = value1 - _load(shared, index1) * _load(
+                    shared, vector_base + _load_u8(shared, wp.int32(path) + index1)
+                )
+                value1 = wp.where(depth1 > level, reduced1, value1)
 
     @wp.func
     def solve(shared: wp.uint64, vector_base: wp.int32, n: wp.int32, lane: wp.int32):

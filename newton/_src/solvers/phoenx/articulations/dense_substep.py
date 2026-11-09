@@ -80,6 +80,7 @@ from newton._src.solvers.phoenx.articulations.reduced import (
     _transport_root_twist,
     _unpack_symmetric_mat66,
     _vec6,
+    _vec8,
     configure_implicit_joint_dynamics,
     initialize_reduced_joint,
     initialize_reduced_rates,
@@ -336,9 +337,8 @@ def _root_path_sum(value: wp.spatial_vector, parent: wp.int32, max_depth: wp.int
         source = wp.max(ancestor, wp.int32(0))
         above = _shuffle_reduced_spatial(total, source, wp.int32(_LANES), _FULL_MASK)
         next_ancestor = _lane_int(ancestor, source)
-        if ancestor >= wp.int32(0):
-            total += above
-            ancestor = next_ancestor
+        total += wp.where(ancestor >= wp.int32(0), above, wp.spatial_vector())
+        ancestor = wp.where(ancestor >= wp.int32(0), next_ancestor, ancestor)
         reach += reach
     return total
 
@@ -444,30 +444,31 @@ def make_dense_substep_kernel(
             world = tree.x_p * joint_transform * wp.transform_inverse(tree.x_c)
         origin = wp.transform_point(world, tree.com)
         origin = wp.vec3(_lane_float(origin[0], 0), _lane_float(origin[1], 0), _lane_float(origin[2], 0))
-        local = wp.transform_identity()
-        anchor = wp.transform_identity()
+        # A root's frame and anchor follow from its own pose.
+        rotation = wp.transform_get_rotation(world)
+        root_local = wp.transform(-wp.quat_rotate(rotation, tree.com), rotation)
+        root_transform = joint_transform
+        if _is_floating(tree.kind):
+            root_transform = wp.transform(wp.vec3(0.0), wp.transform_get_rotation(joint_transform))
+        root_anchor = root_local * tree.x_c * wp.transform_inverse(root_transform)
+        is_root = tree.parent < wp.int32(0)
+        parent_slot = wp.int32(pose_base) + wp.int32(_MOTION_STRIDE) * wp.max(tree.parent, wp.int32(0))
+        local = root_local
+        anchor = root_anchor
         relative = joint_transform
         child_anchor_inverse = wp.transform_inverse(tree.x_c)
-        for depth in range(max_depth + wp.int32(1)):
-            if tree.depth == depth:
-                if tree.parent < wp.int32(0):
-                    rotation = wp.transform_get_rotation(world)
-                    local = wp.transform(-wp.quat_rotate(rotation, tree.com), rotation)
-                    root_transform = joint_transform
-                    if _is_floating(tree.kind):
-                        root_transform = wp.transform(wp.vec3(0.0), wp.transform_get_rotation(joint_transform))
-                    anchor = local * tree.x_c * wp.transform_inverse(root_transform)
-                else:
-                    anchor = (
-                        _load_transform(shared, wp.int32(pose_base) + wp.int32(_MOTION_STRIDE) * tree.parent) * tree.x_p
-                    )
-                    if floating_child:
-                        anchor_world = wp.transform(
-                            origin + wp.transform_get_translation(anchor), wp.transform_get_rotation(anchor)
-                        )
-                        relative = wp.transform_inverse(anchor_world) * floating_world * tree.x_c
-                    local = anchor * relative * child_anchor_inverse
-                _store_transform(shared, wp.int32(pose_base) + wp.int32(_MOTION_STRIDE) * lane, local)
+        # Every lane chains from its parent's stored frame at every level: a joint at depth d
+        # is final after d levels and repeats that value, so no lane branches on its depth.
+        for _level in range(max_depth + wp.int32(1)):
+            chained_anchor = _load_transform(shared, parent_slot) * tree.x_p
+            if floating_child:
+                anchor_world = wp.transform(
+                    origin + wp.transform_get_translation(chained_anchor), wp.transform_get_rotation(chained_anchor)
+                )
+                relative = wp.transform_inverse(anchor_world) * floating_world * tree.x_c
+            anchor = wp.where(is_root, root_anchor, chained_anchor)
+            local = wp.where(is_root, root_local, chained_anchor * relative * child_anchor_inverse)
+            _store_transform(shared, wp.int32(pose_base) + wp.int32(_MOTION_STRIDE) * lane, local)
             _sync_contact_warp()
         if tree.joint >= wp.int32(0):
             if floating_child:
@@ -1396,18 +1397,21 @@ def make_dense_substep_kernel(
         rates = wp.spatial_vector()
         if tree.joint >= wp.int32(0):
             rates = joint_twist(shared, tree, dof_start)
-        for depth in range(max_depth + wp.int32(1)):
-            if tree.depth == depth:
-                twist = rates
-                if tree.parent >= wp.int32(0):
-                    twist += _load_motion(shared, wp.int32(first_base) + wp.int32(_MOTION_STRIDE) * tree.parent)
-                    coriolis = _load_motion(shared, wp.int32(second_base) + wp.int32(_MOTION_STRIDE) * tree.parent)
-                elif _is_floating(tree.kind):
-                    root_velocity = twist
-                coriolis += spatial_cross(twist, rates)
-                _store_spatial(shared, wp.int32(first_base) + wp.int32(_MOTION_STRIDE) * lane, twist)
-                _store_spatial(shared, wp.int32(second_base) + wp.int32(_MOTION_STRIDE) * lane, coriolis)
+        # Every lane adds its parent's stored values at every level, see local_kinematics.
+        has_parent = tree.parent >= wp.int32(0)
+        parent_offset = wp.int32(_MOTION_STRIDE) * wp.max(tree.parent, wp.int32(0))
+        for _level in range(max_depth + wp.int32(1)):
+            twist = rates + wp.where(
+                has_parent, _load_motion(shared, wp.int32(first_base) + parent_offset), wp.spatial_vector()
+            )
+            coriolis = wp.where(
+                has_parent, _load_motion(shared, wp.int32(second_base) + parent_offset), wp.spatial_vector()
+            ) + spatial_cross(twist, rates)
+            _store_spatial(shared, wp.int32(first_base) + wp.int32(_MOTION_STRIDE) * lane, twist)
+            _store_spatial(shared, wp.int32(second_base) + wp.int32(_MOTION_STRIDE) * lane, coriolis)
             _sync_contact_warp()
+        if tree.joint >= wp.int32(0) and not has_parent and _is_floating(tree.kind):
+            root_velocity = twist
         momentum = wp.spatial_vector()
         if tree.joint >= wp.int32(0):
             inertia = _unpack_symmetric_mat66(
@@ -1432,59 +1436,64 @@ def make_dense_substep_kernel(
         dissipation = wp.float32(0.0)
         velocity_com = wp.vec3(0.0)
         omega = wp.vec3(0.0)
-        for depth in range(max_depth + wp.int32(1)):
-            if tree.depth == depth:
-                new_twist = wp.spatial_vector()
-                child_acceleration = wp.spatial_vector()
-                parent_rate = wp.spatial_vector()
-                if tree.parent >= wp.int32(0):
-                    new_twist = _load_motion(shared, wp.int32(first_base) + wp.int32(_MOTION_STRIDE) * tree.parent)
-                    child_acceleration = _load_motion(
-                        shared, wp.int32(second_base) + wp.int32(_MOTION_STRIDE) * tree.parent
-                    )
-                    parent_rate = _load_motion(shared, wp.int32(third_base) + wp.int32(_MOTION_STRIDE) * tree.parent)
-                joint_velocity = wp.spatial_vector()
-                joint_acceleration = wp.spatial_vector()
-                for offset in range(tree.dof_count):
-                    dof = tree.qd_start + offset
-                    local_dof = dof - dof_start
-                    subspace = _load_motion(shared, wp.int32(motion_base) + wp.int32(_MOTION_STRIDE) * local_dof)
-                    rate = _load(shared, wp.int32(qd_base) + local_dof)
-                    acceleration = _load(shared, wp.int32(rhs_base) + local_dof)
-                    midpoint.joint_qd_mid[dof] = rate
-                    dissipation += _joint_dissipation(midpoint, dof, rate)
-                    joint_velocity += subspace * rate
-                    joint_acceleration += subspace * acceleration
-                    rate += acceleration * dt
-                    _store(shared, wp.int32(qd_base) + local_dof, rate)
-                    joint_qd[dof] = rate
-                    new_twist += subspace * rate
-                child_acceleration += joint_acceleration
-                terms = _explicit_step_drift_terms(
-                    new_twist - dt * child_acceleration,
-                    child_acceleration,
-                    joint_velocity,
-                    joint_acceleration,
-                    depth == wp.int32(0),
-                    frame,
-                    momentum,
-                    tree.mass,
-                    x_com,
-                    parent_rate,
-                )
-                drift += terms[6]
-                energy += terms[7]
-                _store_spatial(shared, wp.int32(first_base) + wp.int32(_MOTION_STRIDE) * lane, new_twist)
-                _store_spatial(shared, wp.int32(second_base) + wp.int32(_MOTION_STRIDE) * lane, child_acceleration)
-                _store_spatial(
-                    shared,
-                    wp.int32(third_base) + wp.int32(_MOTION_STRIDE) * lane,
-                    wp.spatial_vector(terms[0], terms[1], terms[2], terms[3], terms[4], terms[5]),
-                )
-                body_velocity[tree.child] = new_twist
-                omega = wp.spatial_bottom(new_twist)
-                velocity_com = wp.spatial_top(new_twist) + wp.cross(omega, x_com)
+        # A joint's own share of the step needs no parent: kick its rates and sum its twists.
+        joint_velocity = wp.spatial_vector()
+        joint_acceleration = wp.spatial_vector()
+        joint_new_twist = wp.spatial_vector()
+        if tree.joint >= wp.int32(0):
+            for offset in range(tree.dof_count):
+                dof = tree.qd_start + offset
+                local_dof = dof - dof_start
+                subspace = _load_motion(shared, wp.int32(motion_base) + wp.int32(_MOTION_STRIDE) * local_dof)
+                rate = _load(shared, wp.int32(qd_base) + local_dof)
+                acceleration = _load(shared, wp.int32(rhs_base) + local_dof)
+                midpoint.joint_qd_mid[dof] = rate
+                dissipation += _joint_dissipation(midpoint, dof, rate)
+                joint_velocity += subspace * rate
+                joint_acceleration += subspace * acceleration
+                rate += acceleration * dt
+                _store(shared, wp.int32(qd_base) + local_dof, rate)
+                joint_qd[dof] = rate
+                joint_new_twist += subspace * rate
+        # The twists, accelerations, and Coriolis rates chain from the parents' stored values
+        # at every level, see local_kinematics.
+        new_twist = wp.spatial_vector()
+        terms = _vec8()
+        for _level in range(max_depth + wp.int32(1)):
+            new_twist = (
+                wp.where(has_parent, _load_motion(shared, wp.int32(first_base) + parent_offset), wp.spatial_vector())
+                + joint_new_twist
+            )
+            child_acceleration = (
+                wp.where(has_parent, _load_motion(shared, wp.int32(second_base) + parent_offset), wp.spatial_vector())
+                + joint_acceleration
+            )
+            terms = _explicit_step_drift_terms(
+                new_twist - dt * child_acceleration,
+                child_acceleration,
+                joint_velocity,
+                joint_acceleration,
+                tree.depth == wp.int32(0),
+                frame,
+                momentum,
+                tree.mass,
+                x_com,
+                wp.where(has_parent, _load_motion(shared, wp.int32(third_base) + parent_offset), wp.spatial_vector()),
+            )
+            _store_spatial(shared, wp.int32(first_base) + wp.int32(_MOTION_STRIDE) * lane, new_twist)
+            _store_spatial(shared, wp.int32(second_base) + wp.int32(_MOTION_STRIDE) * lane, child_acceleration)
+            _store_spatial(
+                shared,
+                wp.int32(third_base) + wp.int32(_MOTION_STRIDE) * lane,
+                wp.spatial_vector(terms[0], terms[1], terms[2], terms[3], terms[4], terms[5]),
+            )
             _sync_contact_warp()
+        if tree.joint >= wp.int32(0):
+            drift = terms[6]
+            energy = terms[7]
+            body_velocity[tree.child] = new_twist
+            omega = wp.spatial_bottom(new_twist)
+            velocity_com = wp.spatial_top(new_twist) + wp.cross(omega, x_com)
         linear = wp.spatial_top(momentum)
         totals = _sum_reduced_group_vec4(wp.vec4(linear[0], linear[1], linear[2], drift), wp.int32(_LANES), _FULL_MASK)
         target_linear_momentum = wp.vec3(totals[0], totals[1], totals[2])
