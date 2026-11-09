@@ -9,6 +9,7 @@ import unittest
 import numpy as np
 import warp as wp
 
+import newton
 from newton._src.solvers.phoenx.constraints.constraint_contact_solve import (
     _default_contact_solver_coefficients,
 )
@@ -22,6 +23,7 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_soft_coefficients,
     contact_container_set_sweeps,
 )
+from newton.solvers import SolverPhoenX
 
 
 @wp.kernel
@@ -112,6 +114,71 @@ class TestDefaultContactCoefficients(unittest.TestCase):
                     wp.launch(_compare_contact_coefficients, dim=len(idts), inputs=inputs, device="cuda:0")
                 wp.capture_launch(capture.graph)
                 np.testing.assert_allclose(specialized.numpy(), reference.numpy(), rtol=2.0e-5, atol=0.0)
+
+    def test_contact_hertz_softens_the_capped_spring(self):
+        idt = 960.0
+        idts = wp.array(np.array([idt], dtype=np.float32), device="cuda:0")
+        for hertz, expected in ((120.0, 120.0), (1.0e6, contact_spring_omega_dt(10, 1) * idt / (2.0 * math.pi))):
+            with self.subTest(hertz=hertz):
+                cc = ContactContainer()
+                contact_container_set_sweeps(cc, 10, 1, contact_hertz=hertz, dt=1.0 / idt)
+                specialized = wp.empty((1, 3), dtype=wp.float32, device="cuda:0")
+                reference = wp.empty_like(specialized)
+                inputs = [cc, idts, expected / idt, specialized, reference]
+                with wp.ScopedCapture(device="cuda:0") as capture:
+                    wp.launch(_compare_contact_coefficients, dim=1, inputs=inputs, device="cuda:0")
+                wp.capture_launch(capture.graph)
+                np.testing.assert_allclose(specialized.numpy(), reference.numpy(), rtol=2.0e-5, atol=0.0)
+
+
+def _resting_box_penetration(substeps: int, contact_hertz: float | None) -> float:
+    """Penetration [m] of a box resting on the ground after one second."""
+    builder = newton.ModelBuilder()
+    builder.add_ground_plane()
+    half = 0.05
+    body = builder.add_body(xform=wp.transform((0.0, 0.0, half), wp.quat_identity()))
+    builder.add_shape_box(body, hx=half, hy=half, hz=half)
+    model = builder.finalize(device="cuda:0")
+    pipeline = newton.CollisionPipeline(model, contact_matching="sticky")
+    solver = SolverPhoenX(
+        model, collision_pipeline=pipeline, substeps=substeps, solver_iterations=8, contact_hertz=contact_hertz
+    )
+    state_0, state_1 = model.state(), model.state()
+    control = model.control()
+    contacts = pipeline.contacts()
+    frame_dt = 1.0 / 60.0
+
+    def simulate():
+        pipeline.collide(state_0, contacts)
+        solver.step(state_0, state_1, control, contacts, frame_dt)
+        wp.copy(state_0.body_q, state_1.body_q)
+        wp.copy(state_0.body_qd, state_1.body_qd)
+
+    with wp.ScopedCapture(device="cuda:0") as capture:
+        simulate()
+    for _ in range(60):
+        wp.capture_launch(capture.graph)
+    return half - float(state_0.body_q.numpy()[body, 2])
+
+
+@unittest.skipUnless(wp.is_cuda_available(), "PhoenX contact tests require CUDA")
+class TestContactHertz(unittest.TestCase):
+    def test_resting_compression_follows_the_requested_frequency(self):
+        """A box rests ``g / omega**2`` deep at any substep count, unlike the substep-scaled default."""
+        hertz = 50.0
+        expected = 9.81 / (2.0 * math.pi * hertz) ** 2
+        for substeps in (4, 16):
+            with self.subTest(substeps=substeps):
+                self.assertAlmostEqual(_resting_box_penetration(substeps, hertz), expected, delta=0.05 * expected)
+        self.assertLess(_resting_box_penetration(16, None), 0.1 * expected)
+
+    def test_rejects_nonpositive_frequency(self):
+        builder = newton.ModelBuilder()
+        builder.add_body()
+        model = builder.finalize(device="cuda:0")
+        for hertz in (0.0, -1.0, math.inf):
+            with self.subTest(hertz=hertz), self.assertRaises(ValueError):
+                SolverPhoenX(model, contact_hertz=hertz)
 
 
 if __name__ == "__main__":

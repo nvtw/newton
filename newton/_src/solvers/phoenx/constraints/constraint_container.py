@@ -698,14 +698,12 @@ def contact_spring_omega_dt(solver_iterations: int, velocity_iterations: int) ->
     return lo
 
 
-def contact_soft_coefficient_values(solver_iterations: int, velocity_iterations: int) -> tuple[float, float, float]:
-    """Return ``(bias_rate * dt, mass_coeff, impulse_coeff)`` of maximal contact rows.
+def contact_soft_coefficient_values(omega_dt: float) -> tuple[float, float, float]:
+    """Return ``(bias_rate * dt, mass_coeff, impulse_coeff)`` of a contact spring.
 
-    The spring is :data:`DEFAULT_HERTZ_CONTACT` capped at
-    :func:`contact_spring_omega_dt`; at that cap ``omega * dt`` is fixed, so
-    the coefficients do not depend on ``dt``.
+    ``omega_dt`` is the spring's angular frequency times the substep ``dt``
+    [rad], with damping ratio :data:`DEFAULT_DAMPING_RATIO`.
     """
-    omega_dt = contact_spring_omega_dt(solver_iterations, velocity_iterations)
     a1 = 2.0 * float(DEFAULT_DAMPING_RATIO.value) + omega_dt
     a2 = omega_dt * a1
     return omega_dt / a1, a2 / (1.0 + a2), 1.0 / (1.0 + a2)

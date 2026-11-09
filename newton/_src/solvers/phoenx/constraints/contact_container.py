@@ -177,8 +177,9 @@ class ContactContainer:
     #: of every substep that reuses the prepared rows; empty when every
     #: substep prepares its rows.
     gap: wp.array[wp.float32]
-    #: Nonzero when the sweep schedule caps the maximal contact spring below
-    #: the Nyquist limit (:func:`contact_container_set_sweeps`). The capped
+    #: Nonzero when the sweep schedule or a requested contact frequency caps
+    #: the maximal contact spring below the Nyquist limit
+    #: (:func:`contact_container_set_sweeps`). The capped
     #: spring's bias rate times the substep ``dt``, mass and impulse
     #: coefficients follow as launch constants; uncapped rows keep the
     #: Nyquist-limited :data:`DEFAULT_HERTZ_CONTACT` spring.
@@ -196,12 +197,25 @@ def cc_soft_coefficients(cc: ContactContainer, idt: wp.float32):
     return cc.soft_bias_dt * idt, cc.soft_mass_coeff, cc.soft_impulse_coeff
 
 
-def contact_container_set_sweeps(cc: ContactContainer, solver_iterations: int, velocity_iterations: int) -> None:
-    """Set the contact spring for a sweep schedule; see :func:`contact_spring_omega_dt`."""
-    cc.soft_capped = int(contact_spring_omega_dt(solver_iterations, velocity_iterations) < math.pi)
-    cc.soft_bias_dt, cc.soft_mass_coeff, cc.soft_impulse_coeff = contact_soft_coefficient_values(
-        solver_iterations, velocity_iterations
-    )
+def contact_container_set_sweeps(
+    cc: ContactContainer,
+    solver_iterations: int,
+    velocity_iterations: int,
+    contact_hertz: float | None = None,
+    dt: float = 0.0,
+) -> None:
+    """Set the contact spring for a sweep schedule and substep ``dt`` [s].
+
+    The spring is the stiffest one the sweeps keep stable
+    (:func:`contact_spring_omega_dt`), softened to ``contact_hertz`` [Hz]
+    when that is given and lower. A fixed frequency gives each contact a
+    stiffness that does not change with the substep count.
+    """
+    omega_dt = contact_spring_omega_dt(solver_iterations, velocity_iterations)
+    if contact_hertz is not None:
+        omega_dt = min(omega_dt, 2.0 * math.pi * float(contact_hertz) * float(dt))
+    cc.soft_capped = int(omega_dt < math.pi)
+    cc.soft_bias_dt, cc.soft_mass_coeff, cc.soft_impulse_coeff = contact_soft_coefficient_values(omega_dt)
 
 
 @wp.kernel(enable_backward=False)

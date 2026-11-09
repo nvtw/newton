@@ -305,6 +305,7 @@ class SolverPhoenX(SolverBase):
         solver_scheme: str = "soft",
         velocity_iterations: int = 1,
         velocity_relaxation: str = "each_substep",
+        contact_hertz: float | None = None,
         joint_friction_model: str = "hard",
         contact_friction_model: str = "point",
         default_friction: float = 0.5,
@@ -370,6 +371,17 @@ class SolverPhoenX(SolverBase):
             velocity_relaxation: ``"each_substep"`` relaxes after every temporal
                 substep (the default). ``"final_substep"`` relaxes only after
                 the final substep of each solver step.
+            contact_hertz: Natural frequency [Hz] of the rigid contact springs
+                (soft rows with damping ratio 1). ``None`` (the default) uses
+                the stiffest spring the sweep schedule keeps stable, which
+                scales with the substep rate. A frequency gives each contact
+                a stiffness of its effective mass times ``(2 pi hertz)**2``
+                that does not change with the substep count, so extra
+                substeps buy convergence instead of stiffness. Deep stacks of
+                light bodies, such as tall card houses, stand with a few
+                hundred hertz; a resting contact then compresses about
+                ``g / (2 pi hertz)**2`` per supported body weight. Values above
+                the schedule's stable limit have no effect.
             joint_friction_model: "hard" uses PhoenX Coulomb friction;
                 "mujoco" maps MuJoCo solref/solimp friction metadata
                 when available.
@@ -990,6 +1002,7 @@ class SolverPhoenX(SolverBase):
             solver_iterations=int(solver_iterations),
             velocity_iterations=int(velocity_iterations),
             velocity_relaxation=velocity_relaxation,
+            contact_hertz=contact_hertz,
             gravity=gravity_arg,
             rigid_contact_max=rigid_contact_max,
             max_contact_columns=(

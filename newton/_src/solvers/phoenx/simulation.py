@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable
 
 import numpy as np
@@ -351,6 +352,7 @@ class PhoenXWorld:
         solver_iterations: int = 8,
         velocity_iterations: int = 1,
         velocity_relaxation: str = "each_substep",
+        contact_hertz: float | None = None,
         gravity: tuple[float, float, float] | Iterable[tuple[float, float, float]] = (0.0, -9.81, 0.0),
         rigid_contact_max: int = 0,
         max_contact_columns: int | None = None,
@@ -415,6 +417,9 @@ class PhoenXWorld:
                 relax (recommended for tall stacks).
             velocity_relaxation: ``"each_substep"`` relaxes after every temporal
                 substep; ``"final_substep"`` relaxes only at step end.
+            contact_hertz: Natural frequency [Hz] of the rigid contact
+                springs, or ``None`` for the stiffest spring the sweep
+                schedule keeps stable. See :class:`SolverPhoenX`.
             prepare_refresh_stride: Refresh cached per-row prepare data
                 every N substeps in rigid contact/joint scenes without
                 deformables, mass splitting, or sleeping. ``"auto"``
@@ -669,6 +674,9 @@ class PhoenXWorld:
         if velocity_relaxation not in ("each_substep", "final_substep"):
             raise ValueError("velocity_relaxation must be 'each_substep' or 'final_substep'")
         self.velocity_relaxation = velocity_relaxation
+        if contact_hertz is not None and not (math.isfinite(contact_hertz) and contact_hertz > 0.0):
+            raise ValueError(f"contact_hertz must be None or a positive finite frequency (got {contact_hertz})")
+        self.contact_hertz = None if contact_hertz is None else float(contact_hertz)
         self.velocity_iterations = int(velocity_iterations)
         if self.velocity_iterations < 0:
             raise ValueError(f"velocity_iterations must be >= 0 (got {self.velocity_iterations})")
@@ -2589,14 +2597,18 @@ class PhoenXWorld:
         The stiffest spring that keeps a resting stack stable depends on how
         many biased and relax sweeps each substep runs; see
         :func:`contact_spring_omega_dt`. Substeps without relax bound it when
-        relaxation runs only on the final substep.
+        relaxation runs only on the final substep. A requested
+        :attr:`contact_hertz` softens it further at the current substep ``dt``.
         """
         relax = self.velocity_iterations
         if self.velocity_relaxation == "final_substep" and self.substeps > 1:
             relax = 0
-        contact_container_set_sweeps(self._contact_container, self.solver_iterations, relax)
+        dt = float(self.substep_dt)
+        contact_container_set_sweeps(self._contact_container, self.solver_iterations, relax, self.contact_hertz, dt)
         if self._contact_container_solve is not self._contact_container:
-            contact_container_set_sweeps(self._contact_container_solve, self.solver_iterations, relax)
+            contact_container_set_sweeps(
+                self._contact_container_solve, self.solver_iterations, relax, self.contact_hertz, dt
+            )
 
     def step(
         self,
