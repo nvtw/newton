@@ -48,7 +48,7 @@ PROJECTILE_MASS = 0.01  # [kg]
 PROJECTILE_SPEED = 2.5  # [m/s]
 
 
-def card_poses(thickness: float) -> list[tuple[wp.transform, bool]]:
+def card_poses(thickness: float, levels: int = LEVELS) -> list[tuple[wp.transform, bool]]:
     """Poses of all cards and whether each one lies flat, built level by level."""
     h, t = 0.5 * CARD_HEIGHT, 0.5 * thickness
     s, c = math.sin(LEAN), math.cos(LEAN)
@@ -57,8 +57,8 @@ def card_poses(thickness: float) -> list[tuple[wp.transform, bool]]:
     flat = wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), 0.5 * math.pi)
     poses = []
     base = 0.0
-    for level in range(LEVELS):
-        tents = LEVELS - level
+    for level in range(levels):
+        tents = levels - level
         centers = [(i - 0.5 * (tents - 1)) * PITCH for i in range(tents)]
         # Each card stands on its lowest edge and touches its partner's top edge at the apex.
         z = base + h * c + t * s
@@ -135,7 +135,10 @@ class Example:
             density=CARD_MASS / (CARD_WIDTH * CARD_HEIGHT * thickness), mu=FRICTION, restitution=0.0
         )
         self.flat = []
-        for pose, flat in card_poses(thickness):
+        if args.levels < 1:
+            raise ValueError("the house needs at least one level")
+        self.levels = args.levels
+        for pose, flat in card_poses(thickness, self.levels):
             body = builder.add_body(xform=pose)
             color = (0.93, 0.92, 0.88) if flat else (0.72, 0.1, 0.12)
             builder.add_shape_box(
@@ -186,7 +189,7 @@ class Example:
     def step(self):
         if self.frame == self.impact_frame:
             # Aim at the lower edge of the right-most bottom tent.
-            target = wp.vec3(0.5 * (LEVELS - 1) * PITCH, 0.0, 0.045)
+            target = wp.vec3(0.5 * (self.levels - 1) * PITCH, 0.0, 0.045)
             wp.launch(_launch_kernel, dim=PROJECTILES, inputs=[self.dyn, target, self.projectiles])
         if self.graph is not None:
             wp.capture_launch(self.graph)
@@ -198,6 +201,7 @@ class Example:
     def render(self):
         self.viewer.begin_frame(self.sim_time)
         self.viewer.log_state(self.state_0)
+        self.viewer.log_contacts(self.contacts, self.state_0)
         wp.launch(
             _projectile_xforms_kernel,
             dim=PROJECTILES,
@@ -274,6 +278,7 @@ class Example:
         parser.add_argument("--card-thickness", type=float, default=0.7, help="Card thickness [mm].")
         parser.add_argument("--substeps", type=int, default=16, help="Physics substeps per frame.")
         parser.add_argument("--iterations", type=int, default=6, help="Solver iterations per substep.")
+        parser.add_argument("--levels", type=int, default=LEVELS, help="Levels of the house (26 cards at 4).")
         parser.add_argument(
             "--impact-time", type=float, default=6.7, help="Time the projectiles are fired [s]; negative never fires."
         )

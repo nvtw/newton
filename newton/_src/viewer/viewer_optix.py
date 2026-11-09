@@ -64,6 +64,17 @@ else:
     _WARP_OPTIX_IMPORT_ERROR = None
 
 
+def _make_picking(model, **_backend_gains) -> Picking:
+    """Create Newton's picking with its own spring gains.
+
+    The path-tracing backend requests a 50 1/s^2 spring, which pulls a body
+    10 cm from the cursor with only 5 m/s^2 and cannot lift it against
+    gravity. Newton's defaults hold a picked body near the cursor and limit
+    the pull acceleration instead of damping it away.
+    """
+    return Picking(model)
+
+
 @wp.kernel
 def _apply_optix_color_palette(
     colors: wp.array[wp.vec3],
@@ -277,7 +288,7 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
         self._overlay_depth_pbo = None
         self._overlay_depth_cuda = None
         self._overlay_depth_size = (0, 0)
-        kwargs.setdefault("picking_factory", Picking)
+        kwargs.setdefault("picking_factory", _make_picking)
         super().__init__(
             width=width,
             height=height,
