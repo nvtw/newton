@@ -129,7 +129,8 @@ def check_mass_against_fp64(snapshot):
 
 class TestParallelPrepareSplit(unittest.TestCase):
     def test_pointwise_geometry_rejects_unsupported_modes(self):
-        for option in ("cloth_support", "patch_friction", "packed_rows", "stage_body_properties"):
+        # Packed rows are supported: colored contact rows prepare their geometry pointwise.
+        for option in ("cloth_support", "patch_friction", "stage_body_properties"):
             with self.subTest(option=option), self.assertRaises(ValueError):
                 _make_contact_prepare_for_iteration_at(
                     pointwise_geometry=True, has_mass_splitting=True, **{"cloth_support": False, option: True}
