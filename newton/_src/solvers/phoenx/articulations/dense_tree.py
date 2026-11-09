@@ -15,14 +15,12 @@ Algorithms*, Sec. 6.5): row ``k`` is nonzero only at the ancestor DOFs of
 the DOF's root-to-self path, so the entry of ancestor ``j`` sits at the depth
 of ``j``.
 
-All passes are written in pull form, so every inner loop only reads:
-
-* row ``k`` of the factor is ``M_kj - sum_i L_ik L_ij`` over the descendants
-  ``i`` of ``k``, and DOFs of equal height are independent;
-* ``L^T z = b`` gives ``z_k = (b_k - sum_i L_ik z_i) / L_kk`` over the same
-  descendants, leaves first;
-* ``L x = z`` gives ``x_i = (z_i - sum_j L_ij x_j) / L_ii`` over the ancestors
-  ``j`` of ``i``, root first.
+Row ``k`` of the factor is ``M_kj - sum_i L_ik L_ij`` over the descendants
+``i`` of ``k``, written in pull form so DOFs of equal height are independent.
+The shared-memory triangular solves hold the vector in lane registers and
+eliminate one column per step: ``L^T z = b`` leaves first, each ``z_k``
+updating its ancestors, and ``L x = z`` root first, each ``x_j`` updating its
+descendants; the global :func:`dense_tree_solve` keeps the pull form by levels.
 
 The velocity advance applies ``M^-1 = L^-1 L^-T`` on each articulation's lane
 group, and the contact rows store ``J`` and ``W = M^-1 J^T`` for the projected
@@ -77,16 +75,22 @@ def dense_dof_bucket(dof_count: int) -> int:
 
 @functools.cache
 def _make_shared_base(length: int):
-    """Return the address of one block's static shared workspace of ``length`` words.
+    """Return the shared-window address of one block's static shared workspace of ``length`` words.
 
     Warp tiles synchronize the block after every element write; the dense
     kernels order their phases with ``__syncwarp`` instead and address raw,
-    16-byte aligned shared storage.
+    16-byte aligned shared storage through 32-bit ``ld.shared``/``st.shared``
+    addresses. Generic pointers into shared memory would make the compiler
+    rebuild the block's shared window from ``SR_CgaCtaId`` at most accesses.
     """
     snippet = f"""
 #if defined(__CUDA_ARCH__)
     __shared__ __align__(16) float dense_shared[{int(length)}];
-    return (uint64_t)dense_shared;
+    unsigned address = (unsigned)__cvta_generic_to_shared(dense_shared);
+    // An opaque copy keeps the address in a register: rebuilt, it would read SR_CgaCtaId
+    // on the dependency chain of every shared access.
+    asm volatile("mov.u32 %0, %0;" : "+r"(address));
+    return address;
 #else
     return 0;
 #endif
@@ -98,35 +102,75 @@ def _make_shared_base(length: int):
     return shared_base
 
 
-@wp.func_native("return ((const float*)base)[index];")
+# Shared accesses are volatile so they keep their program order among each other and
+# around ``__syncwarp``; the address is the 32-bit shared-window offset in ``base``.
+_ADDRESS = "(unsigned)base + {scale}u * (unsigned)index"
+
+
+def _device_only(snippet: str, fallback: str = "") -> str:
+    """Guard a shared-memory snippet; the dense kernels only run on CUDA devices."""
+    return f"\n#if defined(__CUDA_ARCH__)\n{snippet}\n#else\n{fallback}\n#endif\n"
+
+
+@wp.func_native(
+    _device_only(
+        f"""
+    float value;
+    asm volatile("ld.shared.f32 %0, [%1];" : "=f"(value) : "r"({_ADDRESS.format(scale=4)}));
+    return value;
+""",
+        "return {};",
+    )
+)
 def _load(base: wp.uint64, index: wp.int32) -> wp.float32: ...
 
 
-@wp.func_native("((float*)base)[index] = value;")
+@wp.func_native(
+    _device_only(
+        f"""asm volatile("st.shared.f32 [%0], %1;" :: "r"({_ADDRESS.format(scale=4)}), "f"(value));""",
+        "",
+    )
+)
 def _store(base: wp.uint64, index: wp.int32, value: wp.float32): ...
 
 
-@wp.func_native("return ((const int*)base)[index];")
+@wp.func_native(
+    _device_only(
+        f"""
+    int value;
+    asm volatile("ld.shared.s32 %0, [%1];" : "=r"(value) : "r"({_ADDRESS.format(scale=4)}));
+    return value;
+""",
+        "return {};",
+    )
+)
 def _load_int(base: wp.uint64, index: wp.int32) -> wp.int32: ...
 
 
-@wp.func_native("((int*)base)[index] = value;")
+@wp.func_native(
+    _device_only(
+        f"""asm volatile("st.shared.s32 [%0], %1;" :: "r"({_ADDRESS.format(scale=4)}), "r"(value));""",
+        "",
+    )
+)
 def _store_int(base: wp.uint64, index: wp.int32, value: wp.int32): ...
 
 
 @wp.func_native(
-    """
-    const float4* source = (const float4*)((const float*)base + index);
+    _device_only(
+        f"""
+    const unsigned address = {_ADDRESS.format(scale=4)};
     wp::vec_t<24, float> result;
-    for (int word = 0; word < 6; ++word) {
-        const float4 value = source[word];
-        result[4 * word] = value.x;
-        result[4 * word + 1] = value.y;
-        result[4 * word + 2] = value.z;
-        result[4 * word + 3] = value.w;
-    }
+    for (int word = 0; word < 6; ++word) {{
+        asm volatile("ld.shared.v4.f32 {{%0, %1, %2, %3}}, [%4];"
+                     : "=f"(result[4 * word]), "=f"(result[4 * word + 1]), "=f"(result[4 * word + 2]),
+                       "=f"(result[4 * word + 3])
+                     : "r"(address + 16u * word));
+    }}
     return result;
-"""
+""",
+        "return {};",
+    )
 )
 def _load24(base: wp.uint64, index: wp.int32) -> _vec24:
     """Load a padded spatial inertia from 16-byte aligned shared storage."""
@@ -134,19 +178,22 @@ def _load24(base: wp.uint64, index: wp.int32) -> _vec24:
 
 
 @wp.func_native(
-    """
-    const float4* source = (const float4*)((const float*)base + index);
-    const float4 low = source[0];
-    const float4 high = source[1];
+    _device_only(
+        f"""
+    const unsigned address = {_ADDRESS.format(scale=4)};
     wp::spatial_vector result;
-    result[0] = low.x;
-    result[1] = low.y;
-    result[2] = low.z;
-    result[3] = low.w;
-    result[4] = high.x;
-    result[5] = high.y;
+    float pad0;
+    float pad1;
+    asm volatile("ld.shared.v4.f32 {{%0, %1, %2, %3}}, [%4];"
+                 : "=f"(result[0]), "=f"(result[1]), "=f"(result[2]), "=f"(result[3])
+                 : "r"(address));
+    asm volatile("ld.shared.v4.f32 {{%0, %1, %2, %3}}, [%4];"
+                 : "=f"(result[4]), "=f"(result[5]), "=f"(pad0), "=f"(pad1)
+                 : "r"(address + 16u));
     return result;
-"""
+""",
+        "return {};",
+    )
 )
 def _load_motion(base: wp.uint64, index: wp.int32) -> wp.spatial_vector:
     """Load a padded motion subspace from 16-byte aligned shared storage."""
@@ -323,24 +370,69 @@ def _mask_kernel(values: wp.array[wp.int32], mask: wp.array[wp.int32], masked: w
     masked[index] = values[index] * mask[index]
 
 
-@wp.func_native("return ((const unsigned short*)base)[index];")
+@wp.func_native(
+    _device_only(
+        f"""
+    unsigned short value;
+    asm volatile("ld.shared.u16 %0, [%1];" : "=h"(value) : "r"({_ADDRESS.format(scale=2)}));
+    return value;
+""",
+        "return {};",
+    )
+)
 def _load_u16(base: wp.uint64, index: wp.int32) -> wp.int32: ...
 
 
-@wp.func_native("((unsigned short*)base)[index] = (unsigned short)value;")
+@wp.func_native(
+    _device_only(
+        f"""asm volatile("st.shared.u16 [%0], %1;" :: "r"({_ADDRESS.format(scale=2)}), "h"((unsigned short)value));""",
+        "",
+    )
+)
 def _store_u16(base: wp.uint64, index: wp.int32, value: wp.int32): ...
 
 
-@wp.func_native("return ((const unsigned char*)base)[index];")
+@wp.func_native(
+    _device_only(
+        f"""
+    unsigned value;
+    asm volatile("ld.shared.u8 %0, [%1];" : "=r"(value) : "r"({_ADDRESS.format(scale=1)}));
+    return value;
+""",
+        "return {};",
+    )
+)
 def _load_u8(base: wp.uint64, index: wp.int32) -> wp.int32: ...
 
 
-@wp.func_native("((unsigned char*)base)[index] = (unsigned char)value;")
+@wp.func_native(
+    _device_only(
+        f"""asm volatile("st.shared.u8 [%0], %1;" :: "r"({_ADDRESS.format(scale=1)}), "r"(value));""",
+        "",
+    )
+)
 def _store_u8(base: wp.uint64, index: wp.int32, value: wp.int32): ...
 
 
-@wp.func_native("((unsigned int*)base)[index] = value;")
+@wp.func_native(
+    _device_only(
+        f"""asm volatile("st.shared.u32 [%0], %1;" :: "r"({_ADDRESS.format(scale=4)}), "r"(value));""",
+        "",
+    )
+)
 def _store_word(base: wp.uint64, index: wp.int32, value: wp.uint32): ...
+
+
+@wp.func_native(
+    """
+#if defined(__CUDA_ARCH__)
+    return __shfl_sync(0xffffffffu, value, source);
+#else
+    return value;
+#endif
+"""
+)
+def _lane_float(value: wp.float32, source: wp.int32) -> wp.float32: ...
 
 
 class DenseSharedLayout:
@@ -355,17 +447,7 @@ class DenseSharedLayout:
     """
 
     _HALFWORD_TABLES = ("desc_row", "level_pair", "dof_entry", "desc_start", "level_pair_start", "subtree_start")
-    _BYTE_TABLES = (
-        "path",
-        "desc_dof",
-        "dof_joint",
-        "height_start",
-        "height_dof",
-        "depth_start",
-        "depth_dof",
-        "subtree_joint",
-        "joint_last_dof",
-    )
+    _BYTE_TABLES = ("path", "dof_joint", "subtree_joint", "joint_last_dof")
 
     def __init__(
         self,
@@ -378,8 +460,10 @@ class DenseSharedLayout:
         self.factor = 0
         self.motion = entry_capacity
         self.diagonal = self.motion + _MOTION_STRIDE * max_dofs
-        half_word = self.diagonal + max_dofs
-        self.tables = half_word
+        # Each DOF's ancestor DOFs as a 64-bit mask in two words, low word first.
+        self.ancestors = self.diagonal + max_dofs
+        half_word = self.ancestors + 2 * max_dofs
+        self.tables = self.ancestors
         halfwords = [
             ("desc_row", entry_capacity),
             ("level_pair", entry_capacity),
@@ -395,12 +479,7 @@ class DenseSharedLayout:
         byte_word = (offset + 1) // 2
         bytes_ = [
             ("path", entry_capacity),
-            ("desc_dof", entry_capacity),
             ("dof_joint", max_dofs),
-            ("height_start", max_dofs + 2),
-            ("height_dof", max_dofs),
-            ("depth_start", max_dofs + 2),
-            ("depth_dof", max_dofs),
             ("subtree_joint", subtree_capacity),
             ("joint_last_dof", joint_capacity),
         ]
@@ -421,6 +500,10 @@ class DenseSharedLayout:
         """
         image = np.zeros(4 * (self.tables_end - self.tables), dtype=np.uint8)
         dof_count = len(template["dof_entry"]) - 1
+        masks = np.asarray(template["ancestor_mask"], dtype=np.uint64)
+        image[4 * (self.ancestors - self.tables) : 4 * (self.ancestors - self.tables) + masks.nbytes] = masks.view(
+            np.uint8
+        )
         values = {
             "desc_row": template["desc_row"],
             "level_pair": (template["level_pair"] >> 16) << 8 | (template["level_pair"] & 0xFF),
@@ -429,12 +512,7 @@ class DenseSharedLayout:
             "level_pair_start": template["level_pair_start"],
             "subtree_start": template["subtree_start"],
             "path": template["path"],
-            "desc_dof": template["desc_dof"],
             "dof_joint": template["dof_joint"][:dof_count],
-            "height_start": template["height_start"],
-            "height_dof": template["height_dof"],
-            "depth_start": template["depth_start"],
-            "depth_dof": template["depth_dof"],
             "subtree_joint": template["subtree_joint"],
             "joint_last_dof": template["joint_last_dof"][:-1] + 1,
         }
@@ -451,7 +529,7 @@ class DenseTreeOps:
 
     Attributes:
         layout: The shared workspace layout.
-        stage: Stage an articulation's template tables; returns its height and depth level counts.
+        stage: Stage an articulation's template tables; returns its height level count.
         factor: Assemble and factor ``M = L^T L`` from the per-pose motion subspaces and inertias.
         restore: Reload a stored ``L`` and stage the motion subspaces it was factored with.
         solve_upper: Overwrite a shared vector ``b`` by ``L^-T b``, leaves first.
@@ -473,18 +551,15 @@ def make_dense_tree_ops(
     motion_base = layout.motion
     diagonal_base = layout.diagonal
     dof_entry = layout.dof_entry
+    ancestors = layout.ancestors
+    two_rows = max_dofs > _LANES
     desc_start = layout.desc_start
     desc_row = layout.desc_row
     level_pair_start = layout.level_pair_start
     level_pair = layout.level_pair
     subtree_start = layout.subtree_start
     path = layout.path
-    desc_dof = layout.desc_dof
     dof_joint = layout.dof_joint
-    height_start = layout.height_start
-    height_dof = layout.height_dof
-    depth_start = layout.depth_start
-    depth_dof = layout.depth_dof
     subtree_joint = layout.subtree_joint
     table_base = layout.tables
     table_words = layout.tables_end - layout.tables
@@ -525,8 +600,8 @@ def make_dense_tree_ops(
         dense: DenseTreeData,
         template_image: wp.array[wp.uint32],
         template_image_start: wp.array[wp.int32],
-    ) -> wp.vec2i:
-        """Copy an articulation's template tables into the workspace; return its height and depth level counts."""
+    ) -> wp.int32:
+        """Copy an articulation's template tables into the workspace; return its height level count."""
         template = dense.articulation_template[articulation]
         source = template_image_start[template]
         for r in range(table_rounds):
@@ -536,9 +611,8 @@ def make_dense_tree_ops(
         heights = (
             dense.template_height_start[template + wp.int32(1)] - wp.int32(1) - dense.template_height_start[template]
         )
-        depths = dense.template_depth_start[template + wp.int32(1)] - wp.int32(1) - dense.template_depth_start[template]
         _sync_contact_warp()
-        return wp.vec2i(heights, depths)
+        return heights
 
     @wp.func
     def descendant_products(shared: wp.uint64, k: wp.int32, depth: wp.int32, column: wp.int32) -> wp.vec2:
@@ -747,64 +821,119 @@ def make_dense_tree_ops(
         _sync_contact_warp()
 
     @wp.func
-    def solve_upper(shared: wp.uint64, vector_base: wp.int32, heights: wp.int32, lane: wp.int32):
-        for level in range(heights):
-            index = _load_u8(shared, wp.int32(height_start) + level) + lane
-            end = _load_u8(shared, wp.int32(height_start) + level + wp.int32(1))
-            while index < end:
-                k = _load_u8(shared, wp.int32(height_dof) + index)
-                diagonal_entry = _load_u16(shared, wp.int32(dof_entry) + k + wp.int32(1)) - wp.int32(1)
-                depth = diagonal_entry - _load_u16(shared, wp.int32(dof_entry) + k)
-                sums = wp.vec2()
-                descendant = _load_u16(shared, wp.int32(desc_start) + k)
-                descendant_end = _load_u16(shared, wp.int32(desc_start) + k + wp.int32(1))
-                while descendant + wp.int32(1) < descendant_end:
-                    sums += wp.vec2(
-                        _load(shared, _load_u16(shared, wp.int32(desc_row) + descendant) + depth)
-                        * _load(shared, vector_base + _load_u8(shared, wp.int32(desc_dof) + descendant)),
-                        _load(shared, _load_u16(shared, wp.int32(desc_row) + descendant + wp.int32(1)) + depth)
-                        * _load(shared, vector_base + _load_u8(shared, wp.int32(desc_dof) + descendant + wp.int32(1))),
-                    )
-                    descendant += wp.int32(2)
-                if descendant < descendant_end:
-                    sums[0] += _load(shared, _load_u16(shared, wp.int32(desc_row) + descendant) + depth) * _load(
-                        shared, vector_base + _load_u8(shared, wp.int32(desc_dof) + descendant)
-                    )
-                value = _load(shared, vector_base + k) - (sums[0] + sums[1])
-                _store(shared, vector_base + k, value / _load(shared, diagonal_entry))
-                index += wp.int32(_LANES)
-            _sync_contact_warp()
+    def load_row(shared: wp.uint64, vector_base: wp.int32, n: wp.int32, row: wp.int32) -> wp.vec4:
+        """Return a lane's row ``(b_row, 1 / L_row,row, row entry, depth of row)``, zero beyond ``n``."""
+        result = wp.vec4(0.0)
+        if row < n:
+            entry = _load_u16(shared, wp.int32(dof_entry) + row)
+            diagonal_entry = _load_u16(shared, wp.int32(dof_entry) + row + wp.int32(1)) - wp.int32(1)
+            result = wp.vec4(
+                _load(shared, vector_base + row),
+                wp.float32(1.0) / _load(shared, diagonal_entry),
+                wp.float32(entry),
+                wp.float32(diagonal_entry - entry),
+            )
+        return result
 
     @wp.func
-    def solve_lower(shared: wp.uint64, vector_base: wp.int32, depths: wp.int32, lane: wp.int32):
-        for level in range(depths):
-            index = _load_u8(shared, wp.int32(depth_start) + level) + lane
-            end = _load_u8(shared, wp.int32(depth_start) + level + wp.int32(1))
-            while index < end:
-                i = _load_u8(shared, wp.int32(depth_dof) + index)
-                entry = _load_u16(shared, wp.int32(dof_entry) + i)
-                diagonal_entry = _load_u16(shared, wp.int32(dof_entry) + i + wp.int32(1)) - wp.int32(1)
-                sums = wp.vec2()
-                while entry + wp.int32(1) < diagonal_entry:
-                    sums += wp.vec2(
-                        _load(shared, entry) * _load(shared, vector_base + _load_u8(shared, wp.int32(path) + entry)),
-                        _load(shared, entry + wp.int32(1))
-                        * _load(shared, vector_base + _load_u8(shared, wp.int32(path) + entry + wp.int32(1))),
-                    )
-                    entry += wp.int32(2)
-                if entry < diagonal_entry:
-                    sums[0] += _load(shared, entry) * _load(
-                        shared, vector_base + _load_u8(shared, wp.int32(path) + entry)
-                    )
-                value = _load(shared, vector_base + i) - (sums[0] + sums[1])
-                _store(shared, vector_base + i, value / _load(shared, diagonal_entry))
-                index += wp.int32(_LANES)
-            _sync_contact_warp()
+    def store_row(shared: wp.uint64, vector_base: wp.int32, n: wp.int32, row: wp.int32, value: wp.float32):
+        if row < n:
+            _store(shared, vector_base + row, value)
 
     @wp.func
-    def solve(shared: wp.uint64, vector_base: wp.int32, levels: wp.vec2i, lane: wp.int32):
-        solve_upper(shared, vector_base, levels[0], lane)
-        solve_lower(shared, vector_base, levels[1], lane)
+    def solve_upper(shared: wp.uint64, vector_base: wp.int32, n: wp.int32, lane: wp.int32):
+        """Overwrite a shared vector ``b`` by ``z = L^-T b`` one column per step, leaves first.
+
+        Lane ``l`` holds ``b_l`` and ``b_{l+32}`` in registers. Step ``k`` broadcasts
+        ``z_k = b_k / L_kk`` and every ancestor ``j`` of ``k`` subtracts ``L_kj z_k``;
+        parent-first DOF numbering finishes each ``b_k`` before its step. Selects
+        instead of branches keep the warp converged around each step's shuffle.
+        """
+        row0 = load_row(shared, vector_base, n, lane)
+        value0 = row0[0]
+        depth0 = wp.int32(row0[3])
+        row1 = wp.vec4(0.0)
+        value1 = wp.float32(0.0)
+        depth1 = wp.int32(0)
+        if wp.static(two_rows):
+            row1 = load_row(shared, vector_base, n, lane + wp.int32(_LANES))
+            value1 = row1[0]
+            depth1 = wp.int32(row1[3])
+        for step in range(n):
+            k = n - wp.int32(1) - step
+            entry_k = _load_u16(shared, wp.int32(dof_entry) + k)
+            mask = _load_int(shared, wp.int32(ancestors) + wp.int32(2) * k)
+            factor0 = _load(shared, entry_k + depth0)
+            candidate = value0 * row0[1]
+            if wp.static(two_rows):
+                candidate = wp.where(k >= wp.int32(_LANES), value1 * row1[1], candidate)
+            z = _lane_float(candidate, k & wp.int32(_LANES - 1))
+            factor0 = wp.where(((mask >> lane) & wp.int32(1)) != wp.int32(0), factor0, wp.float32(0.0))
+            value0 = wp.where(lane == k, z, value0 - factor0 * z)
+            if wp.static(two_rows):
+                mask = _load_int(shared, wp.int32(ancestors) + wp.int32(2) * k + wp.int32(1))
+                factor1 = _load(shared, entry_k + depth1)
+                factor1 = wp.where(((mask >> lane) & wp.int32(1)) != wp.int32(0), factor1, wp.float32(0.0))
+                value1 = wp.where(lane + wp.int32(_LANES) == k, z, value1 - factor1 * z)
+        store_row(shared, vector_base, n, lane, value0)
+        if wp.static(two_rows):
+            store_row(shared, vector_base, n, lane + wp.int32(_LANES), value1)
+        _sync_contact_warp()
+
+    @wp.func
+    def solve_lower(shared: wp.uint64, vector_base: wp.int32, n: wp.int32, lane: wp.int32):
+        """Overwrite a shared vector ``z`` by ``x = L^-1 z`` one column per step, root first.
+
+        Step ``j`` broadcasts ``x_j = z_j / L_jj`` and every descendant ``i`` of
+        ``j`` subtracts ``L_ij x_j``, the entry at the depth of ``j`` in row ``i``.
+        """
+        row0 = load_row(shared, vector_base, n, lane)
+        value0 = row0[0]
+        entry0 = wp.int32(row0[2])
+        low0 = wp.int32(0)
+        high0 = wp.int32(0)
+        if lane < n:
+            low0 = _load_int(shared, wp.int32(ancestors) + wp.int32(2) * lane)
+            high0 = _load_int(shared, wp.int32(ancestors) + wp.int32(2) * lane + wp.int32(1))
+        row1 = wp.vec4(0.0)
+        value1 = wp.float32(0.0)
+        entry1 = wp.int32(0)
+        low1 = wp.int32(0)
+        high1 = wp.int32(0)
+        if wp.static(two_rows):
+            row = lane + wp.int32(_LANES)
+            row1 = load_row(shared, vector_base, n, row)
+            value1 = row1[0]
+            entry1 = wp.int32(row1[2])
+            if row < n:
+                low1 = _load_int(shared, wp.int32(ancestors) + wp.int32(2) * row)
+                high1 = _load_int(shared, wp.int32(ancestors) + wp.int32(2) * row + wp.int32(1))
+        for j in range(n):
+            entry_j = _load_u16(shared, wp.int32(dof_entry) + j)
+            depth_j = _load_u16(shared, wp.int32(dof_entry) + j + wp.int32(1)) - wp.int32(1) - entry_j
+            factor0 = _load(shared, entry0 + depth_j)
+            candidate = value0 * row0[1]
+            if wp.static(two_rows):
+                candidate = wp.where(j >= wp.int32(_LANES), value1 * row1[1], candidate)
+            x = _lane_float(candidate, j & wp.int32(_LANES - 1))
+            bit = j & wp.int32(_LANES - 1)
+            mask = wp.where(j >= wp.int32(_LANES), high0, low0)
+            factor0 = wp.where(((mask >> bit) & wp.int32(1)) != wp.int32(0), factor0, wp.float32(0.0))
+            value0 = wp.where(lane == j, x, value0 - factor0 * x)
+            if wp.static(two_rows):
+                factor1 = _load(shared, entry1 + depth_j)
+                mask = wp.where(j >= wp.int32(_LANES), high1, low1)
+                factor1 = wp.where(((mask >> bit) & wp.int32(1)) != wp.int32(0), factor1, wp.float32(0.0))
+                value1 = wp.where(lane + wp.int32(_LANES) == j, x, value1 - factor1 * x)
+        store_row(shared, vector_base, n, lane, value0)
+        if wp.static(two_rows):
+            store_row(shared, vector_base, n, lane + wp.int32(_LANES), value1)
+        _sync_contact_warp()
+
+    @wp.func
+    def solve(shared: wp.uint64, vector_base: wp.int32, n: wp.int32, lane: wp.int32):
+        solve_upper(shared, vector_base, n, lane)
+        solve_lower(shared, vector_base, n, lane)
 
     ops = DenseTreeOps()
     ops.layout = layout
@@ -859,7 +988,7 @@ def _make_dense_factor_kernel(max_dofs: int, joint_capacity: int, entry_capacity
         dof_start = joint_qd_start[joint_start]
         n = joint_qd_start[articulation_end[articulation]] - dof_start
         shared = shared_base()
-        levels = stage(shared, articulation, lane, dense, template_image, template_image_start)
+        heights = stage(shared, articulation, lane, dense, template_image, template_image_start)
         factor(
             shared,
             articulation,
@@ -868,7 +997,7 @@ def _make_dense_factor_kernel(max_dofs: int, joint_capacity: int, entry_capacity
             joint_count,
             dof_start,
             n,
-            levels[0],
+            heights,
             joint_child,
             motion,
             body_inertia,
@@ -1179,6 +1308,7 @@ def _articulation_template(joint_parent_local: list[int], joint_dof_count: list[
 
     return {
         "dof_entry": dof_entry,
+        "ancestor_mask": [sum(1 << ancestor for ancestor in path[:-1]) for path in paths],
         "path": flat(paths),
         "dof_joint": np.asarray([*dof_joint, 0], dtype=np.int32),
         "desc_start": starts(descendants),

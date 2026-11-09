@@ -167,6 +167,32 @@ def _warp_sum_int(value: wp.int32) -> wp.int32: ...
 def _warp_any(value: wp.bool) -> wp.bool: ...
 
 
+@wp.func_native(
+    """
+#if defined(__CUDA_ARCH__)
+    return (blockIdx.z * gridDim.y + blockIdx.y) * gridDim.x + blockIdx.x;
+#else
+    return 0;
+#endif
+"""
+)
+def _block_index() -> wp.int32:
+    """Return the block of a lean launch, which the compiler knows is uniform across the block."""
+    ...
+
+
+@wp.func_native(
+    """
+#if defined(__CUDA_ARCH__)
+    return threadIdx.x;
+#else
+    return 0;
+#endif
+"""
+)
+def _lane_index() -> wp.int32: ...
+
+
 @wp.func
 def _store_spatial(shared: wp.uint64, index: wp.int32, value: wp.spatial_vector):
     for component in range(6):
@@ -423,7 +449,7 @@ def make_dense_substep_kernel(
         force_base: wp.int32,
         applied: wp.array[wp.float32],
         implicit_force: wp.array[wp.float32],
-        levels: wp.vec2i,
+        n: wp.int32,
     ):
         """Solve ``M qdd = tau - S^T F`` into the shared right-hand side.
 
@@ -450,7 +476,7 @@ def make_dense_substep_kernel(
                     value += implicit_force[dof]
                 _store(shared, wp.int32(rhs_base) + local, value)
         _sync_contact_warp()
-        solve_mass(shared, wp.int32(rhs_base), levels, lane)
+        solve_mass(shared, wp.int32(rhs_base), n, lane)
 
     @wp.func
     def common_prefix(
@@ -498,7 +524,6 @@ def make_dense_substep_kernel(
         joint_start: wp.int32,
         dof_start: wp.int32,
         n: wp.int32,
-        depths: wp.int32,
         bodies: BodyContainer,
         columns: ContactColumnContainer,
         cc: ContactContainer,
@@ -795,7 +820,7 @@ def make_dense_substep_kernel(
             _store(shared, wp.int32(rhs_base) + k, value)
             k += wp.int32(_LANES)
         _sync_contact_warp()
-        solve_lower(shared, wp.int32(rhs_base), depths, lane)
+        solve_lower(shared, wp.int32(rhs_base), n, lane)
         k = lane
         while k < n:
             rate = _load(shared, wp.int32(qd_base) + k) + _load(shared, wp.int32(rhs_base) + k)
@@ -904,7 +929,7 @@ def make_dense_substep_kernel(
             bodies.velocity[slot] = velocity_com
             bodies.angular_velocity[slot] = omega
 
-    @wp.kernel(enable_backward=False, module=module)
+    @wp.kernel(enable_backward=False, module=module, grid_stride=False)
     def dense_substep_kernel(
         bucket_articulation: wp.array[wp.int32],
         dt: wp.float32,
@@ -991,9 +1016,8 @@ def make_dense_substep_kernel(
         normal_load: wp.array2d[wp.float32],
         bodies: BodyContainer,
     ):
-        thread = wp.tid()
-        block = thread // wp.int32(_LANES)
-        lane = thread - block * wp.int32(_LANES)
+        block = _block_index()
+        lane = _lane_index()
         articulation = bucket_articulation[block]
         data = bodies.reduced
         joint_start = data.articulation_start[articulation]
@@ -1006,7 +1030,7 @@ def make_dense_substep_kernel(
         max_depth = template_max_depth[template]
         shared = shared_base()
         idt = wp.float32(1.0) / dt
-        levels = stage(shared, articulation, lane, dense, template_image, template_image_start)
+        heights = stage(shared, articulation, lane, dense, template_image, template_image_start)
         tree = _load_tree_joint(
             lane,
             joint_start,
@@ -1117,7 +1141,7 @@ def make_dense_substep_kernel(
                 joint_count,
                 dof_start,
                 n,
-                levels[0],
+                heights,
                 joint_child,
                 motion,
                 body_inertia_flat,
@@ -1147,7 +1171,7 @@ def make_dense_substep_kernel(
                     bias -= wp.spatial_vector(control_force, control_torque + wp.cross(x_com, control_force))
                 _store_spatial(shared, wp.int32(first_base) + wp.int32(_MOTION_STRIDE) * lane, bias)
             _sync_contact_warp()
-            solve_forces(shared, tree, lane, dof_start, wp.int32(first_base), joint_f, implicit_force, levels)
+            solve_forces(shared, tree, lane, dof_start, wp.int32(first_base), joint_f, implicit_force, n)
             k = lane
             while k < n:
                 rate = _load(shared, wp.int32(qd_base) + k) + dt * _load(shared, wp.int32(rhs_base) + k)
@@ -1248,7 +1272,6 @@ def make_dense_substep_kernel(
                             joint_start,
                             dof_start,
                             n,
-                            levels[1],
                             bodies,
                             columns,
                             cc,
@@ -1327,7 +1350,7 @@ def make_dense_substep_kernel(
             )
         _sync_contact_warp()
         solve_forces(
-            shared, tree, lane, dof_start, wp.int32(third_base), zero_generalized_force, zero_generalized_force, levels
+            shared, tree, lane, dof_start, wp.int32(third_base), zero_generalized_force, zero_generalized_force, n
         )
         # The explicit step and its energy drift in the frame of a floating root, see
         # _explicit_step_drift_terms.
