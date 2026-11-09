@@ -2770,6 +2770,7 @@ class PhoenXWorld:
                         self._reduced_contacts_active_this_step
                         and self._reduced_articulation.contact_block_system.requires_impulse_response
                     ),
+                    world=self,
                 )
             direct = getattr(self, "_direct_equality_system", None)
             reuse_direct_factor = bool(

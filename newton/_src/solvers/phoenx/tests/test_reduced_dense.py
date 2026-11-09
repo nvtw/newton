@@ -9,6 +9,7 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton._src.solvers.phoenx.articulations.dense_substep import PAGE_ROWS
 from newton._src.solvers.phoenx.tests.test_reduced_articulation import (
     _make_branched_tree,
     _make_floating_mixed_tree,
@@ -54,6 +55,43 @@ def _make_legged_fleet(device, *, worlds: int, gravity: float = -9.81) -> newton
     template.joint_q[2] = 0.75
     template.add_ground_plane()
     builder = newton.ModelBuilder(gravity=(0.0, 0.0, gravity), up_axis=newton.Axis.Z)
+    builder.replicate(template, world_count=worlds)
+    return builder.finalize(device=device)
+
+
+def _make_centipede_fleet(device, *, worlds: int) -> newton.Model:
+    """Floating trunk on twelve driven legs with sphere feet, without self-collision, replicated.
+
+    Its ground contacts span two contact pages of the fused substep.
+    """
+    template = newton.ModelBuilder(up_axis=newton.Axis.Z)
+    trunk = template.add_link(mass=4.0)
+    shapes = [template.add_shape_box(trunk, hx=0.36, hy=0.1, hz=0.04)]
+    joints = [template.add_joint_free(parent=-1, child=trunk)]
+    for leg in range(12):
+        x = -0.3 + 0.6 * (leg // 2) / 5.0
+        y = 0.12 if leg % 2 else -0.12
+        link = template.add_link(mass=0.3)
+        shapes.append(template.add_shape_sphere(link, radius=0.03))
+        joints.append(
+            template.add_joint_revolute(
+                parent=trunk,
+                child=link,
+                axis=newton.Axis.X,
+                parent_xform=wp.transform(wp.vec3(x, y, -0.04), wp.quat_identity()),
+                child_xform=wp.transform(wp.vec3(0.0, 0.0, 0.12), wp.quat_identity()),
+                target_ke=200.0,
+                target_kd=5.0,
+                armature=0.01,
+            )
+        )
+    template.add_articulation(joints)
+    for index, shape_a in enumerate(shapes):
+        for shape_b in shapes[index + 1 :]:
+            template.add_shape_collision_filter_pair(shape_a, shape_b)
+    template.joint_q[2] = 0.19
+    template.add_ground_plane()
+    builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
     builder.replicate(template, world_count=worlds)
     return builder.finalize(device=device)
 
@@ -252,7 +290,7 @@ class TestReducedDenseBackend(unittest.TestCase):
             )
             if backend == "dense":
                 dense = solver._reduced_articulation.system.dense
-                self.assertEqual(sorted(bucket for bucket, *_ in dense.buckets), [16, 32, 48, 64])
+                self.assertEqual(sorted(bucket.max_dofs for bucket in dense.buckets), [16, 32, 48, 64])
                 self.assertTrue(dense.has_fallback and dense.requires_aba)
             state0, state1 = model.state(), model.state()
             newton.eval_fk(model, model.joint_q, model.joint_qd, state0)
@@ -270,6 +308,51 @@ class TestReducedDenseBackend(unittest.TestCase):
         aba_q = simulate("aba")
         self.assertTrue(np.all(np.isfinite(dense_q)))
         np.testing.assert_allclose(dense_q, aba_q, rtol=0.0, atol=5.0e-3)
+
+    def test_fused_substep_tracks_dense_operator_bitwise_deterministically_under_graph_capture(self):
+        """Fused point and patch substeps over two contact pages track the unfused dense backend."""
+        device = _require_cuda(self)
+        model = _make_centipede_fleet(device, worlds=3)
+
+        def simulate(friction: str, fused: bool) -> tuple[np.ndarray, np.ndarray]:
+            solver = newton.solvers.SolverPhoenX(
+                model,
+                joint_mode="reduced",
+                reduced_backend="dense",
+                contact_friction_model=friction,
+                substeps=3,
+                solver_iterations=2,
+                velocity_iterations=1,
+            )
+            articulation = solver._reduced_articulation
+            self.assertIsNotNone(articulation.fused_substep)
+            if not fused:
+                articulation.fused_substep = None
+            state0, state1 = model.state(), model.state()
+            newton.eval_fk(model, model.joint_q, model.joint_qd, state0)
+            control = model.control()
+            control.joint_target_q.assign(model.joint_q)
+            contacts = model.contacts()
+            with wp.ScopedCapture(device=device) as capture:
+                for _ in range(2):
+                    model.collide(state0, contacts)
+                    solver.step(state0, state1, control, contacts, 1.0 / 60.0)
+                    state0, state1 = state1, state0
+            for _ in range(30):
+                wp.capture_launch(capture.graph)
+            # More than one fused contact page per tree.
+            self.assertGreater(int(contacts.rigid_contact_count.numpy()[0]), PAGE_ROWS // 3 * model.articulation_count)
+            return state0.joint_q.numpy(), state0.joint_qd.numpy()
+
+        for friction in ("point", "patch"):
+            fused_q, fused_qd = simulate(friction, True)
+            repeat_q, repeat_qd = simulate(friction, True)
+            unfused_q, _ = simulate(friction, False)
+            np.testing.assert_array_equal(fused_q, repeat_q)
+            np.testing.assert_array_equal(fused_qd, repeat_qd)
+            trunk_height = fused_q.reshape(model.articulation_count, -1)[:, 2]
+            self.assertTrue(np.all(trunk_height > 0.15), trunk_height)
+            np.testing.assert_allclose(fused_q, unfused_q, rtol=0.0, atol=1.0e-3)
 
     def test_dense_backend_rejects_models_without_eligible_trees(self):
         device = _require_cuda(self)

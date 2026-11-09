@@ -973,8 +973,9 @@ def _sync_reduced_bodies_kernel(
     bodies.angular_velocity[slot] = wp.spatial_bottom(twist)
 
 
-@wp.kernel(enable_backward=False)
-def _configure_implicit_joint_dynamics_kernel(
+@wp.func
+def configure_implicit_joint_dynamics(
+    joint: wp.int32,
     joint_type: wp.array[wp.int32],
     joint_q_start: wp.array[wp.int32],
     joint_qd_start: wp.array[wp.int32],
@@ -995,9 +996,8 @@ def _configure_implicit_joint_dynamics_kernel(
     dt: wp.float32,
     factor_diagonal: wp.array[wp.float32],
     implicit_force: wp.array[wp.float32],
-):
-    """Build the linearized implicit-Euler joint operator and right-hand side."""
-    joint = wp.tid()
+) -> None:
+    """Build one joint's linearized implicit-Euler operator diagonal and right-hand side."""
     dof_start = joint_qd_start[joint]
     dof_end = joint_qd_start[joint + wp.int32(1)]
     coord_start = joint_q_start[joint]
@@ -1044,6 +1044,54 @@ def _configure_implicit_joint_dynamics_kernel(
                 - passive_damping * qd
                 - dt * stiffness * qd
             )
+
+
+@wp.kernel(enable_backward=False)
+def _configure_implicit_joint_dynamics_kernel(
+    joint_type: wp.array[wp.int32],
+    joint_q_start: wp.array[wp.int32],
+    joint_qd_start: wp.array[wp.int32],
+    joint_target_q_start: wp.array[wp.int32],
+    joint_q: wp.array[wp.float32],
+    joint_qd: wp.array[wp.float32],
+    joint_target_q: wp.array[wp.float32],
+    joint_target_qd: wp.array[wp.float32],
+    joint_target_ke: wp.array[wp.float32],
+    joint_target_kd: wp.array[wp.float32],
+    joint_target_mode: wp.array[wp.int32],
+    joint_limit_lower: wp.array[wp.float32],
+    joint_limit_upper: wp.array[wp.float32],
+    joint_limit_ke: wp.array[wp.float32],
+    joint_limit_kd: wp.array[wp.float32],
+    joint_damping: wp.array[wp.float32],
+    joint_armature: wp.array[wp.float32],
+    dt: wp.float32,
+    factor_diagonal: wp.array[wp.float32],
+    implicit_force: wp.array[wp.float32],
+):
+    configure_implicit_joint_dynamics(
+        wp.tid(),
+        joint_type,
+        joint_q_start,
+        joint_qd_start,
+        joint_target_q_start,
+        joint_q,
+        joint_qd,
+        joint_target_q,
+        joint_target_qd,
+        joint_target_ke,
+        joint_target_kd,
+        joint_target_mode,
+        joint_limit_lower,
+        joint_limit_upper,
+        joint_limit_ke,
+        joint_limit_kd,
+        joint_damping,
+        joint_armature,
+        dt,
+        factor_diagonal,
+        implicit_force,
+    )
 
 
 @wp.kernel(enable_backward=False)
@@ -1221,9 +1269,9 @@ def _compute_reduced_local_kinematics_kernel(
         body_q_com[child] = child_transform * body_x_com[child]
 
 
-@wp.kernel(enable_backward=False)
-def _initialize_reduced_factor_kernel(
-    factor_joint: wp.array[wp.int32],
+@wp.func
+def initialize_reduced_joint(
+    joint: wp.int32,
     joint_type: wp.array[wp.int32],
     joint_child: wp.array[wp.int32],
     joint_q: wp.array[wp.float32],
@@ -1239,10 +1287,8 @@ def _initialize_reduced_factor_kernel(
     joint_qd_internal: wp.array[wp.float32],
     body_i_s: wp.array[_sym_mat66],
     joint_s: wp.array[wp.spatial_vector],
-):
-    """Initialize independent per-joint quantities for a depth factorization."""
-    factor_index = wp.tid()
-    joint = factor_joint[factor_index]
+) -> None:
+    """Form one joint's motion subspace, its child's spatial inertia, and its internal rates at the current pose."""
     qd_start = joint_qd_start[joint]
     qd_end = joint_qd_start[joint + wp.int32(1)]
     for dof in range(qd_start, qd_end):
@@ -1287,6 +1333,46 @@ def _initialize_reduced_factor_kernel(
         joint_qd_internal,
         joint_q_start[joint],
         joint_qd_start[joint],
+        joint_s,
+    )
+
+
+@wp.kernel(enable_backward=False)
+def _initialize_reduced_factor_kernel(
+    factor_joint: wp.array[wp.int32],
+    joint_type: wp.array[wp.int32],
+    joint_child: wp.array[wp.int32],
+    joint_q: wp.array[wp.float32],
+    joint_q_start: wp.array[wp.int32],
+    joint_qd_start: wp.array[wp.int32],
+    joint_axis: wp.array[wp.vec3],
+    joint_dof_dim: wp.array2d[wp.int32],
+    joint_qd_public: wp.array[wp.float32],
+    joint_anchor_local: wp.array[wp.transform],
+    body_q_com: wp.array[wp.transform],
+    body_mass: wp.array[wp.float32],
+    body_inertia: wp.array[wp.mat33],
+    joint_qd_internal: wp.array[wp.float32],
+    body_i_s: wp.array[_sym_mat66],
+    joint_s: wp.array[wp.spatial_vector],
+):
+    """Initialize independent per-joint quantities for a depth factorization."""
+    initialize_reduced_joint(
+        factor_joint[wp.tid()],
+        joint_type,
+        joint_child,
+        joint_q,
+        joint_q_start,
+        joint_qd_start,
+        joint_axis,
+        joint_dof_dim,
+        joint_qd_public,
+        joint_anchor_local,
+        body_q_com,
+        body_mass,
+        body_inertia,
+        joint_qd_internal,
+        body_i_s,
         joint_s,
     )
 
@@ -4947,6 +5033,10 @@ class ReducedPhoenXArticulation:
         if execution_path == "persistent":
             self.contact_block_system.biased_page_launcher = self._launch_persistent_biased_page
             self.contact_block_system.relax_page_launcher = self._launch_persistent_relax_page
+        # Fused substep of dense trees with private contacts, installed by the solver. A relax
+        # step leaves its factor for the next biased step of the same solver step.
+        self.fused_substep = None
+        self._relaxed_pose_factored = False
         self.owned_joint_mask_np = self.tree_joint_mask_np.copy()
         self.owned_joint_mask_np[self.loop_system.joint_indices_np] = True
         joint_q_start = model.joint_q_start.numpy()
@@ -4983,6 +5073,7 @@ class ReducedPhoenXArticulation:
         # their scenes rebuild the buffers every step from the PhoenX body poses, which spawns
         # write, and import only the rows before the slots.
         self._kinematics_current = state_is_continuation and not self.system.runtime_slots
+        self._relaxed_pose_factored = False
         if self.system.runtime_slots:
             wp.launch(
                 _phoenx_body_poses_kernel,
@@ -5018,8 +5109,18 @@ class ReducedPhoenXArticulation:
         *,
         split_dynamics: bool,
         compute_impulse_response: bool = True,
+        world=None,
     ) -> None:
-        """Apply pre-PGS reduced dynamics at the current configuration."""
+        """Apply pre-PGS reduced dynamics at the current configuration.
+
+        With a fused substep, see :attr:`fused_substep`, this runs the whole biased
+        substep through publication and needs the owning ``world``.
+        """
+        if self.fused_substep is not None:
+            self.fused_substep.biased(world, dt, reuse_factor=self._relaxed_pose_factored)
+            self._relaxed_pose_factored = False
+            self._kinematics_current = True
+            return
         self.system.factor(
             self.state,
             self.control,
@@ -5430,7 +5531,7 @@ class ReducedPhoenXArticulation:
 
     def finish_relax(self) -> None:
         """Publish bias-free velocity corrections without advancing configuration."""
-        if self.execution_path == "persistent":
+        if self.execution_path == "persistent" or self.fused_substep is not None:
             return
         # Relax changes only velocities, so the pose-derived buffers from the
         # preceding full publication remain current.
@@ -5450,6 +5551,8 @@ class ReducedPhoenXArticulation:
         joint rate, and the angular momentum about the center of mass unchanged.
         """
         self._kinematics_current = True
+        if self.fused_substep is not None:
+            return
         if self.execution_path == "persistent" and split_dynamics:
             wp.capture_if(
                 self.contact_block_system.biased_advanced,
@@ -5508,6 +5611,12 @@ class ReducedPhoenXArticulation:
         """Solve loop and contact blocks through the reduced inverse-mass operator."""
         iterations = world._active_velocity_iterations if relax else world.solver_iterations
         if iterations <= 0:
+            return
+        if self.fused_substep is not None:
+            # The biased solve already ran in begin_substep.
+            if relax and world._reduced_contacts_active_this_step:
+                self.fused_substep.relax(world, 1.0 / float(idt))
+                self._relaxed_pose_factored = True
             return
         if relax:
             # Integration changes the mass operator and contact Jacobians.

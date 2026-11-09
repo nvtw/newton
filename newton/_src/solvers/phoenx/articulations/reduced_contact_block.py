@@ -14,6 +14,7 @@ import warp as wp
 from newton._src.sim import Model
 from newton._src.solvers.phoenx.articulations.reduced_contact import (
     _deferred_point_velocity,
+    _point_velocity,
     _prepare_contact_bias_geometry,
     flush_deferred_articulation,
     reduced_contact_iterate,
@@ -803,8 +804,16 @@ def _gather_reduced_contact_blocks_kernel(
 def _sync_patch_gather_warp(): ...
 
 
-@wp.kernel(enable_backward=False, module="reduced_contact_gather_patch_packed")
-def _gather_reduced_contact_patch_blocks_packed_kernel(
+@wp.func
+def _gather_packed_patch_points(
+    articulation: wp.int32,
+    lane: wp.int32,
+    lane_count: wp.int32,
+    page: wp.int32,
+    page_points: wp.int32,
+    enabled: wp.bool,
+    total_points: wp.int32,
+    link_velocity: wp.bool,
     schedule_section_end: wp.array[wp.int32],
     scheduled_column: wp.array[wp.int32],
     columns: ContactColumnContainer,
@@ -813,9 +822,6 @@ def _gather_reduced_contact_patch_blocks_packed_kernel(
     prepare: wp.bool,
     cc: ContactContainer,
     contacts: ContactViews,
-    enabled: wp.array[wp.int32],
-    total_point_count: wp.array[wp.int32],
-    page_index: wp.array[wp.int32],
     point_count: wp.array[wp.int32],
     row_count: wp.array[wp.int32],
     point_contact: wp.array2d[wp.int32],
@@ -830,7 +836,13 @@ def _gather_reduced_contact_patch_blocks_packed_kernel(
     row_wrench_pair: wp.array2d[wp.spatial_vector],
     row_velocity: wp.array2d[wp.float32],
 ):
-    articulation, lane = wp.tid()
+    """Gather one page of an articulation's contact points into normal rows and per-column tangent rows.
+
+    Pages hold ``page_points`` points; ``lane_count`` lanes stride over them. Each
+    column's two tangent rows average its points' tangent wrenches and velocities.
+    Without ``link_velocity``, row velocities leave out the articulation's links,
+    which callers add from the generalized rates.
+    """
     bias_rate = wp.float32(0.0)
     if prepare:
         bias_rate, _mass_coeff, _impulse_coeff = soft_constraint_coefficients(
@@ -841,17 +853,16 @@ def _gather_reduced_contact_patch_blocks_packed_kernel(
         start = schedule_section_end[articulation - wp.int32(1)]
     end = schedule_section_end[articulation]
 
-    page = page_index[0]
-    page_start = page * wp.int32(_POINTS_PER_PAGE)
+    page_start = page * page_points
     storage_page = wp.min(page, wp.int32(_CACHED_PAGE_COUNT - 1))
     packed_articulation = articulation * wp.int32(_CACHED_PAGE_COUNT) + storage_page
-    remaining = total_point_count[articulation] - page_start
-    count = wp.min(wp.max(remaining, wp.int32(0)), wp.int32(_POINTS_PER_PAGE))
+    remaining = total_points - page_start
+    count = wp.min(wp.max(remaining, wp.int32(0)), page_points)
     if lane == wp.int32(0):
-        active_count = count if enabled[articulation] != wp.int32(0) else wp.int32(0)
+        active_count = count if enabled else wp.int32(0)
         point_count[packed_articulation] = active_count
         row_count[packed_articulation] = active_count
-    active = enabled[articulation] != wp.int32(0) and count > wp.int32(0)
+    active = enabled and count > wp.int32(0)
 
     if active:
         page_end = page_start + count
@@ -919,9 +930,16 @@ def _gather_reduced_contact_patch_blocks_packed_kernel(
                 normal[packed_articulation, point] = n
                 tangent0[packed_articulation, point] = t0
 
-                relative = _deferred_point_velocity(bodies, body1, contact_point) - _deferred_point_velocity(
-                    bodies, body0, contact_point
-                )
+                relative = wp.vec3(0.0)
+                if link_velocity:
+                    relative = _deferred_point_velocity(bodies, body1, contact_point) - _deferred_point_velocity(
+                        bodies, body0, contact_point
+                    )
+                else:
+                    if bodies.reduced.body_articulation[body1] < wp.int32(0):
+                        relative += _point_velocity(bodies, body1, contact_point)
+                    if bodies.reduced.body_articulation[body0] < wp.int32(0):
+                        relative -= _point_velocity(bodies, body0, contact_point)
                 row_velocity[packed_articulation, point] = wp.dot(relative, n)
 
                 local_com_position = wp.transform_get_translation(
@@ -953,7 +971,7 @@ def _gather_reduced_contact_patch_blocks_packed_kernel(
                 row_body_pair[packed_articulation, tangent_row + wp.int32(1)] = wp.int32(-1)
                 row_wrench_pair[packed_articulation, tangent_row + wp.int32(1)] = wp.spatial_vector()
                 row_velocity[packed_articulation, tangent_row + wp.int32(1)] = wp.dot(relative, t1)
-                global_point += wp.int32(_PACKED_GATHER_TILE_WIDTH)
+                global_point += lane_count
             point_offset = column_end
 
     _sync_patch_gather_warp()
@@ -987,8 +1005,8 @@ def _gather_reduced_contact_patch_blocks_packed_kernel(
         row_count[packed_articulation] = count + wp.int32(2) * column_ordinal
 
 
-@wp.kernel(enable_backward=False, module="reduced_contact_gather_packed")
-def _gather_reduced_contact_blocks_packed_kernel(
+@wp.kernel(enable_backward=False, module="reduced_contact_gather_patch_packed")
+def _gather_reduced_contact_patch_blocks_packed_kernel(
     schedule_section_end: wp.array[wp.int32],
     scheduled_column: wp.array[wp.int32],
     columns: ContactColumnContainer,
@@ -1015,6 +1033,77 @@ def _gather_reduced_contact_blocks_packed_kernel(
     row_velocity: wp.array2d[wp.float32],
 ):
     articulation, lane = wp.tid()
+    _gather_packed_patch_points(
+        articulation,
+        lane,
+        wp.int32(_PACKED_GATHER_TILE_WIDTH),
+        page_index[0],
+        wp.int32(_POINTS_PER_PAGE),
+        enabled[articulation] != wp.int32(0),
+        total_point_count[articulation],
+        wp.bool(True),
+        schedule_section_end,
+        scheduled_column,
+        columns,
+        bodies,
+        idt,
+        prepare,
+        cc,
+        contacts,
+        point_count,
+        row_count,
+        point_contact,
+        point_column,
+        point0,
+        point1,
+        normal,
+        tangent0,
+        row_body,
+        row_wrench,
+        row_body_pair,
+        row_wrench_pair,
+        row_velocity,
+    )
+
+
+@wp.func
+def _gather_packed_contact_points(
+    articulation: wp.int32,
+    lane: wp.int32,
+    lane_count: wp.int32,
+    page: wp.int32,
+    page_points: wp.int32,
+    enabled: wp.bool,
+    total_points: wp.int32,
+    link_velocity: wp.bool,
+    schedule_section_end: wp.array[wp.int32],
+    scheduled_column: wp.array[wp.int32],
+    columns: ContactColumnContainer,
+    bodies: BodyContainer,
+    idt: wp.float32,
+    prepare: wp.bool,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    point_count: wp.array[wp.int32],
+    row_count: wp.array[wp.int32],
+    point_contact: wp.array2d[wp.int32],
+    point_column: wp.array2d[wp.int32],
+    point0: wp.array2d[wp.vec3],
+    point1: wp.array2d[wp.vec3],
+    normal: wp.array2d[wp.vec3],
+    tangent0: wp.array2d[wp.vec3],
+    row_body: wp.array2d[wp.int32],
+    row_wrench: wp.array2d[wp.spatial_vector],
+    row_body_pair: wp.array2d[wp.int32],
+    row_wrench_pair: wp.array2d[wp.spatial_vector],
+    row_velocity: wp.array2d[wp.float32],
+):
+    """Gather one page of an articulation's contact points into three packed rows each.
+
+    Pages hold ``page_points`` points; ``lane_count`` lanes stride over them.
+    Without ``link_velocity``, row velocities leave out the articulation's
+    links, which callers add from the generalized rates.
+    """
     bias_rate = wp.float32(0.0)
     if prepare:
         bias_rate, _mass_coeff, _impulse_coeff = soft_constraint_coefficients(
@@ -1025,17 +1114,16 @@ def _gather_reduced_contact_blocks_packed_kernel(
         start = schedule_section_end[articulation - wp.int32(1)]
     end = schedule_section_end[articulation]
 
-    page = page_index[0]
-    page_start = page * wp.int32(_POINTS_PER_PAGE)
+    page_start = page * page_points
     storage_page = wp.min(page, wp.int32(_CACHED_PAGE_COUNT - 1))
     packed_articulation = articulation * wp.int32(_CACHED_PAGE_COUNT) + storage_page
-    remaining = total_point_count[articulation] - page_start
-    count = wp.min(wp.max(remaining, wp.int32(0)), wp.int32(_POINTS_PER_PAGE))
+    remaining = total_points - page_start
+    count = wp.min(wp.max(remaining, wp.int32(0)), page_points)
     if lane == wp.int32(0):
-        active_count = count if enabled[articulation] != wp.int32(0) else wp.int32(0)
+        active_count = count if enabled else wp.int32(0)
         point_count[packed_articulation] = active_count
         row_count[packed_articulation] = wp.int32(3) * active_count
-    if enabled[articulation] == wp.int32(0) or count <= wp.int32(0):
+    if not enabled or count <= wp.int32(0):
         return
 
     page_end = page_start + count
@@ -1097,9 +1185,16 @@ def _gather_reduced_contact_blocks_packed_kernel(
             normal[packed_articulation, point] = n
             tangent0[packed_articulation, point] = t0
 
-            relative = _deferred_point_velocity(bodies, body1, contact_point) - _deferred_point_velocity(
-                bodies, body0, contact_point
-            )
+            relative = wp.vec3(0.0)
+            if link_velocity:
+                relative = _deferred_point_velocity(bodies, body1, contact_point) - _deferred_point_velocity(
+                    bodies, body0, contact_point
+                )
+            else:
+                if bodies.reduced.body_articulation[body1] < wp.int32(0):
+                    relative += _point_velocity(bodies, body1, contact_point)
+                if bodies.reduced.body_articulation[body0] < wp.int32(0):
+                    relative -= _point_velocity(bodies, body0, contact_point)
             row = wp.int32(3) * point
             row_velocity[packed_articulation, row] = wp.dot(relative, n)
             row_velocity[packed_articulation, row + wp.int32(1)] = wp.dot(relative, t0)
@@ -1120,8 +1215,69 @@ def _gather_reduced_contact_blocks_packed_kernel(
                 row_body_pair,
                 row_wrench_pair,
             )
-            global_point += wp.int32(_PACKED_GATHER_TILE_WIDTH)
+            global_point += lane_count
         point_offset = column_end
+
+
+@wp.kernel(enable_backward=False, module="reduced_contact_gather_packed")
+def _gather_reduced_contact_blocks_packed_kernel(
+    schedule_section_end: wp.array[wp.int32],
+    scheduled_column: wp.array[wp.int32],
+    columns: ContactColumnContainer,
+    bodies: BodyContainer,
+    idt: wp.float32,
+    prepare: wp.bool,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    enabled: wp.array[wp.int32],
+    total_point_count: wp.array[wp.int32],
+    page_index: wp.array[wp.int32],
+    point_count: wp.array[wp.int32],
+    row_count: wp.array[wp.int32],
+    point_contact: wp.array2d[wp.int32],
+    point_column: wp.array2d[wp.int32],
+    point0: wp.array2d[wp.vec3],
+    point1: wp.array2d[wp.vec3],
+    normal: wp.array2d[wp.vec3],
+    tangent0: wp.array2d[wp.vec3],
+    row_body: wp.array2d[wp.int32],
+    row_wrench: wp.array2d[wp.spatial_vector],
+    row_body_pair: wp.array2d[wp.int32],
+    row_wrench_pair: wp.array2d[wp.spatial_vector],
+    row_velocity: wp.array2d[wp.float32],
+):
+    articulation, lane = wp.tid()
+    _gather_packed_contact_points(
+        articulation,
+        lane,
+        wp.int32(_PACKED_GATHER_TILE_WIDTH),
+        page_index[0],
+        wp.int32(_POINTS_PER_PAGE),
+        enabled[articulation] != wp.int32(0),
+        total_point_count[articulation],
+        wp.bool(True),
+        schedule_section_end,
+        scheduled_column,
+        columns,
+        bodies,
+        idt,
+        prepare,
+        cc,
+        contacts,
+        point_count,
+        row_count,
+        point_contact,
+        point_column,
+        point0,
+        point1,
+        normal,
+        tangent0,
+        row_body,
+        row_wrench,
+        row_body_pair,
+        row_wrench_pair,
+        row_velocity,
+    )
 
 
 @wp.func
@@ -2093,6 +2249,77 @@ def _dof_lane_mask(index: wp.float32, count: wp.float32) -> wp.float32:
     return wp.where(index < count, wp.float32(1.0), wp.float32(0.0))
 
 
+@wp.func
+def _solve_reduced_contact_point(
+    columns: ContactColumnContainer,
+    cc: ContactContainer,
+    contact: wp.int32,
+    column: wp.int32,
+    n: wp.vec3,
+    t0: wp.vec3,
+    velocity: wp.vec3,
+    mobility: wp.vec3,
+    use_bias: wp.bool,
+    idt: wp.float32,
+    mass_coeff: wp.float32,
+    impulse_coeff: wp.float32,
+    sor_boost: wp.float32,
+) -> wp.vec3:
+    """Project one point's coupled normal and friction rows and update its accumulated impulses.
+
+    ``velocity`` holds the normal and tangent row velocities and ``mobility`` the
+    cross terms ``J_n M^-1 J_t1^T``, ``J_n M^-1 J_t2^T`` and ``J_t1 M^-1 J_t2^T``.
+    Returns the impulse increments along the normal and both tangents.
+    """
+    t1 = wp.cross(n, t0)
+    bias = cc_get_bias(cc, contact)
+    speculative = bias > wp.float32(0.0)
+    if speculative and not use_bias:
+        return wp.vec3(0.0)
+    bias_t0 = cc_get_bias_t1(cc, contact) if use_bias else wp.float32(0.0)
+    bias_t1 = cc_get_bias_t2(cc, contact) if use_bias else wp.float32(0.0)
+    if not use_bias:
+        bias = wp.float32(0.0)
+    row_mass_coeff = mass_coeff
+    row_impulse_coeff = impulse_coeff
+    mu_static = contact_get_friction(columns, column)
+    mu_dynamic = contact_get_friction_dynamic(columns, column)
+    if speculative:
+        row_mass_coeff = wp.float32(1.0)
+        row_impulse_coeff = wp.float32(0.0)
+        if bias > idt * wp.float32(0.002):
+            mu_static = wp.float32(0.0)
+            mu_dynamic = wp.float32(0.0)
+    impulse = contact_project_coupled_velocity_update_no_soft_pd(
+        cc,
+        contact,
+        n,
+        t0,
+        t1,
+        velocity[0],
+        velocity[1],
+        velocity[2],
+        cc_get_eff_n(cc, contact),
+        cc_get_eff_t1(cc, contact),
+        cc_get_eff_t2(cc, contact),
+        bias,
+        bias_t0,
+        bias_t1,
+        mu_static,
+        mu_dynamic,
+        row_mass_coeff,
+        row_impulse_coeff,
+        sor_boost,
+        wp.float32(0.0),
+        wp.float32(0.0),
+        wp.float32(0.0),
+        mobility[0],
+        mobility[1],
+        mobility[2],
+    )
+    return wp.vec3(wp.dot(impulse, n), wp.dot(impulse, t0), wp.dot(impulse, t1))
+
+
 def _make_solve_generalized_contact_tile_ops(max_dofs: int):
     _rows_dtype = wp.float32
     module = wp.get_module(f"reduced_contact_generalized_solve_{max_dofs}")
@@ -2258,58 +2485,24 @@ def _make_solve_generalized_contact_tile_ops(max_dofs: int):
                     jv1 = wp.tile_extract(wp.tile_sum(jacobian1 * velocity), 0)
                     jv2 = wp.tile_extract(wp.tile_sum(jacobian2 * velocity), 0)
                 if lane == wp.int32(0):
-                    contact = point_contact[packed_articulation, point]
-                    column = point_column[packed_articulation, point]
-                    n = normal[packed_articulation, point]
-                    t0 = tangent0[packed_articulation, point]
-                    t1 = wp.cross(n, t0)
-                    bias = cc_get_bias(cc, contact)
-                    speculative = bias > wp.float32(0.0)
-                    if not (speculative and not use_bias):
-                        bias_t0 = cc_get_bias_t1(cc, contact) if use_bias else wp.float32(0.0)
-                        bias_t1 = cc_get_bias_t2(cc, contact) if use_bias else wp.float32(0.0)
-                        if not use_bias:
-                            bias = wp.float32(0.0)
-                        row_mass_coeff = mass_coeff
-                        row_impulse_coeff = impulse_coeff
-                        mu_static = contact_get_friction(columns, column)
-                        mu_dynamic = contact_get_friction_dynamic(columns, column)
-                        if speculative:
-                            row_mass_coeff = wp.float32(1.0)
-                            row_impulse_coeff = wp.float32(0.0)
-                            if bias > idt * wp.float32(0.002):
-                                mu_static = wp.float32(0.0)
-                                mu_dynamic = wp.float32(0.0)
-                        impulse = contact_project_coupled_velocity_update_no_soft_pd(
-                            cc,
-                            contact,
-                            n,
-                            t0,
-                            t1,
-                            jv0,
-                            jv1,
-                            jv2,
-                            cc_get_eff_n(cc, contact),
-                            cc_get_eff_t1(cc, contact),
-                            cc_get_eff_t2(cc, contact),
-                            bias,
-                            bias_t0,
-                            bias_t1,
-                            mu_static,
-                            mu_dynamic,
-                            row_mass_coeff,
-                            row_impulse_coeff,
-                            sor_boost,
-                            wp.float32(0.0),
-                            wp.float32(0.0),
-                            wp.float32(0.0),
-                            mobility_nt1,
-                            mobility_nt2,
-                            mobility_t1t2,
-                        )
-                        delta0 = wp.dot(impulse, n)
-                        delta1 = wp.dot(impulse, t0)
-                        delta2 = wp.dot(impulse, t1)
+                    point_delta = _solve_reduced_contact_point(
+                        columns,
+                        cc,
+                        point_contact[packed_articulation, point],
+                        point_column[packed_articulation, point],
+                        normal[packed_articulation, point],
+                        tangent0[packed_articulation, point],
+                        wp.vec3(jv0, jv1, jv2),
+                        wp.vec3(mobility_nt1, mobility_nt2, mobility_t1t2),
+                        use_bias,
+                        idt,
+                        mass_coeff,
+                        impulse_coeff,
+                        sor_boost,
+                    )
+                    delta0 = point_delta[0]
+                    delta1 = point_delta[1]
+                    delta2 = point_delta[2]
 
                 delta0 = _broadcast_contact_scalar(delta0)
                 delta1 = _broadcast_contact_scalar(delta1)
@@ -2443,6 +2636,123 @@ def _make_solve_generalized_contact_tile_ops(max_dofs: int):
         )
     )
     return _solve_generalized_contact_tile_device, _solve_generalized_contact_tile_kernel
+
+
+@wp.func
+def _solve_patch_normal_row(
+    cc: ContactContainer,
+    contact: wp.int32,
+    velocity: wp.float32,
+    inverse_mass: wp.float32,
+    use_bias: wp.bool,
+    idt: wp.float32,
+    mass_coeff: wp.float32,
+    impulse_coeff: wp.float32,
+    sor_boost: wp.float32,
+) -> wp.vec2:
+    """Project one point's normal row of a friction patch and update its accumulated impulse.
+
+    ``inverse_mass`` is the row's ``J M^-1 J^T``. Returns the impulse increment and
+    the normal load the patch's friction cone sees.
+    """
+    bias = cc_get_bias(cc, contact)
+    speculative = bias > wp.float32(0.0)
+    if (speculative and not use_bias) or not (inverse_mass > wp.float32(1.0e-12)):
+        return wp.vec2(0.0)
+    if not use_bias:
+        bias = wp.float32(0.0)
+    row_mass_coeff = mass_coeff
+    row_impulse_coeff = impulse_coeff
+    if speculative:
+        row_mass_coeff = wp.float32(1.0)
+        row_impulse_coeff = wp.float32(0.0)
+    effective_mass = wp.float32(1.0) / inverse_mass
+    lambda_old = cc_get_normal_lambda(cc, contact)
+    normal_update = block_solve_accumulated_inverse_bounded_1(
+        effective_mass,
+        velocity + bias,
+        lambda_old,
+        row_mass_coeff,
+        row_impulse_coeff,
+        sor_boost,
+        wp.float32(0.0),
+        BLOCK_LAMBDA_INF,
+    )
+    cc_set_normal_lambda(cc, contact, normal_update.lambda_new)
+    load = normal_update.lambda_new
+    if speculative and bias > idt * wp.float32(0.002):
+        load = wp.float32(0.0)
+    return wp.vec2(normal_update.delta, load)
+
+
+@wp.func
+def _solve_patch_tangent_rows(
+    columns: ContactColumnContainer,
+    cc: ContactContainer,
+    column: wp.int32,
+    point: wp.int32,
+    active_point_count: wp.int32,
+    packed_articulation: wp.int32,
+    column_ordinal: wp.int32,
+    point_contact: wp.array2d[wp.int32],
+    point_column: wp.array2d[wp.int32],
+    normal_load: wp.array2d[wp.float32],
+    patch_lambda: wp.array2d[wp.vec2],
+    velocity: wp.vec2f,
+    inverse_mass: wp.vec3,
+    use_bias: wp.bool,
+    sor_boost: wp.float32,
+) -> wp.vec2f:
+    """Project the two tangent rows of the friction patch whose points start at ``point``.
+
+    ``inverse_mass`` holds the tangent block ``J M^-1 J^T`` as ``(k00, k01, k11)``. The
+    patch impulse is shared evenly by its points' accumulated tangent impulses.
+    Returns the impulse increments along both tangents.
+    """
+    normal_load_sum = wp.float32(0.0)
+    bias_t = wp.vec2f(0.0, 0.0)
+    column_points = wp.int32(0)
+    column_point = point
+    while column_point < active_point_count and point_column[packed_articulation, column_point] == column:
+        contact = point_contact[packed_articulation, column_point]
+        normal_load_sum += normal_load[packed_articulation, column_point]
+        if use_bias:
+            bias_t[0] += cc_get_bias_t1(cc, contact)
+            bias_t[1] += cc_get_bias_t2(cc, contact)
+        column_points += wp.int32(1)
+        column_point += wp.int32(1)
+    inv_count = wp.float32(1.0) / wp.float32(column_points)
+    bias_t *= inv_count
+    k00 = inverse_mass[0]
+    k01 = inverse_mass[1]
+    k11 = inverse_mass[2]
+    det = k00 * k11 - k01 * k01
+    effective = wp.mat22f(0.0, 0.0, 0.0, 0.0)
+    if det > wp.float32(1.0e-12):
+        inv_det = wp.float32(1.0) / det
+        effective = wp.mat22f(
+            k11 * inv_det,
+            -k01 * inv_det,
+            -k01 * inv_det,
+            k00 * inv_det,
+        )
+    tangent_update = contact_patch_project_velocity_update(
+        patch_lambda[packed_articulation, column_ordinal],
+        velocity,
+        bias_t,
+        effective,
+        normal_load_sum,
+        contact_get_friction(columns, column),
+        contact_get_friction_dynamic(columns, column),
+        sor_boost,
+    )
+    patch_lambda[packed_articulation, column_ordinal] = tangent_update.lambda_new
+    point_lambda = tangent_update.lambda_new * inv_count
+    for column_point_offset in range(column_points):
+        contact = point_contact[packed_articulation, point + wp.int32(column_point_offset)]
+        cc_set_tangent1_lambda(cc, contact, point_lambda[0])
+        cc_set_tangent2_lambda(cc, contact, point_lambda[1])
+    return tangent_update.delta
 
 
 @functools.cache
@@ -2597,35 +2907,19 @@ def _make_solve_patch_contact_tile_kernel(
                     inverse_mass = reinterpret_int_as_float(row_body_cache[packed_articulation, point])
                 delta_n = wp.float32(0.0)
                 if lane == wp.int32(0):
-                    contact = point_contact[packed_articulation, point]
-                    bias = cc_get_bias(cc, contact)
-                    speculative = bias > wp.float32(0.0)
-                    normal_load[packed_articulation, point] = wp.float32(0.0)
-                    if not (speculative and not use_bias) and inverse_mass > wp.float32(1.0e-12):
-                        if not use_bias:
-                            bias = wp.float32(0.0)
-                        row_mass_coeff = mass_coeff
-                        row_impulse_coeff = impulse_coeff
-                        if speculative:
-                            row_mass_coeff = wp.float32(1.0)
-                            row_impulse_coeff = wp.float32(0.0)
-                        effective_mass = wp.float32(1.0) / inverse_mass
-                        lambda_old = cc_get_normal_lambda(cc, contact)
-                        normal_update = block_solve_accumulated_inverse_bounded_1(
-                            effective_mass,
-                            jv + bias,
-                            lambda_old,
-                            row_mass_coeff,
-                            row_impulse_coeff,
-                            sor_boost,
-                            wp.float32(0.0),
-                            BLOCK_LAMBDA_INF,
-                        )
-                        cc_set_normal_lambda(cc, contact, normal_update.lambda_new)
-                        delta_n = normal_update.delta
-                        normal_load[packed_articulation, point] = normal_update.lambda_new
-                        if speculative and bias > idt * wp.float32(0.002):
-                            normal_load[packed_articulation, point] = wp.float32(0.0)
+                    normal_update = _solve_patch_normal_row(
+                        cc,
+                        point_contact[packed_articulation, point],
+                        jv,
+                        inverse_mass,
+                        use_bias,
+                        idt,
+                        mass_coeff,
+                        impulse_coeff,
+                        sor_boost,
+                    )
+                    delta_n = normal_update[0]
+                    normal_load[packed_articulation, point] = normal_update[1]
                 delta_n = _broadcast_contact_scalar(delta_n)
                 generalized_delta += response * delta_n
 
@@ -2692,49 +2986,23 @@ def _make_solve_patch_contact_tile_kernel(
 
                 delta_t = wp.vec2f(0.0, 0.0)
                 if lane == wp.int32(0):
-                    normal_load_sum = wp.float32(0.0)
-                    bias_t = wp.vec2f(0.0, 0.0)
-                    column_points = wp.int32(0)
-                    column_point = point
-                    while (
-                        column_point < active_point_count and point_column[packed_articulation, column_point] == column
-                    ):
-                        contact = point_contact[packed_articulation, column_point]
-                        normal_load_sum += normal_load[packed_articulation, column_point]
-                        if use_bias:
-                            bias_t[0] += cc_get_bias_t1(cc, contact)
-                            bias_t[1] += cc_get_bias_t2(cc, contact)
-                        column_points += wp.int32(1)
-                        column_point += wp.int32(1)
-                    inv_count = wp.float32(1.0) / wp.float32(column_points)
-                    bias_t *= inv_count
-                    det = k00 * k11 - k01 * k01
-                    effective = wp.mat22f(0.0, 0.0, 0.0, 0.0)
-                    if det > wp.float32(1.0e-12):
-                        inv_det = wp.float32(1.0) / det
-                        effective = wp.mat22f(
-                            k11 * inv_det,
-                            -k01 * inv_det,
-                            -k01 * inv_det,
-                            k00 * inv_det,
-                        )
-                    tangent_update = contact_patch_project_velocity_update(
-                        patch_lambda[packed_articulation, column_ordinal],
+                    delta_t = _solve_patch_tangent_rows(
+                        columns,
+                        cc,
+                        column,
+                        point,
+                        active_point_count,
+                        packed_articulation,
+                        column_ordinal,
+                        point_contact,
+                        point_column,
+                        normal_load,
+                        patch_lambda,
                         wp.vec2f(jv1, jv2),
-                        bias_t,
-                        effective,
-                        normal_load_sum,
-                        contact_get_friction(columns, column),
-                        contact_get_friction_dynamic(columns, column),
+                        wp.vec3(k00, k01, k11),
+                        use_bias,
                         sor_boost,
                     )
-                    patch_lambda[packed_articulation, column_ordinal] = tangent_update.lambda_new
-                    delta_t = tangent_update.delta
-                    point_lambda = tangent_update.lambda_new * inv_count
-                    for column_point_offset in range(column_points):
-                        contact = point_contact[packed_articulation, point + wp.int32(column_point_offset)]
-                        cc_set_tangent1_lambda(cc, contact, point_lambda[0])
-                        cc_set_tangent2_lambda(cc, contact, point_lambda[1])
                 delta_t[0] = _broadcast_contact_scalar(delta_t[0])
                 delta_t[1] = _broadcast_contact_scalar(delta_t[1])
                 generalized_delta += response1 * delta_t[0]

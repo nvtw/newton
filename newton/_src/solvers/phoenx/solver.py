@@ -35,6 +35,7 @@ from newton._src.solvers.phoenx.adapter_kernels import (
     _snapshot_pre_step_velocity_kernel,
 )
 from newton._src.solvers.phoenx.articulations.block_joint_system import BlockJointSystem, MixedJointSystem
+from newton._src.solvers.phoenx.articulations.dense_substep import DenseSubstep, dense_substep_blockers
 from newton._src.solvers.phoenx.articulations.direct_contact_gs import DirectContactRunSchedule
 from newton._src.solvers.phoenx.articulations.direct_contact_response import DirectContactResponse
 from newton._src.solvers.phoenx.articulations.direct_equality import DirectEqualitySystem, _drive_dof_masks
@@ -1167,6 +1168,8 @@ class SolverPhoenX(SolverBase):
                     contact_friction_model=contact_friction_model,
                     backend=self.reduced_backend,
                 )
+                if self.reduced_backend == "dense" and not dense_substep_blockers(self._reduced_articulation):
+                    self._reduced_articulation.fused_substep = DenseSubstep(self._reduced_articulation)
                 joint_idx_to_cid = self._joint_constraints.joint_idx_to_cid.numpy()
                 joint_pgs_enabled = np.ones(num_joints, dtype=np.int32)
                 if self._uses_reduced_joint_ownership:
