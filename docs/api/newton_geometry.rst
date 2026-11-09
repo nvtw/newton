@@ -26,6 +26,7 @@ newton.geometry
    ImplicitBvhMeshData
    NarrowPhase
    ParticleSurface
+   PenetrationFreeConfig
    SDFCachedSampling
    TriMeshCollisionInfo
 

@@ -38,6 +38,19 @@ from ..geometry.differentiable_contacts import launch_differentiable_contact_aug
 from ..geometry.flags import MeshProperties, ShapeFlags
 from ..geometry.kernels import create_soft_contacts
 from ..geometry.narrow_phase import NarrowPhase
+from ..geometry.penetration_free import (
+    GenerationScene,
+    PenetrationFreeConfig,
+    PenetrationFreeData,
+    body_budget_kernel,
+    body_radius_kernel,
+    expand_aabbs_kernel,
+    generate_pair_constraints_kernel,
+    generate_triangle_constraints_kernel,
+    generate_triangle_pair_constraints_kernel,
+    penetration_free_capacities,
+    validate_penetration_free_model,
+)
 from ..geometry.sdf_cached_sampling import SDFCachedSampling
 from ..geometry.sdf_hydroelastic import HydroelasticSDF
 from ..geometry.soft_contacts_heightfield import _HEIGHTFIELD_CELLS_PER_TASK, launch_soft_heightfield_contacts
@@ -59,6 +72,7 @@ from ..sim.contacts import GENERATION_SENTINEL, Contacts
 from ..sim.model import Model
 from ..sim.shape_contact_pairs import _shape_contact_pair_count_for_mask, _shape_contact_pair_counts
 from ..sim.state import State
+from ..utils.heightfield import HeightfieldData
 
 _ANALYTIC_PRIMITIVE_PAIRS = frozenset(
     {
@@ -1875,6 +1889,7 @@ class CollisionPipeline:
         speculative_contact_velocity_filter: bool = True,
         dynamic_shape_scale: bool = False,
         publish_capacity: bool = True,
+        penetration_free: PenetrationFreeConfig | None = None,
     ):
         """
         Initialize the CollisionPipeline (expert API).
@@ -2098,6 +2113,14 @@ class CollisionPipeline:
                 default :attr:`~newton.Model.rigid_contact_max` and
                 :attr:`~newton.Model.soft_contact_max`. Pass ``False`` for a private
                 pipeline, such as a solver's internal one. Defaults to ``True``.
+            penetration_free: Opt-in configuration for penetration-free
+                rigid-rigid collisions, or ``None`` to disable them. When set,
+                :meth:`collide` additionally certifies half-space constraints
+                and motion budgets for every rigid shape pair that could meet,
+                and stores them in the :class:`~newton.Contacts` buffer
+                allocated by :meth:`contacts`. Only solvers that support the
+                mode accept such buffers. Pass ``dt`` to :meth:`collide` so the
+                motion budgets follow body velocities. Defaults to ``None``.
 
             speculative_contact_velocity_filter: Whether to discard candidates
                 outside authored gaps unless the initial velocity predicts closure.
@@ -3049,6 +3072,20 @@ class CollisionPipeline:
         # _get_soft_self_contact_detector).
         self._soft_self_contact_detector: TriMeshCollisionDetector | None = None
 
+        self._penetration_free: PenetrationFreeConfig | None = None
+        self._penetration_free_capacities = (0, 0)
+        if penetration_free is not None:
+            if requires_grad:
+                raise ValueError("penetration_free does not support requires_grad=True")
+            penetration_free.validate()
+            validate_penetration_free_model(model)
+            self._penetration_free = penetration_free
+            self._penetration_free_capacities = penetration_free_capacities(model, penetration_free)
+            with wp.ScopedDevice(device):
+                self._pf_empty_heightfield_index = wp.full(max(model.shape_count, 1), -1, dtype=wp.int32)
+                self._pf_empty_heightfield_data = wp.zeros(1, dtype=HeightfieldData)
+                self._pf_empty_elevations = wp.zeros(1, dtype=wp.float32)
+
         # Publish only after all construction succeeds.
         if publish_capacity:
             model.rigid_contact_max = rigid_contact_max
@@ -3206,6 +3243,11 @@ class CollisionPipeline:
         )
         contacts._contact_matching_mode = self.contact_matching
         contacts._rigid_contact_body_pair_reduced = self._reduces_body_pairs
+        if self._penetration_free is not None:
+            max_constraints, max_work = self._penetration_free_capacities
+            contacts._penetration_free = PenetrationFreeData(
+                self._penetration_free, self.model.body_count, max_constraints, max_work, self.model.device
+            )
         if self._soft_mesh_contact_data is not None:
             allocate_soft_mesh_contact_buffers(contacts)
             contacts._soft_contact_mesh_data = self._soft_mesh_contact_data
@@ -3722,6 +3764,14 @@ class CollisionPipeline:
             )
         filter_velocity = speculative_active and self.speculative_contact_velocity_filter
 
+        pf_data = None
+        if self._penetration_free is not None:
+            pf_data = contacts._penetration_free
+            if pf_data is None or pf_data.body_count != model.body_count:
+                raise ValueError("penetration_free requires a Contacts buffer allocated by this pipeline's contacts()")
+            self._penetration_free_prepare(state, pf_data, 0.0 if dt is None else float(dt))
+            self._penetration_free_expand_aabbs(pf_data, 1.0)
+
         self._run_broad_phase(
             shape_collision_group=model.shape_collision_group,
             shape_world=model.shape_world,
@@ -3729,6 +3779,11 @@ class CollisionPipeline:
             shape_displacement=self._shape_displacement if filter_velocity else None,
             sort_axis_displacement_limit=max_speculative_extension if filter_velocity else None,
         )
+
+        if pf_data is not None:
+            # Restore the force-contact AABBs so the narrow phase is unaffected by the safety search range.
+            self._penetration_free_expand_aabbs(pf_data, -1.0)
+            self._penetration_free_generate(state, pf_data)
 
         self._run_narrow_phase_and_post(
             state=state,
@@ -3752,6 +3807,118 @@ class CollisionPipeline:
 
         if soft_self_contact:
             self._detect_soft_self_contact(state.particle_q, contacts)
+
+    def _penetration_free_prepare(self, state: State, data: PenetrationFreeData, dt: float) -> None:
+        """Reset the safety buffers and compute motion budgets at ``state``."""
+        model = self.model
+        if dt < 0.0 or not np.isfinite(dt):
+            raise ValueError(f"dt must be a non-negative finite number, got {dt!r}")
+        data.reset()
+        if model.body_count == 0:
+            return
+        config = data.config
+        data.body_radius.zero_()
+        wp.launch(
+            body_radius_kernel,
+            dim=model.shape_count,
+            inputs=[
+                model.shape_body,
+                model.shape_transform,
+                model.shape_flags,
+                model.shape_collision_radius,
+                model.shape_collision_aabb_lower,
+                model.shape_collision_aabb_upper,
+                model.shape_margin,
+                model.body_com,
+            ],
+            outputs=[data.body_radius],
+            device=self.device,
+            record_tape=False,
+        )
+        wp.launch(
+            body_budget_kernel,
+            dim=model.body_count,
+            inputs=[
+                state.body_q,
+                state.body_qd,
+                model.body_flags,
+                data.body_radius,
+                float(dt),
+                float(config.budget_velocity_scale),
+                float(config.min_motion_budget),
+                float(config.max_motion_budget),
+            ],
+            outputs=[data.body_budget, data.body_used, data.body_tracked_q],
+            device=self.device,
+            record_tape=False,
+        )
+
+    def _penetration_free_expand_aabbs(self, data: PenetrationFreeData, sign: float) -> None:
+        """Grow (``sign=1``) or shrink (``sign=-1``) moving shapes' broad-phase AABBs by their motion budgets."""
+        model = self.model
+        if model.body_count == 0 or model.shape_count == 0:
+            return
+        wp.launch(
+            expand_aabbs_kernel,
+            dim=model.shape_count,
+            inputs=[model.shape_body, data.body_budget, float(sign)],
+            outputs=[self.narrow_phase.shape_aabb_lower, self.narrow_phase.shape_aabb_upper],
+            device=self.device,
+            record_tape=False,
+        )
+
+    def _penetration_free_generate(self, state: State, data: PenetrationFreeData) -> None:
+        """Emit certified half-space constraints for the current broad-phase pairs."""
+        model = self.model
+        if model.body_count == 0 or model.shape_count == 0:
+            return
+        scene = GenerationScene()
+        scene.pairs = self.broad_phase_shape_pairs
+        scene.pair_count = self.broad_phase_pair_count
+        scene.shape_count = model.shape_count
+        scene.tolerance = float(data.config.tolerance)
+        scene.geom_transform = self.geom_transform
+        scene.geom_data = self.geom_data
+        scene.shape_type = model.shape_type
+        scene.shape_source_ptr = model.shape_source_ptr
+        scene.shape_body = model.shape_body
+        scene.shape_aabb_lower_local = model.shape_collision_aabb_lower
+        scene.shape_aabb_upper_local = model.shape_collision_aabb_upper
+        scene.aabb_lower = self.narrow_phase.shape_aabb_lower
+        scene.aabb_upper = self.narrow_phase.shape_aabb_upper
+        scene.shape_gap = model.shape_gap
+        has_heightfields = model.heightfield_data is not None and model.heightfield_data.shape[0] > 0
+        scene.heightfield_index = (
+            model.shape_heightfield_index if has_heightfields else self._pf_empty_heightfield_index
+        )
+        scene.heightfield_data = model.heightfield_data if has_heightfields else self._pf_empty_heightfield_data
+        scene.heightfield_elevations = model.heightfield_elevations if has_heightfields else self._pf_empty_elevations
+        scene.body_q = state.body_q
+        scene.body_com = model.body_com
+        scene.body_budget = data.body_budget
+        out = data.constraints
+        # These kernels are sized by buffer capacity but usually find far fewer
+        # items; bounded grids stride over the capacity instead of scheduling
+        # mostly idle blocks of a register-heavy kernel.
+        launch = {"device": self.device, "record_tape": False, "max_blocks": data.max_blocks}
+        wp.launch(
+            generate_pair_constraints_kernel,
+            dim=scene.pairs.shape[0],
+            inputs=[scene, out, data.work_items, data.work_count],
+            **launch,
+        )
+        wp.launch(
+            generate_triangle_constraints_kernel,
+            dim=data.work_items.shape[0],
+            inputs=[scene, out, data.work_items, data.work_pairs, data.work_count],
+            **launch,
+        )
+        wp.launch(
+            generate_triangle_pair_constraints_kernel,
+            dim=data.work_pairs.shape[0],
+            inputs=[scene, out, data.work_pairs, data.work_count],
+            **launch,
+        )
 
     def _run_broad_phase(
         self,

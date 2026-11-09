@@ -1,0 +1,1 @@
+Add experimental penetration-free rigid-rigid collisions: `CollisionPipeline(penetration_free=newton.geometry.PenetrationFreeConfig())` certifies half-space constraints and motion budgets for every rigid shape type, and `SolverPhoenX` truncates each substep so no colliding pair penetrates deeper than the configured tolerance. Other solvers reject such contact buffers.

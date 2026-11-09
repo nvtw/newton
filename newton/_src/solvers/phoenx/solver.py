@@ -293,6 +293,8 @@ class SolverPhoenX(SolverBase):
 
     SUPPORTED_OBSERVABLES = frozenset({SolverBase.ObservableKind.CONTACT_F})
 
+    supports_penetration_free = True
+
     def __init__(
         self,
         model: Model,
@@ -1578,8 +1580,15 @@ class SolverPhoenX(SolverBase):
         wp.copy(state_out.particle_q, particles.position)
         wp.copy(state_out.particle_qd, particles.velocity)
 
-    def collide(self, state: State, contacts: Contacts) -> None:
-        """Run the configured Newton collision pipeline."""
+    def collide(self, state: State, contacts: Contacts, dt: float | None = None) -> None:
+        """Run the configured Newton collision pipeline.
+
+        Args:
+            state: State to detect collisions at.
+            contacts: Contact buffer to fill.
+            dt: Collision-update horizon [s] forwarded to
+                :meth:`~newton.CollisionPipeline.collide`, or ``None``.
+        """
         if self._collision_pipeline is None:
             raise RuntimeError("SolverPhoenX.collide() requires a collision pipeline.")
         if self._has_deformable_collision:
@@ -1588,6 +1597,7 @@ class SolverPhoenX(SolverBase):
             state,
             contacts,
             soft_self_contact=self._deformable_self_contact_enabled,
+            dt=dt,
         )
 
     def _snapshot_pre_step_pose(self) -> None:
@@ -1848,6 +1858,11 @@ class SolverPhoenX(SolverBase):
             shape_aabb_lower = getattr(np_, "shape_aabb_lower", None)
             shape_aabb_upper = getattr(np_, "shape_aabb_upper", None)
 
+        penetration_free = contacts._penetration_free if contacts is not None else None
+        self.world.set_penetration_free(penetration_free)
+        if penetration_free is not None:
+            self.world._penetration_free.check_reference(penetration_free, state_in.body_q, self.world.bodies)
+
         if self.solver_scheme == "tgs":
             self.world._temporal_contact_state.record_wrenches = int(
                 contacts is not None and (contacts.force is not None or contact_f is not None)
@@ -1869,6 +1884,8 @@ class SolverPhoenX(SolverBase):
         self._last_dt = float(dt) if self.solver_scheme == "tgs" else float(dt) / max(1, self.world.substeps)
 
         self._export_body_state(state_out, dt=float(dt))
+        if penetration_free is not None:
+            self.world._penetration_free.track(penetration_free, state_out.body_q)
         self._export_particle_state(state_out)
         self._particle_state_imported = None
         if want_body_qdd:

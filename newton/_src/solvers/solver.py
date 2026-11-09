@@ -911,6 +911,7 @@ class SolverBase:
 
         .. experimental::
         """
+        self._require_penetration_free_support(contacts)
         if observables is None:
             return
         if not isinstance(observables, self.Observables):
@@ -1128,6 +1129,28 @@ class SolverBase:
     .. experimental::
     """
 
+    supports_penetration_free: bool = False
+    """Whether this solver honors penetration-free rigid-rigid motion certification.
+
+    A :class:`newton.CollisionPipeline` built with ``penetration_free`` attaches
+    certified half-space constraints and motion budgets to the
+    :class:`~newton.Contacts` buffers it allocates. A supporting solver limits
+    every rigid position update with that data; other built-in solvers raise in
+    :meth:`step` when given such a buffer.
+
+    .. experimental::
+    """
+
+    def _require_penetration_free_support(self, contacts: Contacts | None) -> None:
+        """Raise if ``contacts`` carries penetration-free data this solver cannot honor."""
+        if type(self).supports_penetration_free or not isinstance(contacts, Contacts):
+            return
+        if contacts._penetration_free is not None:
+            raise ValueError(
+                f"{type(self).__name__} does not support penetration-free collisions; construct the "
+                "CollisionPipeline without penetration_free or use a solver with supports_penetration_free=True"
+            )
+
     def _require_unreduced_contacts(
         self,
         contacts: Contacts | None,
@@ -1143,6 +1166,7 @@ class SolverBase:
                 ``None`` uses the solver class declaration.
             configuration: Optional configuration label included in an error.
         """
+        self._require_penetration_free_support(contacts)
         if supports_body_pair_reduced_contacts is None:
             supports_body_pair_reduced_contacts = type(self).supports_body_pair_reduced_contacts
         if supports_body_pair_reduced_contacts or not isinstance(contacts, Contacts):

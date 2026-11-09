@@ -43,6 +43,7 @@ from ._src.geometry.inertia import compute_inertia_shape, transform_inertia
 from ._src.geometry.kernels import sdf_box, sdf_capsule, sdf_cone, sdf_cylinder, sdf_mesh, sdf_plane, sdf_sphere
 from ._src.geometry.narrow_phase import NarrowPhase
 from ._src.geometry.particle_surface import ParticleSurface, extract_particle_surface
+from ._src.geometry.penetration_free import PenetrationFreeConfig
 from ._src.geometry.sdf_cached_sampling import SDFCachedSampling
 from ._src.geometry.sdf_hydroelastic import HydroelasticSDF
 from ._src.geometry.sdf_utils import compute_offset_mesh, create_empty_sdf_data
@@ -61,6 +62,7 @@ __all__ = [
     "ImplicitBvhMeshData",
     "NarrowPhase",
     "ParticleSurface",
+    "PenetrationFreeConfig",
     "SDFCachedSampling",
     "TriMeshCollisionInfo",
     "collide_box_box",
