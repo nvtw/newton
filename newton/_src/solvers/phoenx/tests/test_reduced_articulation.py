@@ -4888,15 +4888,51 @@ _POST_IMPACT_ROPE_QD = (
 )
 
 
-def _set_post_impact_rope_state(model, state):
+# Pose and rates of a 14-link rope of the reduced articulation rain one frame before it
+# diverged: its links turn at up to 58 rad/s while it flies at 46 m/s.
+_RAIN_ROPE_Q = (
+    (-6.9913, 2.6882, 1.5699, 0.22946, 0.46064, -0.42158, -0.74661),
+    (-0.74897, 0.14657, 0.013767, 0.64604),
+    (-0.25242, 0.035538, -0.19128, -0.94786),
+    (0.59698, -0.045754, 0.0082601, -0.80091),
+    (0.78578, -0.023108, 0.065734, 0.61457),
+    (0.96877, 0.057159, -0.066589, 0.23191),
+    (0.96268, 0.058557, -0.066578, 0.25571),
+    (0.56992, 0.0095554, -0.036475, 0.82083),
+    (-0.089009, 0.12838, -0.027595, 0.98734),
+    (0.45864, 0.25171, -0.098431, 0.84653),
+    (-0.17738, 0.12561, -0.27095, 0.93773),
+    (-0.59149, -0.17866, -0.010189, 0.7862),
+    (0.021226, -0.15771, 0.13205, 0.97839),
+    (0.80782, 0.14427, 0.064692, 0.56782),
+)
+_RAIN_ROPE_QD = (
+    (16.283, 3.3181, -47.214, 22.46, -59.009, 33.451),
+    (27.422, 40.192, -30.425),
+    (-19.705, -37.645, 2.1276),
+    (22.685, 17.485, -37.456),
+    (-15.274, -8.3165, -26.062),
+    (-2.5756, 7.2938, 31.413),
+    (25.066, -21.654, 34.824),
+    (7.9963, -11.396, 53.071),
+    (-26.06, 38.588, -44.828),
+    (15.952, -80.979, 42.855),
+    (-3.1051, 13.742, -39.084),
+    (-20.43, 16.439, -35.211),
+    (-6.6555, -79.545, -22.793),
+    (30.085, -14.164, 12.97),
+)
+
+
+def _set_rope_state(model, state, rope_q=_POST_IMPACT_ROPE_Q, rope_qd=_POST_IMPACT_ROPE_QD):
     joint_q = []
-    for i, coordinates in enumerate(_POST_IMPACT_ROPE_Q):
+    for i, coordinates in enumerate(rope_q):
         values = np.asarray(coordinates, dtype=np.float32)
         rotation = values[3:] if i == 0 else values
         rotation /= np.linalg.norm(rotation)
         joint_q.extend(values)
     state.joint_q.assign(np.asarray(joint_q, dtype=np.float32))
-    state.joint_qd.assign(np.concatenate(_POST_IMPACT_ROPE_QD).astype(np.float32))
+    state.joint_qd.assign(np.concatenate(rope_qd).astype(np.float32))
     newton.eval_fk(model, state.joint_q, state.joint_qd, state)
 
 
@@ -5075,7 +5111,7 @@ class TestReducedVelocityProductStep(unittest.TestCase):
         model = _make_capsule_ball_chain(self.device, 6)
         state0, state1 = model.state(), model.state()
         for state in (state0, state1):
-            _set_post_impact_rope_state(model, state)
+            _set_rope_state(model, state)
         initial_energy = _kinetic_energy(model, state0)
         initial_momentum = _total_momentum(model, state0)
         initial_spins = _link_axial_spin(state0)
@@ -5089,6 +5125,24 @@ class TestReducedVelocityProductStep(unittest.TestCase):
         momentum = _total_momentum(model, state)
         np.testing.assert_allclose(momentum[:3], initial_momentum[:3], atol=1.0e-3)
         np.testing.assert_allclose(momentum[3:], initial_momentum[3:], atol=2.0e-3 * np.abs(initial_momentum[3:]).max())
+
+    def test_tumbling_rope_from_articulation_rain_stays_finite_without_energy_gain(self):
+        # In free flight from this state the rope's midpoint step equations lose their
+        # nearby solution at 240 Hz: the fixed point stalls, and accepting it gained 37%
+        # energy in one substep and overflowed within a frame. Halved substeps converge.
+        model = _make_capsule_ball_chain(self.device, 14)
+        state0, state1 = model.state(), model.state()
+        for state in (state0, state1):
+            _set_rope_state(model, state, _RAIN_ROPE_Q, _RAIN_ROPE_QD)
+        initial_energy = _kinetic_energy(model, state0)
+        initial_momentum = _total_momentum(model, state0)
+
+        state = _run_reduced_frames(model, state0, state1, 30)
+
+        self.assertTrue(np.isfinite(state.body_qd.numpy()).all())
+        self.assertLess(_kinetic_energy(model, state) / initial_energy, 1.02)
+        momentum = _total_momentum(model, state)
+        np.testing.assert_allclose(momentum[:3], initial_momentum[:3], atol=1.0e-3 * np.abs(initial_momentum[:3]).max())
 
     def test_tumbling_tilted_capsule_keeps_energy_and_angular_momentum(self):
         # A capsule tilted by 0.3 rad tumbles at 60 rad/s about world x, 0.25 rad per substep.

@@ -67,6 +67,17 @@ _MIDPOINT_ENERGY_RATE = wp.constant(0.01)
 # energy to 0.1% over 1.5 s at that residual, against 1.3% at 1e-3.
 _MIDPOINT_TOLERANCE = wp.constant(1.0e-8)
 _MIDPOINT_MAX_ITERATIONS = 16
+# A substep whose fixed point does not reach the tolerance is retried at half
+# length, at most this many times (down to dt / 16). The step equations of long
+# chains of thin links lose their nearby solution at moderate rates: the lever
+# arms turn within the step, which couples the links' axial spins (tiny inertia)
+# to the chain's bending. A free 14-link capsule rope fails at 0.15 to 0.3 rad per
+# step, where even an exact Newton iteration diverges, and accepting the stalled
+# iterate gains tens of percent of energy per step. Its half step converges.
+_MIDPOINT_MAX_HALVINGS = wp.constant(4)
+# Float32 COM positions, with a few roundings each, bound how closely the secant
+# momenta can meet the start momenta; see _midpoint_momentum_step.
+_MIDPOINT_ROUNDING = wp.constant(8.0 * 2.0**-24)
 _WARP_FACTOR_MIN_ARTICULATIONS = 32
 _WARP_FACTOR_MIN_DEPTH_LEVELS = 8
 _vec6 = wp.types.vector(length=6, dtype=wp.float32)
@@ -425,6 +436,10 @@ def _midpoint_pose_pass(
             arm = com0
             if final:
                 arm = com1
+                # Runtime slots pad each joint's rates to a fixed width. The padding has no
+                # motion, whatever template used the slot before.
+                for dof in range(dof_start + linear_count + angular_count, joint_qd_start[joint + wp.int32(1)]):
+                    ws.joint_s_mid[dof] = wp.spatial_vector()
                 jcalc_motion(
                     kind,
                     ws.joint_axis,
@@ -612,50 +627,134 @@ def _midpoint_momentum_step(
     tree conserves linear and angular momentum, a link keeps the spin its joints
     cannot transmit, and the symmetric step keeps the energy without drift.
 
+    A step whose fixed point stalls or diverges above its rounding floor has no
+    solution near the start rates; it is retried at half length, see
+    ``_MIDPOINT_MAX_HALVINGS``. Each converged substep restarts from its end pose,
+    overwriting ``joint_s``, ``body_inertia`` and ``ws.body_q_local`` with that
+    pose's tables; the next factorization rebuilds them from the coordinates.
+
     The tree's lanes split each depth level like the explicit advance; every
     branch is uniform over them. Writes the end coordinates to ``ws.joint_q``,
     internal rates to ``joint_qd`` (root anchor velocity at the new pose), and
     the public floating-root rates to ``ws.joint_qd_public``.
     """
-    # Start momenta and the start factorization, which preconditions the fixed point.
-    for depth in range(tree.max_depth + wp.int32(1)):
-        index = tree.depth_start[tree.articulation, depth] + tree.lane
-        depth_end = tree.depth_start[tree.articulation, depth + wp.int32(1)]
-        while index < depth_end:
-            joint = tree.order[index]
-            parent = joint_parent[joint]
-            child = joint_child[joint]
-            twist = wp.spatial_vector()
-            if parent >= wp.int32(0):
-                twist = body_velocity[parent]
-            for dof in range(joint_qd_start[joint], joint_qd_start[joint + wp.int32(1)]):
-                twist += joint_s[dof] * joint_qd[dof]
-                ws.joint_qd_mid[dof] = joint_qd[dof]
-            body_velocity[child] = twist
-            inertia = _unpack_symmetric_mat66(body_inertia[child])
-            ws.body_articulated[child] = inertia
-            ws.body_momentum[child] = inertia * twist
-            index += tree.width
-        _sync_reduced_group(tree.mask)
-    _midpoint_gather_momentum(tree, joint_child, ws)
     begin = tree.depth_start[tree.articulation, 0]
     end = tree.depth_start[tree.articulation, tree.max_depth + wp.int32(1)]
-    scale = wp.float32(0.0)
-    index = begin + tree.lane
-    while index < end:
-        joint = tree.order[index]
-        child = joint_child[joint]
-        for dof in range(joint_qd_start[joint], joint_qd_start[joint + wp.int32(1)]):
-            momentum = wp.dot(joint_s[dof], ws.body_momentum[child]) + ws.joint_armature[dof] * joint_qd[dof]
-            ws.joint_momentum[dof] = momentum
-            scale += momentum * joint_qd[dof]
-        index += tree.width
-    scale = _sum_reduced_group_float(scale, tree.width, tree.mask)
-    _midpoint_factor(tree, joint_child, joint_qd_start, joint_s, ws)
+    root_joint = tree.order[begin]
+    root_kind = joint_type[root_joint]
+    floating = root_kind == JointType.FREE or root_kind == JointType.DISTANCE
+    # Progress in units of the shortest substep; integers keep the substeps summing to dt.
+    units_left = wp.int32(1) << wp.int32(_MIDPOINT_MAX_HALVINGS)
+    units = units_left
+    while units_left > wp.int32(0):
+        # Start momenta and the start factorization, which preconditions the fixed point.
+        for depth in range(tree.max_depth + wp.int32(1)):
+            index = tree.depth_start[tree.articulation, depth] + tree.lane
+            depth_end = tree.depth_start[tree.articulation, depth + wp.int32(1)]
+            while index < depth_end:
+                joint = tree.order[index]
+                parent = joint_parent[joint]
+                child = joint_child[joint]
+                twist = wp.spatial_vector()
+                if parent >= wp.int32(0):
+                    twist = body_velocity[parent]
+                for dof in range(joint_qd_start[joint], joint_qd_start[joint + wp.int32(1)]):
+                    twist += joint_s[dof] * joint_qd[dof]
+                body_velocity[child] = twist
+                inertia = _unpack_symmetric_mat66(body_inertia[child])
+                ws.body_articulated[child] = inertia
+                ws.body_momentum[child] = inertia * twist
+                index += tree.width
+            _sync_reduced_group(tree.mask)
+        _midpoint_gather_momentum(tree, joint_child, ws)
+        scale = wp.float32(0.0)
+        moment = wp.float32(0.0)
+        index = begin + tree.lane
+        while index < end:
+            joint = tree.order[index]
+            child = joint_child[joint]
+            for dof in range(joint_qd_start[joint], joint_qd_start[joint + wp.int32(1)]):
+                momentum = wp.dot(joint_s[dof], ws.body_momentum[child]) + ws.joint_armature[dof] * joint_qd[dof]
+                ws.joint_momentum[dof] = momentum
+                scale += momentum * joint_qd[dof]
+            com = wp.transform_point(ws.body_q_local[child], ws.body_com[child])
+            moment += ws.body_mass[child] * wp.dot(com, com)
+            index += tree.width
+        scale = _sum_reduced_group_float(scale, tree.width, tree.mask)
+        # Rounding the COM positions to float32 limits the secant momenta m (x1 - x0) / h
+        # to about m |x| eps / h, so the residual cannot fall below (eps / h)^2 sum m |x|^2.
+        moment = _sum_reduced_group_float(moment, tree.width, tree.mask)
+        _midpoint_factor(tree, joint_child, joint_qd_start, joint_s, ws)
 
-    previous = wp.float32(3.4e38)
-    iteration = wp.int32(0)
-    while iteration < max_iterations:
+        units = wp.min(units, units_left)
+        step = dt * wp.float32(units) / wp.float32(wp.int32(1) << wp.int32(_MIDPOINT_MAX_HALVINGS))
+        rounding = _MIDPOINT_ROUNDING / step
+        solved = wp.bool(False)
+        while not solved:
+            index = begin + tree.lane
+            while index < end:
+                joint = tree.order[index]
+                for dof in range(joint_qd_start[joint], joint_qd_start[joint + wp.int32(1)]):
+                    ws.joint_qd_mid[dof] = joint_qd[dof]
+                index += tree.width
+            _sync_reduced_group(tree.mask)
+            converged = wp.bool(False)
+            previous = wp.float32(3.4e38)
+            iteration = wp.int32(0)
+            while iteration < max_iterations:
+                _midpoint_pose_pass(
+                    tree,
+                    joint_type,
+                    joint_parent,
+                    joint_child,
+                    joint_qd_start,
+                    joint_s,
+                    ws,
+                    step,
+                    ws.joint_q_mid,
+                    wp.bool(False),
+                    body_velocity,
+                )
+                index = begin + tree.lane
+                while index < end:
+                    joint = tree.order[index]
+                    child = joint_child[joint]
+                    for dof in range(joint_qd_start[joint], joint_qd_start[joint + wp.int32(1)]):
+                        ws.joint_force[dof] = (
+                            ws.joint_momentum[dof]
+                            - wp.dot(joint_s[dof], ws.body_momentum[child])
+                            - ws.joint_armature[dof] * ws.joint_qd_mid[dof]
+                        )
+                    index += tree.width
+                _sync_reduced_group(tree.mask)
+                # The residual's energy norm r M^-1 r measures convergence.
+                residual = _midpoint_solve(tree, joint_parent, joint_child, joint_qd_start, joint_s, ws, ws.joint_step)
+                iteration += wp.int32(1)
+                if residual > previous:
+                    # Diverging: keep the current iterate.
+                    iteration = max_iterations
+                else:
+                    index = begin + tree.lane
+                    while index < end:
+                        joint = tree.order[index]
+                        for dof in range(joint_qd_start[joint], joint_qd_start[joint + wp.int32(1)]):
+                            ws.joint_qd_mid[dof] = ws.joint_qd_mid[dof] + ws.joint_step[dof]
+                        index += tree.width
+                    _sync_reduced_group(tree.mask)
+                    if residual <= _MIDPOINT_TOLERANCE * scale:
+                        converged = wp.bool(True)
+                        iteration = max_iterations
+                previous = residual
+            # A fixed point that stalls above the rounding floor has no solution near the
+            # start rates: the step is too long for the tree's tumbling, so halve it.
+            floor = _MIDPOINT_TOLERANCE * scale + rounding * rounding * moment
+            if converged or previous <= floor or units == wp.int32(1):
+                solved = wp.bool(True)
+            else:
+                units = units >> wp.int32(1)
+                step = wp.float32(0.5) * step
+
+        # End pose, its momentum and velocity.
         _midpoint_pose_pass(
             tree,
             joint_type,
@@ -664,9 +763,9 @@ def _midpoint_momentum_step(
             joint_qd_start,
             joint_s,
             ws,
-            dt,
-            ws.joint_q_mid,
-            wp.bool(False),
+            step,
+            ws.joint_q,
+            wp.bool(True),
             body_velocity,
         )
         index = begin + tree.lane
@@ -675,64 +774,34 @@ def _midpoint_momentum_step(
             child = joint_child[joint]
             for dof in range(joint_qd_start[joint], joint_qd_start[joint + wp.int32(1)]):
                 ws.joint_force[dof] = (
-                    ws.joint_momentum[dof]
-                    - wp.dot(joint_s[dof], ws.body_momentum[child])
-                    - ws.joint_armature[dof] * ws.joint_qd_mid[dof]
+                    wp.dot(ws.joint_s_mid[dof], ws.body_momentum[child]) + ws.joint_armature[dof] * ws.joint_qd_mid[dof]
                 )
+                if floating and joint == root_joint:
+                    # A floating root's fixed axes project the whole tree's momentum about the
+                    # articulation origin, which the converged step conserves exactly. Keep it
+                    # exact for any fixed-point residual.
+                    ws.joint_force[dof] = ws.joint_momentum[dof]
             index += tree.width
         _sync_reduced_group(tree.mask)
-        # The residual's energy norm r M^-1 r measures convergence.
-        residual = _midpoint_solve(tree, joint_parent, joint_child, joint_qd_start, joint_s, ws, ws.joint_step)
-        iteration += wp.int32(1)
-        if residual > previous:
-            # Diverging, only far beyond practical rates: keep the current iterate.
-            iteration = max_iterations
-        else:
+        _midpoint_factor(tree, joint_child, joint_qd_start, ws.joint_s_mid, ws)
+        _midpoint_solve(tree, joint_parent, joint_child, joint_qd_start, ws.joint_s_mid, ws, joint_qd)
+        units_left -= units
+        if units_left > wp.int32(0):
+            # The next substep starts from this end pose. The factorization rebuilds
+            # these start-pose tables from the coordinates before anything else reads them.
             index = begin + tree.lane
             while index < end:
                 joint = tree.order[index]
+                child = joint_child[joint]
                 for dof in range(joint_qd_start[joint], joint_qd_start[joint + wp.int32(1)]):
-                    ws.joint_qd_mid[dof] = ws.joint_qd_mid[dof] + ws.joint_step[dof]
+                    joint_s[dof] = ws.joint_s_mid[dof]
+                pose = ws.body_pose[child]
+                ws.body_q_local[child] = pose
+                body_inertia[child] = _pack_transformed_body_inertia(
+                    pose * ws.body_x_com[child], ws.body_mass[child], ws.body_inertia[child]
+                )
                 index += tree.width
             _sync_reduced_group(tree.mask)
-            if residual <= _MIDPOINT_TOLERANCE * scale:
-                iteration = max_iterations
-        previous = residual
-
-    # End pose, its momentum and velocity.
-    _midpoint_pose_pass(
-        tree,
-        joint_type,
-        joint_parent,
-        joint_child,
-        joint_qd_start,
-        joint_s,
-        ws,
-        dt,
-        ws.joint_q,
-        wp.bool(True),
-        body_velocity,
-    )
-    root_joint = tree.order[begin]
-    root_kind = joint_type[root_joint]
-    floating = root_kind == JointType.FREE or root_kind == JointType.DISTANCE
-    index = begin + tree.lane
-    while index < end:
-        joint = tree.order[index]
-        child = joint_child[joint]
-        for dof in range(joint_qd_start[joint], joint_qd_start[joint + wp.int32(1)]):
-            ws.joint_force[dof] = (
-                wp.dot(ws.joint_s_mid[dof], ws.body_momentum[child]) + ws.joint_armature[dof] * ws.joint_qd_mid[dof]
-            )
-            if floating and joint == root_joint:
-                # A floating root's fixed axes project the whole tree's momentum about the
-                # articulation origin, which the converged step conserves exactly. Keep it
-                # exact for any fixed-point residual.
-                ws.joint_force[dof] = ws.joint_momentum[dof]
-        index += tree.width
-    _sync_reduced_group(tree.mask)
-    _midpoint_factor(tree, joint_child, joint_qd_start, ws.joint_s_mid, ws)
-    _midpoint_solve(tree, joint_parent, joint_child, joint_qd_start, ws.joint_s_mid, ws, joint_qd)
 
     if tree.lane == wp.int32(0):
         if floating:

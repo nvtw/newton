@@ -46,6 +46,25 @@ def _chain_template(links: int = 4) -> newton.ModelBuilder:
     return builder
 
 
+def _rope_template(links: int = 4) -> newton.ModelBuilder:
+    """The capsule chain of :func:`_chain_template` with ball joints."""
+    builder = newton.ModelBuilder()
+    capsule = wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), 0.5 * wp.pi)
+    previous = -1
+    for i in range(links):
+        body = builder.add_link(xform=wp.transform(wp.vec3(2.0 * _LINK * i, 0.0, 0.0), wp.quat_identity()))
+        builder.add_shape_capsule(body, xform=wp.transform((0.0, 0.0, 0.0), capsule), radius=_RADIUS, half_height=_LINK)
+        if previous >= 0:
+            builder.add_joint_ball(
+                previous,
+                body,
+                parent_xform=wp.transform(wp.vec3(_LINK, 0.0, 0.0), wp.quat_identity()),
+                child_xform=wp.transform(wp.vec3(-_LINK, 0.0, 0.0), wp.quat_identity()),
+            )
+        previous = body
+    return builder
+
+
 def _pendulum_template() -> newton.ModelBuilder:
     """Box hinged to the world 0.5 m along -x of its template origin."""
     builder = newton.ModelBuilder()
@@ -363,6 +382,31 @@ class TestReducedRuntimeArticulations(unittest.TestCase):
             self.assertTrue(np.isfinite(scene.slot_bodies(slot)).all())
         self.assertLess(scene.joint_gap(), 1.0e-4)
         self.assertEqual(int(scene.dyn.error_count.numpy()[0]), 0)
+
+    def test_spinning_tree_moves_alike_in_a_reused_and_a_fresh_slot(self):
+        # A rope spinning about its axis takes the midpoint step, which fills the slot's
+        # ball-joint rates. A hinge chain spawned into that slot later pads those rates and
+        # must move exactly like the same chain in a fresh slot.
+        scene = _ReducedScene(2, [_rope_template(), _chain_template()])
+        spin = wp.spatial_vector(0.0, 0.0, 0.0, 60.0, 0.0, 3.0)
+        positions = wp.array([wp.vec3(-2.0, 0.0, 2.0), wp.vec3(2.0, 0.0, 2.0)], dtype=wp.vec3)
+        instances = wp.zeros(2, dtype=int)
+        wp.launch(_spawn_kernel, dim=1, inputs=[scene.dyn.data, wp.array([0], dtype=int), positions, spin, instances])
+        scene.run(5)
+        wp.launch(_remove_kernel, dim=1, inputs=[scene.dyn.data, wp.array([0], dtype=int)])
+        scene.run(2)  # the slot passes quarantine
+        wp.launch(
+            _spawn_kernel, dim=2, inputs=[scene.dyn.data, wp.array([1, 1], dtype=int), positions, spin, instances]
+        )
+        np.testing.assert_array_equal(instances.numpy(), [0, 1])
+        scene.run(20)
+        midpoint = scene.solver._reduced_articulation.system.midpoint.flag.numpy()
+        self.assertTrue(midpoint[-2:].all())  # both chains take the midpoint step
+        reused, fresh = scene.slot_bodies(0)[:4], scene.slot_bodies(1)[:4]
+        self.assertTrue(np.isfinite(reused).all())
+        self.assertGreater(float(fresh[:, 2].min()), 0.5)  # still in free fall
+        np.testing.assert_allclose(reused[:, :3] - reused[0, :3], fresh[:, :3] - fresh[0, :3], atol=1.0e-4)
+        np.testing.assert_allclose(reused[:, 3:], fresh[:, 3:], atol=1.0e-4)
 
 
 def _spider_template() -> newton.ModelBuilder:
