@@ -213,6 +213,7 @@ def _commit_dynamic_kernel(
     body_budget: wp.array[wp.float32],
     body_radius: wp.array[wp.float32],
     body_used: wp.array[wp.float32],
+    body_blocked: wp.array[wp.int32],
     pseudo_v: wp.array[wp.vec3],
     pseudo_w: wp.array[wp.vec3],
 ):
@@ -231,7 +232,7 @@ def _commit_dynamic_kernel(
     travel = screw_motion_travel(dx, angle, body_radius[b])
     budget_fraction = motion_budget_fraction(body_used[b], body_budget[b], travel)
     alpha = wp.min(fraction[i], budget_fraction)
-    if (status[0] & STATUS_FATAL_MASK) != 0:
+    if (status[0] & STATUS_FATAL_MASK) != 0 or body_blocked[b] != 0:
         alpha = 0.0
     if alpha < 1.0:
         if budget_fraction < 1.0:
@@ -359,6 +360,7 @@ class PhoenXPenetrationFree:
                 data.body_budget,
                 data.body_radius,
                 data.body_used,
+                data.constraints.body_blocked,
                 self.pseudo_v,
                 self.pseudo_w,
             ],

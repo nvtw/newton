@@ -351,18 +351,22 @@ class TestPenetrationFreePhoenX(unittest.TestCase):
         solver.step(state_0, state_1, None, contacts, _DT)
         self.assertTrue(int(contacts._penetration_free.status.numpy()[0]) & int(STATUS_KINEMATIC_VIOLATION))
 
-    def test_constraint_overflow_freezes_motion(self):
+    def test_constraint_overflow_holds_only_affected_bodies(self):
+        # Four spheres hover 4 mm above the ground, inside their motion budgets,
+        # but the buffer holds two pairs. The two spheres whose pairs were
+        # dropped must not move; the other two fall.
         builder = newton.ModelBuilder()
         builder.add_ground_plane()
         for i in range(4):
-            body = builder.add_body(xform=wp.transform((0.5 * i, 0.0, 0.1), wp.quat_identity()))
+            body = builder.add_body(xform=wp.transform((0.5 * i, 0.0, 0.104), wp.quat_identity()))
             builder.add_shape_sphere(body, radius=0.1)
         run = _make_run(builder, penetration_free=PenetrationFreeConfig(max_constraints=2))
         before = run.state_0.body_q.numpy().copy()
         run.step()
-        status = int(run.data.status.numpy()[0])
-        self.assertTrue(status & int(STATUS_CONSTRAINT_OVERFLOW))
-        np.testing.assert_allclose(run.state_0.body_q.numpy(), before, atol=1.0e-6)
+        self.assertTrue(int(run.data.status.numpy()[0]) & int(STATUS_CONSTRAINT_OVERFLOW))
+        drop = before[:, 2] - run.state_0.body_q.numpy()[:, 2]
+        self.assertEqual(int(np.sum(drop < 1.0e-6)), 2, drop)
+        self.assertEqual(int(np.sum(drop > 5.0e-4)), 2, drop)
 
     def test_teleported_state_freezes_motion(self):
         builder = newton.ModelBuilder()

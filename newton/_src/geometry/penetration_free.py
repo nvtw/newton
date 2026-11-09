@@ -78,12 +78,17 @@ STATUS_REFERENCE_MISMATCH = wp.constant(1 << 4)
 STATUS_KINEMATIC_VIOLATION = wp.constant(1 << 5)
 STATUS_BUDGET_EXHAUSTED = wp.constant(1 << 6)
 
-STATUS_FATAL_MASK = wp.constant((1 << 0) | (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4))
-"""Status bits after which no constraint set is complete; solvers must stop all motion."""
+STATUS_FATAL_MASK = wp.constant((1 << 2) | (1 << 3) | (1 << 4))
+"""Status bits after which no constraint set is complete; solvers must stop all motion.
+
+Constraint and triangle work overflow are not fatal: they block only the
+bodies of the dropped pairs (``Constraints.body_blocked``) until the next
+detection.
+"""
 
 _STATUS_NAMES = {
-    1 << 0: "constraint buffer overflow",
-    1 << 1: "triangle work buffer overflow",
+    1 << 0: "constraint buffer overflow (affected bodies held until the next detection)",
+    1 << 1: "triangle work buffer overflow (affected bodies held until the next detection)",
     1 << 2: "broad-phase pair buffer overflow",
     1 << 3: "unsupported geometry",
     1 << 4: "state does not match the detection reference",
@@ -234,6 +239,8 @@ class Constraints:
     limit: wp.array[wp.vec2]
     fixed_support: wp.array[wp.vec2]
     feature: wp.array2d[ConstraintFeature]
+    body_blocked: wp.array[wp.int32]
+    """Nonzero for bodies that lost a pair to a full buffer; they must not move until the next detection."""
 
 
 class PenetrationFreeData:
@@ -268,6 +275,7 @@ class PenetrationFreeData:
             c.limit = wp.zeros(nc, dtype=wp.vec2)
             c.fixed_support = wp.zeros(nc, dtype=wp.vec2)
             c.feature = wp.zeros((nc, 2), dtype=ConstraintFeature)
+            c.body_blocked = wp.zeros(nb, dtype=wp.int32)
             self.constraints = c
             # Triangle work lists: (pair, source triangle, source is shape b, other triangle).
             self.work_count = wp.zeros(2, dtype=wp.int32)
@@ -303,6 +311,7 @@ class PenetrationFreeData:
         self.constraints.count.zero_()
         self.constraints.status.zero_()
         self.constraints.recovery_count.zero_()
+        self.constraints.body_blocked.zero_()
         self.work_count.zero_()
 
     def status_messages(self) -> list[str]:
@@ -859,6 +868,14 @@ def _world_support(f: _Feature, direction: wp.vec3) -> float:
 
 
 @wp.func
+def _block_bodies(body_a: int, body_b: int, out: Constraints):
+    if body_a >= 0:
+        out.body_blocked[body_a] = 1
+    if body_b >= 0:
+        out.body_blocked[body_b] = 1
+
+
+@wp.func
 def _emit_pair(a: _Feature, b: _Feature, normal: wp.vec3, height: wp.vec2, limit: wp.vec2, out: Constraints):
     if (a.body >= 0 and a.infinite_plane != 0) or (b.body >= 0 and b.infinite_plane != 0):
         wp.atomic_or(out.status, 0, STATUS_UNSUPPORTED_GEOMETRY)
@@ -866,6 +883,7 @@ def _emit_pair(a: _Feature, b: _Feature, normal: wp.vec3, height: wp.vec2, limit
     idx = wp.atomic_add(out.count, 0, 1)
     if idx >= out.body.shape[0]:
         wp.atomic_or(out.status, 0, STATUS_CONSTRAINT_OVERFLOW)
+        _block_bodies(a.body, b.body, out)
         return
     out.body[idx] = wp.vec2i(a.body, b.body)
     out.normal[idx] = normal
@@ -986,10 +1004,19 @@ def _is_triangle_source(t: int) -> bool:
 
 
 @wp.func
-def _push_work(items: wp.array[wp.vec4i], counts: wp.array[wp.int32], list_id: int, item: wp.vec4i, out: Constraints):
+def _push_work(
+    scene: GenerationScene,
+    items: wp.array[wp.vec4i],
+    counts: wp.array[wp.int32],
+    list_id: int,
+    item: wp.vec4i,
+    out: Constraints,
+):
     idx = wp.atomic_add(counts, list_id, 1)
     if idx >= items.shape[0]:
         wp.atomic_or(out.status, 0, STATUS_WORK_OVERFLOW)
+        pair = scene.pairs[item[0]]
+        _block_bodies(scene.shape_body[pair[0]], scene.shape_body[pair[1]], out)
         return
     items[idx] = item
 
@@ -1045,13 +1072,13 @@ def _enumerate_triangles(
             for col in range(c0, c1 + 1):
                 for sub in range(2):
                     item[slot] = (row * (hfd.ncol - 1) + col) * 2 + sub
-                    _push_work(items, counts, list_id, item, out)
+                    _push_work(scene, items, counts, list_id, item, out)
     else:
         query = wp.mesh_query_aabb(scene.shape_source_ptr[shape], lo, hi)
         tri = int(0)
         while wp.mesh_query_aabb_next(query, tri):
             item[slot] = tri
-            _push_work(items, counts, list_id, item, out)
+            _push_work(scene, items, counts, list_id, item, out)
 
 
 @wp.func
