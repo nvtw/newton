@@ -54,6 +54,7 @@ from newton._src.solvers.phoenx.articulations.dense_tree import (
     _load_u8,
     _load_u16,
     _make_shared_base,
+    _shared_handle,
     _store,
     _store_u8,
     _unrolled_module,
@@ -127,6 +128,11 @@ PAGE_ROWS = 24
 
 _CHUNK_POINTS = PAGE_ROWS // 3
 _FULL_MASK = wp.constant(wp.uint32(0xFFFFFFFF))
+_BLOCKS_PER_SM = 11
+"""Most blocks per SM the fused kernels are compiled for; more add little, see PERF_NOTES."""
+
+_SM_SHARED_BYTES = 84 * 1024
+"""Shared memory an SM gives the blocks of one kernel (measured on an RTX PRO 6000 Blackwell)."""
 
 
 @wp.func_native(
@@ -204,13 +210,13 @@ def _lane_index() -> wp.int32: ...
 
 
 @wp.func
-def _store_spatial(shared: wp.uint64, index: wp.int32, value: wp.spatial_vector):
+def _store_spatial(shared: _shared_handle, index: wp.int32, value: wp.spatial_vector):
     for component in range(6):
         _store(shared, index + wp.int32(component), value[component])
 
 
 @wp.func
-def _store_transform(shared: wp.uint64, index: wp.int32, value: wp.transform):
+def _store_transform(shared: _shared_handle, index: wp.int32, value: wp.transform):
     translation = wp.transform_get_translation(value)
     rotation = wp.transform_get_rotation(value)
     for component in range(3):
@@ -220,7 +226,7 @@ def _store_transform(shared: wp.uint64, index: wp.int32, value: wp.transform):
 
 
 @wp.func
-def _load_transform(shared: wp.uint64, index: wp.int32) -> wp.transform:
+def _load_transform(shared: _shared_handle, index: wp.int32) -> wp.transform:
     return wp.transform(
         wp.vec3(_load(shared, index), _load(shared, index + wp.int32(1)), _load(shared, index + wp.int32(2))),
         wp.quat(
@@ -382,7 +388,7 @@ def make_dense_substep_kernel(
     scratch_words = qd_offset + 2 * max_dofs + 1
     ops = make_dense_tree_ops(max_dofs, joint_capacity, entry_capacity, subtree_capacity, scratch_words)
     layout = ops.layout
-    shared_base = _make_shared_base(layout.size)
+    shared_base = _make_shared_base(layout.size, layout.tables)
     stage = ops.stage
     factor = ops.factor
     restore = ops.restore
@@ -415,7 +421,7 @@ def make_dense_substep_kernel(
 
     @wp.func
     def local_kinematics(
-        shared: wp.uint64,
+        shared: _shared_handle,
         tree: _TreeJoint,
         lane: wp.int32,
         articulation: wp.int32,
@@ -486,7 +492,7 @@ def make_dense_substep_kernel(
         return local, origin, anchor
 
     @wp.func
-    def joint_twist(shared: wp.uint64, tree: _TreeJoint, dof_start: wp.int32) -> wp.spatial_vector:
+    def joint_twist(shared: _shared_handle, tree: _TreeJoint, dof_start: wp.int32) -> wp.spatial_vector:
         """Return ``sum S qd`` over the joint's DOFs from the shared motion subspaces and rates."""
         twist = wp.spatial_vector()
         for offset in range(tree.dof_count):
@@ -498,7 +504,7 @@ def make_dense_substep_kernel(
 
     @wp.func
     def solve_forces(
-        shared: wp.uint64,
+        shared: _shared_handle,
         tree: _TreeJoint,
         lane: wp.int32,
         dof_start: wp.int32,
@@ -535,7 +541,7 @@ def make_dense_substep_kernel(
         solve_mass(shared, wp.int32(rhs_base), n, lane)
 
     @wp.func
-    def row_dot(shared: wp.uint64, row: wp.int32) -> wp.float32:
+    def row_dot(shared: _shared_handle, row: wp.int32) -> wp.float32:
         """Return ``z_row . w``, the velocity change of a row under the impulses applied so far."""
         total = wp.float32(0.0)
         for position in range(path_capacity):
@@ -546,7 +552,7 @@ def make_dense_substep_kernel(
         return total
 
     @wp.func
-    def row_product(shared: wp.uint64, row: wp.int32, other: wp.int32) -> wp.float32:
+    def row_product(shared: _shared_handle, row: wp.int32, other: wp.int32) -> wp.float32:
         """Return ``z_row . z_other``; root paths share DOFs on a common prefix only."""
         total = wp.float32(0.0)
         for position in range(path_capacity):
@@ -557,7 +563,7 @@ def make_dense_substep_kernel(
         return total
 
     @wp.func
-    def add_row(shared: wp.uint64, lane: wp.int32, row: wp.int32, impulse: wp.float32):
+    def add_row(shared: _shared_handle, lane: wp.int32, row: wp.int32, impulse: wp.float32):
         """Add ``impulse * z_row`` to ``w``; the lanes stride over the path positions, which hold distinct DOFs."""
         position = lane
         while position < wp.int32(path_capacity):
@@ -579,7 +585,7 @@ def make_dense_substep_kernel(
 
     @wp.func
     def solve_chunk(
-        shared: wp.uint64,
+        shared: _shared_handle,
         articulation: wp.int32,
         lane: wp.int32,
         page: wp.int32,
@@ -887,7 +893,7 @@ def make_dense_substep_kernel(
 
     @wp.func
     def publish_rates(
-        shared: wp.uint64,
+        shared: _shared_handle,
         tree: _TreeJoint,
         lane: wp.int32,
         dof_start: wp.int32,
@@ -981,7 +987,12 @@ def make_dense_substep_kernel(
             bodies.velocity[slot] = velocity_com
             bodies.angular_velocity[slot] = omega
 
-    @wp.kernel(enable_backward=False, module=module, grid_stride=False)
+    # The kernels' time is their rounds of blocks per SM: bound the registers so that as many
+    # blocks fit an SM as its shared memory holds. The biased kernel's spills cost less than
+    # the round they save.
+    blocks_per_sm = max(1, min(_BLOCKS_PER_SM, _SM_SHARED_BYTES // (4 * layout.size)))
+
+    @wp.kernel(enable_backward=False, module=module, grid_stride=False, launch_bounds=(_LANES, blocks_per_sm))
     def dense_substep_kernel(
         bucket_articulation: wp.array[wp.int32],
         dt: wp.float32,
@@ -1081,7 +1092,7 @@ def make_dense_substep_kernel(
         template = dense.articulation_template[articulation]
         joint_base = template_joint_start[template]
         max_depth = template_max_depth[template]
-        shared = shared_base()
+        shared = shared_base(template_image, template_image_start[template])
         idt = wp.float32(1.0) / dt
         heights = stage(shared, articulation, lane, dense, template_image, template_image_start)
         tree = _load_tree_joint(

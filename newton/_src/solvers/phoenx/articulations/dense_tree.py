@@ -73,9 +73,18 @@ def dense_dof_bucket(dof_count: int) -> int:
     return 0
 
 
+_shared_handle = wp.types.vector(length=2, dtype=wp.uint64)
+"""A block's workspace: its 32-bit shared-window address and the global address of its factor tables."""
+
+
 @functools.cache
-def _make_shared_base(length: int):
-    """Return the shared-window address of one block's static shared workspace of ``length`` words.
+def _make_shared_base(length: int, tables: int | None = None):
+    """Return the handle of one block's static shared workspace of ``length`` words.
+
+    With ``tables``, the handle also carries the address that maps the halfword
+    offsets of a template's factor-only tables, which count from shared word 0
+    with the template image at word ``tables``, into the image at
+    ``image[source]`` in global memory; see :class:`DenseSharedLayout`.
 
     Warp tiles synchronize the block after every element write; the dense
     kernels order their phases with ``__syncwarp`` instead and address raw,
@@ -83,6 +92,7 @@ def _make_shared_base(length: int):
     addresses. Generic pointers into shared memory would make the compiler
     rebuild the block's shared window from ``SR_CgaCtaId`` at most accesses.
     """
+    table_address = "0ull" if tables is None else f"(unsigned long long)(image.data + source) - {4 * int(tables)}ull"
     snippet = f"""
 #if defined(__CUDA_ARCH__)
     __shared__ __align__(16) float dense_shared[{int(length)}];
@@ -90,21 +100,28 @@ def _make_shared_base(length: int):
     // An opaque copy keeps the address in a register: rebuilt, it would read SR_CgaCtaId
     // on the dependency chain of every shared access.
     asm volatile("mov.u32 %0, %0;" : "+r"(address));
-    return address;
+    return wp::vec_t<2, wp::uint64>(address, {table_address});
 #else
-    return 0;
+    return wp::vec_t<2, wp::uint64>();
 #endif
 """
 
-    @wp.func_native(snippet)
-    def shared_base() -> wp.uint64: ...
+    if tables is None:
+
+        @wp.func_native(snippet)
+        def shared_base() -> _shared_handle: ...
+
+    else:
+
+        @wp.func_native(snippet)
+        def shared_base(image: wp.array[wp.uint32], source: wp.int32) -> _shared_handle: ...
 
     return shared_base
 
 
 # Shared accesses are volatile so they keep their program order among each other and
 # around ``__syncwarp``; the address is the 32-bit shared-window offset in ``base``.
-_ADDRESS = "(unsigned)base + {scale}u * (unsigned)index"
+_ADDRESS = "(unsigned)base[0] + {scale}u * (unsigned)index"
 
 
 def _device_only(snippet: str, fallback: str = "") -> str:
@@ -122,7 +139,7 @@ def _device_only(snippet: str, fallback: str = "") -> str:
         "return {};",
     )
 )
-def _load(base: wp.uint64, index: wp.int32) -> wp.float32: ...
+def _load(base: _shared_handle, index: wp.int32) -> wp.float32: ...
 
 
 @wp.func_native(
@@ -131,7 +148,7 @@ def _load(base: wp.uint64, index: wp.int32) -> wp.float32: ...
         "",
     )
 )
-def _store(base: wp.uint64, index: wp.int32, value: wp.float32): ...
+def _store(base: _shared_handle, index: wp.int32, value: wp.float32): ...
 
 
 @wp.func_native(
@@ -144,7 +161,7 @@ def _store(base: wp.uint64, index: wp.int32, value: wp.float32): ...
         "return {};",
     )
 )
-def _load_int(base: wp.uint64, index: wp.int32) -> wp.int32: ...
+def _load_int(base: _shared_handle, index: wp.int32) -> wp.int32: ...
 
 
 @wp.func_native(
@@ -153,7 +170,7 @@ def _load_int(base: wp.uint64, index: wp.int32) -> wp.int32: ...
         "",
     )
 )
-def _store_int(base: wp.uint64, index: wp.int32, value: wp.int32): ...
+def _store_int(base: _shared_handle, index: wp.int32, value: wp.int32): ...
 
 
 @wp.func_native(
@@ -172,7 +189,7 @@ def _store_int(base: wp.uint64, index: wp.int32, value: wp.int32): ...
         "return {};",
     )
 )
-def _load24(base: wp.uint64, index: wp.int32) -> _vec24:
+def _load24(base: _shared_handle, index: wp.int32) -> _vec24:
     """Load a padded spatial inertia from 16-byte aligned shared storage."""
     ...
 
@@ -195,7 +212,7 @@ def _load24(base: wp.uint64, index: wp.int32) -> _vec24:
         "return {};",
     )
 )
-def _load_motion(base: wp.uint64, index: wp.int32) -> wp.spatial_vector:
+def _load_motion(base: _shared_handle, index: wp.int32) -> wp.spatial_vector:
     """Load a padded motion subspace from 16-byte aligned shared storage."""
     ...
 
@@ -209,7 +226,7 @@ def _unrolled_module(name: str, max_unroll: int):
 
 @wp.func
 def _descendant_solve_sum(
-    shared: wp.uint64,
+    shared: _shared_handle,
     desc_row_base: wp.int32,
     desc_dof_base: wp.int32,
     begin: wp.int32,
@@ -242,7 +259,7 @@ def _descendant_solve_sum(
 
 @wp.func
 def _ancestor_solve_sum(
-    shared: wp.uint64,
+    shared: _shared_handle,
     path_base: wp.int32,
     factor_base: wp.int32,
     begin: wp.int32,
@@ -380,7 +397,13 @@ def _mask_kernel(values: wp.array[wp.int32], mask: wp.array[wp.int32], masked: w
         "return {};",
     )
 )
-def _load_u16(base: wp.uint64, index: wp.int32) -> wp.int32: ...
+def _load_u16(base: _shared_handle, index: wp.int32) -> wp.int32: ...
+
+
+@wp.func_native(_device_only("    return ((const unsigned short*)base[1])[index];", "return {};"))
+def _table_u16(base: _shared_handle, index: wp.int32) -> wp.int32:
+    """Load a halfword of the factor-only tables from the template image in global memory."""
+    ...
 
 
 @wp.func_native(
@@ -389,7 +412,7 @@ def _load_u16(base: wp.uint64, index: wp.int32) -> wp.int32: ...
         "",
     )
 )
-def _store_u16(base: wp.uint64, index: wp.int32, value: wp.int32): ...
+def _store_u16(base: _shared_handle, index: wp.int32, value: wp.int32): ...
 
 
 @wp.func_native(
@@ -402,7 +425,7 @@ def _store_u16(base: wp.uint64, index: wp.int32, value: wp.int32): ...
         "return {};",
     )
 )
-def _load_u8(base: wp.uint64, index: wp.int32) -> wp.int32: ...
+def _load_u8(base: _shared_handle, index: wp.int32) -> wp.int32: ...
 
 
 @wp.func_native(
@@ -411,7 +434,7 @@ def _load_u8(base: wp.uint64, index: wp.int32) -> wp.int32: ...
         "",
     )
 )
-def _store_u8(base: wp.uint64, index: wp.int32, value: wp.int32): ...
+def _store_u8(base: _shared_handle, index: wp.int32, value: wp.int32): ...
 
 
 @wp.func_native(
@@ -420,7 +443,7 @@ def _store_u8(base: wp.uint64, index: wp.int32, value: wp.int32): ...
         "",
     )
 )
-def _store_word(base: wp.uint64, index: wp.int32, value: wp.uint32): ...
+def _store_word(base: _shared_handle, index: wp.int32, value: wp.uint32): ...
 
 
 @wp.func_native(
@@ -455,11 +478,16 @@ class DenseSharedLayout:
     """Offsets of one articulation's shared workspace for the dense factor.
 
     Float words hold the factor ``L``, the motion subspaces padded to float4
-    words, and the assembled diagonal. The template's row, descendant, level,
-    and subtree tables follow as 16-bit and 8-bit tables, addressed in
-    halfwords and bytes, in words ``tables`` to ``tables_end``; see
-    :meth:`pack_template`. A scratch region holds the composite inertias while
-    factoring and ``scratch_words`` words for the caller afterwards.
+    words, and the assembled diagonal. The template image follows in words
+    ``tables`` to ``tables_end`` as ancestor masks and 16-bit and 8-bit tables,
+    addressed in halfwords and bytes; see :meth:`pack_template`. The workspace
+    holds the image up to ``staged_end``: the masks and the path and subtree
+    tables every pass reads. The factorization's own descendant and level
+    tables stay in the template image in global memory, where the same
+    offsets address them through the handle of :func:`_make_shared_base`;
+    a block's shared memory bounds how many trees an SM runs at once. A
+    scratch region holds the composite inertias while factoring and
+    ``scratch_words`` words for the caller afterwards.
     """
 
     _HALFWORD_TABLES = ("desc_row", "level_pair", "dof_entry", "desc_start", "level_pair_start", "subtree_start")
@@ -480,32 +508,34 @@ class DenseSharedLayout:
         self.ancestors = self.diagonal + max_dofs
         half_word = self.ancestors + 2 * max_dofs
         self.tables = self.ancestors
-        halfwords = [
-            ("desc_row", entry_capacity),
-            ("level_pair", entry_capacity),
-            ("dof_entry", max_dofs + 1),
-            ("desc_start", max_dofs + 1),
-            ("level_pair_start", max_dofs + 2),
-            ("subtree_start", joint_capacity + 1),
-        ]
+        # Tables every pass reads follow the masks in the workspace.
         offset = 2 * half_word
-        for name, count in halfwords:
+        for name, count in (("dof_entry", max_dofs + 1), ("subtree_start", joint_capacity + 1)):
             setattr(self, name, offset)
             offset += count
-        byte_word = (offset + 1) // 2
-        bytes_ = [
+        offset = 4 * ((offset + 1) // 2)
+        for name, count in (
             ("path", entry_capacity),
             ("dof_joint", max_dofs),
             ("subtree_joint", subtree_capacity),
             ("joint_last_dof", joint_capacity),
-        ]
-        offset = 4 * byte_word
-        for name, count in bytes_:
+        ):
             setattr(self, name, offset)
             offset += count
-        self.tables_end = (offset + 3) // 4
+        self.staged_end = (offset + 3) // 4
+        # The factorization's own tables stay in the template image.
+        offset = 2 * self.staged_end
+        for name, count in (
+            ("desc_row", entry_capacity),
+            ("level_pair", entry_capacity),
+            ("desc_start", max_dofs + 1),
+            ("level_pair_start", max_dofs + 2),
+        ):
+            setattr(self, name, offset)
+            offset += count
+        self.tables_end = (offset + 1) // 2
         # Spatial inertias are loaded as float4 words.
-        self.scratch = 4 * ((self.tables_end + 3) // 4)
+        self.scratch = 4 * ((self.staged_end + 3) // 4)
         # One spare word takes the stores of lanes without a row.
         self.spare = self.scratch + max(_INERTIA_STRIDE * joint_capacity, scratch_words)
         self.size = self.spare + 1
@@ -581,7 +611,7 @@ def make_dense_tree_ops(
     dof_joint = layout.dof_joint
     subtree_joint = layout.subtree_joint
     table_base = layout.tables
-    table_words = layout.tables_end - layout.tables
+    table_words = layout.staged_end - layout.tables
     table_rounds = (table_words + _LANES - 1) // _LANES
     joint_rounds = (joint_capacity + _LANES - 1) // _LANES
     dof_rounds = (max_dofs + _LANES) // _LANES
@@ -594,7 +624,9 @@ def make_dense_tree_ops(
     factor_vector = wp.types.vector(length=entry_rounds, dtype=wp.float32)
 
     @wp.func
-    def stage_motion(shared: wp.uint64, lane: wp.int32, dof_start: wp.int32, n: wp.int32, motion: wp.array[wp.float32]):
+    def stage_motion(
+        shared: _shared_handle, lane: wp.int32, dof_start: wp.int32, n: wp.int32, motion: wp.array[wp.float32]
+    ):
         """Stage the per-pose motion subspaces as float4-padded shared rows."""
         motion_values = motion_vector()
         for r in range(motion_rounds):
@@ -613,7 +645,7 @@ def make_dense_tree_ops(
 
     @wp.func
     def stage(
-        shared: wp.uint64,
+        shared: _shared_handle,
         articulation: wp.int32,
         lane: wp.int32,
         dense: DenseTreeData,
@@ -634,7 +666,7 @@ def make_dense_tree_ops(
         return heights
 
     @wp.func
-    def descendant_products(shared: wp.uint64, k: wp.int32, depth: wp.int32, column: wp.int32) -> wp.vec2:
+    def descendant_products(shared: _shared_handle, k: wp.int32, depth: wp.int32, column: wp.int32) -> wp.vec2:
         """Return ``sum_i L_ik L_i,column`` and ``sum_i L_ik^2`` over the descendants ``i`` of ``k``.
 
         ``L_ik`` sits at ``depth`` in row ``i``. Four independent partial sums
@@ -642,13 +674,13 @@ def make_dense_tree_ops(
         """
         products = wp.vec4()
         squares = wp.vec4()
-        index = _load_u16(shared, wp.int32(desc_start) + k)
-        end = _load_u16(shared, wp.int32(desc_start) + k + wp.int32(1))
+        index = _table_u16(shared, wp.int32(desc_start) + k)
+        end = _table_u16(shared, wp.int32(desc_start) + k + wp.int32(1))
         while index + wp.int32(3) < end:
-            row0 = _load_u16(shared, wp.int32(desc_row) + index)
-            row1 = _load_u16(shared, wp.int32(desc_row) + index + wp.int32(1))
-            row2 = _load_u16(shared, wp.int32(desc_row) + index + wp.int32(2))
-            row3 = _load_u16(shared, wp.int32(desc_row) + index + wp.int32(3))
+            row0 = _table_u16(shared, wp.int32(desc_row) + index)
+            row1 = _table_u16(shared, wp.int32(desc_row) + index + wp.int32(1))
+            row2 = _table_u16(shared, wp.int32(desc_row) + index + wp.int32(2))
+            row3 = _table_u16(shared, wp.int32(desc_row) + index + wp.int32(3))
             l0 = _load(shared, row0 + depth)
             l1 = _load(shared, row1 + depth)
             l2 = _load(shared, row2 + depth)
@@ -662,7 +694,7 @@ def make_dense_tree_ops(
             squares += wp.vec4(l0 * l0, l1 * l1, l2 * l2, l3 * l3)
             index += wp.int32(4)
         while index < end:
-            row0 = _load_u16(shared, wp.int32(desc_row) + index)
+            row0 = _table_u16(shared, wp.int32(desc_row) + index)
             l0 = _load(shared, row0 + depth)
             products[0] += l0 * _load(shared, row0 + column)
             squares[0] += l0 * l0
@@ -674,7 +706,7 @@ def make_dense_tree_ops(
 
     @wp.func
     def factor(
-        shared: wp.uint64,
+        shared: _shared_handle,
         articulation: wp.int32,
         lane: wp.int32,
         joint_start: wp.int32,
@@ -786,10 +818,10 @@ def make_dense_tree_ops(
         # rows of k's descendants, H_kt - sum_i L_ik L_it, and scales it by L_kk, which it
         # forms alike. Rows of equal height never read each other.
         for level in range(heights):
-            pair = _load_u16(shared, wp.int32(level_pair_start) + level) + lane
-            pair_end = _load_u16(shared, wp.int32(level_pair_start) + level + wp.int32(1))
+            pair = _table_u16(shared, wp.int32(level_pair_start) + level) + lane
+            pair_end = _table_u16(shared, wp.int32(level_pair_start) + level + wp.int32(1))
             while pair < pair_end:
-                packed = _load_u16(shared, wp.int32(level_pair) + pair)
+                packed = _table_u16(shared, wp.int32(level_pair) + pair)
                 k = packed >> wp.int32(8)
                 t = packed & wp.int32(0xFF)
                 entry = _load_u16(shared, wp.int32(dof_entry) + k)
@@ -817,7 +849,7 @@ def make_dense_tree_ops(
 
     @wp.func
     def restore(
-        shared: wp.uint64,
+        shared: _shared_handle,
         articulation: wp.int32,
         lane: wp.int32,
         dof_start: wp.int32,
@@ -840,7 +872,7 @@ def make_dense_tree_ops(
         _sync_contact_warp()
 
     @wp.func
-    def load_row(shared: wp.uint64, vector_base: wp.int32, n: wp.int32, row: wp.int32) -> wp.vec4:
+    def load_row(shared: _shared_handle, vector_base: wp.int32, n: wp.int32, row: wp.int32) -> wp.vec4:
         """Return a lane's row ``(b_row, 1 / L_row,row, row entry, depth of row)``, zero beyond ``n``."""
         result = wp.vec4(0.0)
         if row < n:
@@ -855,12 +887,12 @@ def make_dense_tree_ops(
         return result
 
     @wp.func
-    def store_row(shared: wp.uint64, vector_base: wp.int32, n: wp.int32, row: wp.int32, value: wp.float32):
+    def store_row(shared: _shared_handle, vector_base: wp.int32, n: wp.int32, row: wp.int32, value: wp.float32):
         if row < n:
             _store(shared, vector_base + row, value)
 
     @wp.func
-    def solve_upper(shared: wp.uint64, vector_base: wp.int32, n: wp.int32, lane: wp.int32):
+    def solve_upper(shared: _shared_handle, vector_base: wp.int32, n: wp.int32, lane: wp.int32):
         """Overwrite a shared vector ``b`` by ``z = L^-T b`` one column per step, leaves first.
 
         Lane ``l`` holds ``b_l`` and ``b_{l+32}`` in registers. Step ``k`` broadcasts
@@ -900,7 +932,7 @@ def make_dense_tree_ops(
         _sync_contact_warp()
 
     @wp.func
-    def solve_lower(shared: wp.uint64, vector_base: wp.int32, n: wp.int32, lane: wp.int32):
+    def solve_lower(shared: _shared_handle, vector_base: wp.int32, n: wp.int32, lane: wp.int32):
         """Overwrite a shared vector ``z`` by ``x = L^-1 z`` level by level, root first.
 
         The rows at path depth ``d`` finish ``x_i = z_i / L_ii``; every deeper row
@@ -946,7 +978,7 @@ def make_dense_tree_ops(
                 value1 = wp.where(depth1 > level, reduced1, value1)
 
     @wp.func
-    def solve(shared: wp.uint64, vector_base: wp.int32, n: wp.int32, lane: wp.int32):
+    def solve(shared: _shared_handle, vector_base: wp.int32, n: wp.int32, lane: wp.int32):
         solve_upper(shared, vector_base, n, lane)
         solve_lower(shared, vector_base, n, lane)
 
@@ -963,7 +995,7 @@ def make_dense_tree_ops(
 
 def dense_unroll(layout: DenseSharedLayout, joint_capacity: int) -> int:
     """Return the loop unrolling the staged loads of :class:`DenseTreeOps` need."""
-    table_rounds = (layout.tables_end - layout.tables + _LANES - 1) // _LANES
+    table_rounds = (layout.staged_end - layout.tables + _LANES - 1) // _LANES
     entry_rounds = (layout.motion + _LANES - 1) // _LANES
     return max(_STAGE_ROUNDS, table_rounds, entry_rounds, 21 * ((joint_capacity + _LANES - 1) // _LANES))
 
@@ -972,7 +1004,7 @@ def dense_unroll(layout: DenseSharedLayout, joint_capacity: int) -> int:
 def _make_dense_factor_kernel(max_dofs: int, joint_capacity: int, entry_capacity: int, subtree_capacity: int):
     """Factor each articulation of one bucket into ``dense.factor``."""
     ops = make_dense_tree_ops(max_dofs, joint_capacity, entry_capacity, subtree_capacity)
-    shared_base = _make_shared_base(ops.layout.size)
+    shared_base = _make_shared_base(ops.layout.size, ops.layout.tables)
     stage = ops.stage
     factor = ops.factor
     module = _unrolled_module(
@@ -1002,7 +1034,7 @@ def _make_dense_factor_kernel(max_dofs: int, joint_capacity: int, entry_capacity
         joint_count = articulation_end[articulation] - joint_start
         dof_start = joint_qd_start[joint_start]
         n = joint_qd_start[articulation_end[articulation]] - dof_start
-        shared = shared_base()
+        shared = shared_base(template_image, template_image_start[dense.articulation_template[articulation]])
         heights = stage(shared, articulation, lane, dense, template_image, template_image_start)
         factor(
             shared,
@@ -1054,7 +1086,7 @@ def _make_dense_contact_rows_kernel(max_dofs: int, entry_capacity: int, patch_ro
     @wp.func
     def add_path(
         bodies: BodyContainer,
-        shared: wp.uint64,
+        shared: _shared_handle,
         body: wp.int32,
         wrench: wp.spatial_vector,
         joint_start: wp.int32,
