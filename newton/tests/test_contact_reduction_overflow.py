@@ -12,6 +12,7 @@ import warp as wp
 
 import newton
 from newton._src.geometry.contact_reduction_global import (
+    CONTACT_ID_BITS,
     GlobalContactReducer,
     GlobalContactReducerData,
     export_contact_to_buffer,
@@ -303,9 +304,10 @@ def test_default_capacity_holds_large_batches(test, device):
 
 def test_deterministic_limit_applies_only_with_reducer(test, device):
     """Limit automatic capacity to the reducer's packing range only when a reducer exists, and say so."""
-    world_count = 1400  # about 1.4M estimated slots, above the 2**20 - 1 packing limit
+    packing_limit = (1 << int(CONTACT_ID_BITS)) - 1
+    # About 1000 estimated slots per world: a third more than the packing range holds.
+    world_count = 1400 * (packing_limit + 1) // (1 << 20)
     model = _tray_worlds_model(device, world_count)
-    packing_limit = (1 << 20) - 1
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", newton.exceptions.NewtonWarning)
@@ -316,7 +318,7 @@ def test_deterministic_limit_applies_only_with_reducer(test, device):
     for kwargs in ({"deterministic": True}, {"contact_matching": "latest"}):
         with test.subTest(**kwargs):
             with test.assertWarnsRegex(
-                newton.exceptions.NewtonWarning, r"deterministic contact reduction.*at most 1,048,575"
+                newton.exceptions.NewtonWarning, rf"deterministic contact reduction.*at most {packing_limit:,}"
             ):
                 pipeline = newton.CollisionPipeline(model, **kwargs)
             test.assertEqual(pipeline.narrow_phase.max_triangle_pairs, packing_limit)

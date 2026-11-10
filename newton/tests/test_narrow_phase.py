@@ -117,7 +117,7 @@ class TestNarrowPhaseBufferWarnings(unittest.TestCase):
                     wp.launch(
                         verify_narrow_phase_buffers,
                         dim=1,
-                        inputs=[zero, 0] * 11 + [active_slots, capacity, zero, zero, 80],
+                        inputs=[zero, 0] * 12 + [active_slots, capacity, zero, zero, 80],
                         device=device,
                     )
                 finally:
@@ -139,7 +139,7 @@ class TestNarrowPhaseBufferWarnings(unittest.TestCase):
                     wp.launch(
                         verify_narrow_phase_buffers,
                         dim=1,
-                        inputs=[zero, 0] * 11 + [active_slots, 100, zero, buffer_overflows, 80],
+                        inputs=[zero, 0] * 12 + [active_slots, 100, zero, buffer_overflows, 80],
                         device=device,
                     )
                 finally:

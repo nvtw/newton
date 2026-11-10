@@ -58,6 +58,7 @@ from ..geometry.contact_reduction_global import (
     GroupReductionConfig,
     create_export_group_contacts_kernel,
     create_export_reduced_contacts_kernel,
+    deterministic_packing_fits,
     finish_group_frame_kernel,
     mesh_triangle_contacts_to_reducer_kernel,
     reduce_buffered_contacts_kernel,
@@ -3036,7 +3037,8 @@ class NarrowPhase:
                     speculative=filter_speculative,
                     use_texture_sdf_only=self.mesh_sdf_texture_only,
                     use_identity_sdf_scale=self.mesh_sdf_identity_scale_only,
-                    deterministic_reduction=deterministic,
+                    # A large buffer makes the reducer fall back to its fast packing.
+                    deterministic_reduction=deterministic and deterministic_packing_fits(max_triangle_pairs),
                 )
                 self.mesh_mesh_contacts_kernel_precomputed = create_narrow_phase_process_mesh_mesh_contacts_kernel(
                     write_contact_to_reducer,
@@ -3046,7 +3048,8 @@ class NarrowPhase:
                     use_texture_sdf_only=self.mesh_sdf_texture_only,
                     use_identity_sdf_scale=self.mesh_sdf_identity_scale_only,
                     speculative=filter_speculative,
-                    deterministic_reduction=deterministic,
+                    # A large buffer makes the reducer fall back to its fast packing.
+                    deterministic_reduction=deterministic and deterministic_packing_fits(max_triangle_pairs),
                 )
             else:
                 self.mesh_mesh_contacts_kernel = create_narrow_phase_process_mesh_mesh_contacts_kernel(

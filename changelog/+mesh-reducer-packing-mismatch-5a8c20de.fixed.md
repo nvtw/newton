@@ -1,0 +1,1 @@
+Fix an illegal memory access in mesh-mesh contact reduction when the reducer buffer exceeds the deterministic packing range: the contact kernels kept the deterministic layout after the reducer fell back to fast packing.

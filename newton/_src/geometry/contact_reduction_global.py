@@ -762,6 +762,16 @@ def decode_oct(e: wp.vec2) -> wp.vec3:
     return wp.normalize(wp.vec3(nx, ny, nz))
 
 
+def deterministic_packing_fits(capacity: int) -> bool:
+    """Whether a reducer buffer of ``capacity`` contacts can use the deterministic packing.
+
+    The deterministic packing indexes contacts with :data:`CONTACT_ID_BITS`
+    bits. Kernels that write to the reducer are compiled for one packing, so
+    they must decide with this function, like the reducer does.
+    """
+    return capacity < (1 << int(CONTACT_ID_BITS))
+
+
 @wp.struct
 class GlobalContactReducerData:
     """Struct for passing GlobalContactReducer arrays to kernels.
@@ -1096,7 +1106,7 @@ class GlobalContactReducer:
         max_det_contacts = 1 << int(CONTACT_ID_BITS)
         if group_reduction is not None and (store_hydroelastic_data or enable_contact_reclamation):
             raise ValueError("group reduction supports neither hydroelastic data nor contact reclamation")
-        if deterministic and group_reduction is None and capacity >= max_det_contacts:
+        if deterministic and group_reduction is None and not deterministic_packing_fits(capacity):
             # Auto-fallback: dense mesh-mesh scenes (e.g. a 50x50 grid of
             # SDF nut/bolt pairs) push more edge-test attempts than the
             # deterministic packing's contact_id field can index. Silently
