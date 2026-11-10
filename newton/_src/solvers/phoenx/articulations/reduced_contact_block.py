@@ -111,11 +111,27 @@ def _fallback_world_block_dim(world_count: int, sm_count: int) -> int:
     return 1 if world_count < _FALLBACK_SERIAL_WORLDS_PER_SM * sm_count else 32
 
 
+#: Shape pairs per shape above which a pair list is a large world's all-against-all list.
+_DENSE_PAIR_LIST_RATIO = 64
+
+
+def shape_pairs_are_dense(model: Model) -> bool:
+    """Return whether the model's shape pairs grow with the square of its shapes.
+
+    Replicated worlds list a few pairs per shape. One large world lists nearly
+    every shape against every other: walking, or even building, that list
+    costs more than finding the touching pairs spatially.
+    """
+    return int(model.shape_contact_pair_count or 0) > _DENSE_PAIR_LIST_RATIO * int(model.shape_count)
+
+
 def _model_pair_endpoints(model: Model):
     """Return the bodies, articulations, and static flags of the model's shape pairs, or ``None``."""
     capacity = getattr(model, "_dynamic_capacity", None)
     if capacity is not None and capacity.shape_count:
         return None  # runtime shapes create pairs the model never listed
+    if shape_pairs_are_dense(model):
+        return None  # any shape may meet any other: the per-step schedule decides
     pairs_array = getattr(model, "shape_contact_pairs", None)
     if pairs_array is None or model.shape_body is None:
         return None
@@ -3680,11 +3696,13 @@ class ReducedContactBlockSystem:
                 ],
                 device=self.device,
             )
-            # The classify kernel wrote the sentinel to every inactive key.
+            # The classify kernel wrote the sentinel to every inactive key. Keys are an
+            # ownership bit above a column index: sort only the bits they use.
             sort_variable_length_int64(
                 self.schedule_keys,
                 self.schedule_columns,
                 num_columns,
+                end_bit=(2 * (self.schedule_capacity + 1)).bit_length() + 1,
                 prefix_flags=self._schedule_sort_flags(),
                 tail_masked=True,
             )
@@ -3753,11 +3771,14 @@ class ReducedContactBlockSystem:
                 outputs=[self.schedule_keys, self.schedule_columns, self.schedule_section_end],
                 device=self.device,
             )
-            # The classify kernel wrote the sentinel to every inactive key.
+            # The classify kernel wrote the sentinel to every inactive key. Keys are a
+            # section index above a column index: sort only the bits they use.
+            sections = self.articulation_count + self.schedule_world_count
             sort_variable_length_int64(
                 self.schedule_keys,
                 self.schedule_columns,
                 num_columns,
+                end_bit=(sections * (self.schedule_capacity + 1)).bit_length() + 1,
                 prefix_flags=self._schedule_sort_flags(),
                 tail_masked=True,
             )

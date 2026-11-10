@@ -35,6 +35,7 @@ from newton._src.solvers.phoenx.articulations.reduced_contact_block import (
     _finalize_reduced_contact_rows_device,
     _model_pair_endpoints,
     _sync_contact_warp,
+    shape_pairs_are_dense,
 )
 from newton._src.solvers.phoenx.articulations.reduced_loop import ReducedLoopSystem
 from newton._src.solvers.phoenx.body import (
@@ -4904,7 +4905,8 @@ def _build_persistent_articulation_eligibility(
         reject(parent_articulation, "loop or external joint")
         reject(child_articulation, "loop or external joint")
 
-    pairs_array = getattr(model, "shape_contact_pairs", None)
+    # An all-against-all list of one large world proves nothing and is costly to build.
+    pairs_array = None if shape_pairs_are_dense(model) else getattr(model, "shape_contact_pairs", None)
     if pairs_array is None:
         for articulation in range(articulation_count):
             reject(articulation, "unproven collision topology")

@@ -1,0 +1,1 @@
+Fix one large world stalling or running out of memory at solver construction: PhoenX no longer builds the all-against-all shape pair list, and the collision pipeline it creates for such a world uses sweep and prune (the implicit tree from 32,768 shapes) with a neighbor-sized pair buffer. 16,384 G1 robots with one box each step in 12 ms.

@@ -19,6 +19,7 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton._src.geometry.broad_phase_implicit_tree import BroadPhaseImplicitTree
 from newton._src.sim import BodyFlags, CollisionPipeline, Contacts, Control, JointType, Model, ModelFlags, State
 from newton._src.sim.collide import _estimate_rigid_contact_max
 from newton._src.solvers.phoenx.adapter_kernels import (
@@ -49,6 +50,7 @@ from newton._src.solvers.phoenx.articulations.maximal_projector import (
 )
 from newton._src.solvers.phoenx.articulations.maximal_projector_general import GeneralMaximalTreeProjector
 from newton._src.solvers.phoenx.articulations.reduced import ReducedPhoenXArticulation, _get_reduced_model
+from newton._src.solvers.phoenx.articulations.reduced_contact_block import shape_pairs_are_dense
 from newton._src.solvers.phoenx.body import MOTION_KINEMATIC, BodyContainer, body_container_zeros
 from newton._src.solvers.phoenx.constraints.constraint_joint import (
     _OFF_DAMPING_DRIVE,
@@ -80,6 +82,10 @@ __all__ = ["SolverPhoenX"]
 
 
 _AUTO_SINGLE_WORLD_MIN_BODIES = 2048
+#: Broad-phase candidate pairs budgeted per shape of one large world.
+_DENSE_WORLD_PAIRS_PER_SHAPE = 32
+#: Shapes of one large world from which the solver's pipeline uses the implicit tree broad phase.
+_IMPLICIT_TREE_MIN_SHAPES = 32768
 
 
 def _can_reuse_relax_direct_factor(direct, world, model, bodies, solver_scheme: str) -> bool:
@@ -986,7 +992,29 @@ class SolverPhoenX(SolverBase):
                         phoenx_sleeping_filter,
                         PhoenXSleepingFilterData,
                     )
+                if shape_pairs_are_dense(model):
+                    # One large world: sweep and prune instead of testing every listed pair,
+                    # and size the candidate buffer by neighbors instead of by all pairs.
+                    cp_kwargs["broad_phase"] = "sap"
+                    cp_kwargs["shape_pairs_max"] = max(4096, _DENSE_WORLD_PAIRS_PER_SHAPE * int(model.shape_count))
                 model._collision_pipeline = newton.CollisionPipeline(model, **cp_kwargs)
+                if (
+                    cp_kwargs.get("broad_phase") == "sap"
+                    and dynamic_capacity is None
+                    and int(model.shape_count) >= _IMPLICIT_TREE_MIN_SHAPES
+                ):
+                    # Without rows for runtime shapes the implicit tree finds the pairs of a
+                    # very large world faster (70k shapes: 3.69 against 3.87 ms per step; at
+                    # 17k shapes sweep and prune still wins, 1.96 against 2.12 ms).
+                    tree_kwargs = {}
+                    if uses_broad_phase_filter:
+                        tree_kwargs = {
+                            "filter_func": phoenx_sleeping_filter,
+                            "filter_data_type": PhoenXSleepingFilterData,
+                        }
+                    model._collision_pipeline.broad_phase = BroadPhaseImplicitTree(
+                        model.shape_world, shape_flags=model.shape_flags, device=model.device, **tree_kwargs
+                    )
                 model._collision_pipeline.contacts()  # forces buffer sizing
         self._deformable_self_contact_enabled = False
         if self._has_deformable_collision:
