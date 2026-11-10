@@ -114,6 +114,10 @@ class TestPhoenXAutoPerformancePolicy(unittest.TestCase):
             _maximal_contact_response=None,
             _direct_factor_pending=False,
             _direct_tree_contacts=False,
+            _current_substep_index=0,
+            substeps=1,
+            prepare_refresh_stride=1,
+            _reduced_articulation=None,
         )
         PhoenXWorld._refresh_owned_relax_geometry(world, wp.float32(1.0))
         direct.refresh_geometry.assert_called_once()

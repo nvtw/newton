@@ -2992,6 +2992,7 @@ class TestReducedArticulation(unittest.TestCase):
         state = model.state()
         solver = newton.solvers.SolverPhoenX(
             model,
+            reduced_backend="aba",
             joint_mode="reduced",
             substeps=1,
             solver_iterations=1,
@@ -3196,6 +3197,7 @@ class TestReducedArticulation(unittest.TestCase):
                 state = model.state()
                 solver = newton.solvers.SolverPhoenX(
                     model,
+                    reduced_backend="aba",
                     joint_mode="reduced",
                     contact_friction_model="patch",
                     substeps=1,
@@ -3373,6 +3375,7 @@ class TestReducedArticulation(unittest.TestCase):
         state = model.state()
         solver = newton.solvers.SolverPhoenX(
             model,
+            reduced_backend="aba",
             joint_mode="reduced",
             substeps=1,
             solver_iterations=1,
@@ -3422,6 +3425,7 @@ class TestReducedArticulation(unittest.TestCase):
         control = model.control()
         solver = newton.solvers.SolverPhoenX(
             model,
+            reduced_backend="aba",
             joint_mode="reduced",
             substeps=1,
             solver_iterations=1,
@@ -3967,6 +3971,7 @@ class TestReducedArticulation(unittest.TestCase):
         newton.eval_fk(model, state.joint_q, state.joint_qd, state)
         solver = newton.solvers.SolverPhoenX(
             model,
+            reduced_backend="aba",
             joint_mode="reduced",
             substeps=3,
             solver_iterations=2,
@@ -4013,6 +4018,7 @@ class TestReducedArticulation(unittest.TestCase):
         newton.eval_fk(model, state.joint_q, state.joint_qd, state)
         solver = newton.solvers.SolverPhoenX(
             model,
+            reduced_backend="aba",
             joint_mode="reduced",
             substeps=2,
             solver_iterations=2,
@@ -4090,6 +4096,7 @@ class TestReducedArticulation(unittest.TestCase):
         newton.eval_fk(model, state.joint_q, state.joint_qd, state)
         solver = newton.solvers.SolverPhoenX(
             model,
+            reduced_backend="aba",
             enable_body_pair_grouping=False,  # keep one contact point per sphere
             joint_mode="reduced",
             substeps=1,
@@ -4177,6 +4184,7 @@ class TestReducedArticulation(unittest.TestCase):
         newton.eval_fk(model, state.joint_q, state.joint_qd, state)
         solver = newton.solvers.SolverPhoenX(
             model,
+            reduced_backend="aba",
             enable_body_pair_grouping=False,  # keep one contact point per sphere
             joint_mode="reduced",
             substeps=1,
@@ -4252,6 +4260,7 @@ class TestReducedArticulation(unittest.TestCase):
 
         separate = newton.solvers.SolverPhoenX(
             model,
+            reduced_backend="aba",
             enable_body_pair_grouping=False,  # keep one contact point per sphere
             joint_mode="reduced",
             substeps=1,
@@ -4260,6 +4269,7 @@ class TestReducedArticulation(unittest.TestCase):
         )
         fused = newton.solvers.SolverPhoenX(
             model,
+            reduced_backend="aba",
             enable_body_pair_grouping=False,  # keep one contact point per sphere
             joint_mode="reduced",
             substeps=1,
@@ -4321,6 +4331,7 @@ class TestReducedArticulation(unittest.TestCase):
 
         reference = newton.solvers.SolverPhoenX(
             model,
+            reduced_backend="aba",
             enable_body_pair_grouping=False,  # keep one contact point per sphere
             joint_mode="reduced",
             reduced_articulation_path="reference",
@@ -4330,6 +4341,7 @@ class TestReducedArticulation(unittest.TestCase):
         )
         persistent = newton.solvers.SolverPhoenX(
             model,
+            reduced_backend="aba",
             enable_body_pair_grouping=False,  # keep one contact point per sphere
             joint_mode="reduced",
             reduced_articulation_path="persistent",
@@ -4886,9 +4898,11 @@ def _make_capsule_hinge_chain(device, damping):
     return builder.finalize(device=device)
 
 
-def _run_reduced_frames(model, state0, state1, frames, *, dt=1.0 / 60.0, substeps=4):
+def _run_reduced_frames(model, state0, state1, frames, *, dt=1.0 / 60.0, substeps=4, reduced_backend="auto"):
     """Advance ``frames`` (even) graph-captured frames and return the final state."""
-    solver = newton.solvers.SolverPhoenX(model, joint_mode="reduced", substeps=substeps, solver_iterations=4)
+    solver = newton.solvers.SolverPhoenX(
+        model, joint_mode="reduced", reduced_backend=reduced_backend, substeps=substeps, solver_iterations=4
+    )
     with wp.ScopedCapture(device=model.device) as capture:
         solver.step(state0, state1, None, None, dt)
         solver.step(state1, state0, None, None, dt)
@@ -5178,6 +5192,7 @@ class TestReducedVelocityProductStep(unittest.TestCase):
             state0, state1 = self._initial_states(model)
             solver = newton.solvers.SolverPhoenX(
                 model,
+                reduced_backend="aba",
                 joint_mode="reduced",
                 substeps=4,
                 solver_iterations=4,
@@ -5213,7 +5228,9 @@ class TestReducedVelocityProductStep(unittest.TestCase):
         initial_spins = _link_axial_spin(state0)
         self.assertGreater(initial_spins.max(), 140.0)
 
-        state = _run_reduced_frames(model, state0, state1, 30)
+        # The spin bound below is the articulated-body path's: the spins oscillate by up to
+        # 3.4 rad/s at the midpoint solve's residual, and another backend ends at another phase.
+        state = _run_reduced_frames(model, state0, state1, 30, reduced_backend="aba")
 
         self.assertTrue(np.isfinite(state.body_qd.numpy()).all())
         self.assertLess(abs(_kinetic_energy(model, state) / initial_energy - 1.0), 0.01)

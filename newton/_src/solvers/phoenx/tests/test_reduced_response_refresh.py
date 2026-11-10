@@ -28,6 +28,7 @@ class TestReducedResponseRefresh(unittest.TestCase):
             model,
             collision_pipeline=pipeline,
             joint_mode="reduced",
+            reduced_backend="aba",  # These tests count the articulated-body path's launches.
             step_layout="single_world",
             substeps=2,
             solver_iterations=4,

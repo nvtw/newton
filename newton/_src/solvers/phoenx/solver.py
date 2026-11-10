@@ -343,7 +343,7 @@ class SolverPhoenX(SolverBase):
         jacobi_max_colors: int | None = None,
         joint_mode: str = "maximal_direct",
         reduced_articulation_path: str = "reference",
-        reduced_backend: str = "aba",
+        reduced_backend: str = "auto",
         direct_joint_mask: np.ndarray | None = None,
         tracking_volumes: Sequence[int] | None = None,
     ):
@@ -556,8 +556,8 @@ class SolverPhoenX(SolverBase):
                 tree depth. Trees whose contacts all touch static or kinematic
                 geometry then run each substep fused in two kernels per tree,
                 about twice the throughput of ``"aba"`` on humanoid fleets.
-                ``"auto"`` selects ``"dense"`` when that fused substep can run
-                every tree of the model and ``"aba"`` otherwise.
+                ``"auto"`` (the default) selects ``"dense"`` when that fused
+                substep can run every tree of the model and ``"aba"`` otherwise.
         """
         super().__init__(model)
         if solver_scheme not in ("soft", "tgs"):
