@@ -9,6 +9,7 @@ import warp as wp
 
 import newton
 from newton._src.solvers.phoenx.body import inertia_sym6_pack_np, inertia_sym6_unpack_np
+from newton._src.solvers.phoenx.constraints.constraint_contact_solve import rebase_ordinary_contact_relax_kernel
 from newton._src.solvers.phoenx.tests.test_rigid_normal_first import CopyStateContainer, ParticleContainer, _make_sweep
 from newton._src.solvers.phoenx.tests.test_stacking import _PhoenXScene
 
@@ -41,6 +42,66 @@ class TestContactRelaxMomentum(unittest.TestCase):
         world._refresh_owned_relax_geometry(wp.float32(60.0))
         np.testing.assert_array_equal(current.impulses.numpy(), values)
         np.testing.assert_array_equal(current.lambdas.numpy(), references)
+
+    def test_unpacked_rebase_is_independent_of_row_lanes(self):
+        """Rebase every row once and identically for any lane count per column."""
+        if not wp.is_cuda_available():
+            self.skipTest("CUDA required")
+        scene = _PhoenXScene(substeps=1, solver_iterations=1, velocity_iterations=1, step_layout="single_world")
+        scene.add_ground_plane()
+        scene.add_box(position=(0.0, 0.0, 0.49), half_extents=(0.5, 0.5, 0.5), mass=1.0)
+        scene.add_box(position=(0.1, 0.0, 1.47), half_extents=(0.5, 0.5, 0.5), mass=2.0)
+        scene.finalize()
+        scene.step()
+        world = scene.world
+        self.assertFalse(world._colored_contact_headers)
+        cc = world._contact_container
+        columns = int(world._ingest_scratch.num_contact_columns.numpy()[0])
+        self.assertEqual(columns, 2)
+        # Several rows per column, so one and three lanes stride over rows
+        # while eight and 32 lanes leave most lanes idle.
+        self.assertEqual(int(scene.contacts.rigid_contact_count.numpy()[0]), 8)
+        # Move both centers of mass so every lever and effective mass changes.
+        positions = world.bodies.position.numpy()
+        world.bodies.position_prev_substep.assign(positions)
+        positions[1] += [0.01, -0.02, 0.005]
+        positions[2] += [-0.015, 0.01, 0.02]
+        world.bodies.position.assign(positions)
+        prepared = cc.derived.numpy().copy()
+
+        def rebase(rows_per_column):
+            cc.derived.assign(prepared)
+            wp.launch(
+                rebase_ordinary_contact_relax_kernel,
+                dim=(world.max_contact_columns, rows_per_column),
+                inputs=[
+                    world._contact_cols,
+                    cc,
+                    world.bodies,
+                    world._ingest_scratch.num_contact_columns,
+                    wp.bool(False),
+                    world._contact_cols.articulation_owner,
+                    world._partitioner.element_ids_by_color,
+                    wp.int32(world._contact_offset),
+                    wp.bool(False),
+                    wp.int32(rows_per_column),
+                    wp.bool(True),
+                    wp.bool(False),
+                    wp.float32(60.0),
+                ],
+                device=scene.device,
+            )
+            return cc.derived.numpy().copy()
+
+        reference = rebase(1)
+        self.assertFalse(np.array_equal(reference[:, :8], prepared[:, :8]))
+        for rows_per_column in (3, 8, 32):
+            with self.subTest(rows_per_column=rows_per_column):
+                np.testing.assert_array_equal(rebase(rows_per_column), reference)
+        # The solver's own launch shape produces the same rows.
+        cc.derived.assign(prepared)
+        world._refresh_owned_relax_geometry(wp.float32(60.0))
+        np.testing.assert_array_equal(cc.derived.numpy(), reference)
 
     def test_free_pair_relaxation_uses_one_world_point(self):
         """Move COMs after prepare without moving the common impulse point."""
