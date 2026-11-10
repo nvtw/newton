@@ -61,6 +61,8 @@ def make_scene():
         mass_splitting_batch_size=1,
         mass_splitting_unrolled=True,
         partitioner_algorithm="endpoint_owner",
+        # Keep the D6 out of the overflow so one color mixes joints and contacts.
+        joint_coloring_priority=True,
         colored_contact_headers=True,
         colored_contact_rows=True,
         joint_mode="maximal_pgs",

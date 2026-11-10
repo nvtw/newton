@@ -21,7 +21,7 @@ def _count_family_visits(
     allocation_out: wp.array[wp.int32],
 ):
     lane = wp.tid()
-    allocation = _rigid_family_lane_allocation(count_joints, count_contacts, stride)
+    allocation = _rigid_family_lane_allocation(count_joints, count_contacts, stride, wp.int32(8))
     joint_lanes = allocation[0]
     contact_lane_base = allocation[1]
     if lane == wp.int32(0):
