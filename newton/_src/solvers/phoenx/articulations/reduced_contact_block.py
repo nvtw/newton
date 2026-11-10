@@ -1025,27 +1025,50 @@ def _gather_packed_patch_points(
                 if sign > wp.float32(0.0):
                     point_local = local_com_position + offset1 - wp.float32(0.5) * separation
 
+                # Two links of one tree: the row acts reversed on the second link.
+                pair_body = wp.int32(-1)
+                pair_local = wp.vec3(0.0)
+                pair_scale = wp.float32(0.0)
+                if (
+                    bodies.reduced.body_articulation[body0] >= wp.int32(0)
+                    and bodies.reduced.body_articulation[body0] == bodies.reduced.body_articulation[body1]
+                ):
+                    pair_body = body1 - wp.int32(1)
+                    pair_local = (
+                        wp.transform_get_translation(bodies.reduced.body_q_com[pair_body])
+                        + offset1
+                        - wp.float32(0.5) * separation
+                    )
+                    pair_scale = wp.float32(1.0)
+
                 impulse = sign * n
                 row_body[packed_articulation, point] = articulation_body - wp.int32(1)
                 row_wrench[packed_articulation, point] = wp.spatial_vector(impulse, wp.cross(point_local, impulse))
-                row_body_pair[packed_articulation, point] = wp.int32(-1)
-                row_wrench_pair[packed_articulation, point] = wp.spatial_vector()
+                impulse = pair_scale * n
+                row_body_pair[packed_articulation, point] = pair_body
+                row_wrench_pair[packed_articulation, point] = wp.spatial_vector(impulse, wp.cross(pair_local, impulse))
                 tangent_row = wp.int32(_POINTS_PER_PAGE) + wp.int32(2) * point
                 impulse = sign * t0
                 row_body[packed_articulation, tangent_row] = articulation_body - wp.int32(1)
                 row_wrench[packed_articulation, tangent_row] = wp.spatial_vector(
                     impulse, wp.cross(point_local, impulse)
                 )
-                row_body_pair[packed_articulation, tangent_row] = wp.int32(-1)
-                row_wrench_pair[packed_articulation, tangent_row] = wp.spatial_vector()
+                impulse = pair_scale * t0
+                row_body_pair[packed_articulation, tangent_row] = pair_body
+                row_wrench_pair[packed_articulation, tangent_row] = wp.spatial_vector(
+                    impulse, wp.cross(pair_local, impulse)
+                )
                 row_velocity[packed_articulation, tangent_row] = wp.dot(relative, t0)
                 impulse = sign * t1
                 row_body[packed_articulation, tangent_row + wp.int32(1)] = articulation_body - wp.int32(1)
                 row_wrench[packed_articulation, tangent_row + wp.int32(1)] = wp.spatial_vector(
                     impulse, wp.cross(point_local, impulse)
                 )
-                row_body_pair[packed_articulation, tangent_row + wp.int32(1)] = wp.int32(-1)
-                row_wrench_pair[packed_articulation, tangent_row + wp.int32(1)] = wp.spatial_vector()
+                impulse = pair_scale * t1
+                row_body_pair[packed_articulation, tangent_row + wp.int32(1)] = pair_body
+                row_wrench_pair[packed_articulation, tangent_row + wp.int32(1)] = wp.spatial_vector(
+                    impulse, wp.cross(pair_local, impulse)
+                )
                 row_velocity[packed_articulation, tangent_row + wp.int32(1)] = wp.dot(relative, t1)
                 global_point += lane_count
             point_offset = column_end
@@ -1058,6 +1081,8 @@ def _gather_packed_patch_points(
             column = point_column[packed_articulation, point]
             tangent1_sum = wp.spatial_vector()
             tangent2_sum = wp.spatial_vector()
+            pair1_sum = wp.spatial_vector()
+            pair2_sum = wp.spatial_vector()
             velocity1_sum = wp.float32(0.0)
             velocity2_sum = wp.float32(0.0)
             column_start = point
@@ -1065,6 +1090,8 @@ def _gather_packed_patch_points(
                 source = wp.int32(_POINTS_PER_PAGE) + wp.int32(2) * point
                 tangent1_sum += row_wrench[packed_articulation, source]
                 tangent2_sum += row_wrench[packed_articulation, source + wp.int32(1)]
+                pair1_sum += row_wrench_pair[packed_articulation, source]
+                pair2_sum += row_wrench_pair[packed_articulation, source + wp.int32(1)]
                 velocity1_sum += row_velocity[packed_articulation, source]
                 velocity2_sum += row_velocity[packed_articulation, source + wp.int32(1)]
                 point += wp.int32(1)
@@ -1073,6 +1100,10 @@ def _gather_packed_patch_points(
             source = wp.int32(_POINTS_PER_PAGE) + wp.int32(2) * column_start
             row_body[packed_articulation, target] = row_body[packed_articulation, source]
             row_wrench[packed_articulation, target] = tangent1_sum * inv_count
+            row_body_pair[packed_articulation, target] = row_body_pair[packed_articulation, source]
+            row_wrench_pair[packed_articulation, target] = pair1_sum * inv_count
+            row_body_pair[packed_articulation, target + wp.int32(1)] = row_body_pair[packed_articulation, source]
+            row_wrench_pair[packed_articulation, target + wp.int32(1)] = pair2_sum * inv_count
             row_velocity[packed_articulation, target] = velocity1_sum * inv_count
             row_body[packed_articulation, target + wp.int32(1)] = row_body[packed_articulation, source + wp.int32(1)]
             row_wrench[packed_articulation, target + wp.int32(1)] = tangent2_sum * inv_count
@@ -2817,7 +2848,10 @@ def _patch_tangent_rows_update(
     k11 = inverse_mass[2]
     det = k00 * k11 - k01 * k01
     effective = wp.mat22f(0.0, 0.0, 0.0, 0.0)
-    if det > wp.float32(1.0e-12):
+    # A tangent the links cannot move along against each other, as between two links of a
+    # planar mechanism, has no mobility beyond rounding; it must not take the friction budget.
+    floor = wp.max(wp.float32(1.0e-12), wp.float32(1.0e-5) * wp.max(k00, k11))
+    if det > wp.float32(1.0e-12) and wp.min(k00, k11) > floor and det > wp.float32(1.0e-5) * k00 * k11:
         inv_det = wp.float32(1.0) / det
         effective = wp.mat22f(
             k11 * inv_det,
@@ -2825,6 +2859,12 @@ def _patch_tangent_rows_update(
             -k01 * inv_det,
             k00 * inv_det,
         )
+    else:
+        # The remaining tangent still carries friction on its own.
+        if k00 > floor:
+            effective[0, 0] = wp.float32(1.0) / k00
+        if k11 > floor:
+            effective[1, 1] = wp.float32(1.0) / k11
     return contact_patch_project_velocity_update(
         lambda_old, velocity, bias_t, effective, normal_load_sum, friction, friction_dynamic, sor_boost
     )
@@ -3311,7 +3351,8 @@ class ReducedContactBlockSystem:
         if patch_rows_override is not None:
             patch_rows_requested = patch_rows_override
         self.patch_rows = allow_patch_rows and self.device.is_cuda and patch_rows_requested
-        self.packed_internal_contacts = not self.patch_rows
+        # The fused substep also solves patch rows between two links; the patch tile does not.
+        self.packed_internal_contacts = not self.patch_rows or self._external_rigid_rows
         if self._external_rigid_rows:
             census = _external_rigid_owners(model, self.packed_internal_contacts)
             if census is not None:

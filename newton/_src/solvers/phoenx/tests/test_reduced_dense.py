@@ -273,6 +273,72 @@ class TestReducedDenseBackend(unittest.TestCase):
         self.assertGreater(float(rest["auto"][folded, 2]), 0.5)
         np.testing.assert_allclose(rest["auto"], rest["aba"], atol=2.0e-2)
 
+    def test_fused_substep_holds_a_link_on_another_link_by_friction_under_graph_capture(self):
+        """Friction between two links holds a slider on its tilted base, with either friction model.
+
+        The links can only move against each other along one tangent, so the patch
+        tangent block is singular and must still carry friction along that tangent.
+        """
+        device = _require_cuda(self)
+        tilt = 0.3
+        scale = 9.81 / np.sqrt(1.0 + tilt * tilt)
+        for friction in ("point", "patch"):
+            with self.subTest(friction=friction):
+                builder = newton.ModelBuilder(gravity=(0.0, 0.0, -9.81), up_axis=newton.Axis.Z)
+                builder.default_shape_cfg.gap = 0.005
+                builder.default_shape_cfg.mu = 0.6
+                builder.add_ground_plane()
+                base = builder.add_link(xform=wp.transform(wp.vec3(0.0, 0.0, 0.1), wp.quat_identity()))
+                builder.add_shape_box(base, hx=1.0, hy=0.4, hz=0.1)
+                builder.add_joint_free(base)
+                # A shapeless carriage slides along the base and carries a block that presses on it.
+                carriage = builder.add_link(xform=wp.transform(wp.vec3(0.0, 0.0, 0.3), wp.quat_identity()), mass=0.1)
+                builder.add_joint_prismatic(
+                    base,
+                    carriage,
+                    parent_xform=wp.transform(wp.vec3(0.0, 0.0, 0.2), wp.quat_identity()),
+                    child_xform=wp.transform_identity(),
+                    axis=newton.Axis.X,
+                )
+                block = builder.add_link(xform=wp.transform(wp.vec3(0.0, 0.0, 0.3), wp.quat_identity()))
+                builder.add_shape_box(block, hx=0.2, hy=0.2, hz=0.1)
+                builder.add_joint_prismatic(
+                    carriage,
+                    block,
+                    parent_xform=wp.transform_identity(),
+                    child_xform=wp.transform_identity(),
+                    axis=newton.Axis.Z,
+                )
+                builder.add_articulation(list(range(builder.joint_count)))
+                model = builder.finalize(device=device)
+                model.set_gravity((scale * tilt, 0.0, -scale))
+                pipeline = newton.CollisionPipeline(model, contact_matching="sticky")
+                solver = newton.solvers.SolverPhoenX(
+                    model,
+                    collision_pipeline=pipeline,
+                    joint_mode="reduced",
+                    contact_friction_model=friction,
+                    substeps=4,
+                    solver_iterations=4,
+                )
+                state, output = model.state(), model.state()
+                newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+                contacts = pipeline.contacts()
+                with wp.ScopedCapture() as capture:
+                    pipeline.collide(state, contacts)
+                    solver.step(state, output, None, contacts, 1.0 / 60.0)
+                    for name in ("body_q", "body_qd", "joint_q", "joint_qd"):
+                        wp.copy(getattr(state, name), getattr(output, name))
+                for _ in range(120):
+                    wp.capture_launch(capture.graph)
+                articulation = solver._reduced_articulation
+                self.assertIsNotNone(articulation.fused_substep)
+                self.assertTrue(articulation.contact_block_system.internal_rows)
+                joint_q = state.joint_q.numpy()
+                # Without friction between the links the carriage runs 5.6 m in these two seconds.
+                self.assertLess(abs(float(joint_q[7])), 5.0e-3)
+                self.assertLess(abs(float(joint_q[8])), 2.0e-3)
+
     def test_fused_substep_rests_a_tree_on_a_free_body_under_graph_capture(self):
         """A tree stands on a free rigid body whose ground contact the regular solver holds."""
         device = _require_cuda(self)

@@ -1,1 +1,1 @@
-Solve contacts between two links of one reduced articulation inside the fused dense substep of `SolverPhoenX` with point friction, so `reduced_backend="auto"` selects the dense backend for trees with self-collision; patch friction keeps the articulated-body path for such trees
+Solve contacts between two links of one reduced articulation inside the fused dense substep of `SolverPhoenX`, so `reduced_backend="auto"` selects the dense backend for trees with self-collision
