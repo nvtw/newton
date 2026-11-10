@@ -4112,9 +4112,6 @@ class PhoenXWorld:
 
     def _refresh_owned_relax_geometry(self, idt: wp.float32) -> None:
         """Refresh maximal constraint responses at the integrated configuration."""
-        rebase_levers = (
-            self._active_velocity_iterations > 0 and not self.num_particles and not self._contact_patch_enabled
-        )
         # The next substep reuses this substep's prepared rows: advance their
         # gaps by the motion just integrated.
         next_substep = self._current_substep_index + 1
@@ -4122,6 +4119,15 @@ class PhoenXWorld:
             self.prepare_refresh_stride > 1
             and next_substep < self.substeps
             and next_substep % self.prepare_refresh_stride != 0
+        )
+        # Rows that are solved again before the next prepare must keep both
+        # bodies' impulses at one world point; with stale levers the pair of
+        # impulses separates by the relative body motion and leaks angular
+        # momentum.
+        rebase_levers = (
+            (self._active_velocity_iterations > 0 or advance_gap)
+            and not self.num_particles
+            and not self._contact_patch_enabled
         )
         # A fused reduced substep owns every contact row and gathers them again at the
         # integrated pose, which rewrites the levers, biases, and effective masses.
