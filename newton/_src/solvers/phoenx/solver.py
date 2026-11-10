@@ -541,7 +541,11 @@ class SolverPhoenX(SolverBase):
                 algorithm and factors it on one warp without fill-in; trees with
                 more than 64 DOFs or joints keep the articulated-body path. It
                 requires CUDA, the ``"reference"`` path, and at most 32 joints per
-                tree depth.
+                tree depth. Trees whose contacts all touch static or kinematic
+                geometry then run each substep fused in two kernels per tree,
+                about twice the throughput of ``"aba"`` on humanoid fleets.
+                ``"auto"`` selects ``"dense"`` when that fused substep can run
+                every tree of the model and ``"aba"`` otherwise.
         """
         super().__init__(model)
         if solver_scheme not in ("soft", "tgs"):
@@ -749,8 +753,8 @@ class SolverPhoenX(SolverBase):
             and multi_world_scheduler == "auto"
         ):
             multi_world_scheduler = "fast_tail"
-        if reduced_backend not in ("aba", "dense"):
-            raise ValueError(f"reduced_backend must be 'aba' or 'dense', got {reduced_backend!r}")
+        if reduced_backend not in ("aba", "dense", "auto"):
+            raise ValueError(f"reduced_backend must be 'aba', 'dense', or 'auto', got {reduced_backend!r}")
         self.reduced_articulation_path = reduced_articulation_path
         self.reduced_backend = reduced_backend
         self._reduced_articulation: ReducedPhoenXArticulation | None = None
@@ -1161,14 +1165,34 @@ class SolverPhoenX(SolverBase):
         ):
             reduced_model = _get_reduced_model(model)
             if reduced_model.articulation_count > 0:
-                self._reduced_articulation = ReducedPhoenXArticulation(
-                    reduced_model,
-                    self.bodies,
-                    execution_path=self.reduced_articulation_path,
-                    contact_friction_model=contact_friction_model,
-                    backend=self.reduced_backend,
-                )
-                if self.reduced_backend == "dense" and not dense_substep_blockers(self._reduced_articulation):
+
+                def build_reduced(backend: str) -> ReducedPhoenXArticulation:
+                    return ReducedPhoenXArticulation(
+                        reduced_model,
+                        self.bodies,
+                        execution_path=self.reduced_articulation_path,
+                        contact_friction_model=contact_friction_model,
+                        backend=backend,
+                    )
+
+                fused = False
+                if self.reduced_backend == "auto":
+                    # The dense backend pays off through its fused substep; keep the
+                    # articulated-body recurrences wherever that cannot run every tree.
+                    self.reduced_backend = "aba"
+                    if self.device.is_cuda and self.reduced_articulation_path == "reference":
+                        try:
+                            candidate = build_reduced("dense")
+                        except ValueError:
+                            candidate = None
+                        if candidate is not None and not dense_substep_blockers(candidate):
+                            self._reduced_articulation = candidate
+                            self.reduced_backend = "dense"
+                            fused = True
+                if self._reduced_articulation is None:
+                    self._reduced_articulation = build_reduced(self.reduced_backend)
+                    fused = self.reduced_backend == "dense" and not dense_substep_blockers(self._reduced_articulation)
+                if fused:
                     self._reduced_articulation.fused_substep = DenseSubstep(self._reduced_articulation)
                 joint_idx_to_cid = self._joint_constraints.joint_idx_to_cid.numpy()
                 joint_pgs_enabled = np.ones(num_joints, dtype=np.int32)

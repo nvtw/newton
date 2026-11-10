@@ -403,6 +403,25 @@ class TestReducedDenseBackend(unittest.TestCase):
         np.testing.assert_allclose(fused_q[:, 2], 0.03, rtol=0.0, atol=2.0e-3)
         np.testing.assert_allclose(fused_q, simulate(False), rtol=0.0, atol=1.0e-3)
 
+    def test_auto_backend_selects_dense_only_where_the_fused_substep_runs(self):
+        device = _require_cuda(self)
+        fleet = _make_centipede_fleet(device, worlds=2)
+        solver = newton.solvers.SolverPhoenX(fleet, joint_mode="reduced", reduced_backend="auto")
+        self.assertEqual(solver.reduced_backend, "dense")
+        self.assertIsNotNone(solver._reduced_articulation.fused_substep)
+
+        # A free body may touch the trees, which the fused substep does not couple.
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        builder.add_ground_plane()
+        link = builder.add_link(mass=0.2)
+        builder.add_shape_sphere(link, radius=0.03)
+        builder.add_articulation([builder.add_joint_revolute(parent=-1, child=link, axis=newton.Axis.Y)])
+        builder.add_shape_sphere(builder.add_body(mass=0.2), radius=0.03)
+        coupled = builder.finalize(device=device)
+        solver = newton.solvers.SolverPhoenX(coupled, joint_mode="reduced", reduced_backend="auto")
+        self.assertEqual(solver.reduced_backend, "aba")
+        self.assertIsNone(solver._reduced_articulation.fused_substep)
+
     def test_dense_backend_rejects_models_without_eligible_trees(self):
         device = _require_cuda(self)
         builder = newton.ModelBuilder()
