@@ -320,6 +320,7 @@ def _defer_articulation_impulse(bodies: BodyContainer, body: wp.int32, point: wp
     point_local = _reduced_point_local(bodies, body, point)
     wrench = wp.spatial_vector(impulse, wp.cross(point_local, impulse))
     joint = data.body_joint[link]
+    data.deferred_pending[data.body_articulation[body]] = wp.int32(1)
     while joint >= wp.int32(0):
         data.deferred_wrench[link] = data.deferred_wrench[link] + wrench
         dof_start = data.joint_qd_start[joint]
@@ -375,6 +376,10 @@ def _apply_deferred_impulse(
 def flush_deferred_articulation(bodies: BodyContainer, articulation: wp.int32):
     """Apply an articulation's deferred wrenches to its joint and link velocities."""
     data = bodies.reduced
+    # Sweeps flush every articulation; most took no impulse and have nothing to propagate.
+    if data.deferred_pending[articulation] == wp.int32(0):
+        return
+    data.deferred_pending[articulation] = wp.int32(0)
     start = data.articulation_start[articulation]
     end = data.articulation_end[articulation]
     for joint in range(start, end):

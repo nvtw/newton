@@ -4338,6 +4338,7 @@ class ReducedArticulationSystem:
         self.generalized_rhs = wp.empty(dof_count, dtype=wp.float32, device=self.device)
         self.impulse_response = wp.zeros((body_count, 6), dtype=wp.spatial_vector, device=self.device)
         self.deferred_wrench = wp.zeros(body_count, dtype=wp.spatial_vector, device=self.device)
+        self.deferred_pending = wp.zeros(max(1, articulation_count), dtype=wp.int32, device=self.device)
         self.target_linear_momentum = wp.zeros(articulation_count, dtype=wp.vec3, device=self.device)
         # Model data and scratch for the midpoint step of fast trees, see _midpoint_momentum_step.
         midpoint = _MidpointWorkspace()
@@ -5002,6 +5003,7 @@ class ReducedPhoenXArticulation:
         reduced.generalized_response = self.system.generalized_acceleration
         reduced.impulse_response = self.system.impulse_response
         reduced.deferred_wrench = self.system.deferred_wrench
+        reduced.deferred_pending = self.system.deferred_pending
         reduced.body_joint = wp.array(body_joint_np, device=model.device)
         reduced.body_path_start = wp.array(body_path_start_np, device=model.device)
         reduced.body_path_joint = wp.array(
