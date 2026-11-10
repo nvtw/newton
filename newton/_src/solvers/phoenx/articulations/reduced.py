@@ -34,6 +34,7 @@ from newton._src.solvers.phoenx.articulations.reduced_contact_block import (
     EXTERNAL_BODY_SLOTS,
     ReducedContactBlockSystem,
     _finalize_reduced_contact_rows_device,
+    _model_pair_endpoints,
     _sync_contact_warp,
 )
 from newton._src.solvers.phoenx.articulations.reduced_loop import ReducedLoopSystem
@@ -4867,8 +4868,45 @@ def _build_persistent_articulation_eligibility(
     return eligible, tuple(reasons)
 
 
-def _get_reduced_model(model: Model) -> Model:
+def _merge_touching_trees(model: Model, starts: np.ndarray, ends: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Join consecutive trees of one world whose shapes may touch into one articulation range.
+
+    One block of the fused dense substep then holds them, and their contacts are rows
+    between two links. A group starts with any tree and continues with trees on fixed
+    roots, while it fits a block: 32 joints and 64 DOFs.
+    """
+    endpoints = _model_pair_endpoints(model)
+    if endpoints is None or len(starts) < 2:
+        return starts, ends
+    _pairs, _body0, _body1, tree0, tree1, _static0, _static1 = endpoints
+    touching = {(int(a), int(b)) for a, b in zip(tree0, tree1, strict=True) if a >= 0 and b >= 0 and a != b}
+    touching |= {(b, a) for a, b in touching}
+    joint_world = model.joint_world.numpy() if model.joint_world is not None else np.zeros(model.joint_count, np.int32)
+    joint_type = model.joint_type.numpy()
+    dof_start = model.joint_qd_start.numpy()
+    group_of = np.arange(len(starts))
+    for tree in range(1, len(starts)):
+        group = int(group_of[tree - 1])
+        first = int(starts[group])
+        members = range(group, tree)
+        if (
+            int(starts[tree]) == int(ends[tree - 1])
+            and int(joint_world[starts[tree]]) == int(joint_world[first])
+            and int(joint_type[starts[tree]]) not in (int(JointType.FREE), int(JointType.DISTANCE))
+            and any((member, tree) in touching for member in members)
+            and int(ends[tree]) - first <= 32
+            and int(dof_start[ends[tree]]) - int(dof_start[first]) <= 64
+        ):
+            group_of[tree] = group
+    keep = np.flatnonzero(group_of == np.arange(len(starts)))
+    last = np.array([np.flatnonzero(group_of == group)[-1] for group in keep], dtype=np.int64)
+    return starts[keep], ends[last]
+
+
+def _get_reduced_model(model: Model, merge_trees: bool = False) -> Model:
     """Keep trees with prescribed body motion and free rigid bodies outside reduced dynamics.
+
+    ``merge_trees`` also joins trees that may touch, see :func:`_merge_touching_trees`.
 
     A lone body on a free joint beside jointed trees is a rigid body: the
     maximal-coordinate solver integrates it and solves its contacts with other
@@ -4897,14 +4935,28 @@ def _get_reduced_model(model: Model) -> Model:
     )
     if np.any(eligible & ~free_body):
         eligible &= ~free_body
-    if np.all(eligible):
+    if np.all(eligible) and not merge_trees:
         return model
     reduced_model = copy.copy(model)
+    selected_starts = starts[eligible]
     selected_ends = ends[eligible]
-    selected_starts = np.append(starts[eligible], selected_ends[-1] if selected_ends.size else 0).astype(np.int32)
-    reduced_model.articulation_start = wp.array(selected_starts, dtype=wp.int32, device=model.device)
-    reduced_model.articulation_end = wp.array(ends[eligible], dtype=wp.int32, device=model.device)
-    reduced_model.articulation_count = int(np.count_nonzero(eligible))
+    reduced_model.articulation_start = wp.array(
+        np.append(selected_starts, selected_ends[-1] if selected_ends.size else 0).astype(np.int32),
+        dtype=wp.int32,
+        device=model.device,
+    )
+    reduced_model.articulation_end = wp.array(selected_ends.astype(np.int32), dtype=wp.int32, device=model.device)
+    reduced_model.articulation_count = int(selected_ends.size)
+    if merge_trees and selected_ends.size:
+        # The pair census numbers the trees as the model above lists them.
+        merged_starts, merged_ends = _merge_touching_trees(reduced_model, selected_starts, selected_ends)
+        if merged_ends.size == selected_ends.size:
+            return model if np.all(eligible) else reduced_model
+        reduced_model.articulation_start = wp.array(
+            np.append(merged_starts, merged_ends[-1]).astype(np.int32), dtype=wp.int32, device=model.device
+        )
+        reduced_model.articulation_end = wp.array(merged_ends.astype(np.int32), dtype=wp.int32, device=model.device)
+        reduced_model.articulation_count = int(merged_ends.size)
     return reduced_model
 
 

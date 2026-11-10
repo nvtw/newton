@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import functools
 
+import numpy as np
 import warp as wp
 
 from newton._src.sim import JointType
@@ -363,6 +364,18 @@ def _root_path_sum(value: wp.spatial_vector, parent: wp.int32, max_depth: wp.int
 
 
 @wp.func
+def _in_first_tree(parent: wp.int32, lane: wp.int32, max_depth: wp.int32) -> wp.bool:
+    """Return whether a lane's joint hangs below the block's first root, lane 0."""
+    root = lane
+    ancestor = parent
+    for _level in range(max_depth + wp.int32(1)):
+        above = _lane_int(parent, wp.max(ancestor, wp.int32(0)))
+        root = wp.where(ancestor >= wp.int32(0), ancestor, root)
+        ancestor = wp.where(ancestor >= wp.int32(0), above, ancestor)
+    return root == wp.int32(0)
+
+
+@wp.func
 def _is_floating(kind: wp.int32) -> wp.bool:
     return kind == JointType.FREE or kind == JointType.DISTANCE
 
@@ -391,6 +404,7 @@ def make_dense_substep_kernel(
     relax: bool,
     external: bool = False,
     pairs: bool = False,
+    forest: bool = False,
 ):
     """Build the biased or the relax substep kernel of one dense bucket.
 
@@ -406,6 +420,8 @@ def make_dense_substep_kernel(
             components join the rows' DOFs.
         pairs: Solve contact rows between two links of the tree, whose second root
             path takes a second block of path positions.
+        forest: Run blocks that hold several trees: a floating-base tree first, if any,
+            then trees on fixed roots. Frames stay about the first root's COM.
     """
     # Scratch after the factor's tables: the composite inertias while factoring, then the tree
     # recurrences and the contact pages share one region; the rates and a solve vector follow.
@@ -451,7 +467,7 @@ def make_dense_substep_kernel(
     joint_last_dof = layout.joint_last_dof
     module = _unrolled_module(
         f"dense_substep_{max_dofs}_{joint_capacity}_{entry_capacity}_{path_capacity}_{subtree_capacity}"
-        f"_{int(patch)}_{int(relax)}_{int(external)}_{int(pairs)}",
+        f"_{int(patch)}_{int(relax)}_{int(external)}_{int(pairs)}_{int(forest)}",
         dense_unroll(layout, joint_capacity),
     )
 
@@ -489,6 +505,10 @@ def make_dense_substep_kernel(
         # A root's frame and anchor follow from its own pose.
         rotation = wp.transform_get_rotation(world)
         root_local = wp.transform(-wp.quat_rotate(rotation, tree.com), rotation)
+        if wp.static(forest):
+            # A further root sits where its joint puts it, relative to the first root's COM.
+            if lane > wp.int32(0):
+                root_local = wp.transform(wp.transform_get_translation(world) - origin, rotation)
         root_transform = joint_transform
         if _is_floating(tree.kind):
             root_transform = wp.transform(wp.vec3(0.0), wp.transform_get_rotation(joint_transform))
@@ -1220,15 +1240,20 @@ def make_dense_substep_kernel(
         # A floating tree gets its incoming linear momentum back through a uniform boost,
         # see ReducedPhoenXArticulation.end_substep.
         if update_configuration and not integrated and _is_floating(_lane_int(tree.kind, 0)):
+            # Only the floating tree, the block's first, carries momentum to restore.
+            boosted = wp.bool(True)
+            if wp.static(forest):
+                boosted = _in_first_tree(tree.parent, lane, max_depth)
             local_momentum = wp.vec4(0.0)
-            if tree.joint >= wp.int32(0):
+            if tree.joint >= wp.int32(0) and boosted:
                 local_momentum = wp.vec4(
                     tree.mass * velocity_com[0], tree.mass * velocity_com[1], tree.mass * velocity_com[2], tree.mass
                 )
             total = _sum_reduced_group_vec4(local_momentum, wp.int32(_LANES), _FULL_MASK)
             if total[3] > wp.float32(0.0):
                 boost = (target_linear_momentum - wp.vec3(total[0], total[1], total[2])) / total[3]
-                velocity_com += boost
+                if boosted:
+                    velocity_com += boost
                 if lane == wp.int32(0):
                     _boost_root_coordinates(
                         tree.joint, joint_qd_start, joint_x_p, motion_array, boost, joint_qd, joint_qd_public
@@ -1703,6 +1728,12 @@ def make_dense_substep_kernel(
         # The explicit step and its energy drift in the frame of a floating root, see
         # _explicit_step_drift_terms.
         frame = _shuffle_reduced_spatial(_floating_root_frame(root_velocity), wp.int32(0), wp.int32(_LANES), _FULL_MASK)
+        first_tree = wp.bool(True)
+        if wp.static(forest):
+            # Trees on fixed roots step in the frame at rest and hold no momentum to restore.
+            first_tree = _in_first_tree(tree.parent, lane, max_depth)
+            if not first_tree:
+                frame = wp.spatial_vector()
         drift = wp.float32(0.0)
         energy = wp.float32(0.0)
         dissipation = wp.float32(0.0)
@@ -1767,6 +1798,8 @@ def make_dense_substep_kernel(
             omega = wp.spatial_bottom(new_twist)
             velocity_com = wp.spatial_top(new_twist) + wp.cross(omega, x_com)
         linear = wp.spatial_top(momentum)
+        if not first_tree:
+            linear = wp.vec3(0.0)
         totals = _sum_reduced_group_vec4(wp.vec4(linear[0], linear[1], linear[2], drift), wp.int32(_LANES), _FULL_MASK)
         target_linear_momentum = wp.vec3(totals[0], totals[1], totals[2])
         tree_energy = _sum_reduced_group_float(energy, wp.int32(_LANES), _FULL_MASK)
@@ -1948,8 +1981,18 @@ def dense_substep_blockers(articulation) -> list[str]:
     if int((end - start).max(initial=0)) > _LANES:
         reasons.append(f"articulations with more than {_LANES} joints")
     joint_parent = model.joint_parent.numpy()
-    if any(int(joint_parent[int(first)]) >= 0 for first in start):
-        reasons.append("roots attached to a body")
+    joint_child = model.joint_child.numpy()
+    joint_type = model.joint_type.numpy()
+    for first, last in zip(start, end, strict=True):
+        children = set(joint_child[int(first) : int(last)].tolist())
+        roots = [joint for joint in range(int(first), int(last)) if int(joint_parent[joint]) not in children]
+        if any(int(joint_parent[joint]) >= 0 for joint in roots):
+            reasons.append("roots attached to a body")
+            break
+        # Frames follow the first root; further roots must be fixed to the world.
+        if any(int(joint_type[joint]) in (int(JointType.FREE), int(JointType.DISTANCE)) for joint in roots[1:]):
+            reasons.append("a floating root that is not its block's first joint")
+            break
     return reasons
 
 
@@ -1969,6 +2012,15 @@ class DenseSubstep:
         # The relax step gathers the contact rows at the pose the next biased step starts
         # from: (substep dt, contact ingest count) of that gather, or None.
         self._gathered_rows = None
+        # Blocks that hold several trees, see _get_reduced_model.
+        model = articulation.model
+        count = int(model.articulation_count)
+        starts = model.articulation_start.numpy()[:count]
+        ends = model.articulation_end.numpy()[:count]
+        parents = model.joint_parent.numpy()
+        self.forest = any(
+            int(np.count_nonzero(parents[start:end] < 0)) > 1 for start, end in zip(starts, ends, strict=True)
+        )
 
     def _launch(self, world, dt: float, *, relax: bool, reuse_factor: bool = False, reuse_rows: bool = False) -> None:
         articulation = self.articulation
@@ -1991,6 +2043,7 @@ class DenseSubstep:
                 relax,
                 articulation.external_rigid_rows,
                 contact.internal_rows,
+                self.forest,
             )
             wp.launch(
                 kernel,

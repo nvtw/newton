@@ -1181,7 +1181,8 @@ class SolverPhoenX(SolverBase):
 
                 def build_reduced(backend: str, external_rigid_rows: bool = False) -> ReducedPhoenXArticulation:
                     return ReducedPhoenXArticulation(
-                        reduced_model,
+                        # The fused substep solves trees that may touch in one block.
+                        _get_reduced_model(model, merge_trees=True) if external_rigid_rows else reduced_model,
                         self.bodies,
                         execution_path=self.reduced_articulation_path,
                         contact_friction_model=contact_friction_model,

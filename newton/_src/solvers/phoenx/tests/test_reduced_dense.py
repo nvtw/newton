@@ -339,6 +339,91 @@ class TestReducedDenseBackend(unittest.TestCase):
                 self.assertLess(abs(float(joint_q[7])), 5.0e-3)
                 self.assertLess(abs(float(joint_q[8])), 2.0e-3)
 
+    def test_fused_substep_holds_a_tree_on_a_second_tree_under_graph_capture(self):
+        """A floating chain rests on a tilted plate that hangs on a sprung hinge, a second tree.
+
+        The fused substep solves both trees in one block; the articulated-body path keeps
+        them apart and couples them through its fallback.
+        """
+        device = _require_cuda(self)
+        tilt = 0.2
+        rotation = wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), tilt)
+        for friction in ("point", "patch"):
+            results = {}
+            for backend in ("aba", "auto"):
+                builder = newton.ModelBuilder(gravity=(0.0, 0.0, -9.81), up_axis=newton.Axis.Z)
+                builder.default_shape_cfg.gap = 0.005
+                builder.default_shape_cfg.mu = 0.6
+                previous = -1
+                for i in range(2):
+                    local = wp.vec3(-0.15 + 0.3 * i, 0.0, 0.245)
+                    body = builder.add_link(
+                        xform=wp.transform(wp.vec3(0.0, 0.0, 1.0) + wp.quat_rotate(rotation, local), rotation)
+                    )
+                    builder.add_shape_box(body, hx=0.14, hy=0.14, hz=0.14)
+                    if previous < 0:
+                        builder.add_joint_free(body)
+                    else:
+                        builder.add_joint_revolute(
+                            previous,
+                            body,
+                            parent_xform=wp.transform(wp.vec3(0.15, 0.0, 0.0), wp.quat_identity()),
+                            child_xform=wp.transform(wp.vec3(-0.15, 0.0, 0.0), wp.quat_identity()),
+                            axis=newton.Axis.Z,
+                        )
+                    previous = body
+                builder.add_articulation(list(range(builder.joint_count)))
+                plate = builder.add_link(xform=wp.transform(wp.vec3(0.0, 0.0, 1.0), rotation))
+                builder.add_shape_box(plate, hx=1.0, hy=0.6, hz=0.1)
+                hinge = builder.add_joint_revolute(
+                    -1,
+                    plate,
+                    parent_xform=wp.transform(wp.vec3(0.0, 0.0, 1.0), wp.quat_identity()),
+                    child_xform=wp.transform_identity(),
+                    axis=newton.Axis.Y,
+                    target_ke=2000.0,
+                    target_kd=50.0,
+                    actuator_mode=newton.JointTargetMode.POSITION,
+                )
+                builder.add_articulation([hinge])
+                builder.joint_q[-1] = tilt
+                builder.joint_target_q[-1] = tilt
+                model = builder.finalize(device=device)
+                pipeline = newton.CollisionPipeline(model, contact_matching="sticky")
+                solver = newton.solvers.SolverPhoenX(
+                    model,
+                    collision_pipeline=pipeline,
+                    joint_mode="reduced",
+                    reduced_backend=backend,
+                    contact_friction_model=friction,
+                    substeps=4,
+                    solver_iterations=4,
+                )
+                state, output = model.state(), model.state()
+                newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+                control = model.control()
+                contacts = pipeline.contacts()
+                start = state.body_q.numpy()[0, :3].copy()
+                with wp.ScopedCapture() as capture:
+                    pipeline.collide(state, contacts)
+                    solver.step(state, output, control, contacts, 1.0 / 60.0)
+                    for name in ("body_q", "body_qd", "joint_q", "joint_qd"):
+                        wp.copy(getattr(state, name), getattr(output, name))
+                for _ in range(120):
+                    wp.capture_launch(capture.graph)
+                articulation = solver._reduced_articulation
+                fused = backend == "auto"
+                self.assertEqual(articulation.fused_substep is not None, fused)
+                self.assertEqual(int(articulation.model.articulation_count), 1 if fused else 2)
+                slid = float(np.linalg.norm(state.body_q.numpy()[0, :3] - start))
+                results[backend] = (slid, float(state.joint_q.numpy()[-1]))
+            with self.subTest(friction=friction):
+                # Friction holds the chain on the slope, and its weight opens the hinge a little.
+                self.assertLess(results["auto"][0], 2.0e-2)
+                self.assertAlmostEqual(results["auto"][0], results["aba"][0], delta=5.0e-3)
+                self.assertAlmostEqual(results["auto"][1], results["aba"][1], delta=5.0e-3)
+                self.assertGreater(results["auto"][1], tilt + 1.0e-3)
+
     def test_fused_substep_rests_a_tree_on_a_free_body_under_graph_capture(self):
         """A tree stands on a free rigid body whose ground contact the regular solver holds."""
         device = _require_cuda(self)
@@ -649,13 +734,22 @@ class TestReducedDenseBackend(unittest.TestCase):
         def make(second_tree: bool) -> newton.Model:
             builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
             builder.add_ground_plane()
-            link = builder.add_link(mass=0.2)
-            builder.add_shape_sphere(link, radius=0.03)
-            builder.add_articulation([builder.add_joint_revolute(parent=-1, child=link, axis=newton.Axis.Y)])
+
+            def add_floating_tree():
+                base = builder.add_link(mass=0.2)
+                builder.add_shape_sphere(base, radius=0.03)
+                tip = builder.add_link(mass=0.2)
+                builder.add_shape_sphere(tip, radius=0.03)
+                builder.add_articulation(
+                    [
+                        builder.add_joint_free(base),
+                        builder.add_joint_revolute(parent=base, child=tip, axis=newton.Axis.Y),
+                    ]
+                )
+
+            add_floating_tree()
             if second_tree:
-                other = builder.add_link(mass=0.2)
-                builder.add_shape_sphere(other, radius=0.03)
-                builder.add_articulation([builder.add_joint_revolute(parent=-1, child=other, axis=newton.Axis.Y)])
+                add_floating_tree()
             else:
                 builder.add_shape_sphere(builder.add_body(mass=0.2), radius=0.03)
             return builder.finalize(device=device)
@@ -665,7 +759,8 @@ class TestReducedDenseBackend(unittest.TestCase):
         self.assertEqual(solver.reduced_backend, "dense")
         self.assertTrue(solver._reduced_articulation.external_rigid_rows)
 
-        # Trees that may touch each other need the coupled response of the articulated-body path.
+        # A second floating tree cannot share a block, and their contacts need the coupled
+        # response of the articulated-body path.
         solver = newton.solvers.SolverPhoenX(make(True), joint_mode="reduced", reduced_backend="auto")
         self.assertEqual(solver.reduced_backend, "aba")
         self.assertIsNone(solver._reduced_articulation.fused_substep)

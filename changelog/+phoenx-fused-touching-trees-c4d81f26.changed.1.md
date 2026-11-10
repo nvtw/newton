@@ -1,0 +1,1 @@
+Solve reduced articulations of one world that may touch each other in one block of the fused dense substep of `SolverPhoenX`, when the group holds at most one floating-base articulation, listed first, and fits 32 joints and 64 DOFs; `reduced_backend="auto"` then selects the dense backend for robots that touch fixed-base mechanisms
