@@ -134,7 +134,7 @@ def _build_scale_model() -> newton.Model:
             )
             mb.add_shape_box(cube, hx=CUBE_HE, hy=CUBE_HE, hz=CUBE_HE, cfg=cfg_static)
 
-    mb.gravity = -GRAVITY
+    mb.gravity = (0.0, 0.0, -GRAVITY)
     return mb.finalize()
 
 

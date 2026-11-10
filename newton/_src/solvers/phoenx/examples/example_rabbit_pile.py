@@ -208,8 +208,8 @@ class Example:
         mb = newton.ModelBuilder()
         mb.default_shape_cfg.gap = DEFAULT_SHAPE_GAP
         mb.add_shape_plane(
-            -1,
-            wp.transform_identity(),
+            body=-1,
+            xform=wp.transform_identity(),
             width=0.0,
             length=0.0,
         )
