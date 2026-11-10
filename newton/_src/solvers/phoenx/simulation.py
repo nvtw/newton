@@ -225,7 +225,6 @@ from newton._src.solvers.phoenx.simulation_kernels import (
     _scan_blocks_int_kernel,
     _scatter_monotone_world_run_starts_kernel,
     _set_kinematic_pose_batch_kernel,
-    advance_singleworld_color_cursor_kernel,
     get_block_world_kernel,
     get_fast_tail_kernel,
     get_multiworld_mass_splitting_kernel,
@@ -905,6 +904,8 @@ class PhoenXWorld:
         # Head capture-while predicate. Persistent-grid sweep zeroes it on
         # hand-off to the fused tail kernel.
         self._head_active: wp.array[wp.int32] = wp.ones(1, dtype=wp.int32, device=self.device)
+        # Second cursor of the dynamic head launches; see ``_launch_singleworld_head``.
+        self._color_cursor_next: wp.array[wp.int32] = wp.zeros(1, dtype=wp.int32, device=self.device)
         self._fuse_threshold: int = int(FUSE_TAIL_MAX_COLOR_SIZE)
         self._fuse_tail_block_dim: int = int(FUSE_TAIL_BLOCK_DIM)
 
@@ -4630,8 +4631,21 @@ class PhoenXWorld:
         fuse_threshold: wp.int32,
         contact_container: ContactContainer | None = None,
         fixed_step_idx: int = -1,
+        cursor_parity: int = 0,
     ) -> None:
-        """Launch the persistent-grid single-world head kernel."""
+        """Launch the persistent-grid single-world head kernel.
+
+        A dynamic launch (``fixed_step_idx < 0``) reads the color cursor from
+        one array and publishes the next cursor in another, so every CTA sees
+        the same color. ``cursor_parity`` selects which of the two arrays is
+        read; consecutive dynamic launches alternate it.
+        """
+        cursor = self._partitioner.color_cursor
+        cursor_next = cursor
+        if fixed_step_idx < 0:
+            cursor_next = self._color_cursor_next
+            if cursor_parity:
+                cursor, cursor_next = cursor_next, cursor
         contact_views = self._active_contact_views()
         if contact_container is None:
             contact_container = self._contact_container
@@ -4656,7 +4670,7 @@ class PhoenXWorld:
                     else self._partitioner.color_starts
                 ),
                 self._partitioner.num_colors,
-                self._partitioner.color_cursor,
+                cursor,
                 contact_container,
                 contact_views,
                 wp.int32(self.num_joints),
@@ -4674,17 +4688,11 @@ class PhoenXWorld:
                 ms_batch,
                 self._partitioner.sweep_direction,
                 wp.int32(fixed_step_idx),
+                cursor_next,
             ],
             block_dim=_SINGLEWORLD_BLOCK_DIM,
             device=self.device,
         )
-        if fixed_step_idx < 0:
-            wp.launch(
-                advance_singleworld_color_cursor_kernel,
-                dim=1,
-                inputs=[self._partitioner.color_cursor, self._head_active],
-                device=self.device,
-            )
 
     def _capture_singleworld_sweep(self, kernel, **kw) -> None:
         """capture_while body: head-path sweep on the persistent grid, unrolled
@@ -4695,8 +4703,11 @@ class PhoenXWorld:
         if contact_container is None:
             contact_container = self._contact_container
         fuse_threshold = wp.int32(self._fuse_threshold)
-        for _ in range(NUM_INNER_WHILE_ITERATIONS):
-            self._launch_singleworld_head(kernel, idt, fuse_threshold, contact_container)
+        # An even launch count returns the cursor to the partitioner's array,
+        # which the fused tail and both loop conditions read.
+        assert NUM_INNER_WHILE_ITERATIONS % 2 == 0
+        for launch in range(NUM_INNER_WHILE_ITERATIONS):
+            self._launch_singleworld_head(kernel, idt, fuse_threshold, contact_container, cursor_parity=launch % 2)
 
     def _capture_singleworld_tail_sweep(self, kernel, **kw) -> None:
         """capture_while body: drain remaining small colours in one block via

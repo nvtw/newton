@@ -59,8 +59,10 @@ def _trace_dispatch(
     bodies.inverse_mass[slot] += 1.0
 
 
-def _legacy_head_first_sweep(self, head_kernel, tail_kernel, idt, contact_container=None):
+def _legacy_head_first_sweep(self, head_kernel, tail_kernel, idt, contact_container=None, *, reverse_colors=False):
     """Retain the previous dispatch order as an independent test reference."""
+    # Only color-group sweeps consume ``reverse_colors``; this reference has none.
+    assert self._color_group_data is None
     assert not self.parallel_contact_prepare
 
     def round_sweep():
@@ -136,6 +138,7 @@ def _run_schedule(sizes, reverse, overflow, batch, candidate):
             wp.array(np.arange(count, dtype=np.int32), dtype=int, device="cuda:0"),
             wp.array(starts, dtype=int, device="cuda:0"),
             wp.zeros(1, dtype=int, device="cuda:0"),
+            wp.zeros(1, dtype=int, device="cuda:0"),
             wp.array([len(sizes)], dtype=int, device="cuda:0"),
             cursor,
             kernels.ContactContainer(),
@@ -151,32 +154,29 @@ def _run_schedule(sizes, reverse, overflow, batch, candidate):
         copy = kernels.CopyStateContainer()
         direction = wp.array([int(reverse)], dtype=int, device="cuda:0")
 
+        cursor_next = wp.zeros(1, dtype=int, device="cuda:0")
+        cursor_slot = next(i for i, value in enumerate(common) if value is cursor)
+
         def head_sweep(**_kwargs):
             wp.launch(_count_dispatch, dim=1, inputs=[0, dispatch_counts, cursor, head_active], device="cuda:0")
-            for _ in range(8):
-                wp.launch(
-                    head,
-                    dim=256,
-                    block_dim=256,
-                    inputs=[
-                        *common,
-                        wp.int32(256),
-                        wp.int32(4),
-                        head_active,
-                        copy,
-                        wp.int32(overflow),
-                        wp.int32(batch),
-                        direction,
-                        wp.int32(-1),
-                    ],
-                    device="cuda:0",
-                )
-                wp.launch(
-                    kernels.advance_singleworld_color_cursor_kernel,
-                    dim=1,
-                    inputs=[cursor, head_active],
-                    device="cuda:0",
-                )
+            # Each launch reads one cursor array and publishes into the other;
+            # the even launch count ends in the array the tail reads.
+            for launch in range(8):
+                source, target = (cursor_next, cursor) if launch % 2 else (cursor, cursor_next)
+                inputs = [
+                    *common,
+                    wp.int32(256),
+                    wp.int32(4),
+                    head_active,
+                    copy,
+                    wp.int32(overflow),
+                    wp.int32(batch),
+                    direction,
+                    wp.int32(-1),
+                    target,
+                ]
+                inputs[cursor_slot] = source
+                wp.launch(head, dim=256, block_dim=256, inputs=inputs, device="cuda:0")
 
         def tail_sweep(**_kwargs):
             wp.launch(_count_dispatch, dim=1, inputs=[1, dispatch_counts, cursor, head_active], device="cuda:0")
@@ -251,7 +251,7 @@ class TestTailFirstDispatch(unittest.TestCase):
                 )
                 # Force both paths on this compact version of the hanging-cloth
                 # reproducer; the cube begins just above the cloth for prompt impact.
-                simulation._fuse_threshold = 8
+                world._fuse_threshold = 8
                 rest_positions = model.particle_q.numpy().copy()
                 pinned = model.particle_inv_mass.numpy() == 0
                 # Match the fixture initialization: materialize lazy buffers
@@ -263,7 +263,11 @@ class TestTailFirstDispatch(unittest.TestCase):
                 contact_peak = 0
                 for _ in range(3):
                     wp.capture_launch(capture.graph)
-                    contact_peak = max(contact_peak, int(contacts.rigid_contact_count.numpy()[0]))
+                    # Cube-cloth contacts arrive through the deformable contact arrays.
+                    contact_peak = max(
+                        contact_peak,
+                        int(contacts.rigid_contact_count.numpy()[0]) + int(contacts.soft_contact_count.numpy()[0]),
+                    )
                     history.append(
                         np.concatenate(
                             (
@@ -274,7 +278,7 @@ class TestTailFirstDispatch(unittest.TestCase):
                             )
                         )
                     )
-                    self.assertEqual(int(simulation._partitioner.color_cursor.numpy()[0]), 0)
+                    self.assertEqual(int(world._partitioner.color_cursor.numpy()[0]), 0)
                 self.assertGreater(contact_peak, 0, "The cube never contacted the cloth")
                 self.assertTrue(np.isfinite(history).all())
                 positions = state.particle_q.numpy()

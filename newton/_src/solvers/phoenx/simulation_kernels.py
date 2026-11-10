@@ -3269,29 +3269,6 @@ def _color_for_step(
     return n_regular - wp.int32(1) - step_idx
 
 
-@wp.func
-def _singleworld_color_range(
-    color_starts: wp.array[wp.int32],
-    num_colors: wp.array[wp.int32],
-    color_cursor: wp.array[wp.int32],
-    sweep_direction: wp.array[wp.int32],
-    max_colored_partitions: wp.int32,
-):
-    """Decode current colour's cid range from cursor. Returns
-    ``(start, count, cursor, c)`` where ``c`` is the *actual* colour
-    index (post-direction remap). When ``sweep_direction[0] != 0``
-    the regular colours are visited in reverse order; the overflow
-    bucket (if any) stays last."""
-    cursor = color_cursor[0]
-    n_colors = num_colors[0]
-    step_idx = n_colors - cursor
-    c = _color_for_step(step_idx, n_colors, sweep_direction[0], max_colored_partitions)
-    start = color_starts[c]
-    end = color_starts[c + 1]
-    count = end - start
-    return start, count, cursor, c
-
-
 # Single-world fused-tail kernels: one 1D block walks trailing small colours,
 # __syncthreads between colours. Hands off to the persistent kernel on the
 # first colour > FUSE_TAIL_MAX_COLOR_SIZE without decrementing the cursor.
@@ -3305,9 +3282,10 @@ def _singleworld_color_range_from_cursor(
     sweep_direction: wp.array[wp.int32],
     max_colored_partitions: wp.int32,
 ):
-    """:func:`_singleworld_color_range` taking the cursor as a register
-    value. Returns ``(start, count, c)`` -- ``c`` is the direction-
-    remapped colour index (see :func:`_color_for_step`)."""
+    """Decode the colour at ``cursor``. Returns ``(start, count, c)`` where
+    ``c`` is the direction-remapped colour index (see :func:`_color_for_step`):
+    a reversed sweep visits regular colours in reverse order and keeps the
+    overflow bucket last."""
     n_colors = num_colors[0]
     step_idx = n_colors - cursor
     c = _color_for_step(step_idx, n_colors, sweep_direction[0], max_colored_partitions)
@@ -4325,6 +4303,7 @@ def _make_singleworld_persistent_kernel(
         ms_batch_size: wp.int32,
         sweep_direction: wp.array[wp.int32],
         fixed_step_idx: wp.int32,
+        color_cursor_next: wp.array[wp.int32],
     ):
         tid = wp.tid()
         if fixed_step_idx >= wp.int32(0):
@@ -4342,12 +4321,17 @@ def _make_singleworld_persistent_kernel(
             start = color_starts[c]
             count = color_starts[c + wp.int32(1)] - start
         else:
-            if color_cursor[0] <= 0:
+            # A dynamic launch reads ``color_cursor`` and thread 0 publishes
+            # the cursor of the following launch in ``color_cursor_next``, a
+            # different array. No CTA of this launch can observe the update.
+            cursor = color_cursor[0]
+            if cursor <= 0:
                 if tid == 0:
                     head_active[0] = 0
+                    color_cursor_next[0] = cursor
                 return
-            start, count, cursor, c = _singleworld_color_range(
-                color_starts, num_colors, color_cursor, sweep_direction, max_colored_partitions
+            start, count, c = _singleworld_color_range_from_cursor(
+                color_starts, num_colors, cursor, sweep_direction, max_colored_partitions
             )
 
         num_units = count
@@ -4356,6 +4340,8 @@ def _make_singleworld_persistent_kernel(
         if num_units <= fuse_threshold:
             if tid == 0:
                 head_active[0] = 0
+                if fixed_step_idx < wp.int32(0):
+                    color_cursor_next[0] = cursor
             return
 
         # Overflow detection. ``c`` is the direction-remapped colour
@@ -4405,8 +4391,8 @@ def _make_singleworld_persistent_kernel(
                     tid,
                     total_num_threads,
                 )
-                if tid == 0 and fixed_step_idx >= wp.int32(0):
-                    color_cursor[0] = cursor - 1
+                if tid == 0:
+                    color_cursor_next[0] = cursor - 1
                 return
 
         for t in range(thread_start, count, stride):
@@ -4460,20 +4446,10 @@ def _make_singleworld_persistent_kernel(
                     parallel_id,
                 )
 
-        if tid == 0 and fixed_step_idx >= wp.int32(0):
-            color_cursor[0] = cursor - 1
+        if tid == 0:
+            color_cursor_next[0] = cursor - 1
 
     return kernel
-
-
-@wp.kernel
-def advance_singleworld_color_cursor_kernel(
-    color_cursor: wp.array[wp.int32],
-    head_active: wp.array[wp.int32],
-):
-    """Advance only after every CTA of a dynamic head launch has finished."""
-    if head_active[0] != wp.int32(0) and color_cursor[0] > wp.int32(0):
-        color_cursor[0] = color_cursor[0] - wp.int32(1)
 
 
 @functools.cache
