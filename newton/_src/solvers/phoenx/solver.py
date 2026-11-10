@@ -20,6 +20,7 @@ import warp as wp
 
 import newton
 from newton._src.sim import BodyFlags, CollisionPipeline, Contacts, Control, JointType, Model, ModelFlags, State
+from newton._src.sim.collide import _estimate_rigid_contact_max
 from newton._src.solvers.phoenx.adapter_kernels import (
     _apply_joint_drive_control_kernel,
     _apply_joint_forces_kernel,
@@ -171,7 +172,7 @@ def _shape_pair_estimate(model) -> int:
 
 
 def _estimate_rigid_contact_max_phoenx(model) -> int | None:
-    """Tight rigid_contact_max from shape_contact_pair_count * 5 (CPP) * 2 (safety).
+    """Tight rigid_contact_max: pairs * 5 (CPP) * 2 (safety), bounded by Newton's neighbor budget.
     None when pair count is unavailable (caller falls back to Newton's default)."""
     pair_count = _shape_pair_estimate(model)
     if pair_count <= 0:
@@ -181,7 +182,11 @@ def _estimate_rigid_contact_max_phoenx(model) -> int | None:
     # opt-in hydroelastic and overshoots us.
     PRIMITIVE_CPP = 5
     SAFETY = 2
-    return max(1000, pair_count * PRIMITIVE_CPP * SAFETY)
+    capacity = max(1000, pair_count * PRIMITIVE_CPP * SAFETY)
+    # Every pair touching at once is impossible for more than a few bodies:
+    # the pair count grows with the square of the shapes of a world, the
+    # contacts only with the shapes. Newton's neighbor budget bounds that.
+    return min(capacity, _estimate_rigid_contact_max(model))
 
 
 def _estimate_contact_column_max_phoenx(model: Model, rigid_contact_max: int) -> int:

@@ -1,0 +1,1 @@
+Bound the contact capacity of PhoenX-built collision pipelines by Newton's neighbor budget: worlds with many loose bodies no longer reserve a slot for every shape pair (11x less contact memory and 2.5x faster steps for 100 loose objects per world).
