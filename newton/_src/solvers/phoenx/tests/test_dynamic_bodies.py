@@ -425,7 +425,9 @@ class TestDynamicBodies(unittest.TestCase):
         top = 2.0 * half + _HALF
 
         def spawn(x: float) -> int:
-            wp.launch(_spawn_column_kernel, dim=1, inputs=[solver.dynamics.data, wp.array([x], dtype=float), 0.5, bodies])
+            wp.launch(
+                _spawn_column_kernel, dim=1, inputs=[solver.dynamics.data, wp.array([x], dtype=float), 0.5, bodies]
+            )
             return int(bodies.numpy()[0])
 
         def settle() -> tuple[np.ndarray, int, int]:
