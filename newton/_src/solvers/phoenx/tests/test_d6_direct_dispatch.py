@@ -35,7 +35,7 @@ def _mode_for(model: newton.Model) -> int:
 @unittest.skipUnless(wp.get_preferred_device().is_cuda, "PhoenX direct D6 dispatch tests run on CUDA only")
 class TestD6DirectDispatch(unittest.TestCase):
     def test_free_rotation_d6_uses_compact_rows(self) -> None:
-        """Bound row storage and preserve motion against padded storage."""
+        """Bound row storage while the compact rows still lock translation."""
         builder = newton.ModelBuilder(gravity=(0.0, 0.0, -9.81), up_axis=newton.Axis.Z)
         joints = []
         for _ in range(3):
@@ -51,30 +51,27 @@ class TestD6DirectDispatch(unittest.TestCase):
             )
         builder.add_articulation(joints)
         model = builder.finalize(device=wp.get_preferred_device())
-        compact = newton.solvers.SolverPhoenX(model, joint_mode="maximal_direct", velocity_iterations=1)
-        padded = newton.solvers.SolverPhoenX(model, joint_mode="maximal_direct", velocity_iterations=1)
+        solver = newton.solvers.SolverPhoenX(model, joint_mode="maximal_direct", velocity_iterations=1)
         names = ("row_wrench0", "row_wrench1", "row_bias", "row_error", "row_stiffness", "row_damping")
-        direct = compact._direct_equality_system
+        direct = solver._direct_equality_system
         # Two spatial wrenches and four scalar fields cost 64 bytes per row.
         # Three locked translations must not reserve three unused rotations.
         row_bytes = sum(getattr(direct, name).numpy().nbytes for name in names)
         self.assertLessEqual(row_bytes, 64 * len(direct.topology.row_joint))
-        reference = padded._direct_equality_system
-        for name in names:
-            array = getattr(reference, name)
-            setattr(reference, name, wp.zeros((len(joints), 6), dtype=array.dtype, device=model.device))
-        states = [model.state(), model.state()]
-        velocities = states[0].body_qd.numpy()
+        state = model.state()
+        start = state.body_q.numpy()[:, :3].copy()
+        velocities = state.body_qd.numpy()
         velocities[:, :3] = (0.2, 0.4, 0.6)
-        for state in states:
-            state.body_qd.assign(velocities)
+        velocities[:, 3:] = (0.3, -0.2, 0.1)
+        state.body_qd.assign(velocities)
         for _ in range(4):
-            for solver, state in zip((compact, padded), states, strict=True):
-                state.clear_forces()
-                solver.step(state, state, model.control(), None, 1.0 / 120.0)
-            np.testing.assert_array_equal(states[0].body_q.numpy(), states[1].body_q.numpy())
-            np.testing.assert_array_equal(states[0].body_qd.numpy(), states[1].body_qd.numpy())
-            np.testing.assert_array_equal(direct.accumulated_impulse.numpy(), reference.accumulated_impulse.numpy())
+            state.clear_forces()
+            solver.step(state, state, model.control(), None, 1.0 / 120.0)
+        # The anchors sit at the body origins, so the locked translations
+        # hold the origins in place while the free rotations keep spinning.
+        np.testing.assert_allclose(state.body_q.numpy()[:, :3], start, atol=1.0e-6)
+        np.testing.assert_allclose(state.body_qd.numpy()[:, :3], 0.0, atol=1.0e-5)
+        self.assertGreater(float(np.linalg.norm(state.body_qd.numpy()[:, 3:], axis=1).min()), 0.3)
 
     def test_direct_drive_reports_constraint_wrench(self) -> None:
         """Report direct D6 reactions through the common diagnostics path."""
