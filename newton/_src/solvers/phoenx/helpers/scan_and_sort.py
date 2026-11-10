@@ -54,9 +54,16 @@ def sort_variable_length_int64(
     active_length: wp.array[int],
     end_bit: int | None = None,
     prefix_flags: wp.array[wp.int32] | None = None,
+    tail_masked: bool = False,
 ) -> None:
+    """Sort ``keys[:active_length]`` with ``values``; inactive entries sort to the end.
+
+    ``tail_masked`` skips the sentinel fill for callers that already wrote
+    ``INT64_MAX`` to every key past ``active_length``.
+    """
     count = keys.shape[0] // 2
-    wp.launch(_mask_tail_int64, dim=count, inputs=[keys, active_length])
+    if not tail_masked:
+        wp.launch(_mask_tail_int64, dim=count, inputs=[keys, active_length])
     # As for ``sort_variable_length_int``: callers whose nonnegative keys stay
     # below ``2**end_bit - 1`` get the full-width order with fewer passes.
     if prefix_flags is None:

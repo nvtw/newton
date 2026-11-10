@@ -3580,8 +3580,13 @@ class ReducedContactBlockSystem:
                 ],
                 device=self.device,
             )
+            # The classify kernel wrote the sentinel to every inactive key.
             sort_variable_length_int64(
-                self.schedule_keys, self.schedule_columns, num_columns, prefix_flags=self._schedule_sort_flags()
+                self.schedule_keys,
+                self.schedule_columns,
+                num_columns,
+                prefix_flags=self._schedule_sort_flags(),
+                tail_masked=True,
             )
             wp.launch(
                 _reorder_contact_columns_kernel,
@@ -3648,8 +3653,13 @@ class ReducedContactBlockSystem:
                 outputs=[self.schedule_keys, self.schedule_columns, self.schedule_section_end],
                 device=self.device,
             )
+            # The classify kernel wrote the sentinel to every inactive key.
             sort_variable_length_int64(
-                self.schedule_keys, self.schedule_columns, num_columns, prefix_flags=self._schedule_sort_flags()
+                self.schedule_keys,
+                self.schedule_columns,
+                num_columns,
+                prefix_flags=self._schedule_sort_flags(),
+                tail_masked=True,
             )
         wp.utils.array_scan(self.schedule_section_end, self.schedule_section_end, inclusive=True)
         assert self.fallback_count is not None
