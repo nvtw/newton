@@ -272,9 +272,12 @@ class TestNewtonCableAdapter(unittest.TestCase):
                 twist_damping=2.0,
                 gravity=(0.0, 0.0, 0.0),
             )
-            body_q = model.body_q.numpy()
-            body_q[1, 3:7] = (0.0, 0.0, math.sin(0.5 * initial_twist), math.cos(0.5 * initial_twist))
-            model.body_q.assign(body_q)
+            # Rods carry free-joint coordinates, so the initial twist about the
+            # +Z material tangent is authored in joint_q; the rest stays untwisted.
+            rotation = int(model.joint_q_start.numpy()[1]) + 3
+            joint_q = model.joint_q.numpy()
+            joint_q[rotation : rotation + 4] = (0.0, 0.0, math.sin(0.5 * initial_twist), math.cos(0.5 * initial_twist))
+            model.joint_q.assign(joint_q)
             body_q = _step_n(model, solver, frames=240, dt=1.0 / 240.0)
             return 2.0 * math.atan2(abs(float(body_q[1, 5])), abs(float(body_q[1, 6])))
 
@@ -295,7 +298,7 @@ class TestNewtonCableAdapter(unittest.TestCase):
         self.assertAlmostEqual(measured, rest_bend, delta=2.0e-3)
 
     def test_cable_refreshes_authored_curved_rest_state(self) -> None:
-        """Refresh cable rest bend after an authored body-pose edit."""
+        """Refresh cable rest bend after a ``joint_rest_q`` edit."""
         model, solver = _two_body_cable_world(
             bend_stiffness=40.0,
             bend_damping=4.0,
@@ -303,10 +306,11 @@ class TestNewtonCableAdapter(unittest.TestCase):
             rest_bend=0.45,
         )
         rest_bend = 0.25
-        body_q = model.body_q.numpy()
-        body_q[1, 3:7] = (0.0, math.sin(0.5 * rest_bend), 0.0, math.cos(0.5 * rest_bend))
-        model.body_q.assign(body_q)
-        solver.notify_model_changed(newton.ModelFlags.BODY_PROPERTIES)
+        rotation = int(model.joint_q_start.numpy()[1]) + 3
+        joint_rest_q = model.joint_rest_q.numpy()
+        joint_rest_q[rotation : rotation + 4] = (0.0, math.sin(0.5 * rest_bend), 0.0, math.cos(0.5 * rest_bend))
+        model.joint_rest_q.assign(joint_rest_q)
+        solver.notify_model_changed(newton.ModelFlags.JOINT_REFERENCE_POSE_PROPERTIES)
 
         body_q = _step_n(model, solver, frames=120, dt=1.0 / 240.0)
         measured = 2.0 * math.acos(min(abs(float(body_q[1, 6])), 1.0))
