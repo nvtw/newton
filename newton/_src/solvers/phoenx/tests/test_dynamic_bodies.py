@@ -376,6 +376,91 @@ class TestDynamicBodies(unittest.TestCase):
             wp.capture_launch(capture.graph)
         np.testing.assert_allclose(state_0.body_q.numpy()[bodies.numpy()[0]][2], _HALF, atol=5.0e-3)
 
+    def test_runtime_bodies_join_and_leave_fused_trees(self):
+        """Bodies spawned onto fused trees are solved with the tree they touch, and removal frees them.
+
+        A spawned box that lands on one tree joins that tree's fused substep for as long as only
+        that tree touches it. One that lands across two trees belongs to neither: its contacts
+        are solved between the fused kernels. Removing a box leaves the trees at rest and its
+        row reusable.
+        """
+        builder = newton.ModelBuilder()
+        # The trees lie 4 cm apart: keep their contact gap below that.
+        builder.default_shape_cfg.gap = 0.005
+        builder.add_ground_plane()
+        half = 0.14
+        for start in (0.0, 0.62):
+            first = builder.joint_count
+            previous = -1
+            for i in range(2):
+                link = builder.add_link(xform=wp.transform(wp.vec3(start + 0.3 * i, 0.0, half), wp.quat_identity()))
+                builder.add_shape_box(link, hx=half, hy=half, hz=half)
+                if previous < 0:
+                    builder.add_joint_free(link)
+                else:
+                    builder.add_joint_revolute(
+                        previous,
+                        link,
+                        parent_xform=wp.transform(wp.vec3(0.15, 0.0, 0.0), wp.quat_identity()),
+                        child_xform=wp.transform(wp.vec3(-0.15, 0.0, 0.0), wp.quat_identity()),
+                        axis=newton.Axis.Y,
+                    )
+                previous = link
+            builder.add_articulation(list(range(first, builder.joint_count)))
+        builder.reserve_dynamic_capacity(bodies=1, shapes=1)
+        model = builder.finalize()
+        solver = newton.solvers.SolverPhoenX(model, joint_mode="reduced", substeps=4)
+        reduced = solver._reduced_articulation
+        self.assertIsNotNone(reduced.fused_substep)
+        state_0, state_1, control = model.state(), model.state(), model.control()
+        newton.eval_fk(model, model.joint_q, model.joint_qd, state_0)
+        contacts = model._collision_pipeline.contacts()
+        with wp.ScopedCapture() as capture:
+            solver.collide(state_0, contacts)
+            solver.step(state_0, state_1, control, contacts, _DT)
+            for name in ("body_q", "body_qd", "joint_q", "joint_qd"):
+                wp.copy(getattr(state_0, name), getattr(state_1, name))
+
+        bodies = wp.zeros(1, dtype=int)
+        top = 2.0 * half + _HALF
+
+        def spawn(x: float) -> int:
+            wp.launch(_spawn_column_kernel, dim=1, inputs=[solver.dynamics.data, wp.array([x], dtype=float), 0.5, bodies])
+            return int(bodies.numpy()[0])
+
+        def settle() -> tuple[np.ndarray, int, int]:
+            for _ in range(90):
+                wp.capture_launch(capture.graph)
+            owners = solver.world.bodies.reduced.external_owner.numpy()[1:]
+            cross = int(reduced.contact_block_system.cross_column_count.numpy()[0])
+            return state_0.body_q.numpy(), owners, cross
+
+        links = np.arange(4)
+        for x, owner in ((0.15, 0), (0.77, 1)):
+            with self.subTest(owner=owner):
+                box = spawn(x)
+                self.assertGreaterEqual(box, 0)
+                body_q, owners, cross = settle()
+                # The box rests on the tree below it, which solves it in its own block.
+                np.testing.assert_allclose(body_q[box, 2], top, atol=5.0e-3)
+                np.testing.assert_allclose(body_q[links, 2], half, atol=5.0e-3)
+                self.assertEqual(int(owners[box]), owner)
+                self.assertEqual(cross, 0)
+                wp.launch(_remove_bodies_kernel, dim=1, inputs=[solver.dynamics.data, bodies])
+                body_q, owners, cross = settle()
+                np.testing.assert_allclose(body_q[links, 2], half, atol=5.0e-3)
+                self.assertTrue(np.all(owners < 0))
+                self.assertEqual(cross, 0)
+
+        # Across the gap between the trees both carry the box, so neither owns it.
+        box = spawn(0.46)
+        body_q, owners, cross = settle()
+        np.testing.assert_allclose(body_q[box, 2], top, atol=5.0e-3)
+        np.testing.assert_allclose(body_q[links, 2], half, atol=5.0e-3)
+        self.assertLess(int(owners[box]), 0)
+        self.assertGreater(cross, 0)
+        self.assertEqual(int(solver.dynamics.error_count.numpy()[0]), 0)
+
 
 if __name__ == "__main__":
     unittest.main()
