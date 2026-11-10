@@ -3927,6 +3927,7 @@ class TestReducedArticulation(unittest.TestCase):
         solver_colored = newton.solvers.SolverPhoenX(
             model,
             joint_mode="reduced",
+            reduced_backend="aba",
             substeps=1,
             solver_iterations=4,
             velocity_iterations=1,
@@ -3934,6 +3935,7 @@ class TestReducedArticulation(unittest.TestCase):
         solver_serial = newton.solvers.SolverPhoenX(
             model,
             joint_mode="reduced",
+            reduced_backend="aba",
             substeps=1,
             solver_iterations=4,
             velocity_iterations=1,
@@ -4054,6 +4056,7 @@ class TestReducedArticulation(unittest.TestCase):
         solver = newton.solvers.SolverPhoenX(
             model,
             joint_mode="reduced",
+            reduced_backend="aba",
             substeps=1,
             solver_iterations=4,
             velocity_iterations=1,
@@ -4563,6 +4566,7 @@ class TestReducedArticulation(unittest.TestCase):
             solver = newton.solvers.SolverPhoenX(
                 model,
                 joint_mode="reduced",
+                reduced_backend="aba",
                 substeps=1,
                 solver_iterations=8,
                 velocity_iterations=0,

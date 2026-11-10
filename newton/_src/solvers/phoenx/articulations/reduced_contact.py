@@ -220,6 +220,15 @@ def _apply_pair_impulse(
 
 
 @wp.func
+def _external_owner(bodies: BodyContainer, body: wp.int32) -> wp.int32:
+    """Return the articulation whose fused substep solves contacts with a free rigid body, or -1."""
+    owner = bodies.reduced.external_owner[body]
+    if owner < wp.int32(0):
+        return wp.int32(-1)
+    return owner >> wp.int32(3)
+
+
+@wp.func
 def reduced_contact_deferred_owner(
     columns: ContactColumnContainer,
     column: wp.int32,
@@ -233,8 +242,12 @@ def reduced_contact_deferred_owner(
     if articulation0 >= wp.int32(0) and articulation1 < wp.int32(0):
         if bodies.inverse_mass[body1] == wp.float32(0.0) or bodies.motion_type[body1] == MOTION_KINEMATIC:
             return articulation0
+        if _external_owner(bodies, body1) == articulation0:
+            return articulation0
     if articulation1 >= wp.int32(0) and articulation0 < wp.int32(0):
         if bodies.inverse_mass[body0] == wp.float32(0.0) or bodies.motion_type[body0] == MOTION_KINEMATIC:
+            return articulation1
+        if _external_owner(bodies, body0) == articulation1:
             return articulation1
     return wp.int32(-1)
 

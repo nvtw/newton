@@ -1179,34 +1179,37 @@ class SolverPhoenX(SolverBase):
             reduced_model = _get_reduced_model(model)
             if reduced_model.articulation_count > 0:
 
-                def build_reduced(backend: str) -> ReducedPhoenXArticulation:
+                def build_reduced(backend: str, external_rigid_rows: bool = False) -> ReducedPhoenXArticulation:
                     return ReducedPhoenXArticulation(
                         reduced_model,
                         self.bodies,
                         execution_path=self.reduced_articulation_path,
                         contact_friction_model=contact_friction_model,
                         backend=backend,
+                        external_rigid_rows=external_rigid_rows,
                     )
 
-                fused = False
-                if self.reduced_backend == "auto":
-                    # The dense backend pays off through its fused substep; keep the
+                def build_fused() -> ReducedPhoenXArticulation | None:
+                    """Build the dense trees with a fused substep, which also solves free-body contacts."""
+                    if not self.device.is_cuda or self.reduced_articulation_path != "reference":
+                        return None
+                    try:
+                        candidate = build_reduced("dense", external_rigid_rows=True)
+                    except ValueError:
+                        return None
+                    return None if dense_substep_blockers(candidate) else candidate
+
+                if self.reduced_backend != "aba":
+                    # The dense backend pays off through its fused substep; "auto" keeps the
                     # articulated-body recurrences wherever that cannot run every tree.
-                    self.reduced_backend = "aba"
-                    if self.device.is_cuda and self.reduced_articulation_path == "reference":
-                        try:
-                            candidate = build_reduced("dense")
-                        except ValueError:
-                            candidate = None
-                        if candidate is not None and not dense_substep_blockers(candidate):
-                            self._reduced_articulation = candidate
-                            self.reduced_backend = "dense"
-                            fused = True
+                    self._reduced_articulation = build_fused()
+                    if self._reduced_articulation is not None:
+                        self.reduced_backend = "dense"
+                        self._reduced_articulation.fused_substep = DenseSubstep(self._reduced_articulation)
+                    elif self.reduced_backend == "auto":
+                        self.reduced_backend = "aba"
                 if self._reduced_articulation is None:
                     self._reduced_articulation = build_reduced(self.reduced_backend)
-                    fused = self.reduced_backend == "dense" and not dense_substep_blockers(self._reduced_articulation)
-                if fused:
-                    self._reduced_articulation.fused_substep = DenseSubstep(self._reduced_articulation)
                 joint_idx_to_cid = self._joint_constraints.joint_idx_to_cid.numpy()
                 joint_pgs_enabled = np.ones(num_joints, dtype=np.int32)
                 if self._uses_reduced_joint_ownership:

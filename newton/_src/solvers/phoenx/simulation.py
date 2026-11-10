@@ -2801,16 +2801,13 @@ class PhoenXWorld:
             self._current_substep_index = k
             if picking is not None:
                 picking.apply_force()
-            if self._reduced_articulation is not None:
-                self._reduced_articulation.begin_substep(
-                    self.substep_dt,
-                    split_dynamics=True,
-                    compute_impulse_response=(
-                        self._reduced_contacts_active_this_step
-                        and self._reduced_articulation.contact_block_system.requires_impulse_response
-                    ),
-                    world=self,
-                )
+            # A fused substep that solves contacts with free rigid bodies runs after the
+            # regular solve, so that it meets those bodies with their other contacts solved.
+            reduced_after_regular = (
+                self._reduced_articulation is not None and self._reduced_articulation.external_rigid_rows
+            )
+            if self._reduced_articulation is not None and not reduced_after_regular:
+                self._begin_reduced_substep()
             direct = getattr(self, "_direct_equality_system", None)
             reuse_direct_factor = bool(
                 self._reuse_exact_relax_factor
@@ -2832,6 +2829,8 @@ class PhoenXWorld:
             # dispatcher.
             idt = wp.float32(1.0 / self.substep_dt)
             self._dispatcher.solve(idt)
+            if reduced_after_regular:
+                self._begin_reduced_substep()
             if self._penetration_free_data is not None:
                 self._penetration_free.limit_velocities(self._penetration_free_data, self.bodies, self.substep_dt)
             self._integrate_positions()
@@ -4019,6 +4018,17 @@ class PhoenXWorld:
                 block_dim=_PER_WORLD_COLORING_BLOCK_DIM,
                 device=self.device,
             )
+
+    def _begin_reduced_substep(self) -> None:
+        self._reduced_articulation.begin_substep(
+            self.substep_dt,
+            split_dynamics=True,
+            compute_impulse_response=(
+                self._reduced_contacts_active_this_step
+                and self._reduced_articulation.contact_block_system.requires_impulse_response
+            ),
+            world=self,
+        )
 
     def _integrate_forces_and_gravity(self) -> None:
         """Apply force/torque + gravity in one per-substep launch.

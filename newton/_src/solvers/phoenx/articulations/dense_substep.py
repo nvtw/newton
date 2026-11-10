@@ -89,6 +89,7 @@ from newton._src.solvers.phoenx.articulations.reduced import (
 from newton._src.solvers.phoenx.articulations.reduced_contact_block import (
     _CACHED_PAGE_COUNT,
     _POINTS_PER_PAGE,
+    EXTERNAL_BODY_SLOTS,
     _gather_packed_contact_points,
     _gather_packed_patch_points,
     _patch_normal_row_update,
@@ -97,10 +98,12 @@ from newton._src.solvers.phoenx.articulations.reduced_contact_block import (
     _store_point_row_effective_mass,
     _sync_contact_warp,
 )
-from newton._src.solvers.phoenx.body import BodyContainer, DenseTreeData
+from newton._src.solvers.phoenx.body import BodyContainer, DenseTreeData, mat33_from_sym6
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
     ContactColumnContainer,
     ContactViews,
+    contact_get_body1,
+    contact_get_body2,
     contact_get_contact_count,
     contact_get_friction,
     contact_get_friction_dynamic,
@@ -351,6 +354,19 @@ def _is_floating(kind: wp.int32) -> wp.bool:
     return kind == JointType.FREE or kind == JointType.DISTANCE
 
 
+@wp.func
+def _cholesky3(matrix: wp.mat33) -> wp.mat33:
+    """Return the lower factor ``C`` of a symmetric positive semidefinite ``C C^T``."""
+    tiny = wp.float32(1.0e-30)
+    c00 = wp.sqrt(wp.max(matrix[0, 0], wp.float32(0.0)))
+    c10 = matrix[1, 0] / wp.max(c00, tiny)
+    c20 = matrix[2, 0] / wp.max(c00, tiny)
+    c11 = wp.sqrt(wp.max(matrix[1, 1] - c10 * c10, wp.float32(0.0)))
+    c21 = (matrix[2, 1] - c20 * c10) / wp.max(c11, tiny)
+    c22 = wp.sqrt(wp.max(matrix[2, 2] - c20 * c20 - c21 * c21, wp.float32(0.0)))
+    return wp.mat33(c00, 0.0, 0.0, c10, c11, 0.0, c20, c21, c22)
+
+
 @functools.cache
 def make_dense_substep_kernel(
     max_dofs: int,
@@ -360,6 +376,7 @@ def make_dense_substep_kernel(
     subtree_capacity: int,
     patch: bool,
     relax: bool,
+    external: bool = False,
 ):
     """Build the biased or the relax substep kernel of one dense bucket.
 
@@ -371,6 +388,8 @@ def make_dense_substep_kernel(
         subtree_capacity: Longest subtree list of the bucket's templates.
         patch: Solve patch friction rows instead of point friction rows.
         relax: Build the relax kernel instead of the biased one.
+        external: Solve contact rows against free rigid bodies, whose six velocity
+            components join the rows' DOFs.
     """
     # Scratch after the factor's tables: the composite inertias while factoring, then the tree
     # recurrences and the contact pages share one region; the rates and a solve vector follow.
@@ -379,10 +398,13 @@ def make_dense_substep_kernel(
     # of those positions as bytes, their start velocities, z . z, and the points' normal loads.
     # The solve vector ends with a
     # spare DOF that the padding of short paths addresses.
-    row_words = PAGE_ROWS * path_capacity
+    # A row against a free rigid body carries that body's six whitened components after its path.
+    z_positions = path_capacity + (6 if external else 0)
+    external_dofs = 6 * EXTERNAL_BODY_SLOTS if external else 0
+    row_words = PAGE_ROWS * z_positions
     contact_words = row_words + (row_words + 3) // 4 + 2 * PAGE_ROWS + _CHUNK_POINTS
     qd_offset = max(tree_words, contact_words, _INERTIA_STRIDE * joint_capacity)
-    scratch_words = qd_offset + 2 * max_dofs + 1
+    scratch_words = qd_offset + 2 * max_dofs + 1 + external_dofs
     ops = make_dense_tree_ops(max_dofs, joint_capacity, entry_capacity, subtree_capacity, scratch_words)
     layout = ops.layout
     shared_base = _make_shared_base(layout.size, layout.tables)
@@ -412,7 +434,7 @@ def make_dense_substep_kernel(
     joint_last_dof = layout.joint_last_dof
     module = _unrolled_module(
         f"dense_substep_{max_dofs}_{joint_capacity}_{entry_capacity}_{path_capacity}_{subtree_capacity}"
-        f"_{int(patch)}_{int(relax)}",
+        f"_{int(patch)}_{int(relax)}_{int(external)}",
         dense_unroll(layout, joint_capacity),
     )
 
@@ -541,7 +563,7 @@ def make_dense_substep_kernel(
     def row_dot(shared: _shared_handle, row: wp.int32) -> wp.float32:
         """Return ``z_row . w``, the velocity change of a row under the impulses applied so far."""
         total = wp.float32(0.0)
-        for position in range(path_capacity):
+        for position in range(z_positions):
             index = wp.int32(PAGE_ROWS * position) + row
             total += _load(shared, wp.int32(z_base) + index) * _load(
                 shared, wp.int32(rhs_base) + _load_u8(shared, wp.int32(z_dof_byte) + index)
@@ -552,7 +574,7 @@ def make_dense_substep_kernel(
     def row_product(shared: _shared_handle, row: wp.int32, other: wp.int32) -> wp.float32:
         """Return ``z_row . z_other``; root paths share DOFs on a common prefix only."""
         total = wp.float32(0.0)
-        for position in range(path_capacity):
+        for position in range(z_positions):
             index = wp.int32(PAGE_ROWS * position) + row
             other_index = wp.int32(PAGE_ROWS * position) + other
             if _load_u8(shared, wp.int32(z_dof_byte) + index) == _load_u8(shared, wp.int32(z_dof_byte) + other_index):
@@ -563,7 +585,7 @@ def make_dense_substep_kernel(
     def add_row(shared: _shared_handle, lane: wp.int32, row: wp.int32, impulse: wp.float32):
         """Add ``impulse * z_row`` to ``w``; the lanes stride over the path positions, which hold distinct DOFs."""
         position = lane
-        while position < wp.int32(path_capacity):
+        while position < wp.int32(z_positions):
             index = wp.int32(PAGE_ROWS) * position + row
             slot = wp.int32(rhs_base) + _load_u8(shared, wp.int32(z_dof_byte) + index)
             _store(shared, slot, _load(shared, slot) + impulse * _load(shared, wp.int32(z_base) + index))
@@ -603,6 +625,7 @@ def make_dense_substep_kernel(
         point_count: wp.array[wp.int32],
         point_contact: wp.array2d[wp.int32],
         point_column: wp.array2d[wp.int32],
+        point0: wp.array2d[wp.vec3],
         normal: wp.array2d[wp.vec3],
         tangent0: wp.array2d[wp.vec3],
         row_body: wp.array2d[wp.int32],
@@ -651,6 +674,9 @@ def make_dense_substep_kernel(
         column_points = wp.int32(0)
         column_ordinal = wp.int32(0)
         column_owner = wp.bool(False)
+        # The column and the application point of the lane's row, for rows against a free body.
+        row_column = wp.int32(0)
+        row_point = wp.vec3(0.0)
         bias_t = wp.vec2f(0.0, 0.0)
         friction = wp.float32(0.0)
         friction_dynamic = wp.float32(0.0)
@@ -659,8 +685,12 @@ def make_dense_substep_kernel(
             if lane < chunk_points:
                 bias_n = cc_get_bias(cc, contact)
                 lambda_n = cc_get_normal_lambda(cc, contact)
-            elif lane < row_count and ((lane - chunk_points) & wp.int32(1)) == wp.int32(0):
-                column_owner = wp.bool(True)
+                row_column = column
+                if wp.static(external):
+                    row_point = point0[packed_articulation, chunk[0] + lane]
+            elif lane < row_count and (wp.static(external) or ((lane - chunk_points) & wp.int32(1)) == wp.int32(0)):
+                # With free bodies the second tangent lane walks its column too, for its point.
+                column_owner = ((lane - chunk_points) & wp.int32(1)) == wp.int32(0)
                 column_ordinal = chunk[2] + ((lane - chunk_points) >> wp.int32(1))
                 # The chunk's columns start after the points of a column that began earlier.
                 walk = chunk[0]
@@ -679,9 +709,13 @@ def make_dense_substep_kernel(
                         column_contact = point_contact[packed_articulation, walk]
                         bias_t[0] += cc_get_bias_t1(cc, column_contact)
                         bias_t[1] += cc_get_bias_t2(cc, column_contact)
+                    if wp.static(external):
+                        row_point += point0[packed_articulation, walk]
                     column_points += wp.int32(1)
                     walk += wp.int32(1)
                 bias_t *= wp.float32(1.0) / wp.float32(column_points)
+                row_point *= wp.float32(1.0) / wp.float32(column_points)
+                row_column = patch_column
                 friction = contact_get_friction(columns, patch_column)
                 friction_dynamic = contact_get_friction_dynamic(columns, patch_column)
                 lambda_t = patch_lambda[packed_articulation, column_ordinal]
@@ -721,6 +755,39 @@ def make_dense_substep_kernel(
             for position in range(path_length, wp.int32(path_capacity)):
                 _store(shared, wp.int32(z_base) + wp.int32(PAGE_ROWS) * position + lane, wp.float32(0.0))
                 _store_u8(shared, wp.int32(z_dof_byte) + wp.int32(PAGE_ROWS) * position + lane, wp.int32(max_dofs))
+            if wp.static(external):
+                # The other endpoint, if a free rigid body of this tree: the row's impulse acts on
+                # it reversed, and its mass is diagonal after whitening by the factor of its
+                # inverse inertia. Its components take the DOFs after the spare one.
+                if wp.static(not patch):
+                    row_column = point_column[packed_articulation, gathered_row // wp.int32(3)]
+                    row_point = point0[packed_articulation, gathered_row // wp.int32(3)]
+                other = contact_get_body1(columns, row_column)
+                if bodies.reduced.body_articulation[other] >= wp.int32(0):
+                    other = contact_get_body2(columns, row_column)
+                owner = bodies.reduced.external_owner[other]
+                linear = wp.vec3(0.0)
+                angular = wp.vec3(0.0)
+                first_dof = wp.int32(max_dofs)
+                stride = wp.int32(0)
+                if owner >= wp.int32(0):
+                    direction = -wp.spatial_top(wrench)
+                    moment = wp.cross(row_point - bodies.position[other], direction)
+                    velocity += wp.dot(direction, bodies.velocity[other]) + wp.dot(
+                        moment, bodies.angular_velocity[other]
+                    )
+                    linear = wp.sqrt(bodies.inverse_mass[other]) * direction
+                    angular = wp.transpose(_cholesky3(mat33_from_sym6(bodies.inverse_inertia_world[other]))) * moment
+                    inverse_mass += wp.dot(linear, linear) + wp.dot(angular, angular)
+                    first_dof = wp.int32(max_dofs + 1) + wp.int32(6) * (owner & wp.int32(7))
+                    stride = wp.int32(1)
+                for axis in range(3):
+                    slot = wp.int32(PAGE_ROWS) * wp.int32(path_capacity + axis) + lane
+                    _store(shared, wp.int32(z_base) + slot, linear[axis])
+                    _store_u8(shared, wp.int32(z_dof_byte) + slot, first_dof + stride * wp.int32(axis))
+                    slot += wp.int32(3 * PAGE_ROWS)
+                    _store(shared, wp.int32(z_base) + slot, angular[axis])
+                    _store_u8(shared, wp.int32(z_dof_byte) + slot, first_dof + stride * wp.int32(axis + 3))
             _store(shared, wp.int32(start_velocity_base) + lane, velocity)
             _store(shared, wp.int32(row_mass_base) + lane, inverse_mass)
             if wp.static(not patch):
@@ -738,7 +805,7 @@ def make_dense_substep_kernel(
                     prepare,
                 )
         k = lane
-        while k <= wp.int32(max_dofs):
+        while k <= wp.int32(max_dofs + external_dofs):
             _store(shared, wp.int32(rhs_base) + k, wp.float32(0.0))
             k += wp.int32(_LANES)
         _sync_contact_warp()
@@ -886,6 +953,22 @@ def make_dense_substep_kernel(
             _store(shared, wp.int32(qd_base) + k, rate)
             joint_qd[dof_start + k] = rate
             k += wp.int32(_LANES)
+        if wp.static(external):
+            # The free bodies' velocity changes, unwhitened; lane s holds the tree's slot s.
+            if lane < wp.int32(EXTERNAL_BODY_SLOTS):
+                other = bodies.reduced.external_body[wp.int32(EXTERNAL_BODY_SLOTS) * articulation + lane]
+                if other >= wp.int32(0):
+                    first = wp.int32(rhs_base + max_dofs + 1) + wp.int32(6) * lane
+                    bodies.velocity[other] += wp.sqrt(bodies.inverse_mass[other]) * wp.vec3(
+                        _load(shared, first), _load(shared, first + wp.int32(1)), _load(shared, first + wp.int32(2))
+                    )
+                    bodies.angular_velocity[other] += _cholesky3(
+                        mat33_from_sym6(bodies.inverse_inertia_world[other])
+                    ) * wp.vec3(
+                        _load(shared, first + wp.int32(3)),
+                        _load(shared, first + wp.int32(4)),
+                        _load(shared, first + wp.int32(5)),
+                    )
         _sync_contact_warp()
 
     @wp.func
@@ -1371,6 +1454,7 @@ def make_dense_substep_kernel(
                             point_count,
                             point_contact,
                             point_column,
+                            point0,
                             normal,
                             tangent0,
                             row_body,
@@ -1732,6 +1816,7 @@ class DenseSubstep:
                 bucket.subtree_capacity,
                 contact.patch_rows,
                 relax,
+                articulation.external_rigid_rows,
             )
             wp.launch(
                 kernel,

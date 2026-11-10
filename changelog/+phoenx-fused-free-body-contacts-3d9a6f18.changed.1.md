@@ -1,0 +1,1 @@
+Solve contacts between a reduced articulation and free rigid bodies inside the fused dense substep of `SolverPhoenX`, when each such body can touch only one articulation and an articulation has at most eight of them; `reduced_backend="auto"` now selects the dense backend for these scenes

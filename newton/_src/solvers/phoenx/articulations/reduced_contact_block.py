@@ -14,6 +14,7 @@ import warp as wp
 from newton._src.sim import Model
 from newton._src.solvers.phoenx.articulations.reduced_contact import (
     _deferred_point_velocity,
+    _external_owner,
     _point_velocity,
     _prepare_contact_bias_geometry,
     flush_deferred_articulation,
@@ -113,22 +114,19 @@ def _fallback_world_block_dim(world_count: int, sm_count: int) -> int:
     return 1 if world_count < _FALLBACK_SERIAL_WORLDS_PER_SM * sm_count else 32
 
 
-def _fallback_impossible_from_model_pairs(model: Model) -> tuple[bool, bool, bool, bool, bool]:
-    """Prove whether model-generated rigid pairs can require fallback.
+#: Free rigid bodies one articulation's fused substep can solve contacts with.
+EXTERNAL_BODY_SLOTS = 8
 
-    The last entry tells whether a pair without an articulated endpoint can move a
-    body, which makes it a contact for the regular solver.
-    """
+
+def _model_pair_endpoints(model: Model):
+    """Return the bodies, articulations, and static flags of the model's shape pairs, or ``None``."""
     capacity = getattr(model, "_dynamic_capacity", None)
     if capacity is not None and capacity.shape_count:
-        return False, False, False, False, True  # runtime shapes create pairs the model never listed
+        return None  # runtime shapes create pairs the model never listed
     pairs_array = getattr(model, "shape_contact_pairs", None)
     if pairs_array is None or model.shape_body is None:
-        return False, False, False, False, True
+        return None
     pairs = pairs_array.numpy()
-    if pairs.size == 0:
-        return True, True, True, True, False
-
     body_articulation = np.full(int(model.body_count), -1, dtype=np.int32)
     articulation_start = model.articulation_start.numpy()
     articulation_end = model.articulation_end.numpy()
@@ -143,13 +141,68 @@ def _fallback_impossible_from_model_pairs(model: Model) -> tuple[bool, bool, boo
     body1 = shape_body[pairs[:, 1]]
     articulation0 = np.where(body0 >= 0, body_articulation[np.maximum(body0, 0)], -1)
     articulation1 = np.where(body1 >= 0, body_articulation[np.maximum(body1, 0)], -1)
-    reduced0 = articulation0 >= 0
-    reduced1 = articulation1 >= 0
     inverse_mass = model.body_inv_mass.numpy()
     static0 = (body0 < 0) | (inverse_mass[np.maximum(body0, 0)] == 0.0)
     static1 = (body1 < 0) | (inverse_mass[np.maximum(body1, 0)] == 0.0)
+    return pairs, body0, body1, articulation0, articulation1, static0, static1
+
+
+def _external_rigid_owners(model: Model) -> np.ndarray | None:
+    """Assign each free rigid body that pairs with a tree to that tree's fused substep.
+
+    Returns ``8 * articulation + slot`` per model body, -1 for the others, or ``None``
+    unless every pair is a tree against static geometry, a tree against a free body
+    that pairs with no other tree, or free of trees.
+    """
+    endpoints = _model_pair_endpoints(model)
+    if endpoints is None:
+        return None
+    _pairs, body0, body1, articulation0, articulation1, static0, static1 = endpoints
+    reduced0 = articulation0 >= 0
+    reduced1 = articulation1 >= 0
+    if np.any(reduced0 & reduced1):
+        return None
+    owners = np.full(int(model.body_count), -1, dtype=np.int32)
+    used = np.zeros(max(1, int(model.articulation_count)), dtype=np.int32)
+    coupled = (reduced0 & ~static1) | (reduced1 & ~static0)
+    bodies = np.where(reduced0, body1, body0)[coupled]
+    articulations = np.where(reduced0, articulation0, articulation1)[coupled]
+    for body, articulation in zip(bodies.tolist(), articulations.tolist(), strict=True):
+        owner = int(owners[body])
+        if owner >= 0:
+            if owner >> 3 != articulation:
+                return None
+            continue
+        if used[articulation] == EXTERNAL_BODY_SLOTS:
+            return None
+        owners[body] = 8 * articulation + int(used[articulation])
+        used[articulation] += 1
+    return owners
+
+
+def _fallback_impossible_from_model_pairs(
+    model: Model, external_owner: np.ndarray | None = None
+) -> tuple[bool, bool, bool, bool, bool]:
+    """Prove whether model-generated rigid pairs can require fallback.
+
+    ``external_owner`` are the free bodies a fused substep solves with, see
+    :func:`_external_rigid_owners`; their pairs and the pairs free of trees need no
+    fallback. The last entry tells whether a pair without an articulated endpoint can
+    move a body, which makes it a contact for the regular solver.
+    """
+    endpoints = _model_pair_endpoints(model)
+    if endpoints is None:
+        return False, False, False, False, True
+    pairs, body0, body1, articulation0, articulation1, static0, static1 = endpoints
+    if pairs.size == 0:
+        return True, True, True, True, False
+    reduced0 = articulation0 >= 0
+    reduced1 = articulation1 >= 0
     block_owned = (reduced0 & ~reduced1 & static1) | (reduced1 & ~reduced0 & static0)
+    free_rigid = bool(np.any(~reduced0 & ~reduced1 & ~(static0 & static1)))
     safe = not bool(np.any(~block_owned))
+    # The regular solver and the fused substep own every pair that is not a tree's own.
+    impossible = safe or external_owner is not None
     owner = np.where(reduced0, articulation0, articulation1)
     shape_order = np.lexsort((pairs[:, 1], pairs[:, 0]))
     shape_owner = owner[shape_order]
@@ -160,8 +213,7 @@ def _fallback_impossible_from_model_pairs(model: Model) -> tuple[bool, bool, boo
     body_order = np.argsort(body_key, kind="stable")
     body_owner = owner[body_order]
     body_grouped = bool(np.all(body_owner[1:] >= body_owner[:-1]))
-    free_rigid = bool(np.any(~reduced0 & ~reduced1 & ~(static0 & static1)))
-    return safe, safe, safe and shape_grouped, safe and body_grouped, free_rigid
+    return impossible, impossible, safe and shape_grouped, safe and body_grouped, free_rigid
 
 
 @wp.kernel(enable_backward=False)
@@ -953,9 +1005,14 @@ def _gather_packed_patch_points(
                         bodies, body0, contact_point
                     )
                 else:
-                    if bodies.reduced.body_articulation[body1] < wp.int32(0):
+                    # A free body the fused substep solves with moves during the solve.
+                    if bodies.reduced.body_articulation[body1] < wp.int32(0) and _external_owner(
+                        bodies, body1
+                    ) < wp.int32(0):
                         relative += _point_velocity(bodies, body1, contact_point)
-                    if bodies.reduced.body_articulation[body0] < wp.int32(0):
+                    if bodies.reduced.body_articulation[body0] < wp.int32(0) and _external_owner(
+                        bodies, body0
+                    ) < wp.int32(0):
                         relative -= _point_velocity(bodies, body0, contact_point)
                 row_velocity[packed_articulation, point] = wp.dot(relative, n)
 
@@ -1208,9 +1265,13 @@ def _gather_packed_contact_points(
                     bodies, body0, contact_point
                 )
             else:
-                if bodies.reduced.body_articulation[body1] < wp.int32(0):
+                if bodies.reduced.body_articulation[body1] < wp.int32(0) and _external_owner(bodies, body1) < wp.int32(
+                    0
+                ):
                     relative += _point_velocity(bodies, body1, contact_point)
-                if bodies.reduced.body_articulation[body0] < wp.int32(0):
+                if bodies.reduced.body_articulation[body0] < wp.int32(0) and _external_owner(bodies, body0) < wp.int32(
+                    0
+                ):
                     relative -= _point_velocity(bodies, body0, contact_point)
             row = wp.int32(3) * point
             row_velocity[packed_articulation, row] = wp.dot(relative, n)
@@ -3209,8 +3270,12 @@ class ReducedContactBlockSystem:
         use_depth_warp: bool,
         allow_patch_rows: bool = True,
         use_patch_rows: bool = False,
+        external_rigid_rows: bool = False,
     ):
         self.device = model.device
+        #: Per model body, the fused substep that solves its contacts, see
+        #: :func:`_external_rigid_owners`; ``None`` without such a substep.
+        self.external_owner = _external_rigid_owners(model) if external_rigid_rows else None
         self.articulation_depth_start = articulation_depth_start
         self.articulation_depth_joint = articulation_depth_joint
         self.joint_parent_lane = joint_parent_lane
@@ -3223,7 +3288,7 @@ class ReducedContactBlockSystem:
             self._shape_schedule_already_grouped,
             self._body_schedule_already_grouped,
             self.free_rigid_pairs_possible,
-        ) = _fallback_impossible_from_model_pairs(model)
+        ) = _fallback_impossible_from_model_pairs(model, self.external_owner)
         self._skip_fallback_coloring = False
         self._schedule_already_grouped = False
         self._body_pair_grouping = False

@@ -115,7 +115,116 @@ def _randomize_state(model: newton.Model, seed: int) -> newton.State:
     return state
 
 
+def _make_chain_and_free_box(device, *, resting: bool) -> tuple[newton.Model, int]:
+    """A two-link chain and a free box: the chain rests on the box, or flies into it without gravity."""
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, -9.81 if resting else 0.0), up_axis=newton.Axis.Z)
+    builder.default_shape_cfg.gap = 0.005
+    builder.default_shape_cfg.mu = 0.6
+    height = 0.34 if resting else 0.0
+    previous = -1
+    for i in range(2):
+        body = builder.add_link(xform=wp.transform(wp.vec3(0.3 * i, 0.0, height), wp.quat_identity()))
+        builder.add_shape_box(body, hx=0.14, hy=0.14, hz=0.14)
+        if previous < 0:
+            builder.add_joint_free(body)
+        else:
+            builder.add_joint_revolute(
+                previous,
+                body,
+                parent_xform=wp.transform(wp.vec3(0.15, 0.0, 0.0), wp.quat_identity()),
+                child_xform=wp.transform(wp.vec3(-0.15, 0.0, 0.0), wp.quat_identity()),
+                axis=newton.Axis.Y,
+            )
+        previous = body
+    builder.add_articulation(list(range(builder.joint_count)))
+    if resting:
+        builder.add_ground_plane()
+        box = builder.add_body(xform=wp.transform(wp.vec3(0.15, 0.0, 0.1), wp.quat_identity()))
+        builder.add_shape_box(box, hx=0.6, hy=0.4, hz=0.1)
+    else:
+        box = builder.add_body(xform=wp.transform(wp.vec3(0.95, 0.1, 0.12), wp.quat_identity()))
+        builder.add_shape_box(box, hx=0.2, hy=0.2, hz=0.2)
+        builder.joint_qd[0] = 1.0
+        builder.joint_qd[4] = 0.5
+        builder.joint_qd[6] = 2.0
+    return builder.finalize(device=device), box
+
+
+def _momentum(model: newton.Model, state: newton.State) -> tuple[np.ndarray, np.ndarray]:
+    """Linear and angular momentum of all bodies about the world origin."""
+    body_q = state.body_q.numpy()
+    body_qd = state.body_qd.numpy()
+    mass = model.body_mass.numpy()
+    inertia = model.body_inertia.numpy()
+    com = model.body_com.numpy()
+    linear = np.zeros(3)
+    angular = np.zeros(3)
+    for body in range(model.body_count):
+        rotation = np.array(wp.quat_to_matrix(wp.quat(*body_q[body, 3:]))).reshape(3, 3)
+        position = body_q[body, :3] + rotation @ com[body]
+        linear += mass[body] * body_qd[body, :3]
+        angular += np.cross(position, mass[body] * body_qd[body, :3])
+        angular += rotation @ inertia[body] @ rotation.T @ body_qd[body, 3:]
+    return linear, angular
+
+
+def _run_chain_and_free_box(model: newton.Model, friction: str, frames: int):
+    pipeline = newton.CollisionPipeline(model, contact_matching="sticky")
+    solver = newton.solvers.SolverPhoenX(
+        model,
+        collision_pipeline=pipeline,
+        joint_mode="reduced",
+        contact_friction_model=friction,
+        substeps=4,
+        solver_iterations=4,
+    )
+    state, output = model.state(), model.state()
+    newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+    contacts = pipeline.contacts()
+    with wp.ScopedCapture() as capture:
+        pipeline.collide(state, contacts)
+        solver.step(state, output, None, contacts, 1.0 / 60.0)
+        for name in ("body_q", "body_qd", "joint_q", "joint_qd"):
+            wp.copy(getattr(state, name), getattr(output, name))
+    start = model.state()
+    newton.eval_fk(model, model.joint_q, model.joint_qd, start)
+    for _ in range(frames):
+        wp.capture_launch(capture.graph)
+    return solver, start, state
+
+
 class TestReducedDenseBackend(unittest.TestCase):
+    def test_fused_substep_exchanges_momentum_with_a_free_body_under_graph_capture(self):
+        """A tree hitting a free rigid body trades momentum with it inside the fused substep."""
+        device = _require_cuda(self)
+        for friction in ("patch", "point"):
+            with self.subTest(friction=friction):
+                model, box = _make_chain_and_free_box(device, resting=False)
+                solver, start, state = _run_chain_and_free_box(model, friction, frames=60)
+                articulation = solver._reduced_articulation
+                self.assertIsNotNone(articulation.fused_substep)
+                self.assertTrue(articulation.external_rigid_rows)
+                self.assertFalse(articulation.contact_block_system.requires_impulse_response)
+                linear_start, angular_start = _momentum(model, start)
+                linear, angular = _momentum(model, state)
+                # The chain carried about 44 kg m/s into the box.
+                np.testing.assert_allclose(linear, linear_start, atol=2.0e-2)
+                np.testing.assert_allclose(angular, angular_start, atol=5.0e-2)
+                self.assertGreater(float(state.body_qd.numpy()[box, 0]), 0.2)
+
+    def test_fused_substep_rests_a_tree_on_a_free_body_under_graph_capture(self):
+        """A tree stands on a free rigid body whose ground contact the regular solver holds."""
+        device = _require_cuda(self)
+        for friction in ("patch", "point"):
+            with self.subTest(friction=friction):
+                model, box = _make_chain_and_free_box(device, resting=True)
+                solver, _start, state = _run_chain_and_free_box(model, friction, frames=90)
+                self.assertTrue(solver._reduced_articulation.external_rigid_rows)
+                body_q = state.body_q.numpy()
+                self.assertAlmostEqual(float(body_q[box, 2]), 0.1, delta=2.0e-3)
+                np.testing.assert_allclose(body_q[:2, 2], 0.34, atol=4.0e-3)
+                self.assertLess(float(np.abs(state.body_qd.numpy()).max()), 2.0e-2)
+
     def test_dense_mass_solve_matches_articulated_body_factor_under_graph_capture(self):
         """The tree-sparse factor applies the same inverse mass as the ABA factor on random poses."""
         device = _require_cuda(self)
@@ -410,15 +519,27 @@ class TestReducedDenseBackend(unittest.TestCase):
         self.assertEqual(solver.reduced_backend, "dense")
         self.assertIsNotNone(solver._reduced_articulation.fused_substep)
 
-        # A free body may touch the trees, which the fused substep does not couple.
-        builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
-        builder.add_ground_plane()
-        link = builder.add_link(mass=0.2)
-        builder.add_shape_sphere(link, radius=0.03)
-        builder.add_articulation([builder.add_joint_revolute(parent=-1, child=link, axis=newton.Axis.Y)])
-        builder.add_shape_sphere(builder.add_body(mass=0.2), radius=0.03)
-        coupled = builder.finalize(device=device)
-        solver = newton.solvers.SolverPhoenX(coupled, joint_mode="reduced", reduced_backend="auto")
+        def make(second_tree: bool) -> newton.Model:
+            builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+            builder.add_ground_plane()
+            link = builder.add_link(mass=0.2)
+            builder.add_shape_sphere(link, radius=0.03)
+            builder.add_articulation([builder.add_joint_revolute(parent=-1, child=link, axis=newton.Axis.Y)])
+            if second_tree:
+                other = builder.add_link(mass=0.2)
+                builder.add_shape_sphere(other, radius=0.03)
+                builder.add_articulation([builder.add_joint_revolute(parent=-1, child=other, axis=newton.Axis.Y)])
+            else:
+                builder.add_shape_sphere(builder.add_body(mass=0.2), radius=0.03)
+            return builder.finalize(device=device)
+
+        # A free body that may touch one tree joins that tree's fused substep.
+        solver = newton.solvers.SolverPhoenX(make(False), joint_mode="reduced", reduced_backend="auto")
+        self.assertEqual(solver.reduced_backend, "dense")
+        self.assertTrue(solver._reduced_articulation.external_rigid_rows)
+
+        # Trees that may touch each other need the coupled response of the articulated-body path.
+        solver = newton.solvers.SolverPhoenX(make(True), joint_mode="reduced", reduced_backend="auto")
         self.assertEqual(solver.reduced_backend, "aba")
         self.assertIsNone(solver._reduced_articulation.fused_substep)
 

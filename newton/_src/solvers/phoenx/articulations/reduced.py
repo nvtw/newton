@@ -31,6 +31,7 @@ from newton._src.solvers.phoenx.articulations.reduced_contact import (
 from newton._src.solvers.phoenx.articulations.reduced_contact_block import (
     _POINTS_PER_PAGE,
     _SOLVE_GENERALIZED_CONTACT_TILE_DEVICES,
+    EXTERNAL_BODY_SLOTS,
     ReducedContactBlockSystem,
     _finalize_reduced_contact_rows_device,
     _sync_contact_warp,
@@ -4908,6 +4909,11 @@ def _get_reduced_model(model: Model) -> Model:
 
 
 @wp.kernel(enable_backward=False)
+def _copy_indexed_kernel(index: wp.array[wp.int32], source: wp.array[wp.float32], destination: wp.array[wp.float32]):
+    destination[index[wp.tid()]] = source[index[wp.tid()]]
+
+
+@wp.kernel(enable_backward=False)
 def _phoenx_body_poses_kernel(bodies: BodyContainer, body_com: wp.array[wp.vec3], body_q: wp.array[wp.transform]):
     """Body origin poses from the PhoenX body centers of mass."""
     body = wp.tid()
@@ -4927,6 +4933,7 @@ class ReducedPhoenXArticulation:
         execution_path: str = "reference",
         contact_friction_model: str = "point",
         backend: str = "aba",
+        external_rigid_rows: bool = False,
     ):
         if backend not in ("aba", "dense"):
             raise ValueError(f"backend must be 'aba' or 'dense', got {backend!r}")
@@ -5021,6 +5028,10 @@ class ReducedPhoenXArticulation:
         reduced.impulse_response = self.system.impulse_response
         reduced.deferred_wrench = self.system.deferred_wrench
         reduced.deferred_pending = self.system.deferred_pending
+        reduced.external_owner = wp.full(int(model.body_count) + 1, value=-1, dtype=wp.int32, device=model.device)
+        reduced.external_body = wp.full(
+            EXTERNAL_BODY_SLOTS * max(1, int(model.articulation_count)), value=-1, dtype=wp.int32, device=model.device
+        )
         reduced.body_joint = wp.array(body_joint_np, device=model.device)
         reduced.body_path_start = wp.array(body_path_start_np, device=model.device)
         reduced.body_path_joint = wp.array(
@@ -5063,7 +5074,20 @@ class ReducedPhoenXArticulation:
             use_depth_warp=self.system.use_warp_advance,
             allow_patch_rows=execution_path != "persistent",
             use_patch_rows=contact_friction_model == "patch",
+            external_rigid_rows=external_rigid_rows,
         )
+        #: Free rigid bodies whose contacts with a tree that tree's fused substep solves.
+        self.external_rigid_rows = False
+        external_owner = self.contact_block_system.external_owner
+        if external_owner is not None and np.any(external_owner >= 0):
+            self.external_rigid_rows = True
+            owner_np = np.full(int(model.body_count) + 1, -1, dtype=np.int32)
+            owner_np[1:] = external_owner
+            body_np = np.full(reduced.external_body.shape[0], -1, dtype=np.int32)
+            owned = np.flatnonzero(owner_np >= 0)
+            body_np[owner_np[owned]] = owned
+            reduced.external_owner.assign(owner_np)
+            reduced.external_body.assign(body_np)
         if dense is not None:
             # Coupled contacts and loop closures still read the articulated-body factor.
             dense.requires_aba = (
@@ -5088,6 +5112,17 @@ class ReducedPhoenXArticulation:
             (int(joint_q_start[start]), int(joint_q_start[end]), int(joint_qd_start[start]), int(joint_qd_start[end]))
             for start, end in owned_boundaries.reshape(-1, 2)
         ]
+        # Many ranges, as with free bodies between the trees of many worlds, export by index.
+        self._owned_coordinates = None
+        if len(self._owned_coordinate_ranges) > 4:
+            self._owned_coordinates = tuple(
+                wp.array(
+                    np.concatenate([np.arange(r[first], r[first + 1]) for r in self._owned_coordinate_ranges]),
+                    dtype=wp.int32,
+                    device=model.device,
+                )
+                for first in (0, 2)
+            )
 
         wp.launch(
             _mark_articulated_bodies_kernel,
@@ -5744,6 +5779,21 @@ class ReducedPhoenXArticulation:
 
     def export_step(self, state: State) -> None:
         """Export authoritative generalized coordinates to common Newton state."""
+        if self._owned_coordinates is not None:
+            for index, source, destination in zip(
+                self._owned_coordinates,
+                (self.state.joint_q, self.state.joint_qd),
+                (state.joint_q, state.joint_qd),
+                strict=True,
+            ):
+                wp.launch(
+                    _copy_indexed_kernel,
+                    dim=index.shape[0],
+                    inputs=[index, source],
+                    outputs=[destination],
+                    device=self.model.device,
+                )
+            return
         for q_start, q_end, qd_start, qd_end in self._owned_coordinate_ranges:
             if q_end > q_start:
                 wp.copy(state.joint_q, self.state.joint_q, q_start, q_start, q_end - q_start)

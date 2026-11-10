@@ -170,6 +170,11 @@ class ReducedArticulationData:
     deferred_wrench: wp.array[wp.spatial_vector]
     #: Per articulation, nonzero while deferred wrenches await :func:`flush_deferred_articulation`.
     deferred_pending: wp.array[wp.int32]
+    #: Per body slot, ``8 * articulation + slot`` of the one articulation whose fused
+    #: substep solves its contacts with this free rigid body, or -1.
+    external_owner: wp.array[wp.int32]
+    #: Per articulation and slot, the free rigid body slot, or -1.
+    external_body: wp.array[wp.int32]
     body_joint: wp.array[wp.int32]
     body_path_start: wp.array[wp.int32]
     body_path_joint: wp.array[wp.int32]
@@ -199,6 +204,8 @@ def reduced_articulation_data_zeros(device: wp.DeviceLike = None) -> ReducedArti
     data.impulse_response = wp.zeros((1, 6), dtype=wp.spatial_vector, device=device)
     data.deferred_wrench = wp.zeros(1, dtype=wp.spatial_vector, device=device)
     data.deferred_pending = wp.zeros(1, dtype=wp.int32, device=device)
+    data.external_owner = wp.full(1, value=-1, dtype=wp.int32, device=device)
+    data.external_body = wp.full(1, value=-1, dtype=wp.int32, device=device)
     data.body_joint = wp.full(1, value=-1, dtype=wp.int32, device=device)
     data.body_path_start = wp.zeros(2, dtype=wp.int32, device=device)
     data.body_path_joint = wp.zeros(1, dtype=wp.int32, device=device)
