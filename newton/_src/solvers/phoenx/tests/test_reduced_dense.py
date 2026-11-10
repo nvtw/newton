@@ -471,6 +471,37 @@ class TestReducedDenseBackend(unittest.TestCase):
         self.assertGreater(float(np.abs(soft - stiff).max()), 1.0e-3)
         np.testing.assert_array_equal(notified, soft)
 
+    def test_reduced_contacts_follow_the_requested_contact_frequency_under_graph_capture(self):
+        """A requested contact frequency softens the ground contacts of reduced articulations."""
+        device = _require_cuda(self)
+
+        def rest_height(backend: str, contact_hertz: float | None) -> float:
+            model = _make_legged_fleet(device, worlds=2)
+            solver = newton.solvers.SolverPhoenX(
+                model, joint_mode="reduced", reduced_backend=backend, substeps=4, contact_hertz=contact_hertz
+            )
+            state0, state1 = model.state(), model.state()
+            newton.eval_fk(model, model.joint_q, model.joint_qd, state0)
+            control = model.control()
+            contacts = model.contacts()
+            with wp.ScopedCapture(device=device) as capture:
+                for _ in range(2):
+                    model.collide(state0, contacts)
+                    solver.step(state0, state1, control, contacts, 1.0 / 60.0)
+                    state0, state1 = state1, state0
+            for _ in range(60):
+                wp.capture_launch(capture.graph)
+            return float(state0.joint_q.numpy()[2])
+
+        for backend in ("auto", "aba"):
+            with self.subTest(backend=backend):
+                stiff = rest_height(backend, None)
+                soft = rest_height(backend, 15.0)
+                # The spring of a foot row scales with the row's effective mass, which is
+                # a fraction of the carried weight: the trunk settles millimeters lower.
+                self.assertLess(soft, stiff - 1.0e-3)
+                self.assertGreater(soft, stiff - 2.0e-2)
+
     def test_reduced_articulations_selects_by_index_or_label(self):
         device = _require_cuda(self)
         fleet = _make_centipede_fleet(device, worlds=2)

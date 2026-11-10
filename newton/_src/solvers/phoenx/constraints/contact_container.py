@@ -187,6 +187,8 @@ class ContactContainer:
     soft_bias_dt: wp.float32
     soft_mass_coeff: wp.float32
     soft_impulse_coeff: wp.float32
+    #: Requested contact frequency [Hz], or zero when none was requested.
+    hertz: wp.float32
 
 
 @wp.func
@@ -195,6 +197,21 @@ def cc_soft_coefficients(cc: ContactContainer, idt: wp.float32):
     if cc.soft_capped == 0:
         return soft_constraint_coefficients(DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, wp.float32(1.0) / idt)
     return cc.soft_bias_dt * idt, cc.soft_mass_coeff, cc.soft_impulse_coeff
+
+
+@wp.func
+def cc_reduced_soft_coefficients(cc: ContactContainer, idt: wp.float32):
+    """Return ``(bias_rate, mass_coeff, impulse_coeff)`` of contact rows solved in reduced coordinates.
+
+    The rows keep the Nyquist-limited :data:`DEFAULT_HERTZ_CONTACT` spring,
+    softened only to a requested contact frequency. The sweep-schedule cap of
+    :func:`cc_soft_coefficients` bounds the slow modes of maximal-coordinate
+    stacks, which the reduced solve does not have.
+    """
+    # Two calls keep the default spring's constants folded at compile time.
+    if cc.hertz > 0.0:
+        return soft_constraint_coefficients(cc.hertz, DEFAULT_DAMPING_RATIO, wp.float32(1.0) / idt)
+    return soft_constraint_coefficients(DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, wp.float32(1.0) / idt)
 
 
 def contact_container_set_sweeps(
@@ -214,6 +231,7 @@ def contact_container_set_sweeps(
     omega_dt = contact_spring_omega_dt(solver_iterations, velocity_iterations)
     if contact_hertz is not None:
         omega_dt = min(omega_dt, 2.0 * math.pi * float(contact_hertz) * float(dt))
+    cc.hertz = 0.0 if contact_hertz is None else float(contact_hertz)
     cc.soft_capped = int(omega_dt < math.pi)
     cc.soft_bias_dt, cc.soft_mass_coeff, cc.soft_impulse_coeff = contact_soft_coefficient_values(omega_dt)
 

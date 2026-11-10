@@ -42,11 +42,6 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     contact_get_side0_kind,
     contact_get_side1_kind,
 )
-from newton._src.solvers.phoenx.constraints.constraint_container import (
-    DEFAULT_DAMPING_RATIO,
-    DEFAULT_HERTZ_CONTACT,
-    soft_constraint_coefficients,
-)
 from newton._src.solvers.phoenx.constraints.contact_container import (
     ContactContainer,
     cc_get_bias,
@@ -60,6 +55,7 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_get_tangent1,
     cc_get_tangent1_lambda,
     cc_get_tangent2_lambda,
+    cc_reduced_soft_coefficients,
     cc_set_bias,
     cc_set_eff_n,
     cc_set_eff_t1,
@@ -758,9 +754,7 @@ def _gather_reduced_contact_blocks_kernel(
     articulation, lane = wp.tid()
     bias_rate = wp.float32(0.0)
     if prepare:
-        bias_rate, _mass_coeff, _impulse_coeff = soft_constraint_coefficients(
-            DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, wp.float32(1.0) / idt
-        )
+        bias_rate, _mass_coeff, _impulse_coeff = cc_reduced_soft_coefficients(cc, idt)
     start = wp.int32(0)
     if articulation > wp.int32(0):
         start = schedule_section_end[articulation - wp.int32(1)]
@@ -913,9 +907,7 @@ def _gather_packed_patch_points(
     """
     bias_rate = wp.float32(0.0)
     if prepare:
-        bias_rate, _mass_coeff, _impulse_coeff = soft_constraint_coefficients(
-            DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, wp.float32(1.0) / idt
-        )
+        bias_rate, _mass_coeff, _impulse_coeff = cc_reduced_soft_coefficients(cc, idt)
     start = wp.int32(0)
     if articulation > wp.int32(0):
         start = schedule_section_end[articulation - wp.int32(1)]
@@ -1210,9 +1202,7 @@ def _gather_packed_contact_points(
     """
     bias_rate = wp.float32(0.0)
     if prepare:
-        bias_rate, _mass_coeff, _impulse_coeff = soft_constraint_coefficients(
-            DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, wp.float32(1.0) / idt
-        )
+        bias_rate, _mass_coeff, _impulse_coeff = cc_reduced_soft_coefficients(cc, idt)
     start = wp.int32(0)
     if articulation > wp.int32(0):
         start = schedule_section_end[articulation - wp.int32(1)]
@@ -2516,9 +2506,7 @@ def _make_solve_generalized_contact_tile_ops(max_dofs: int):
         mass_coeff = wp.float32(1.0)
         impulse_coeff = wp.float32(0.0)
         if use_bias:
-            _bias_rate, mass_coeff, impulse_coeff = soft_constraint_coefficients(
-                DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, wp.float32(1.0) / idt
-            )
+            _bias_rate, mass_coeff, impulse_coeff = cc_reduced_soft_coefficients(cc, idt)
 
         # One three-component mobility per point, valid only for this invocation.
         # Rows and response are immutable throughout its alternating sweeps.
@@ -3037,9 +3025,7 @@ def _make_solve_patch_contact_tile_kernel(
         mass_coeff = wp.float32(1.0)
         impulse_coeff = wp.float32(0.0)
         if use_bias:
-            _bias_rate, mass_coeff, impulse_coeff = soft_constraint_coefficients(
-                DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, wp.float32(1.0) / idt
-            )
+            _bias_rate, mass_coeff, impulse_coeff = cc_reduced_soft_coefficients(cc, idt)
 
         # Row body/wrench scratch is dead after construction, so resident pages cache their invariant contact mass there.
         for iteration in range(iterations):

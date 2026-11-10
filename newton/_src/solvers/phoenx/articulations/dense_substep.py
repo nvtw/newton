@@ -107,11 +107,6 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     contact_get_friction,
     contact_get_friction_dynamic,
 )
-from newton._src.solvers.phoenx.constraints.constraint_container import (
-    DEFAULT_DAMPING_RATIO,
-    DEFAULT_HERTZ_CONTACT,
-    soft_constraint_coefficients,
-)
 from newton._src.solvers.phoenx.constraints.contact_container import (
     ContactContainer,
     cc_get_bias,
@@ -120,6 +115,7 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_get_normal_lambda,
     cc_get_tangent1_lambda,
     cc_get_tangent2_lambda,
+    cc_reduced_soft_coefficients,
     cc_set_normal_lambda,
     cc_set_tangent1_lambda,
     cc_set_tangent2_lambda,
@@ -1110,9 +1106,7 @@ def make_dense_substep_kernel(
         mass_coeff = wp.float32(1.0)
         impulse_coeff = wp.float32(0.0)
         if use_bias:
-            _bias_rate, mass_coeff, impulse_coeff = soft_constraint_coefficients(
-                DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, wp.float32(1.0) / idt
-            )
+            _bias_rate, mass_coeff, impulse_coeff = cc_reduced_soft_coefficients(cc, idt)
         # The products between a point's rows, or a column's tangent rows, hold for every sweep;
         # the lane that projects them keeps them.
         coupling = wp.vec3(0.0)
