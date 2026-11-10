@@ -7,7 +7,8 @@ import unittest
 import numpy as np
 import warp as wp
 
-from newton._src.solvers.phoenx.helpers.scan_and_sort import active_prefix_sort_levels, sort_variable_length_int64
+from newton._src.geometry.active_prefix_sort import active_prefix_sort_levels
+from newton._src.solvers.phoenx.helpers.scan_and_sort import sort_variable_length_int64
 
 
 def _sort(keys: np.ndarray, active: int, end_bit: int | None) -> tuple[np.ndarray, np.ndarray]:

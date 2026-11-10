@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import warp as wp
 
+from newton._src.geometry.active_prefix_sort import active_prefix_sort_levels, radix_sort_active_prefix
 from newton._src.solvers.phoenx.body import (
     BodyContainer,
     body_load_inv_inertia_sym6,
@@ -39,7 +40,6 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
 )
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import warp_aggregated_increment
 from newton._src.solvers.phoenx.helpers.math_helpers import apply_body_spatial_impulse
-from newton._src.solvers.phoenx.helpers.scan_and_sort import active_prefix_sort_levels, radix_sort_active_prefix
 from newton._src.solvers.phoenx.mass_splitting.kernels import subgroup_accumulate8_vec3
 
 #: Sorts after every body id; its low bits are all ones for any key width.

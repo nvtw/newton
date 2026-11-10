@@ -31,12 +31,13 @@ from __future__ import annotations
 
 import warp as wp
 
+from newton._src.geometry.active_prefix_sort import active_prefix_sort_levels
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     MAX_BODIES,
     ElementInteractionData,
     element_interaction_data_get,
 )
-from newton._src.solvers.phoenx.helpers.scan_and_sort import active_prefix_sort_levels, sort_variable_length_int64
+from newton._src.solvers.phoenx.helpers.scan_and_sort import sort_variable_length_int64
 from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
 
 __all__ = [

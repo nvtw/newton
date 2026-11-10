@@ -17,6 +17,7 @@ Usage::
 import numpy as np
 import warp as wp
 
+from newton._src.geometry.active_prefix_sort import active_prefix_sort_levels, radix_sort_active_prefix
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
     ContactColumnContainer,
     contact_get_contact_count,
@@ -68,11 +69,7 @@ from newton._src.solvers.phoenx.graph_coloring.warm_start import (
     warm_start_mark_boundaries_kernel,
     warm_start_reset_count_kernel,
 )
-from newton._src.solvers.phoenx.helpers.scan_and_sort import (
-    active_prefix_sort_levels,
-    radix_sort_active_prefix,
-    scan_variable_length,
-)
+from newton._src.solvers.phoenx.helpers.scan_and_sort import scan_variable_length
 from newton._src.solvers.phoenx.solver_config import NUM_INNER_WHILE_ITERATIONS
 
 __all__ = ["MAX_COLORS", "IncrementalContactPartitioner"]

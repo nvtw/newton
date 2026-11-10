@@ -19,6 +19,7 @@ from dataclasses import dataclass
 import warp as wp
 
 from ..core.types import Devicelike
+from .active_prefix_sort import active_prefix_sort_levels, radix_sort_active_prefix
 from .contact_reduction_global import decode_oct
 
 # Sentinel key for unused contact slots.  ``radix_sort_pairs`` treats
@@ -379,6 +380,7 @@ class ContactSorter:
             self._key_bit_count = key_bit_count
             # radix_sort_pairs uses the second half as scratch, so allocate 2x.
             self._sort_indices = wp.zeros(2 * capacity, dtype=wp.int32)
+            self._prefix_flags = wp.zeros(active_prefix_sort_levels(capacity), dtype=wp.int32)
             self._sort_keys_copy = wp.zeros(2 * capacity, dtype=wp.int64)
             self._compact_shape_rank = compact_shape_rank
             self._compact_shape_pair_base = compact_shape_pair_base
@@ -707,6 +709,17 @@ class ContactSorter:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def _radix_sort(self, keys: wp.array, contact_count: wp.array, end_bit: int) -> None:
+        """Sort ``keys`` with the permutation, over the active prefix where a graph is being captured."""
+        n = self._capacity
+        # Buffers are sized for the worst case; a captured graph can branch to the smallest
+        # prefix that holds the contacts, which the keys' sentinel tail allows. Outside a
+        # capture the branch would read its predicate back from the device.
+        if self._prefix_flags.shape[0] > 1 and keys.device.is_cuda and keys.device.is_capturing:
+            radix_sort_active_prefix(keys, self._sort_indices, contact_count, self._prefix_flags, end_bit=end_bit)
+        else:
+            wp.utils.radix_sort_pairs(keys, self._sort_indices, n, end_bit=end_bit)
+
     def _sort_and_permute(self, sort_keys: wp.array, contact_count: wp.array, *, device: Devicelike = None) -> None:
         """Prepare keys (sentinel-fill unused slots), then radix-sort over the full buffer."""
         n = self._capacity
@@ -734,12 +747,7 @@ class ContactSorter:
                 ],
                 device=device,
             )
-            wp.utils.radix_sort_pairs(
-                self._compact_sort_keys,
-                self._sort_indices,
-                n,
-                end_bit=self._compact_key_bits + 1,
-            )
+            self._radix_sort(self._compact_sort_keys, contact_count, self._compact_key_bits + 1)
         else:
             wp.launch(
                 _prepare_sort,
@@ -747,4 +755,4 @@ class ContactSorter:
                 inputs=[contact_count, sort_keys, self._sort_keys_copy, self._sort_indices],
                 device=device,
             )
-            wp.utils.radix_sort_pairs(self._sort_keys_copy, self._sort_indices, n, end_bit=self._key_bit_count)
+            self._radix_sort(self._sort_keys_copy, contact_count, self._key_bit_count)
