@@ -37,7 +37,7 @@ import functools
 import numpy as np
 import warp as wp
 
-from newton._src.sim import JointType
+from newton._src.sim import JointTargetMode, JointType
 from newton._src.solvers.featherstone.kernels import (
     integrate_body_pose_from_com_twist,
     jcalc_integrate,
@@ -83,7 +83,6 @@ from newton._src.solvers.phoenx.articulations.reduced import (
     _unpack_symmetric_mat66,
     _vec6,
     _vec8,
-    configure_implicit_joint_dynamics,
     initialize_reduced_joint,
     initialize_reduced_rates,
 )
@@ -372,6 +371,112 @@ def _in_first_tree(parent: wp.int32, lane: wp.int32, max_depth: wp.int32) -> wp.
         root = wp.where(ancestor >= wp.int32(0), ancestor, root)
         ancestor = wp.where(ancestor >= wp.int32(0), above, ancestor)
     return root == wp.int32(0)
+
+
+#: Columns of the packed per-DOF joint parameters, see _pack_dof_parameters_kernel.
+_DOF_PARAMETERS = 9
+
+
+@wp.kernel(enable_backward=False)
+def _pack_dof_parameters_kernel(
+    joint_target_ke: wp.array[wp.float32],
+    joint_target_kd: wp.array[wp.float32],
+    joint_target_mode: wp.array[wp.int32],
+    joint_limit_lower: wp.array[wp.float32],
+    joint_limit_upper: wp.array[wp.float32],
+    joint_limit_ke: wp.array[wp.float32],
+    joint_limit_kd: wp.array[wp.float32],
+    joint_damping: wp.array[wp.float32],
+    joint_armature: wp.array[wp.float32],
+    parameters: wp.array2d[wp.float32],
+):
+    """Copy the drive, limit, damping, and armature parameters of each DOF into one row.
+
+    The fused kernels read them for every DOF in every substep; from nine separate
+    arrays that is nine cache lines per DOF, from one row it is one.
+    """
+    dof = wp.tid()
+    parameters[dof, 0] = joint_target_ke[dof]
+    parameters[dof, 1] = joint_target_kd[dof]
+    parameters[dof, 2] = wp.float32(joint_target_mode[dof])
+    parameters[dof, 3] = joint_limit_lower[dof]
+    parameters[dof, 4] = joint_limit_upper[dof]
+    parameters[dof, 5] = joint_limit_ke[dof]
+    parameters[dof, 6] = joint_limit_kd[dof]
+    parameters[dof, 7] = joint_damping[dof]
+    parameters[dof, 8] = joint_armature[dof]
+
+
+@wp.func
+def _configure_implicit_joint_dynamics_packed(
+    joint: wp.int32,
+    joint_type: wp.array[wp.int32],
+    joint_q_start: wp.array[wp.int32],
+    joint_qd_start: wp.array[wp.int32],
+    joint_target_q_start: wp.array[wp.int32],
+    joint_q: wp.array[wp.float32],
+    joint_qd: wp.array[wp.float32],
+    joint_target_q: wp.array[wp.float32],
+    joint_target_qd: wp.array[wp.float32],
+    params: wp.array2d[wp.float32],
+    dt: wp.float32,
+    factor_diagonal: wp.array[wp.float32],
+    implicit_force: wp.array[wp.float32],
+):
+    """Build one joint's implicit-Euler operator diagonal and right-hand side from packed parameters.
+
+    The arithmetic of :func:`configure_implicit_joint_dynamics`, reading the rows of
+    :func:`_pack_dof_parameters_kernel`.
+    """
+    dof_start = joint_qd_start[joint]
+    dof_end = joint_qd_start[joint + wp.int32(1)]
+    coord_start = joint_q_start[joint]
+    target_start = joint_target_q_start[joint]
+    kind = joint_type[joint]
+    for dof in range(dof_start, dof_end):
+        diagonal = params[dof, 8]
+        force = wp.float32(0.0)
+        if kind == JointType.REVOLUTE or kind == JointType.PRISMATIC or kind == JointType.D6:
+            local = dof - dof_start
+            q = joint_q[coord_start + local]
+            qd = joint_qd[dof]
+            stiffness = params[dof, 0]
+            drive_damping = params[dof, 1]
+            target_position = joint_target_q[target_start + local]
+            target_velocity = joint_target_qd[dof]
+            target_mode = wp.int32(params[dof, 2])
+            if target_mode == JointTargetMode.NONE or target_mode == JointTargetMode.EFFORT:
+                stiffness = wp.float32(0.0)
+                drive_damping = wp.float32(0.0)
+                target_velocity = wp.float32(0.0)
+            elif target_mode == JointTargetMode.POSITION:
+                target_velocity = wp.float32(0.0)
+            elif target_mode == JointTargetMode.VELOCITY:
+                stiffness = wp.float32(0.0)
+            predicted_q = q + dt * qd
+            lower = params[dof, 3]
+            upper = params[dof, 4]
+            if q < lower or predicted_q < lower:
+                stiffness = params[dof, 5]
+                drive_damping = params[dof, 6]
+                target_position = lower
+                target_velocity = wp.float32(0.0)
+            elif q > upper or predicted_q > upper:
+                stiffness = params[dof, 5]
+                drive_damping = params[dof, 6]
+                target_position = upper
+                target_velocity = wp.float32(0.0)
+            passive_damping = params[dof, 7]
+            damping = drive_damping + passive_damping
+            diagonal += dt * damping + dt * dt * stiffness
+            force = (
+                stiffness * (target_position - q)
+                + drive_damping * (target_velocity - qd)
+                - passive_damping * qd
+                - dt * stiffness * qd
+            )
+        factor_diagonal[dof] = diagonal
+        implicit_force[dof] = force
 
 
 @wp.func
@@ -1300,15 +1405,6 @@ def make_dense_substep_kernel(
         joint_x_c: wp.array[wp.transform],
         joint_axis: wp.array[wp.vec3],
         joint_dof_dim: wp.array2d[wp.int32],
-        joint_target_ke: wp.array[wp.float32],
-        joint_target_kd: wp.array[wp.float32],
-        joint_target_mode: wp.array[wp.int32],
-        joint_limit_lower: wp.array[wp.float32],
-        joint_limit_upper: wp.array[wp.float32],
-        joint_limit_ke: wp.array[wp.float32],
-        joint_limit_kd: wp.array[wp.float32],
-        joint_damping: wp.array[wp.float32],
-        joint_armature: wp.array[wp.float32],
         body_com: wp.array[wp.vec3],
         body_mass: wp.array[wp.float32],
         body_inertia: wp.array[wp.mat33],
@@ -1367,6 +1463,7 @@ def make_dense_substep_kernel(
         row_velocity: wp.array2d[wp.float32],
         patch_lambda: wp.array2d[wp.vec2],
         normal_load: wp.array2d[wp.float32],
+        dof_parameters: wp.array2d[wp.float32],
         bodies: BodyContainer,
     ):
         block = _block_index()
@@ -1440,7 +1537,7 @@ def make_dense_substep_kernel(
             for offset in range(6):
                 if wp.int32(offset) < tree.dof_count:
                     previous_diagonal[offset] = factor_diagonal[tree.qd_start + offset]
-            configure_implicit_joint_dynamics(
+            _configure_implicit_joint_dynamics_packed(
                 tree.joint,
                 joint_type,
                 joint_q_start,
@@ -1450,15 +1547,7 @@ def make_dense_substep_kernel(
                 joint_qd_public,
                 joint_target_q,
                 joint_target_qd,
-                joint_target_ke,
-                joint_target_kd,
-                joint_target_mode,
-                joint_limit_lower,
-                joint_limit_upper,
-                joint_limit_ke,
-                joint_limit_kd,
-                joint_damping,
-                joint_armature,
+                dof_parameters,
                 dt,
                 factor_diagonal,
                 implicit_force,
@@ -2025,6 +2114,13 @@ class DenseSubstep:
         # The relax step gathers the contact rows at the pose the next biased step starts
         # from: (substep dt, contact ingest count) of that gather, or None.
         self._gathered_rows = None
+        # Packed per-DOF joint parameters; SolverPhoenX.notify_model_changed refreshes them.
+        self._dof_parameters = wp.zeros(
+            (max(1, int(articulation.model.joint_dof_count)), _DOF_PARAMETERS),
+            dtype=wp.float32,
+            device=articulation.model.device,
+        )
+        self.refresh_joint_parameters()
         # Blocks that hold several trees, see _get_reduced_model.
         model = articulation.model
         count = int(model.articulation_count)
@@ -2033,6 +2129,27 @@ class DenseSubstep:
         parents = model.joint_parent.numpy()
         self.forest = any(
             int(np.count_nonzero(parents[start:end] < 0)) > 1 for start, end in zip(starts, ends, strict=True)
+        )
+
+    def refresh_joint_parameters(self) -> None:
+        """Repack the joint parameters after the model's joint properties changed."""
+        model = self.articulation.model
+        wp.launch(
+            _pack_dof_parameters_kernel,
+            dim=self._dof_parameters.shape[0],
+            inputs=[
+                model.joint_target_ke,
+                model.joint_target_kd,
+                model.joint_target_mode,
+                model.joint_limit_lower,
+                model.joint_limit_upper,
+                model.joint_limit_ke,
+                model.joint_limit_kd,
+                model.joint_damping,
+                model.joint_armature,
+            ],
+            outputs=[self._dof_parameters],
+            device=model.device,
         )
 
     def _launch(self, world, dt: float, *, relax: bool, reuse_factor: bool = False, reuse_rows: bool = False) -> None:
@@ -2080,15 +2197,6 @@ class DenseSubstep:
                     model.joint_X_c,
                     model.joint_axis,
                     model.joint_dof_dim,
-                    model.joint_target_ke,
-                    model.joint_target_kd,
-                    model.joint_target_mode,
-                    model.joint_limit_lower,
-                    model.joint_limit_upper,
-                    model.joint_limit_ke,
-                    model.joint_limit_kd,
-                    model.joint_damping,
-                    model.joint_armature,
                     model.body_com,
                     model.body_mass,
                     model.body_inertia,
@@ -2147,6 +2255,7 @@ class DenseSubstep:
                     contact.row_velocity,
                     contact.patch_lambda,
                     contact.normal_load,
+                    self._dof_parameters,
                     articulation.bodies,
                 ],
                 device=model.device,

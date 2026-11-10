@@ -438,6 +438,39 @@ class TestReducedDenseBackend(unittest.TestCase):
                     self.assertAlmostEqual(results[case][1], results["aba"][1], delta=5.0e-3)
                     self.assertGreater(results[case][1], tilt + 1.0e-3)
 
+    def test_fused_substep_follows_notified_joint_parameters_under_graph_capture(self):
+        """The fused kernels' packed drive gains follow the model after a change notification."""
+        device = _require_cuda(self)
+
+        def simulate(soften_before: bool, soften_after: bool) -> np.ndarray:
+            model = _make_legged_fleet(device, worlds=2)
+            if soften_before:
+                model.joint_target_ke.assign(0.25 * model.joint_target_ke.numpy())
+            solver = newton.solvers.SolverPhoenX(model, joint_mode="reduced", substeps=2)
+            self.assertIsNotNone(solver._reduced_articulation.fused_substep)
+            if soften_after:
+                model.joint_target_ke.assign(0.25 * model.joint_target_ke.numpy())
+                solver.notify_model_changed(newton.ModelFlags.JOINT_DOF_PROPERTIES)
+            state0, state1 = model.state(), model.state()
+            newton.eval_fk(model, model.joint_q, model.joint_qd, state0)
+            control = model.control()
+            control.joint_target_q.assign(model.joint_q.numpy() + 0.3)
+            contacts = model.contacts()
+            with wp.ScopedCapture(device=device) as capture:
+                for _ in range(2):
+                    model.collide(state0, contacts)
+                    solver.step(state0, state1, control, contacts, 1.0 / 60.0)
+                    state0, state1 = state1, state0
+            for _ in range(10):
+                wp.capture_launch(capture.graph)
+            return state0.joint_q.numpy()
+
+        stiff = simulate(False, False)
+        soft = simulate(True, False)
+        notified = simulate(False, True)
+        self.assertGreater(float(np.abs(soft - stiff).max()), 1.0e-3)
+        np.testing.assert_array_equal(notified, soft)
+
     def test_reduced_articulations_selects_by_index_or_label(self):
         device = _require_cuda(self)
         fleet = _make_centipede_fleet(device, worlds=2)

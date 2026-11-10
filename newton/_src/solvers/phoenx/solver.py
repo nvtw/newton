@@ -2092,6 +2092,8 @@ class SolverPhoenX(SolverBase):
                 if self._reduced_articulation is not None:
                     self._reduced_articulation.system.refresh_inertial_properties()
                     self._reduced_articulation.invalidate_kinematics()
+        if reduced_joint_properties_changed and self._reduced_articulation.fused_substep is not None:
+            self._reduced_articulation.fused_substep.refresh_joint_parameters()
         if joint_props_changed or body_properties_changed:
             self._refresh_direct_factor_reuse_eligibility()
         if joint_props_changed and self._uses_maximal_tree_projector:
