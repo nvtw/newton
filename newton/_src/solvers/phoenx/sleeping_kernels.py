@@ -336,8 +336,8 @@ def _phoenx_copy_elements_to_int2d_kernel(
     interaction_bodies: wp.array2d[wp.int32],
 ):
     """Pack each element's dynamic + kinematic body slots to the front
-    of its row in ``interaction_bodies``. Inactive cids, STATIC bodies,
-    and particles are dropped to ``-1``.
+    of its row in ``interaction_bodies``. STATIC bodies and particles
+    are dropped to ``-1``; rows of inactive cids are left untouched.
 
     Sleeping (dynamic) bodies whose root is **not** active stay filtered
     (cost nothing in the live UF). Sleeping bodies in **active** islands
@@ -350,8 +350,8 @@ def _phoenx_copy_elements_to_int2d_kernel(
     """
     tid = wp.tid()
     if tid >= num_active_constraints[0]:
-        for j in range(MAX_BODIES):
-            interaction_bodies[tid, j] = wp.int32(-1)
+        # The union-find reads only the rows below its interaction count:
+        # these elements and the chain edges, which write whole rows.
         return
     el = elements[tid]
     write_idx = wp.int32(0)

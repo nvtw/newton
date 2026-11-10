@@ -3513,9 +3513,8 @@ class PhoenXWorld:
         )
 
         # --- Copy elements into the 2D UF input. ---
-        # Note: the kernel writes -1 to slots past num_active_constraints.
         # Chain-edge injection runs *after* this, atomically claiming
-        # slots past num_active_constraints and overwriting the -1s.
+        # whole rows past num_active_constraints.
         wp.launch(
             _phoenx_copy_elements_to_int2d_kernel,
             dim=self._constraint_capacity,
