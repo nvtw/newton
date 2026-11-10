@@ -206,6 +206,12 @@ class TestDynamicBodies(unittest.TestCase):
         np.testing.assert_allclose(z, _HALF, atol=2.0e-3)
         self.assertEqual(int(scene.dyn.error_count.numpy()[0]), 0)
 
+    def test_contact_capacity_budgets_reserved_shapes(self):
+        # Newton's neighbor budget only sees the finalized shapes. A scene that spawns all its
+        # bodies at runtime once got the minimum capacity and dropped contacts of a cube pile.
+        scene = _Scene(bodies=512, shapes=512)
+        self.assertGreaterEqual(scene.contacts.rigid_contact_max, 512 * 8 * 10)
+
     def test_removed_support_drops_box_and_slot_is_reused(self):
         scene = _Scene(bodies=2, shapes=2)
         bottom = wp.zeros(1, dtype=int)

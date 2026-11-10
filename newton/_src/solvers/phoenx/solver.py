@@ -174,19 +174,23 @@ def _shape_pair_estimate(model) -> int:
 def _estimate_rigid_contact_max_phoenx(model) -> int | None:
     """Tight rigid_contact_max: pairs * 5 (CPP) * 2 (safety), bounded by Newton's neighbor budget.
     None when pair count is unavailable (caller falls back to Newton's default)."""
-    pair_count = _shape_pair_estimate(model)
-    if pair_count <= 0:
+    if _shape_pair_estimate(model) <= 0:
         return None
 
     # GJK/MPR primitive contacts cap at ~5/pair; Newton's default 40 is for
     # opt-in hydroelastic and overshoots us.
     PRIMITIVE_CPP = 5
     SAFETY = 2
-    capacity = max(1000, pair_count * PRIMITIVE_CPP * SAFETY)
+    contacts_per_pair = PRIMITIVE_CPP * SAFETY
+    finalized_pairs = int(getattr(model, "shape_contact_pair_count", 0) or 0)
     # Every pair touching at once is impossible for more than a few bodies:
     # the pair count grows with the square of the shapes of a world, the
-    # contacts only with the shapes. Newton's neighbor budget bounds that.
-    return min(capacity, _estimate_rigid_contact_max(model))
+    # contacts only with the shapes. Newton's neighbor budget bounds that
+    # for the finalized shapes; it does not know the reserved runtime shapes,
+    # which keep their own pair budget.
+    capacity = min(finalized_pairs * contacts_per_pair, _estimate_rigid_contact_max(model))
+    capacity += (_shape_pair_estimate(model) - finalized_pairs) * contacts_per_pair
+    return max(1000, capacity)
 
 
 def _estimate_contact_column_max_phoenx(model: Model, rigid_contact_max: int) -> int:
