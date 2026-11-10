@@ -197,6 +197,19 @@ def _rigid_family_lane_allocation(
 
 
 @wp.func
+def _spread_lane(lane: wp.int32, lanes: wp.int32) -> wp.int32:
+    """Return the work lane of physical ``lane`` in a warp-aligned range of ``lanes``.
+
+    The items of one color occupy the first work lanes. Mapped to physical
+    lanes in order, they fill whole warps, where up to 32 unrelated items
+    wait for each other's scattered loads and branches while most warps of
+    the launch stay empty. This bijection hands consecutive items to
+    different warps instead.
+    """
+    return (lane % wp.int32(32)) * (lanes / wp.int32(32)) + lane / wp.int32(32)
+
+
+@wp.func
 def _rigid_singleton_lane_allocation(
     count_single: wp.int32, count_multi: wp.int32, contact_lanes: wp.int32
 ) -> wp.int32:
@@ -3868,6 +3881,7 @@ def _make_singleworld_rigid_direct_color_func(
     joint_row_capacity: int = 6,
     cooperative_contacts: bool = False,
     adaptive_singleton_contacts: bool = False,
+    spread_contact_lanes: bool = False,
 ):
     """Generated rigid-only color dispatch for single-world kernels.
 
@@ -3875,7 +3889,14 @@ def _make_singleworld_rigid_direct_color_func(
     in iterate/relax and runs joint and contact families of a color on
     disjoint lanes. ``cooperative_contacts`` solves eligible regular-color
     contact columns with four lanes in iterate. Both require CUDA warp shuffles.
+    ``spread_contact_lanes`` distributes the scalar contact columns of a color
+    over the warps of a 32-lane-block launch (:func:`_spread_lane`); a color
+    is an independent set, so the result is unchanged.
     """
+    if spread_contact_lanes and packed_contact_headers:
+        # Color-ordered rows coalesce the loads of neighbouring lanes, and
+        # cooperative columns need their lanes side by side.
+        raise ValueError("Spread contact lanes require unpacked contact columns")
 
     _dispatch_rigid_contact = _make_singleworld_rigid_contact_dispatch_func(
         has_mass_splitting=has_mass_splitting,
@@ -4034,6 +4055,10 @@ def _make_singleworld_rigid_direct_color_func(
         if wp.static(has_contacts):
             count_contacts = color_end - contact_start
             base = lane - contact_lane_base
+            if wp.static(spread_contact_lanes):
+                # Joint-family lanes stay negative and skip the contacts.
+                if base >= wp.int32(0):
+                    base = _spread_lane(base, stride - contact_lane_base)
             if wp.static(
                 adaptive_singleton_contacts
                 and cooperative_contacts
@@ -4191,12 +4216,16 @@ def _make_singleworld_persistent_kernel(
     joint_row_capacity: int = 6,
     cooperative_contacts: bool = False,
     adaptive_singleton_contacts: bool = False,
+    spread_contact_lanes: bool = False,
 ):
     """Persistent-grid PGS kernel for the requested phase.
 
     Per-cid dispatch uses fixed constraint family ranges. The static
     ``cloth_support`` flag keeps deformable code out of rigid-only binaries;
     ``soft_tet_neohookean`` chooses the soft-tet block variant.
+
+    ``spread_contact_lanes`` distributes the unpacked contact columns of a
+    rigid color over the warps of the grid.
 
     ``enable_column_timers`` brackets each per-cid dispatch with
     ``%globaltimer`` and atomic-adds elapsed microseconds to ``time_us``.
@@ -4240,6 +4269,7 @@ def _make_singleworld_persistent_kernel(
         joint_row_capacity=joint_row_capacity,
         cooperative_contacts=cooperative_contacts,
         adaptive_singleton_contacts=adaptive_singleton_contacts,
+        spread_contact_lanes=spread_contact_lanes,
     )
     if direct_regular_colors:
         _dispatch_rigid_direct_color = _make_singleworld_rigid_direct_color_func(
@@ -4261,6 +4291,7 @@ def _make_singleworld_persistent_kernel(
             joint_row_capacity=joint_row_capacity,
             cooperative_contacts=cooperative_contacts,
             adaptive_singleton_contacts=adaptive_singleton_contacts,
+            spread_contact_lanes=spread_contact_lanes,
         )
 
     # Approximate float32 division and square roots shorten the latency-bound
@@ -4656,6 +4687,7 @@ def get_singleworld_kernel(
     joint_row_capacity: int = 6,
     cooperative_contacts: bool = False,
     adaptive_singleton_contacts: bool = False,
+    spread_contact_lanes: bool = False,
 ):
     """Lazy singleworld kernel builder. Each axis combination is cached
     after first build by the underlying factory's ``functools.cache``."""
@@ -4669,6 +4701,7 @@ def get_singleworld_kernel(
             "joint_row_capacity": joint_row_capacity,
             "cooperative_contacts": cooperative_contacts,
             "adaptive_singleton_contacts": adaptive_singleton_contacts,
+            "spread_contact_lanes": spread_contact_lanes,
         }
     )
     return factory(

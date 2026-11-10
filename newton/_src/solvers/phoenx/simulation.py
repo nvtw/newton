@@ -5290,23 +5290,36 @@ class PhoenXWorld:
             "cooperative_joints": cuda and kw["bilateral_joint_blocks"],
             "joint_row_capacity": int(self.constraints.bilateral.row_capacity) or 6,
         }
+        spread = {"spread_contact_lanes": self._spread_contact_lanes()}
         return (
-            get_singleworld_kernel(phase="prepare", fused=False, **kw),
+            get_singleworld_kernel(phase="prepare", fused=False, **kw, **spread),
             get_singleworld_kernel(phase="prepare", fused=True, **kw),
             get_singleworld_kernel(
                 phase="iterate",
                 fused=False,
                 **kw,
                 **cooperative,
+                **spread,
                 cooperative_contacts=cuda,
                 adaptive_singleton_contacts=cuda
                 and self._colored_singleton_contact_lanes
                 and not kw["has_soft_contact_pd"],
             ),
             get_singleworld_kernel(phase="iterate", fused=True, **kw),
-            get_singleworld_kernel(phase="relax", fused=False, **kw, **cooperative),
+            get_singleworld_kernel(phase="relax", fused=False, **kw, **cooperative, **spread),
             get_singleworld_kernel(phase="relax", fused=True, **kw),
         )
+
+    def _spread_contact_lanes(self) -> bool:
+        """Whether head launches hand consecutive contact columns to different warps.
+
+        Unpacked columns scatter their loads over the contact arrays, so a
+        warp filled with 32 of them mostly waits (Kapla arena: 7.10 -> 6.58
+        ms/frame). Color-packed rows keep dense lanes: their neighbouring
+        lanes share coalesced loads (Kapla+Hoberman: 13.6 -> 15.1 ms/frame
+        when spread). The result is the same either way.
+        """
+        return self.device.is_cuda and not self._colored_contact_headers
 
     def _singleworld_cached_prepare_kernels(self):
         """Return cached-contact-warm-start head/fused kernels."""
@@ -5326,6 +5339,7 @@ class PhoenXWorld:
                 has_soft_contact_pd=False,
                 rigid_direct=self._singleworld_rigid_direct(),
                 bilateral_joint_blocks=bool(self.constraints.bilateral.enabled),
+                spread_contact_lanes=self.device.is_cuda,
             ),
             get_singleworld_kernel(
                 phase="cached_prepare",
