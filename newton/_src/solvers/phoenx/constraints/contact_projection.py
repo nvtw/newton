@@ -187,6 +187,7 @@ def _fast_div(a: wp.float32, b: wp.float32) -> wp.float32: ...
 
 def _make_contact_project_friction_metric(scalar_type):
     relative_tolerance = 2.0e-7 if scalar_type == wp.float32 else 1.0e-7
+    step_tolerance = 2.0 * relative_tolerance
 
     @wp.func
     def div(x: scalar_type, y: scalar_type) -> scalar_type:
@@ -250,8 +251,12 @@ def _make_contact_project_friction_metric(scalar_type):
                     radius = scalar_type(dynamic_radius)
                     target_x = scalar_type(target1)
                     target_y = scalar_type(target2)
-                    upper = wp.sqrt(target_x * target_x + target_y * target_y) / radius
-                    alpha = upper
+                    inverse_radius = scalar_type(1.0) / radius
+                    upper = wp.sqrt(target_x * target_x + target_y * target_y) * inverse_radius
+                    # An isotropic mobility has this multiplier exactly.
+                    alpha = upper - scalar_type(0.5) * (scalar_type(a) + scalar_type(c))
+                    if alpha <= lower:
+                        alpha = upper
                     old_x = scalar_type(lambda_t1_old)
                     old_y = scalar_type(lambda_t2_old)
                     old_length_sq = old_x * old_x + old_y * old_y
@@ -266,16 +271,18 @@ def _make_contact_project_friction_metric(scalar_type):
                         ) - old_k_old / old_length_sq
                         if estimate > lower and estimate < upper:
                             alpha = estimate
-                    # The norm bound supplies a feasible upper bracket. Newton
-                    # usually converges in a few iterations; bisection safeguards
-                    # nearly singular blocks without changing their mobility.
+                    # The norm bound supplies a feasible upper bracket. The
+                    # reciprocal of the impulse norm is nearly linear in the
+                    # multiplier, so Newton on it converges in a few
+                    # iterations; bisection safeguards nearly singular blocks
+                    # without changing their mobility.
                     for _iteration in range(40):
                         aa = scalar_type(a) + alpha
                         cc = scalar_type(c) + alpha
                         bb = scalar_type(b)
-                        det = aa * cc - bb * bb
-                        x = div(cc * target_x - bb * target_y, det)
-                        y = div(aa * target_y - bb * target_x, det)
+                        inverse_det = div(scalar_type(1.0), aa * cc - bb * bb)
+                        x = (cc * target_x - bb * target_y) * inverse_det
+                        y = (aa * target_y - bb * target_x) * inverse_det
                         length = wp.sqrt(x * x + y * y)
                         error = length - radius
                         # Newton approaches this convex decreasing norm from
@@ -291,10 +298,25 @@ def _make_contact_project_friction_metric(scalar_type):
                         else:
                             upper = alpha
                             result = wp.vec2f(wp.float32(x), wp.float32(y))
-                        derivative = -div(cc * x * x - scalar_type(2.0) * bb * x * y + aa * y * y, det * length)
-                        proposal = alpha - div(error, derivative)
-                        if proposal <= lower or proposal >= upper:
+                        # Newton step on 1 / length - 1 / radius, in terms of
+                        # the unit impulse direction so that no product of
+                        # small impulses underflows.
+                        unit_x = div(x, length)
+                        unit_y = div(y, length)
+                        response = (
+                            cc * unit_x * unit_x - scalar_type(2.0) * bb * unit_x * unit_y + aa * unit_y * unit_y
+                        ) * inverse_det
+                        proposal = alpha + div(error * inverse_radius, response)
+                        # The negated test also rejects a non-finite proposal.
+                        if not (proposal > lower and proposal < upper):
                             proposal = scalar_type(0.5) * (lower + upper)
+                        # A step below the multiplier's resolution cannot
+                        # improve the impulse: roundoff in the norm otherwise
+                        # keeps a few blocks searching for all iterations.
+                        if wp.abs(proposal - alpha) <= scalar_type(step_tolerance) * alpha:
+                            boundary_scale = radius / length
+                            result = wp.vec2f(wp.float32(x * boundary_scale), wp.float32(y * boundary_scale))
+                            break
                         alpha = proposal
         return result
 
