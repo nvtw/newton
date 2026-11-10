@@ -1259,6 +1259,15 @@ contact accuracy are still being investigated.
       <br><code>python -m newton.examples phoenx_house_of_cards</code>
     </td>
   </tr>
+  <tr>
+    <td align="center" width="33%">
+      <img width="320" src="docs/images/examples/example_phoenx_warehouse.jpg" alt="PhoenX warehouse robot fleet">
+      <br><b>Warehouse robot fleet</b>
+      <br><code>python -m newton.examples phoenx_warehouse</code>
+    </td>
+    <td align="center" width="33%"></td>
+    <td align="center" width="33%"></td>
+  </tr>
 </table>
 
 ### Example Options
