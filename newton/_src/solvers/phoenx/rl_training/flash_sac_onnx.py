@@ -37,12 +37,16 @@ def _require_onnx_runtime():
         "Div",
         "Gemm",
         "Mul",
-        "ReduceMean",
         "Relu",
         "Sqrt",
         "Tanh",
     }
-    if not required_ops <= getattr(OnnxRuntime, "supported_ops", frozenset()):
+    # Warp-NN 0.3 lists its operators on the class and 0.4 in the runtime module's compiler
+    # table. A release that exposes neither rejects an unsupported operator when it loads the model.
+    supported = getattr(OnnxRuntime, "supported_ops", None)
+    if supported is None:
+        supported = getattr(importlib.import_module(OnnxRuntime.__module__), "COMPILERS", None)
+    if supported is not None and not required_ops <= set(supported):
         raise ImportError("FlashSAC ONNX replay requires Warp-NN 0.3.1 or newer")
     return OnnxRuntime
 
@@ -118,6 +122,9 @@ def export_flash_sac_actor_onnx(
     initializers.update(
         {
             "rms.epsilon": np.asarray([1.0e-6], dtype=np.float32),
+            # A row mean as a matrix product: Warp-NN 0.4 has no ReduceMean.
+            "rms.mean_weight": np.full((1, network.hidden_dim), 1.0 / network.hidden_dim, dtype=np.float32),
+            "rms.mean_bias": np.zeros(1, dtype=np.float32),
             "log_std.half_range": np.asarray([(network.log_std_max - network.log_std_min) * 0.5], dtype=np.float32),
             "log_std.midpoint": np.asarray([(network.log_std_max + network.log_std_min) * 0.5], dtype=np.float32),
         }
@@ -161,7 +168,9 @@ def export_flash_sac_actor_onnx(
     nodes.extend(
         (
             helper.make_node("Mul", [hidden, hidden], ["rms.squared"]),
-            helper.make_node("ReduceMean", ["rms.squared"], ["rms.mean_square"], axes=[1], keepdims=1),
+            helper.make_node(
+                "Gemm", ["rms.squared", "rms.mean_weight", "rms.mean_bias"], ["rms.mean_square"], transB=1
+            ),
             helper.make_node("Add", ["rms.mean_square", "rms.epsilon"], ["rms.mean_square_epsilon"]),
             helper.make_node("Sqrt", ["rms.mean_square_epsilon"], ["rms.root"]),
             helper.make_node("Div", [hidden, "rms.root"], ["rms.unit"]),

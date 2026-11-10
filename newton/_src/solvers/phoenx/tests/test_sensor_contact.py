@@ -413,7 +413,7 @@ class TestSensorContactPhoenX(unittest.TestCase):
         )
         model = builder.finalize()
 
-        sensor = SensorContact(model, sensing_obj_shapes="ball", verbose=False)
+        sensor = SensorContact(model, sensing_shapes="ball", verbose=False)
         solver = _make_solver(model)
 
         # Non-compound scene: grouping must be off so we exercise the
@@ -491,7 +491,7 @@ class TestSensorContactPhoenX(unittest.TestCase):
         # aggregation forces the pipeline to walk every contact slot
         # (including ones from both shapes), exposing any
         # newton-order-vs-sorted-order mismatch.
-        sensor = SensorContact(model, sensing_obj_bodies=[body], verbose=False)
+        sensor = SensorContact(model, sensing_bodies=[body], verbose=False)
         solver = _make_solver(model, step_layout="single_world")
 
         # The compound body must have triggered grouping; if not, this
@@ -583,7 +583,7 @@ class TestSensorContactPhoenX(unittest.TestCase):
 
         sensor = SensorContact(
             model,
-            sensing_obj_shapes="bottom_box",
+            sensing_shapes="bottom_box",
             counterpart_shapes=["ground", "top_box"],
             verbose=False,
         )
@@ -706,7 +706,7 @@ class TestSensorContactPhoenX(unittest.TestCase):
         )
         model = builder.finalize()
 
-        sensor = SensorContact(model, sensing_obj_shapes="cube", verbose=False)
+        sensor = SensorContact(model, sensing_shapes="cube", verbose=False)
         solver = _make_solver(model)
 
         self._settle_with_sensor(model, solver, [sensor], n_frames=240)
@@ -794,7 +794,7 @@ class TestSensorContactPhoenX(unittest.TestCase):
 
         sensor = SensorContact(
             model,
-            sensing_obj_shapes="ball",
+            sensing_shapes="ball",
             counterpart_shapes=["ground", "wall"],
             verbose=False,
         )
@@ -932,8 +932,8 @@ class TestSensorContactPhoenX(unittest.TestCase):
         )
         model = builder.finalize()
 
-        sensor_a = SensorContact(model, sensing_obj_shapes="link_a", verbose=False)
-        sensor_b = SensorContact(model, sensing_obj_shapes="link_b", verbose=False)
+        sensor_a = SensorContact(model, sensing_shapes="link_a", verbose=False)
+        sensor_b = SensorContact(model, sensing_shapes="link_b", verbose=False)
         solver = newton.solvers.SolverPhoenX(model, substeps=4, solver_iterations=40, velocity_iterations=2)
 
         self._settle_with_sensor(model, solver, [sensor_a, sensor_b], n_frames=600)
@@ -991,7 +991,7 @@ class TestSensorContactPhoenX(unittest.TestCase):
                 label="ball",
             )
             model = builder.finalize()
-            sensor = SensorContact(model, sensing_obj_shapes="ball", verbose=False)
+            sensor = SensorContact(model, sensing_shapes="ball", verbose=False)
             solver = newton.solvers.SolverPhoenX(model, substeps=substeps, solver_iterations=20, velocity_iterations=2)
             self._settle_with_sensor(model, solver, [sensor], n_frames=120)
             return float(sensor.total_force.numpy()[0][2])
@@ -1040,7 +1040,7 @@ class TestSensorContactPhoenX(unittest.TestCase):
 
         # Sensor first -- must request "force" before the Contacts
         # buffer is built.
-        SensorContact(model, sensing_obj_shapes="ball", verbose=False)
+        SensorContact(model, sensing_shapes="ball", verbose=False)
         self.assertIn("force", model.get_requested_contact_attributes())
 
         # ``SolverPhoenX.__init__`` builds a CollisionPipeline; the

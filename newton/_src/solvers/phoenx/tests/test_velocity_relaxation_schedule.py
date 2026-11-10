@@ -48,6 +48,7 @@ class TestReducedRelaxationSchedule(unittest.TestCase):
         world._reduced_contacts_active_this_step = False
         articulation = SimpleNamespace(
             _kinematics_current=True,
+            fused_substep=None,
             system=Mock(),
             state=object(),
             control=object(),
@@ -85,6 +86,7 @@ class TestVelocityRelaxationSchedule(unittest.TestCase):
         """Match explicit scheduling while contact ownership changes."""
         original_init = newton.solvers.SolverPhoenX.__init__
         original_forces = PhoenXWorld._integrate_forces_and_gravity
+        original_spring = PhoenXWorld._set_contact_spring
 
         def run(final_policy, mass_splitting):
             def initialize(solver, *args, **kwargs):
@@ -99,10 +101,19 @@ class TestVelocityRelaxationSchedule(unittest.TestCase):
                 world.velocity_iterations = int(world._current_substep_index == 2)
                 return original_forces(world)
 
+            def reference_spring(world):
+                # The final-substep schedule bounds its contact spring by the
+                # substeps that run no relax sweep.
+                world.velocity_iterations = 0
+                original_spring(world)
+
             with patch.object(newton.solvers.SolverPhoenX, "__init__", initialize):
                 if final_policy:
                     return run_scene(True, mass_splitting=mass_splitting)
-                with patch.object(PhoenXWorld, "_integrate_forces_and_gravity", reference_forces):
+                with (
+                    patch.object(PhoenXWorld, "_integrate_forces_and_gravity", reference_forces),
+                    patch.object(PhoenXWorld, "_set_contact_spring", reference_spring),
+                ):
                     return run_scene(True, mass_splitting=mass_splitting)
 
         for split in (False, True):

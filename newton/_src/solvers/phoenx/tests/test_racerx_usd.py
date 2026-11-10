@@ -625,6 +625,7 @@ class TestRacerXUsd(unittest.TestCase):
                 self.model = SimpleNamespace(
                     shape_body=wp.array((0, -1), dtype=wp.int32, device=device),
                     shape_world=wp.zeros(2, dtype=wp.int32, device=device),
+                    shape_collision_radius=wp.ones(2, dtype=wp.float32, device=device),
                 )
                 self.world_offsets = wp.zeros(1, dtype=wp.vec3, device=device)
                 self.layer = SimpleNamespace(xform=wp.transform_identity())
