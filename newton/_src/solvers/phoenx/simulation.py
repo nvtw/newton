@@ -5040,12 +5040,21 @@ class PhoenXWorld:
             "has_soft_contact_pd": bool(self._has_soft_contact_pd),
         }
 
+    def _regular_solver_has_contacts(self) -> bool:
+        """Whether the regular solver's kernels solve contact columns.
+
+        Reduced trees own their contacts; free rigid bodies beside them leave theirs here.
+        """
+        return self.max_contact_columns > 0 and (
+            self._reduced_articulation is None or self._free_rigid_contacts_classic
+        )
+
     def _fast_tail_kernel_flags(self, fixed_tpw: int, *, cached_prepare: bool | None = None) -> dict[str, object]:
         """Factory flags for multi-world fast-tail kernels."""
         joint_sweeps, contact_sweeps, outer_chunk = _choose_fast_tail_solve_schedule(substeps=self.substeps)
         kw: dict[str, object] = {
             **self._dispatch_specialization_flags(),
-            "has_contacts": self.max_contact_columns > 0 and self._reduced_articulation is None,
+            "has_contacts": self._regular_solver_has_contacts(),
             "fixed_tpw": int(fixed_tpw),
             "guard_tpw": self._tpw_auto,
             "family_split": self._fast_tail_family_split(),
@@ -5089,7 +5098,7 @@ class PhoenXWorld:
         kernel = get_multiworld_mass_splitting_kernel(
             phase=phase,
             **flags,
-            has_contacts=self.max_contact_columns > 0 and self._reduced_articulation is None,
+            has_contacts=self._regular_solver_has_contacts(),
             packed_contact_headers=self._colored_contact_headers,
             patch_friction=self._contact_patch_enabled,
             bilateral_joint_blocks=bool(self.constraints.bilateral.enabled),
@@ -5166,7 +5175,7 @@ class PhoenXWorld:
         kernel = get_multiworld_mass_splitting_kernel(
             phase=phase,
             **flags,
-            has_contacts=self.max_contact_columns > 0 and self._reduced_articulation is None,
+            has_contacts=self._regular_solver_has_contacts(),
             packed_contact_headers=self._colored_contact_headers,
             patch_friction=self._contact_patch_enabled,
             bilateral_joint_blocks=bool(self.constraints.bilateral.enabled),
@@ -5211,7 +5220,7 @@ class PhoenXWorld:
         overflow_kernel = get_multiworld_mass_splitting_overflow_kernel(
             phase=phase,
             **flags,
-            has_contacts=self.max_contact_columns > 0 and self._reduced_articulation is None,
+            has_contacts=self._regular_solver_has_contacts(),
             packed_contact_headers=self._colored_contact_headers,
             patch_friction=self._contact_patch_enabled,
             bilateral_joint_blocks=bool(self.constraints.bilateral.enabled),
@@ -5256,7 +5265,7 @@ class PhoenXWorld:
         kw = {
             **self._dispatch_specialization_flags(),
             "bilateral_joint_blocks": bool(self.constraints.bilateral.enabled),
-            "has_contacts": self.max_contact_columns > 0 and self._reduced_articulation is None,
+            "has_contacts": self._regular_solver_has_contacts(),
             "has_mass_splitting": self.mass_splitting_enabled,
             "packed_contact_headers": self._colored_contact_headers,
             "rigid_direct": self._singleworld_rigid_direct(),

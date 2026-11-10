@@ -4802,6 +4802,75 @@ class TestReducedContactIsolation(unittest.TestCase):
         np.testing.assert_allclose(body_q[links, 2], 0.34, atol=4.0e-3)
         self.assertLess(float(np.abs(state_0.body_qd.numpy()).max()), 2.0e-2)
 
+    def test_free_bodies_keep_their_contacts_beside_a_joint_outside_the_trees(self):
+        """Free bodies rest on the ground while the regular solver also holds a jointed mechanism.
+
+        A hinge that belongs to no articulation gives the regular solver joint rows; its
+        kernels must still solve the free bodies' contacts, which the trees do not own.
+        """
+        device = wp.get_preferred_device()
+        if not device.is_cuda:
+            self.skipTest("reduced articulation tests require CUDA graph capture")
+        for backend in ("aba", "auto"):
+            with self.subTest(backend=backend):
+                builder = newton.ModelBuilder(gravity=(0.0, 0.0, -9.81), up_axis=newton.Axis.Z)
+                builder.default_shape_cfg.gap = 0.005
+                builder.add_ground_plane()
+                previous = -1
+                for i in range(2):
+                    body = builder.add_link(xform=wp.transform(wp.vec3(0.3 * i, 0.0, 0.145), wp.quat_identity()))
+                    builder.add_shape_box(body, hx=0.14, hy=0.14, hz=0.14)
+                    if previous < 0:
+                        builder.add_joint_free(body)
+                    else:
+                        builder.add_joint_revolute(
+                            previous,
+                            body,
+                            parent_xform=wp.transform(wp.vec3(0.15, 0.0, 0.0), wp.quat_identity()),
+                            child_xform=wp.transform(wp.vec3(-0.15, 0.0, 0.0), wp.quat_identity()),
+                            axis=newton.Axis.Z,
+                        )
+                    previous = body
+                builder.add_articulation(list(range(builder.joint_count)))
+                boxes = []
+                for i in range(3):
+                    box = builder.add_body(xform=wp.transform(wp.vec3(1.0, 0.0, 0.05 + 0.1 * i), wp.quat_identity()))
+                    builder.add_shape_box(box, hx=0.05, hy=0.05, hz=0.05)
+                    boxes.append(box)
+                door = builder.add_body(xform=wp.transform(wp.vec3(-1.0, 0.0, 0.5), wp.quat_identity()))
+                builder.add_shape_box(door, hx=0.02, hy=0.3, hz=0.45)
+                builder.add_joint_revolute(
+                    -1,
+                    door,
+                    parent_xform=wp.transform(wp.vec3(-1.0, 0.3, 0.5), wp.quat_identity()),
+                    child_xform=wp.transform(wp.vec3(0.0, 0.3, 0.0), wp.quat_identity()),
+                    axis=newton.Axis.Z,
+                )
+                model = builder.finalize(device=device)
+                pipeline = newton.CollisionPipeline(model, contact_matching="sticky")
+                solver = newton.solvers.SolverPhoenX(
+                    model,
+                    collision_pipeline=pipeline,
+                    joint_mode="reduced",
+                    reduced_backend=backend,
+                    substeps=4,
+                    solver_iterations=4,
+                )
+                state_0, state_1 = model.state(), model.state()
+                newton.eval_fk(model, model.joint_q, model.joint_qd, state_0)
+                contacts = pipeline.contacts()
+                with wp.ScopedCapture() as capture:
+                    pipeline.collide(state_0, contacts)
+                    solver.step(state_0, state_1, None, contacts, 1.0 / 60.0)
+                    for name in ("body_q", "body_qd", "joint_q", "joint_qd"):
+                        wp.copy(getattr(state_0, name), getattr(state_1, name))
+                for _ in range(60):
+                    wp.capture_launch(capture.graph)
+                body_q = state_0.body_q.numpy()
+                np.testing.assert_allclose(body_q[boxes, 2], [0.05, 0.15, 0.25], atol=2.0e-3)
+                np.testing.assert_allclose(body_q[:2, 2], 0.14, atol=4.0e-3)
+                np.testing.assert_allclose(body_q[door, :3], [-1.0, 0.0, 0.5], atol=2.0e-3)
+
     def test_articulations_with_different_dof_counts_do_not_share_contact_rows(self):
         """Contact rows of one articulation must not leak into another's DOF columns."""
         device = wp.get_preferred_device()
