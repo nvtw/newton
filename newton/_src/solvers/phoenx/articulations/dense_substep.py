@@ -844,17 +844,20 @@ def make_dense_substep_kernel(
                         shared, lane, joint_start, bodies, body_pair, wrench_pair, wp.int32(path_capacity)
                     )
                     velocity += second_path[0]
-                    inverse_mass += second_path[1]
+                    # z . z with the two parts added on shared DOFs before squaring: links that
+                    # cannot move against each other then cancel to rounding squared, not to the
+                    # rounding of the two parts' squares.
+                    inverse_mass = wp.float32(0.0)
                     for position in range(path_capacity):
                         slot = wp.int32(PAGE_ROWS * position) + lane
+                        first_value = _load(shared, wp.int32(z_base) + slot)
+                        second_value = _load(shared, wp.int32(z_base) + slot + wp.int32(PAGE_ROWS * path_capacity))
                         if _load_u8(shared, wp.int32(z_dof_byte) + slot) == _load_u8(
                             shared, wp.int32(z_dof_byte) + slot + wp.int32(PAGE_ROWS * path_capacity)
                         ):
-                            inverse_mass += (
-                                wp.float32(2.0)
-                                * _load(shared, wp.int32(z_base) + slot)
-                                * _load(shared, wp.int32(z_base) + slot + wp.int32(PAGE_ROWS * path_capacity))
-                            )
+                            inverse_mass += (first_value + second_value) * (first_value + second_value)
+                        else:
+                            inverse_mass += first_value * first_value + second_value * second_value
                 else:
                     for position in range(path_capacity, 2 * path_capacity):
                         _store(shared, wp.int32(z_base) + wp.int32(PAGE_ROWS * position) + lane, wp.float32(0.0))
