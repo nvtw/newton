@@ -27,6 +27,7 @@ from newton._src.solvers.phoenx.body import (
     EXTERNAL_SHARED,
     MOTION_KINEMATIC,
     BodyContainer,
+    DenseTreeData,
     ReducedArticulationData,
     mat33_from_sym6,
 )
@@ -193,11 +194,11 @@ def _external_rigid_owners(model: Model, allow_internal: bool) -> tuple[np.ndarr
 def _free_bodies_may_touch_trees(model: Model) -> tuple[bool, bool]:
     """Return whether free rigid bodies may touch trees, and whether two links of one tree may.
 
-    Without a pair list, as with shapes created at runtime, any free body may.
+    Without a pair list, as with shapes created at runtime, any of them may.
     """
     endpoints = _model_pair_endpoints(model)
     if endpoints is None:
-        return True, False
+        return True, True
     _pairs, _body0, _body1, articulation0, articulation1, static0, static1 = endpoints
     reduced0 = articulation0 >= 0
     reduced1 = articulation1 >= 0
@@ -410,6 +411,100 @@ def _classify_contact_ownership_kernel(
         wp.atomic_add(reduced_count, 0, wp.int32(1))
     else:
         wp.atomic_add(classic_count, 0, wp.int32(1))
+
+
+#: Longest root path [DOFs] of a link whose response :func:`_link_response_kernel` forms.
+@wp.kernel(enable_backward=False)
+def _mark_cross_trees_kernel(
+    columns: ContactColumnContainer,
+    bodies: BodyContainer,
+    reduced_column_count: wp.array[wp.int32],
+    articulation_count: wp.int32,
+    section_end: wp.array[wp.int32],
+    schedule_columns: wp.array[wp.int32],
+):
+    """Flag the trees of the columns that no articulation owns as holding deferred wrenches."""
+    offset, side = wp.tid()
+    first = wp.int32(0)
+    if articulation_count > 0:
+        first = section_end[articulation_count - 1]
+    if first + offset >= reduced_column_count[0]:
+        return
+    column = schedule_columns[first + offset]
+    body = contact_get_body1(columns, column)
+    if side == 1:
+        body = contact_get_body2(columns, column)
+    articulation = bodies.reduced.body_articulation[body]
+    if articulation >= wp.int32(0):
+        bodies.reduced.deferred_pending[articulation] = wp.int32(1)
+
+
+@wp.kernel(enable_backward=False)
+def _link_path_kernel(
+    bodies: BodyContainer,
+    dense: DenseTreeData,
+    joint_last_dof: wp.array[wp.int32],
+    template_joint_start: wp.array[wp.int32],
+):
+    """Form ``Z = L^-T J^T`` along the root path of every link of a flagged tree.
+
+    ``J`` is the link's Jacobian about the articulation origin and ``M = L^T L`` the stored
+    factor. ``Z^T Z`` is the link's twist response to a wrench on itself, and two links of one
+    tree couple through the positions their paths share.
+    """
+    link = wp.tid()
+    data = bodies.reduced
+    articulation = data.body_articulation[link + 1]
+    if articulation < wp.int32(0):
+        return
+    if data.deferred_pending[articulation] == wp.int32(0):
+        return
+    joint_start = data.articulation_start[articulation]
+    dof_start = data.joint_qd_start[joint_start]
+    template = dense.articulation_template[articulation]
+    leaf = joint_last_dof[template_joint_start[template] + data.body_joint[link] - joint_start]
+    length = wp.int32(0)
+    if leaf >= wp.int32(0):
+        base = dense.factor_start[articulation]
+        dof_base = dense.template_dof_start[template]
+        path = dense.template_path_start[template] + dense.dof_entry[dof_base + leaf]
+        length = dense.dof_entry[dof_base + leaf + wp.int32(1)] - dense.dof_entry[dof_base + leaf]
+        # L^T z = J^T, leaves first, for the six wrench axes at once.
+        for reverse in range(length):
+            position = length - wp.int32(1) - reverse
+            k = dense.path[path + position]
+            value = data.joint_s[dof_start + k]
+            for later in range(position + wp.int32(1), length):
+                row = dense.path[path + later]
+                value -= dense.factor[base + dense.dof_entry[dof_base + row] + position] * data.link_path[link, later]
+            data.link_path[link, position] = (
+                value / dense.factor[base + dense.dof_entry[dof_base + k + wp.int32(1)] - wp.int32(1)]
+            )
+            data.link_path_dof[link, position] = dof_start + k
+    if length < data.link_path.shape[1]:
+        data.link_path_dof[link, length] = wp.int32(-1)
+
+
+@wp.kernel(enable_backward=False)
+def _seed_deferred_rate_kernel(bodies: BodyContainer):
+    """Form each flagged tree's deferred rates from the wrenches its links already hold."""
+    articulation = wp.tid()
+    data = bodies.reduced
+    if data.deferred_pending[articulation] == wp.int32(0):
+        return
+    joint_start = data.articulation_start[articulation]
+    joint_end = data.articulation_end[articulation]
+    for dof in range(data.joint_qd_start[joint_start], data.joint_qd_start[joint_end]):
+        data.deferred_rate[dof] = wp.float32(0.0)
+    for joint in range(joint_start, joint_end):
+        link = data.joint_child[joint]
+        wrench = data.deferred_wrench[link]
+        if wp.length_sq(wrench) > wp.float32(0.0):
+            for position in range(data.link_path.shape[1]):
+                dof = data.link_path_dof[link, position]
+                if dof < wp.int32(0):
+                    break
+                data.deferred_rate[dof] = data.deferred_rate[dof] + wp.dot(data.link_path[link, position], wrench)
 
 
 @wp.kernel(enable_backward=False)
@@ -3468,6 +3563,9 @@ class ReducedContactBlockSystem:
         self.external_owner = None
         #: Whether the tree that solves a free body's contacts is chosen per step on the device.
         self.dynamic_external_owner = False
+        #: Whether fallback sweeps end by applying the deferred wrenches with the articulated-body
+        #: recurrences. A fused substep applies them itself, see ``link_response``.
+        self.flush_fallback = True
         #: Whether the fused substep solves rows between two links of one tree.
         self.internal_rows = False
         self._external_rigid_rows = external_rigid_rows
@@ -3510,10 +3608,9 @@ class ReducedContactBlockSystem:
             else:
                 # Several trees may reach one free body, or each other: which tree a free body
                 # joins is then decided in every step, see build_schedule.
-                free_bodies, internal = _free_bodies_may_touch_trees(model)
+                free_bodies, self.internal_rows = _free_bodies_may_touch_trees(model)
                 if free_bodies:
                     self.dynamic_external_owner = True
-                    self.internal_rows = internal
                     body_slots = int(model.body_count) + 1
                     self._external_owner_crowded = wp.zeros(body_slots, dtype=wp.int32, device=self.device)
         (
@@ -3919,6 +4016,34 @@ class ReducedContactBlockSystem:
         self.fallback_partitioner.reset(self.fallback_element, self.fallback_run_count)
         self.fallback_partitioner.build_csr()
 
+    def refresh_link_responses(self, columns: ContactColumnContainer, bodies: BodyContainer) -> None:
+        """Form the link responses of the trees in unowned columns from the stored dense factor.
+
+        Trees whose links still hold deferred wrenches are flagged already; their deferred
+        rates start from those wrenches.
+        """
+        dense = self.dense_rows
+        wp.launch(
+            _mark_cross_trees_kernel,
+            dim=(self.schedule_capacity, 2),
+            inputs=[
+                columns,
+                bodies,
+                self.reduced_column_count,
+                wp.int32(self.articulation_count),
+                self.schedule_section_end,
+                self.schedule_columns,
+            ],
+            device=self.device,
+        )
+        wp.launch(
+            _link_path_kernel,
+            dim=bodies.reduced.link_path.shape[0],
+            inputs=[bodies, dense.data, dense.joint_last_dof, dense.template_joint_start],
+            device=self.device,
+        )
+        wp.launch(_seed_deferred_rate_kernel, dim=self.articulation_count, inputs=[bodies], device=self.device)
+
     def solve_fallback(
         self,
         columns: ContactColumnContainer,
@@ -3966,7 +4091,11 @@ class ReducedContactBlockSystem:
         partitioner = self.fallback_partitioner
 
         def flush() -> None:
-            wp.launch(_flush_fallback_contacts_kernel, dim=self.articulation_count, inputs=[bodies], device=self.device)
+            # With link responses the wrenches stay collected for the fused relax kernel.
+            if self.flush_fallback:
+                wp.launch(
+                    _flush_fallback_contacts_kernel, dim=self.articulation_count, inputs=[bodies], device=self.device
+                )
 
         def sweep(phase: int) -> None:
             partitioner.begin_sweep()

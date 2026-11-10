@@ -1481,7 +1481,6 @@ def make_dense_substep_kernel(
         patch_lambda: wp.array2d[wp.vec2],
         normal_load: wp.array2d[wp.float32],
         dof_parameters: wp.array2d[wp.float32],
-        pose_changed: wp.array[wp.int32],
         bodies: BodyContainer,
     ):
         block = _block_index()
@@ -1521,15 +1520,6 @@ def make_dense_substep_kernel(
         # The biased step leaves the frames, motion subspaces, and spatial inertias of its
         # integrated pose, which the relax step and a following biased step at that pose reuse.
         frames_current = reuse_factor or wp.static(relax)
-        rows_current = reuse_rows
-        if wp.static(coupled):
-            # The cross-contact solve between the kernels moved this tree's coordinates and
-            # published its rates: form the frames again, as at a fresh pose.
-            if pose_changed[articulation] != wp.int32(0):
-                frames_current = False
-                rows_current = False
-                if lane == wp.int32(0):
-                    pose_changed[articulation] = wp.int32(0)
         local = wp.transform_identity()
         origin = wp.vec3(0.0)
         if frames_current:
@@ -1618,7 +1608,7 @@ def make_dense_substep_kernel(
         while k < n:
             _store(shared, wp.int32(qd_base) + k, joint_qd[dof_start + k])
             k += wp.int32(_LANES)
-        if reuse_factor and frames_current and not _warp_any(diagonal_changed):
+        if reuse_factor and not _warp_any(diagonal_changed):
             restore(shared, articulation, lane, dof_start, n, motion, dense)
         else:
             # The relax step stores its factor for the next biased step.
@@ -1641,6 +1631,8 @@ def make_dense_substep_kernel(
         _sync_contact_warp()
         x_com = wp.transform_get_translation(local * body_x_com[tree.child])
 
+        held = wp.spatial_vector()
+        held_origin = origin
         if wp.static(not relax):
             # Free rates under joint, drive, external, and gravity forces.
             if tree.joint >= wp.int32(0):
@@ -1658,6 +1650,16 @@ def make_dense_substep_kernel(
                         joint_f[tree.qd_start + 3], joint_f[tree.qd_start + 4], joint_f[tree.qd_start + 5]
                     )
                     bias -= wp.spatial_vector(control_force, control_torque + wp.cross(x_com, control_force))
+                if wp.static(coupled):
+                    # The contacts between trees act with the impulses of their last biased
+                    # sweeps, push-out included, so that this tree's own contacts and its
+                    # integration answer them. The sweeps after this kernel solve for the
+                    # change: they start from the opposite of what is applied here and add
+                    # the impulses the contacts still hold.
+                    held = bodies.reduced.carried_wrench[tree.child]
+                    if wp.length_sq(held) > wp.float32(0.0):
+                        bias -= idt * held
+                        bodies.reduced.deferred_pending[articulation] = wp.int32(1)
                 _store_spatial(shared, wp.int32(first_base) + wp.int32(_MOTION_STRIDE) * lane, bias)
             _sync_contact_warp()
             solve_forces(shared, tree, lane, dof_start, wp.int32(first_base), joint_f, implicit_force, n)
@@ -1668,6 +1670,44 @@ def make_dense_substep_kernel(
                 joint_qd[dof_start + k] = rate
                 k += wp.int32(_LANES)
             _sync_contact_warp()
+
+        if wp.static(relax and coupled):
+            # Changes of the impulses between trees against what the biased kernel applied,
+            # see ReducedPhoenXArticulation._solve_cross_contacts: this tree's rates change by
+            # M^-1 J^T of the change after the relax sweeps, and the next biased kernel
+            # applies the impulses after the biased sweeps.
+            if bodies.reduced.deferred_pending[articulation] != wp.int32(0):
+                if tree.joint >= wp.int32(0):
+                    _store_spatial(
+                        shared,
+                        wp.int32(first_base) + wp.int32(_MOTION_STRIDE) * lane,
+                        -bodies.reduced.deferred_wrench[tree.child],
+                    )
+                    bodies.reduced.carried_wrench[tree.child] = (
+                        bodies.reduced.carried_wrench[tree.child] + bodies.reduced.biased_wrench[tree.child]
+                    )
+                    bodies.reduced.deferred_wrench[tree.child] = wp.spatial_vector()
+                    bodies.reduced.biased_wrench[tree.child] = wp.spatial_vector()
+                _sync_contact_warp()
+                solve_forces(
+                    shared,
+                    tree,
+                    lane,
+                    dof_start,
+                    wp.int32(first_base),
+                    zero_generalized_force,
+                    zero_generalized_force,
+                    n,
+                )
+                k = lane
+                while k < n:
+                    rate = _load(shared, wp.int32(qd_base) + k) + _load(shared, wp.int32(rhs_base) + k)
+                    _store(shared, wp.int32(qd_base) + k, rate)
+                    joint_qd[dof_start + k] = rate
+                    k += wp.int32(_LANES)
+                _sync_contact_warp()
+                if lane == wp.int32(0):
+                    bodies.reduced.deferred_pending[articulation] = wp.int32(0)
 
         if contacts_active:
             section_start = wp.int32(0)
@@ -1681,7 +1721,7 @@ def make_dense_substep_kernel(
             total_points = _warp_sum_int(local_points)
             pages = (total_points + wp.int32(_POINTS_PER_PAGE - 1)) // wp.int32(_POINTS_PER_PAGE)
             # The relax step before left the rows of every page that has storage of its own.
-            gathered = rows_current and pages <= wp.int32(_CACHED_PAGE_COUNT)
+            gathered = reuse_rows and pages <= wp.int32(_CACHED_PAGE_COUNT)
             for page in range(pages):
                 if not gathered:
                     gather(
@@ -2030,6 +2070,14 @@ def make_dense_substep_kernel(
             body_q_com,
             joint_anchor_local,
         )
+        if wp.static(coupled):
+            if tree.joint >= wp.int32(0) and wp.length_sq(held) > wp.float32(0.0):
+                # The same impulses, about the origin this step moved.
+                force = wp.spatial_top(held)
+                held = wp.spatial_vector(force, wp.spatial_bottom(held) - wp.cross(origin - held_origin, force))
+                bodies.reduced.carried_wrench[tree.child] = held
+                bodies.reduced.deferred_wrench[tree.child] = -held
+                bodies.reduced.biased_wrench[tree.child] = -held
         if tree.joint >= wp.int32(0):
             if chained:
                 world = wp.transform(origin + wp.transform_get_translation(local), wp.transform_get_rotation(local))
@@ -2095,7 +2143,11 @@ def dense_substep_blockers(articulation) -> list[str]:
     elif dense.has_fallback:
         reasons.extend(dense.fallback_reasons)
     # Contacts that couple two trees are solved between the fused kernels, see
-    # ReducedPhoenXArticulation._solve_cross_contacts.
+    # ReducedPhoenXArticulation._solve_cross_contacts. Contacts within one tree that its
+    # block cannot own still need the articulated-body pair response.
+    contact = articulation.contact_block_system
+    if contact.requires_impulse_response and not contact.packed_internal_contacts:
+        reasons.append("contacts within a tree that its block does not own")
     if articulation.loop_system.count:
         reasons.append("loop joints")
     if articulation.system.runtime_slots:
@@ -2135,10 +2187,17 @@ class DenseSubstep:
     def __init__(self, articulation):
         self.articulation = articulation
         self.system = articulation.system
-        #: Nonzero for trees whose coordinates the cross-contact solve changed since the biased kernel.
-        self.pose_changed = wp.zeros(
-            max(1, int(articulation.model.articulation_count)), dtype=wp.int32, device=articulation.model.device
-        )
+        contact = articulation.contact_block_system
+        if contact.requires_impulse_response:
+            # Contacts between trees are solved between the kernels with the links' responses
+            # from the dense factor, and the relax kernel applies the collected link impulses.
+            contact.flush_fallback = False
+            reduced = articulation.bodies.reduced
+            model = articulation.model
+            path = max(bucket.path_capacity for bucket in self.system.dense.buckets)
+            reduced.link_response = 1
+            reduced.link_path = wp.zeros((int(model.body_count), path), dtype=wp.spatial_vector, device=model.device)
+            reduced.link_path_dof = wp.full((int(model.body_count), path), -1, dtype=wp.int32, device=model.device)
         self.dense = self.system.dense
         self.contact = articulation.contact_block_system
         # The relax step gathers the contact rows at the pose the next biased step starts
@@ -2287,7 +2346,6 @@ class DenseSubstep:
                     contact.patch_lambda,
                     contact.normal_load,
                     self._dof_parameters,
-                    self.pose_changed,
                     articulation.bodies,
                 ],
                 device=model.device,

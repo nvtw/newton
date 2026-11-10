@@ -315,6 +315,16 @@ def _deferred_endpoint_inverse_mass(
         return _rigid_endpoint_inverse_mass(bodies, body, point, direction)
     point_local = _reduced_point_local(bodies, body, point)
     wrench = wp.spatial_vector(direction, wp.cross(point_local, direction))
+    data = bodies.reduced
+    if data.link_response != wp.int32(0):
+        link = body - wp.int32(1)
+        inverse_mass = wp.float32(0.0)
+        for position in range(data.link_path.shape[1]):
+            if data.link_path_dof[link, position] < wp.int32(0):
+                break
+            rate = wp.dot(data.link_path[link, position], wrench)
+            inverse_mass += rate * rate
+        return inverse_mass
     return wp.dot(wrench, _response_matrix_multiply(bodies, body - wp.int32(1), wrench))
 
 
@@ -346,6 +356,15 @@ def _defer_articulation_impulse(bodies: BodyContainer, body: wp.int32, point: wp
     wrench = wp.spatial_vector(impulse, wp.cross(point_local, impulse))
     joint = data.body_joint[link]
     data.deferred_pending[data.body_articulation[body]] = wp.int32(1)
+    if data.link_response != wp.int32(0):
+        # The tree's deferred rates answer every later query on any of its links.
+        data.deferred_wrench[link] = data.deferred_wrench[link] + wrench
+        for position in range(data.link_path.shape[1]):
+            dof = data.link_path_dof[link, position]
+            if dof < wp.int32(0):
+                break
+            data.deferred_rate[dof] = data.deferred_rate[dof] + wp.dot(data.link_path[link, position], wrench)
+        return
     while joint >= wp.int32(0):
         data.deferred_wrench[link] = data.deferred_wrench[link] + wrench
         dof_start = data.joint_qd_start[joint]
@@ -449,6 +468,14 @@ def flush_deferred_articulation(bodies: BodyContainer, articulation: wp.int32):
 def _deferred_link_delta_twist(bodies: BodyContainer, body_slot: wp.int32) -> wp.spatial_vector:
     data = bodies.reduced
     body = body_slot - wp.int32(1)
+    if data.link_response != wp.int32(0):
+        twist = wp.spatial_vector()
+        for position in range(data.link_path.shape[1]):
+            dof = data.link_path_dof[body, position]
+            if dof < wp.int32(0):
+                break
+            twist += data.link_path[body, position] * data.deferred_rate[dof]
+        return twist
     delta = wp.spatial_vector()
     start = data.body_path_start[body]
     end = data.body_path_start[body + wp.int32(1)]
@@ -526,7 +553,11 @@ def _prepare_contact_bias_geometry(
         unconstrained = _rigid_endpoint_inverse_mass(bodies, body0, point, normal) + _rigid_endpoint_inverse_mass(
             bodies, body1, point, normal
         )
-        constrained = _pair_inverse_mass(bodies, body0, point, body1, point, normal)
+        constrained = wp.float32(0.0)
+        if bodies.reduced.link_response != wp.int32(0):
+            constrained = _deferred_inverse_mass(bodies, body0, point, body1, point, normal)
+        else:
+            constrained = _pair_inverse_mass(bodies, body0, point, body1, point, normal)
         if unconstrained > wp.float32(1.0e-12):
             bias *= wp.clamp(constrained / unconstrained, wp.float32(0.0), wp.float32(1.0))
     cc_set_bias(contacts_state, contact, bias)

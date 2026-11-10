@@ -578,7 +578,7 @@ class TestReducedDenseBackend(unittest.TestCase):
                 self.assertTrue(np.isfinite(body_q).all())
                 # Nothing sinks into what carries it, and everything comes to rest.
                 np.testing.assert_allclose(body_q[:, 2], reference_q[:, 2], atol=5.0e-3)
-                self.assertLess(float(np.abs(body_qd[:, :3]).max()), 0.06)
+                self.assertLess(float(np.abs(body_qd).max()), 0.005 if scene == "stacked" else 0.06)
                 if scene == "owned":
                     # The one tree under the box solves it in its own block: nothing crosses.
                     self.assertEqual(int(owners[-1]), 1)
@@ -591,6 +591,61 @@ class TestReducedDenseBackend(unittest.TestCase):
                     # Two trees touch each other: their contacts are solved between the kernels.
                     self.assertTrue(np.all(owners == -1))
                     self.assertGreater(cross, 0)
+
+    def test_fused_substep_conserves_momentum_when_trees_collide_under_graph_capture(self):
+        """Two chains that meet in free flight, and then fold onto themselves, keep their momentum."""
+        device = _require_cuda(self)
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
+        builder.default_shape_cfg.gap = 0.005
+        builder.default_shape_cfg.mu = 0.6
+        for x, y, z, speed in ((0.0, 0.0, 0.0, 1.0), (1.2, 0.1, 0.05, -0.5)):
+            first = builder.joint_count
+            previous = -1
+            for i in range(3):
+                body = builder.add_link(xform=wp.transform(wp.vec3(x + 0.3 * i, y, z), wp.quat_identity()))
+                builder.add_shape_box(body, hx=0.14, hy=0.14, hz=0.14)
+                if previous < 0:
+                    builder.add_joint_free(body)
+                else:
+                    builder.add_joint_revolute(
+                        previous,
+                        body,
+                        parent_xform=wp.transform(wp.vec3(0.15, 0.0, 0.0), wp.quat_identity()),
+                        child_xform=wp.transform(wp.vec3(-0.15, 0.0, 0.0), wp.quat_identity()),
+                        axis=newton.Axis.Y,
+                    )
+                previous = body
+            builder.add_articulation(list(range(first, builder.joint_count)))
+            builder.joint_qd[builder.joint_qd_start[first]] = speed
+        model = builder.finalize(device=device)
+        pipeline = newton.CollisionPipeline(model, contact_matching="sticky")
+        solver = newton.solvers.SolverPhoenX(
+            model, collision_pipeline=pipeline, joint_mode="reduced", substeps=4, solver_iterations=4
+        )
+        self.assertIsNotNone(solver._reduced_articulation.fused_substep)
+        state, output = model.state(), model.state()
+        newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+        linear_start, angular_start = _momentum(model, state)
+        contacts = pipeline.contacts()
+        with wp.ScopedCapture() as capture:
+            pipeline.collide(state, contacts)
+            solver.step(state, output, None, contacts, 1.0 / 60.0)
+            for name in ("body_q", "body_qd", "joint_q", "joint_qd"):
+                wp.copy(getattr(state, name), getattr(output, name))
+        crossed = False
+        touched_itself = False
+        for _ in range(240):
+            wp.capture_launch(capture.graph)
+            cross = int(solver._reduced_articulation.contact_block_system.cross_column_count.numpy()[0])
+            crossed = crossed or cross > 0
+            touched_itself = touched_itself or (cross == 0 and int(contacts.rigid_contact_count.numpy()[0]) > 0)
+        # The chains met each other, and one then touched itself.
+        self.assertTrue(crossed)
+        self.assertTrue(touched_itself)
+        linear, angular = _momentum(model, state)
+        # The chains carry about 100 kg m/s.
+        np.testing.assert_allclose(linear, linear_start, atol=0.05)
+        np.testing.assert_allclose(angular, angular_start, atol=0.03)
 
     def test_reduced_articulations_selects_by_index_or_label(self):
         device = _require_cuda(self)

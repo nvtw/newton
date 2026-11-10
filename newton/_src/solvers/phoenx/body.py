@@ -169,7 +169,25 @@ class ReducedArticulationData:
     body_acceleration: wp.array[wp.spatial_vector]
     generalized_response: wp.array[wp.float32]
     impulse_response: wp.array2d[wp.spatial_vector]
+    #: Nonzero when ``link_path`` answers wrenches on links and ``deferred_wrench`` collects the
+    #: wrench impulses per link, which the fused relax kernel applies. Zero for the
+    #: articulated-body recurrences along root paths.
+    link_response: wp.int32
+    #: With ``link_response``, per link and position on its root path the row ``z`` of
+    #: ``Z = L^-T J^T`` for the dense factor ``M = L^T L``: a wrench ``w`` on the link changes
+    #: the tree's ``deferred_rate`` at ``link_path_dof`` by ``z . w``, and the link's twist is
+    #: the sum of ``z`` times that rate. ``link_path_dof`` is -1 past the end of the path.
+    link_path: wp.array2d[wp.spatial_vector]
+    link_path_dof: wp.array2d[wp.int32]
+    #: With ``link_response``, per DOF the sum of ``Z w`` over the deferred wrenches of a tree.
+    deferred_rate: wp.array[wp.float32]
     deferred_wrench: wp.array[wp.spatial_vector]
+    #: With ``link_response``, ``deferred_wrench`` as the biased sweeps left it.
+    biased_wrench: wp.array[wp.spatial_vector]
+    #: With ``link_response``, the wrench impulse per link that the fused biased kernel applies
+    #: as a force: what the contacts between trees held after their last biased sweeps.
+    #: ``deferred_wrench`` then collects the change against it.
+    carried_wrench: wp.array[wp.spatial_vector]
     #: Per articulation, nonzero while deferred wrenches await :func:`flush_deferred_articulation`.
     deferred_pending: wp.array[wp.int32]
     #: Per body slot, the one articulation whose fused substep solves its contacts with
@@ -211,6 +229,11 @@ def reduced_articulation_data_zeros(device: wp.DeviceLike = None) -> ReducedArti
     data.generalized_response = wp.zeros(1, dtype=wp.float32, device=device)
     data.impulse_response = wp.zeros((1, 6), dtype=wp.spatial_vector, device=device)
     data.deferred_wrench = wp.zeros(1, dtype=wp.spatial_vector, device=device)
+    data.link_path = wp.zeros((1, 1), dtype=wp.spatial_vector, device=device)
+    data.link_path_dof = wp.full((1, 1), -1, dtype=wp.int32, device=device)
+    data.deferred_rate = wp.zeros(1, dtype=wp.float32, device=device)
+    data.biased_wrench = wp.zeros(1, dtype=wp.spatial_vector, device=device)
+    data.carried_wrench = wp.zeros(1, dtype=wp.spatial_vector, device=device)
     data.deferred_pending = wp.zeros(1, dtype=wp.int32, device=device)
     data.external_owner = wp.full(1, value=-1, dtype=wp.int32, device=device)
     data.external_lowest = wp.full(1, value=-1, dtype=wp.int32, device=device)

@@ -1271,67 +1271,6 @@ def _compute_reduced_local_kinematics_kernel(
         body_q_com[child] = child_transform * body_x_com[child]
 
 
-@wp.kernel(enable_backward=False)
-def _integrate_rate_change_kernel(
-    joint_type: wp.array[wp.int32],
-    joint_parent: wp.array[wp.int32],
-    joint_child: wp.array[wp.int32],
-    joint_q_start: wp.array[wp.int32],
-    joint_qd_start: wp.array[wp.int32],
-    joint_x_c: wp.array[wp.transform],
-    body_com: wp.array[wp.vec3],
-    rates: wp.array[wp.float32],
-    rates_before: wp.array[wp.float32],
-    dt: wp.float32,
-    joint_q: wp.array[wp.float32],
-):
-    """Advance joint coordinates by the change of their public rates over ``dt``.
-
-    A free joint's public rates are its child's COM velocity and angular velocity in the
-    parent anchor frame, so the COM translates and the child turns about it.
-    """
-    joint = wp.tid()
-    kind = joint_type[joint]
-    q = joint_q_start[joint]
-    qd = joint_qd_start[joint]
-    count = joint_qd_start[joint + 1] - qd
-    if kind == JointType.FREE or kind == JointType.DISTANCE:
-        linear = wp.vec3(
-            rates[qd] - rates_before[qd],
-            rates[qd + 1] - rates_before[qd + 1],
-            rates[qd + 2] - rates_before[qd + 2],
-        )
-        angular = wp.vec3(
-            rates[qd + 3] - rates_before[qd + 3],
-            rates[qd + 4] - rates_before[qd + 4],
-            rates[qd + 5] - rates_before[qd + 5],
-        )
-        position = wp.vec3(joint_q[q], joint_q[q + 1], joint_q[q + 2])
-        rotation = wp.quat(joint_q[q + 3], joint_q[q + 4], joint_q[q + 5], joint_q[q + 6])
-        com_joint = wp.transform_point(wp.transform_inverse(joint_x_c[joint]), body_com[joint_child[joint]])
-        com = position + wp.quat_rotate(rotation, com_joint)
-        rotation = wp.normalize(rotation + wp.quat(angular, 0.0) * rotation * (0.5 * dt))
-        position = com + dt * linear - wp.quat_rotate(rotation, com_joint)
-        for axis in range(3):
-            joint_q[q + axis] = position[axis]
-        for axis in range(4):
-            joint_q[q + 3 + axis] = rotation[axis]
-    elif kind == JointType.BALL:
-        angular = wp.vec3(
-            rates[qd] - rates_before[qd],
-            rates[qd + 1] - rates_before[qd + 1],
-            rates[qd + 2] - rates_before[qd + 2],
-        )
-        rotation = wp.quat(joint_q[q], joint_q[q + 1], joint_q[q + 2], joint_q[q + 3])
-        rotation = wp.normalize(rotation + wp.quat(angular, 0.0) * rotation * (0.5 * dt))
-        for axis in range(4):
-            joint_q[q + axis] = rotation[axis]
-    else:
-        # One coordinate per rate: revolute, prismatic, universal, and D6 axes.
-        for axis in range(count):
-            joint_q[q + axis] += dt * (rates[qd + axis] - rates_before[qd + axis])
-
-
 @wp.func
 def initialize_reduced_rates(
     joint: wp.int32,
@@ -4403,6 +4342,8 @@ class ReducedArticulationSystem:
         self.generalized_rhs = wp.zeros(dof_count, dtype=wp.float32, device=self.device)
         self.impulse_response = wp.zeros((body_count, 6), dtype=wp.spatial_vector, device=self.device)
         self.deferred_wrench = wp.zeros(body_count, dtype=wp.spatial_vector, device=self.device)
+        self.biased_wrench = wp.zeros(body_count, dtype=wp.spatial_vector, device=self.device)
+        self.carried_wrench = wp.zeros(body_count, dtype=wp.spatial_vector, device=self.device)
         self.deferred_pending = wp.zeros(max(1, articulation_count), dtype=wp.int32, device=self.device)
         self.target_linear_momentum = wp.zeros(articulation_count, dtype=wp.vec3, device=self.device)
         # Model data and scratch for the midpoint step of fast trees, see _midpoint_momentum_step.
@@ -5147,6 +5088,13 @@ class ReducedPhoenXArticulation:
         reduced.generalized_response = self.system.generalized_acceleration
         reduced.impulse_response = self.system.impulse_response
         reduced.deferred_wrench = self.system.deferred_wrench
+        reduced.link_path = wp.zeros((1, 1), dtype=wp.spatial_vector, device=self.model.device)
+        reduced.link_path_dof = wp.full((1, 1), -1, dtype=wp.int32, device=self.model.device)
+        reduced.deferred_rate = wp.zeros(
+            max(1, int(self.model.joint_dof_count)), dtype=wp.float32, device=self.model.device
+        )
+        reduced.biased_wrench = self.system.biased_wrench
+        reduced.carried_wrench = self.system.carried_wrench
         reduced.deferred_pending = self.system.deferred_pending
         reduced.external_owner = wp.full(int(model.body_count) + 1, value=-1, dtype=wp.int32, device=model.device)
         reduced.external_lowest = wp.full_like(reduced.external_owner, value=-1)
@@ -5221,11 +5169,6 @@ class ReducedPhoenXArticulation:
         # Fused substep of dense trees with private contacts, installed by the solver. A relax
         # step leaves its factor for the next biased step at the same pose.
         self.fused_substep = None
-        #: Public rates before the cross-contact solve of a fused substep.
-        self._cross_rates_before = wp.zeros(max(1, int(model.joint_dof_count)), dtype=wp.float32, device=model.device)
-        self._cross_boost_all = wp.zeros(max(1, int(model.articulation_count)), dtype=wp.int32, device=model.device)
-        #: Linear momentum of every tree after the cross-contact impulses.
-        self._cross_momentum = wp.zeros(max(1, int(model.articulation_count)), dtype=wp.vec3, device=model.device)
         self._relaxed_pose_factored = False
         self.owned_joint_mask_np = self.tree_joint_mask_np.copy()
         self.owned_joint_mask_np[self.loop_system.joint_indices_np] = True
@@ -5343,109 +5286,54 @@ class ReducedPhoenXArticulation:
         if compute_impulse_response:
             self._refresh_impulse_response()
 
-    def _solve_cross_contacts(self, world, dt: float, *, relax: bool = False) -> None:
+    def _solve_cross_contacts(self, world, dt: float) -> None:
         """Solve the contacts between articulations that the fused substep leaves out.
 
-        The fused kernels own the contacts of one tree. Contacts that cross between two trees,
-        or reach a free body no tree owns, are scheduled as fallback columns; they are solved
-        here, between the biased and the relax kernel, with the articulated-body impulse
-        response at the integrated pose. The impulses on both sides are equal and opposite and
-        enter the rates the relax kernel continues from. The poses follow in the next substep.
+        The fused kernels own the contacts of one tree and of the free bodies it shares with
+        at most one other tree. Contacts between two trees, or with a free body that more trees
+        touch, are scheduled as fallback columns and solved here, after the biased kernel, by
+        the colored fallback sweeps. Each link answers with its own response matrix from the
+        stored dense factor, so a sweep walks no root path. The equal and opposite impulses are
+        collected per link, and the relax kernel of each tree applies them with its own factor.
+
+        The biased kernel has integrated the poses already, so it applies the impulses of the
+        last biased sweeps here, push-out included, as a force: a tree's own contacts and its
+        integration answer them. The sweeps solve for the change. They start from the opposite
+        of that force and warm start with the impulses the contacts still hold; the rates take
+        the change after the relax sweeps, and the next biased kernel applies the impulses
+        after the biased sweeps. A load that persists therefore needs no correction at all.
         """
         contacts = self.contact_block_system
-        if world.max_contact_columns <= 0:
+        if world.max_contact_columns <= 0 or world.solver_iterations <= 0:
             return
-        idt = wp.float32(1.0 / float(dt))
 
-        def solve_fallback(iterations: int, *, relax: bool, prepare: bool) -> None:
-            if iterations > 0:
+        def solve() -> None:
+            self.system.dense.factor_mass()
+            contacts.refresh_link_responses(world._contact_cols, world.bodies)
+            contacts.solve_fallback(
+                world._contact_cols,
+                world.bodies,
+                wp.float32(1.0 / float(dt)),
+                world.sor_boost,
+                world._contact_container,
+                world._active_contact_views(),
+                world.solver_iterations,
+                use_bias=True,
+                prepare=True,
+            )
+            wp.copy(self.system.biased_wrench, self.system.deferred_wrench)
+            if world._active_velocity_iterations > 0:
                 contacts.solve_fallback(
                     world._contact_cols,
                     world.bodies,
-                    idt,
+                    wp.float32(1.0 / float(dt)),
                     world.sor_boost,
                     world._contact_container,
                     world._active_contact_views(),
-                    iterations,
-                    use_bias=not relax,
-                    prepare=prepare,
+                    world._active_velocity_iterations,
+                    use_bias=False,
+                    prepare=False,
                 )
-
-        def solve() -> None:
-            model = self.model
-            # The fused kernels keep the public rates; the articulated-body factor forms its
-            # internal rates from them at the published pose.
-            wp.copy(self._cross_rates_before, self.state.joint_qd)
-            self.system.factor(self.state, self.control, dt, update_kinematics=True)
-            self._refresh_impulse_response()
-            solve_fallback(world.solver_iterations, relax=False, prepare=True)
-            self._publish_state(0.0, update_configuration=False)
-            momentum_inputs = [model.articulation_start, model.articulation_end]
-            wp.launch(
-                _capture_reduced_linear_momentum_kernel,
-                dim=int(model.articulation_count),
-                inputs=[*momentum_inputs, model.joint_child, model.body_mass, self.bodies],
-                outputs=[self._cross_momentum],
-                device=model.device,
-            )
-            # The fused kernel integrated the coordinates with the rates from before these
-            # impulses: integrate the change of the rates as well, as one solve of all rows
-            # would have, and have the relax kernel form its frames at the corrected pose.
-            wp.launch(
-                _integrate_rate_change_kernel,
-                dim=int(model.joint_count),
-                inputs=[
-                    model.joint_type,
-                    model.joint_parent,
-                    model.joint_child,
-                    model.joint_q_start,
-                    model.joint_qd_start,
-                    model.joint_X_c,
-                    model.body_com,
-                    self.state.joint_qd,
-                    self._cross_rates_before,
-                    wp.float32(dt),
-                ],
-                outputs=[self.state.joint_q],
-                device=model.device,
-            )
-            eval_fk(model, self.state.joint_q, self.state.joint_qd, self.state)
-            self.sync_bodies()
-            # The same rates at the corrected pose carry a slightly different linear momentum.
-            wp.launch(
-                _boost_reduced_linear_momentum_kernel,
-                dim=int(model.articulation_count),
-                inputs=[
-                    *momentum_inputs,
-                    model.joint_type,
-                    model.joint_child,
-                    model.joint_qd_start,
-                    model.joint_X_p,
-                    model.body_mass,
-                    self._cross_momentum,
-                    self.system.joint_s_publish,
-                    self.bodies,
-                ],
-                outputs=[
-                    self.system.joint_qd_internal,
-                    self.state.joint_qd,
-                    self.state.body_qd,
-                    # Also for trees on the midpoint step, which only conserves its own integration.
-                    self._cross_boost_all,
-                ],
-                device=model.device,
-            )
-            self.fused_substep.pose_changed.fill_(1)
-
-        def relax_rows() -> None:
-            # After the free bodies integrated too, relax sweeps remove the velocity the bias left.
-            self.system.factor(self.state, self.control, dt, update_kinematics=True)
-            self._refresh_impulse_response()
-            solve_fallback(world._active_velocity_iterations, relax=True, prepare=True)
-            self._publish_state(0.0, update_configuration=False)
-
-        if relax:
-            solve = relax_rows
 
         # Most steps of a large scene have no such contact: skip the stage on the device.
         wp.capture_if(contacts.cross_column_count, on_true=solve)
@@ -5927,8 +5815,6 @@ class ReducedPhoenXArticulation:
         if self.fused_substep is not None:
             # The biased solve already ran in begin_substep.
             if relax and world._reduced_contacts_active_this_step:
-                if self.contact_block_system.requires_impulse_response:
-                    self._solve_cross_contacts(world, world.substep_dt, relax=True)
                 self.fused_substep.relax(world, world.substep_dt)
                 self._relaxed_pose_factored = True
             return
