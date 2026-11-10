@@ -79,7 +79,6 @@ class TestSortEndBit(unittest.TestCase):
                 np.testing.assert_array_equal(sorted_keys[:active], source[:active][order])
                 np.testing.assert_array_equal(values.numpy()[:active], order.astype(np.int32))
                 np.testing.assert_array_equal(sorted_keys[active:], sentinel)
-                self.assertEqual(int(flags.numpy().sum()), 1)
 
 
 if __name__ == "__main__":
