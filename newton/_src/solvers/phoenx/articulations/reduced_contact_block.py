@@ -114,10 +114,6 @@ def _fallback_world_block_dim(world_count: int, sm_count: int) -> int:
     return 1 if world_count < _FALLBACK_SERIAL_WORLDS_PER_SM * sm_count else 32
 
 
-#: Free rigid bodies one articulation's fused substep can solve contacts with.
-EXTERNAL_BODY_SLOTS = 8
-
-
 def _model_pair_endpoints(model: Model):
     """Return the bodies, articulations, and static flags of the model's shape pairs, or ``None``."""
     capacity = getattr(model, "_dynamic_capacity", None)
@@ -150,7 +146,7 @@ def _model_pair_endpoints(model: Model):
 def _external_rigid_owners(model: Model, allow_internal: bool) -> tuple[np.ndarray, bool] | None:
     """Assign each free rigid body that pairs with a tree to that tree's fused substep.
 
-    Returns ``8 * articulation + slot`` per model body, -1 for the others, and whether
+    Returns the articulation per model body, -1 for the others, and whether
     two links of one tree may touch; or ``None`` unless every pair is a tree against
     static geometry, a tree against a free body that pairs with no other tree, two
     links of one tree where ``allow_internal``, or free of trees.
@@ -165,20 +161,13 @@ def _external_rigid_owners(model: Model, allow_internal: bool) -> tuple[np.ndarr
     if np.any(reduced0 & reduced1 & ~internal) or (np.any(internal) and not allow_internal):
         return None
     owners = np.full(int(model.body_count), -1, dtype=np.int32)
-    used = np.zeros(max(1, int(model.articulation_count)), dtype=np.int32)
     coupled = ((reduced0 & ~static1) | (reduced1 & ~static0)) & ~internal
     bodies = np.where(reduced0, body1, body0)[coupled]
     articulations = np.where(reduced0, articulation0, articulation1)[coupled]
     for body, articulation in zip(bodies.tolist(), articulations.tolist(), strict=True):
-        owner = int(owners[body])
-        if owner >= 0:
-            if owner >> 3 != articulation:
-                return None
-            continue
-        if used[articulation] == EXTERNAL_BODY_SLOTS:
+        if owners[body] >= 0 and owners[body] != articulation:
             return None
-        owners[body] = 8 * articulation + int(used[articulation])
-        used[articulation] += 1
+        owners[body] = articulation
     return owners, bool(np.any(internal))
 
 

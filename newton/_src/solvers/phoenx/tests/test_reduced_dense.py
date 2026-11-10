@@ -144,6 +144,13 @@ def _make_chain_and_free_box(device, *, resting: bool) -> tuple[newton.Model, in
     else:
         box = builder.add_body(xform=wp.transform(wp.vec3(0.95, 0.1, 0.12), wp.quat_identity()))
         builder.add_shape_box(box, hx=0.2, hy=0.2, hz=0.2)
+        # A second box in the chain's way and a dozen out of reach: a tree may touch several
+        # free bodies at once and pair with any number.
+        other = builder.add_body(xform=wp.transform(wp.vec3(0.95, -0.35, -0.1), wp.quat_identity()))
+        builder.add_shape_box(other, hx=0.2, hy=0.2, hz=0.2)
+        for i in range(12):
+            far = builder.add_body(xform=wp.transform(wp.vec3(4.0 + 0.5 * i, 3.0, 0.0), wp.quat_identity()))
+            builder.add_shape_box(far, hx=0.1, hy=0.1, hz=0.1)
         builder.joint_qd[0] = 1.0
         builder.joint_qd[4] = 0.5
         builder.joint_qd[6] = 2.0

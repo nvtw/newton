@@ -222,10 +222,7 @@ def _apply_pair_impulse(
 @wp.func
 def _external_owner(bodies: BodyContainer, body: wp.int32) -> wp.int32:
     """Return the articulation whose fused substep solves contacts with a free rigid body, or -1."""
-    owner = bodies.reduced.external_owner[body]
-    if owner < wp.int32(0):
-        return wp.int32(-1)
-    return owner >> wp.int32(3)
+    return bodies.reduced.external_owner[body]
 
 
 @wp.func

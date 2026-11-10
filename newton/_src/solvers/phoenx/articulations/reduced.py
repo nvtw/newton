@@ -31,7 +31,6 @@ from newton._src.solvers.phoenx.articulations.reduced_contact import (
 from newton._src.solvers.phoenx.articulations.reduced_contact_block import (
     _POINTS_PER_PAGE,
     _SOLVE_GENERALIZED_CONTACT_TILE_DEVICES,
-    EXTERNAL_BODY_SLOTS,
     ReducedContactBlockSystem,
     _finalize_reduced_contact_rows_device,
     _model_pair_endpoints,
@@ -5081,9 +5080,6 @@ class ReducedPhoenXArticulation:
         reduced.deferred_wrench = self.system.deferred_wrench
         reduced.deferred_pending = self.system.deferred_pending
         reduced.external_owner = wp.full(int(model.body_count) + 1, value=-1, dtype=wp.int32, device=model.device)
-        reduced.external_body = wp.full(
-            EXTERNAL_BODY_SLOTS * max(1, int(model.articulation_count)), value=-1, dtype=wp.int32, device=model.device
-        )
         reduced.body_joint = wp.array(body_joint_np, device=model.device)
         reduced.body_path_start = wp.array(body_path_start_np, device=model.device)
         reduced.body_path_joint = wp.array(
@@ -5135,11 +5131,7 @@ class ReducedPhoenXArticulation:
             self.external_rigid_rows = True
             owner_np = np.full(int(model.body_count) + 1, -1, dtype=np.int32)
             owner_np[1:] = external_owner
-            body_np = np.full(reduced.external_body.shape[0], -1, dtype=np.int32)
-            owned = np.flatnonzero(owner_np >= 0)
-            body_np[owner_np[owned]] = owned
             reduced.external_owner.assign(owner_np)
-            reduced.external_body.assign(body_np)
         if dense is not None:
             # Coupled contacts and loop closures still read the articulated-body factor.
             dense.requires_aba = (
