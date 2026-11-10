@@ -514,12 +514,36 @@ class TestMultiWorldPgsOrder(unittest.TestCase):
 
         canonical = make_sim(False)
         packed = make_sim(True)
-        for _ in range(12):
-            step(canonical)
-            step(packed)
+        nudged = make_sim(False)
+        nudged_q = nudged[3].body_q.numpy()
+        nudged_q[:, :3] = np.nextafter(nudged_q[:, :3], np.float32(np.inf))
+        nudged[3].body_q.assign(nudged_q)
 
+        # Packed rows cache the tangent mobility that canonical rows invert
+        # each sweep, so the layouts agree to round-off. One step solves the
+        # same rows and stays at float32 resolution.
+        for sim in (canonical, packed, nudged):
+            step(sim)
         np.testing.assert_allclose(packed[3].body_q.numpy(), canonical[3].body_q.numpy(), rtol=1.0e-5, atol=1.0e-6)
         np.testing.assert_allclose(packed[3].body_qd.numpy(), canonical[3].body_qd.numpy(), rtol=1.0e-5, atol=1.0e-6)
+
+        # The overlapping stack then depenetrates at meters per second and
+        # amplifies round-off. Packing may move the bodies no more than a
+        # comparable round-off does in the canonical layout: one float32 ulp
+        # on the initial positions. The factor of ten covers the spread
+        # between two such samples; a wrong row or a lost impulse exceeds it
+        # by orders of magnitude. The former absolute tolerance is the floor.
+        for _ in range(11):
+            for sim in (canonical, packed, nudged):
+                step(sim)
+        canonical_q, canonical_qd = canonical[3].body_q.numpy(), canonical[3].body_qd.numpy()
+        q_bound = max(10.0 * np.abs(nudged[3].body_q.numpy() - canonical_q).max(), 1.0e-6)
+        qd_bound = max(10.0 * np.abs(nudged[3].body_qd.numpy() - canonical_qd).max(), 1.0e-6)
+        np.testing.assert_allclose(packed[3].body_q.numpy(), canonical_q, rtol=0.0, atol=q_bound)
+        np.testing.assert_allclose(packed[3].body_qd.numpy(), canonical_qd, rtol=0.0, atol=qd_bound)
+        # The comparison is only meaningful while the amplified round-off stays small.
+        self.assertLess(q_bound, 1.0e-3)
+        self.assertLess(qd_bound, 1.0e-2)
 
     def test_stable_rigid_coloring_matches_forced_rebuild(self) -> None:
         """Cached coloring must preserve an evolving deterministic solve."""
