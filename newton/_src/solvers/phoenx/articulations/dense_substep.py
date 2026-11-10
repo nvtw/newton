@@ -189,6 +189,19 @@ def _warp_any(value: wp.bool) -> wp.bool: ...
 @wp.func_native(
     """
 #if defined(__CUDA_ARCH__)
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        value += __shfl_xor_sync(0xffffffffu, value, offset);
+    }
+#endif
+    return value;
+"""
+)
+def _warp_sum_float(value: wp.float32) -> wp.float32: ...
+
+
+@wp.func_native(
+    """
+#if defined(__CUDA_ARCH__)
     return (blockIdx.z * gridDim.y + blockIdx.y) * gridDim.x + blockIdx.x;
 #else
     return 0;
@@ -560,26 +573,34 @@ def make_dense_substep_kernel(
         solve_mass(shared, wp.int32(rhs_base), n, lane)
 
     @wp.func
-    def row_dot(shared: _shared_handle, row: wp.int32) -> wp.float32:
-        """Return ``z_row . w``, the velocity change of a row under the impulses applied so far."""
+    def row_dot(shared: _shared_handle, lane: wp.int32, row: wp.int32) -> wp.float32:
+        """Return ``z_row . w``, the velocity change of a row under the impulses applied so far.
+
+        Every lane calls this with the same ``row``: the lanes stride over the path
+        positions and sum their products across the warp.
+        """
         total = wp.float32(0.0)
-        for position in range(z_positions):
-            index = wp.int32(PAGE_ROWS * position) + row
+        position = lane
+        while position < wp.int32(z_positions):
+            index = wp.int32(PAGE_ROWS) * position + row
             total += _load(shared, wp.int32(z_base) + index) * _load(
                 shared, wp.int32(rhs_base) + _load_u8(shared, wp.int32(z_dof_byte) + index)
             )
-        return total
+            position += wp.int32(_LANES)
+        return _warp_sum_float(total)
 
     @wp.func
-    def row_product(shared: _shared_handle, row: wp.int32, other: wp.int32) -> wp.float32:
-        """Return ``z_row . z_other``; root paths share DOFs on a common prefix only."""
+    def row_product(shared: _shared_handle, lane: wp.int32, row: wp.int32, other: wp.int32) -> wp.float32:
+        """Return ``z_row . z_other`` like :func:`row_dot`; root paths share DOFs on a common prefix only."""
         total = wp.float32(0.0)
-        for position in range(z_positions):
-            index = wp.int32(PAGE_ROWS * position) + row
-            other_index = wp.int32(PAGE_ROWS * position) + other
+        position = lane
+        while position < wp.int32(z_positions):
+            index = wp.int32(PAGE_ROWS) * position + row
+            other_index = wp.int32(PAGE_ROWS) * position + other
             if _load_u8(shared, wp.int32(z_dof_byte) + index) == _load_u8(shared, wp.int32(z_dof_byte) + other_index):
                 total += _load(shared, wp.int32(z_base) + index) * _load(shared, wp.int32(z_base) + other_index)
-        return total
+            position += wp.int32(_LANES)
+        return _warp_sum_float(total)
 
     @wp.func
     def add_row(shared: _shared_handle, lane: wp.int32, row: wp.int32, impulse: wp.float32):
@@ -839,6 +860,26 @@ def make_dense_substep_kernel(
             _bias_rate, mass_coeff, impulse_coeff = soft_constraint_coefficients(
                 DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, wp.float32(1.0) / idt
             )
+        # The products between a point's rows, or a column's tangent rows, hold for every sweep;
+        # the lane that projects them keeps them.
+        coupling = wp.vec3(0.0)
+        if sweeps > wp.int32(0):
+            if wp.static(patch):
+                for column_offset in range(chunk[3] - chunk[2]):
+                    row = chunk_points + wp.int32(2) * wp.int32(column_offset)
+                    product = row_product(shared, lane, row, row + wp.int32(1))
+                    if lane == row:
+                        coupling[0] = product
+            else:
+                for point_offset in range(chunk_points):
+                    row = wp.int32(3) * wp.int32(point_offset)
+                    products = wp.vec3(
+                        row_product(shared, lane, row, row + wp.int32(1)),
+                        row_product(shared, lane, row, row + wp.int32(2)),
+                        row_product(shared, lane, row + wp.int32(1), row + wp.int32(2)),
+                    )
+                    if lane == wp.int32(point_offset):
+                        coupling = products
         for sweep in range(sweeps):
             iteration = first_sweep + sweep
             for point_offset in range(chunk_points):
@@ -847,11 +888,12 @@ def make_dense_substep_kernel(
                     point = chunk_points - wp.int32(1) - wp.int32(point_offset)
                 if wp.static(patch):
                     delta_n = wp.float32(0.0)
+                    change = row_dot(shared, lane, point)
                     if lane == point:
                         update = _patch_normal_row_update(
                             bias_n,
                             lambda_n,
-                            velocity + row_dot(shared, point),
+                            velocity + change,
                             inverse_mass,
                             use_bias,
                             idt,
@@ -868,6 +910,11 @@ def make_dense_substep_kernel(
                 else:
                     row = wp.int32(3) * point
                     delta = wp.vec3(0.0)
+                    change = wp.vec3(
+                        row_dot(shared, lane, row),
+                        row_dot(shared, lane, row + wp.int32(1)),
+                        row_dot(shared, lane, row + wp.int32(2)),
+                    )
                     if lane == point:
                         delta = _solve_reduced_contact_point(
                             columns,
@@ -877,17 +924,11 @@ def make_dense_substep_kernel(
                             point_normal,
                             point_tangent,
                             wp.vec3(
-                                _load(shared, wp.int32(start_velocity_base) + row) + row_dot(shared, row),
-                                _load(shared, wp.int32(start_velocity_base) + row + wp.int32(1))
-                                + row_dot(shared, row + wp.int32(1)),
-                                _load(shared, wp.int32(start_velocity_base) + row + wp.int32(2))
-                                + row_dot(shared, row + wp.int32(2)),
+                                _load(shared, wp.int32(start_velocity_base) + row) + change[0],
+                                _load(shared, wp.int32(start_velocity_base) + row + wp.int32(1)) + change[1],
+                                _load(shared, wp.int32(start_velocity_base) + row + wp.int32(2)) + change[2],
                             ),
-                            wp.vec3(
-                                row_product(shared, row, row + wp.int32(1)),
-                                row_product(shared, row, row + wp.int32(2)),
-                                row_product(shared, row + wp.int32(1), row + wp.int32(2)),
-                            ),
+                            coupling,
                             use_bias,
                             idt,
                             mass_coeff,
@@ -902,6 +943,7 @@ def make_dense_substep_kernel(
                 for column_offset in range(chunk[3] - chunk[2]):
                     row = chunk_points + wp.int32(2) * wp.int32(column_offset)
                     delta_t = wp.vec2f(0.0, 0.0)
+                    change_t = wp.vec2f(row_dot(shared, lane, row), row_dot(shared, lane, row + wp.int32(1)))
                     if lane == row:
                         load_sum = wp.float32(0.0)
                         for offset in range(column_points):
@@ -913,14 +955,13 @@ def make_dense_substep_kernel(
                         tangent_update = _patch_tangent_rows_update(
                             lambda_t,
                             wp.vec2f(
-                                _load(shared, wp.int32(start_velocity_base) + row) + row_dot(shared, row),
-                                _load(shared, wp.int32(start_velocity_base) + row + wp.int32(1))
-                                + row_dot(shared, row + wp.int32(1)),
+                                _load(shared, wp.int32(start_velocity_base) + row) + change_t[0],
+                                _load(shared, wp.int32(start_velocity_base) + row + wp.int32(1)) + change_t[1],
                             ),
                             bias_t,
                             wp.vec3(
                                 _load(shared, wp.int32(row_mass_base) + row),
-                                row_product(shared, row, row + wp.int32(1)),
+                                coupling[0],
                                 _load(shared, wp.int32(row_mass_base) + row + wp.int32(1)),
                             ),
                             load_sum,
