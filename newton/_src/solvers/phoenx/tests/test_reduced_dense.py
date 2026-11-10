@@ -431,6 +431,74 @@ class TestReducedDenseBackend(unittest.TestCase):
                 self.assertAlmostEqual(results["auto"][1], results["aba"][1], delta=5.0e-3)
                 self.assertGreater(results["auto"][1], tilt + 1.0e-3)
 
+    def test_fused_substep_wakes_sleeping_free_bodies_under_graph_capture(self):
+        """Free bodies that fell asleep wake when a tree of the fused substep pushes them."""
+        device = _require_cuda(self)
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, -9.81), up_axis=newton.Axis.Z)
+        builder.default_shape_cfg.gap = 0.005
+        builder.default_shape_cfg.mu = 0.3
+        builder.add_ground_plane()
+        previous = -1
+        for i in range(2):
+            body = builder.add_link(xform=wp.transform(wp.vec3(-1.5 + 0.3 * i, 0.0, 0.145), wp.quat_identity()))
+            builder.add_shape_box(body, hx=0.14, hy=0.14, hz=0.14)
+            if previous < 0:
+                builder.add_joint_free(body)
+            else:
+                builder.add_joint_revolute(
+                    previous,
+                    body,
+                    parent_xform=wp.transform(wp.vec3(0.15, 0.0, 0.0), wp.quat_identity()),
+                    child_xform=wp.transform(wp.vec3(-0.15, 0.0, 0.0), wp.quat_identity()),
+                    axis=newton.Axis.Z,
+                )
+            previous = body
+        builder.add_articulation(list(range(builder.joint_count)))
+        boxes = []
+        for i in range(3):
+            box = builder.add_body(xform=wp.transform(wp.vec3(0.5 * i, 0.0, 0.1), wp.quat_identity()))
+            builder.add_shape_box(box, hx=0.1, hy=0.1, hz=0.1)
+            boxes.append(box)
+        model = builder.finalize(device=device)
+        pipeline = newton.CollisionPipeline(model, contact_matching="sticky")
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            collision_pipeline=pipeline,
+            joint_mode="reduced",
+            substeps=4,
+            solver_iterations=4,
+            sleeping_velocity_threshold=0.05,
+            sleeping_frames_required=10,
+        )
+        self.assertIsNotNone(solver._reduced_articulation.fused_substep)
+        state, output = model.state(), model.state()
+        newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+        contacts = pipeline.contacts()
+        with wp.ScopedCapture() as capture:
+            pipeline.collide(state, contacts)
+            solver.step(state, output, None, contacts, 1.0 / 60.0)
+            for name in ("body_q", "body_qd", "joint_q", "joint_qd"):
+                wp.copy(getattr(state, name), getattr(output, name))
+        for _ in range(60):
+            wp.capture_launch(capture.graph)
+        asleep = solver.world.bodies.island_root.numpy()[1:] >= 0
+        self.assertTrue(np.all(asleep[boxes]))
+        rest = state.body_q.numpy()[boxes, 0].copy()
+
+        # Send the chain into the first box, which it pushes into the second.
+        joint_qd = state.joint_qd.numpy()
+        joint_qd[0] = 3.0
+        state.joint_qd.assign(joint_qd)
+        newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+        for _ in range(120):
+            wp.capture_launch(capture.graph)
+        moved = state.body_q.numpy()[boxes, 0] - rest
+        self.assertGreater(float(moved[0]), 0.2)
+        self.assertGreater(float(moved[1]), 0.02)
+        self.assertAlmostEqual(float(moved[2]), 0.0, delta=1.0e-4)
+        # At rest again, they sleep again.
+        self.assertTrue(np.all((solver.world.bodies.island_root.numpy()[1:] >= 0)[boxes]))
+
     def test_fused_substep_rests_a_tree_on_a_free_body_under_graph_capture(self):
         """A tree stands on a free rigid body whose ground contact the regular solver holds."""
         device = _require_cuda(self)
