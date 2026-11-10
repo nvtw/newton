@@ -38,6 +38,8 @@ __all__ = [
 # Motion types (mirrors Jitter2 ``MotionType``).
 MOTION_STATIC = wp.constant(0)
 MOTION_KINEMATIC = wp.constant(1)
+#: ``external_owner`` of a free body that two articulations solve with half its mass each.
+EXTERNAL_SHARED = wp.constant(wp.int32(-2))
 MOTION_DYNAMIC = wp.constant(2)
 MOTION_ARTICULATED = wp.constant(3)
 
@@ -171,8 +173,16 @@ class ReducedArticulationData:
     #: Per articulation, nonzero while deferred wrenches await :func:`flush_deferred_articulation`.
     deferred_pending: wp.array[wp.int32]
     #: Per body slot, the one articulation whose fused substep solves its contacts with
-    #: this free rigid body, or -1.
+    #: this free rigid body, -1 for none, or :data:`EXTERNAL_SHARED` when the two
+    #: articulations ``external_lowest`` and ``external_highest`` each solve them with half
+    #: of the body's mass.
     external_owner: wp.array[wp.int32]
+    external_lowest: wp.array[wp.int32]
+    external_highest: wp.array[wp.int32]
+    #: Velocity change of each half of a shared body: slot ``2 * body`` for the lowest
+    #: articulation and ``2 * body + 1`` for the highest.
+    external_delta_linear: wp.array[wp.vec3]
+    external_delta_angular: wp.array[wp.vec3]
     body_joint: wp.array[wp.int32]
     body_path_start: wp.array[wp.int32]
     body_path_joint: wp.array[wp.int32]
@@ -203,6 +213,10 @@ def reduced_articulation_data_zeros(device: wp.DeviceLike = None) -> ReducedArti
     data.deferred_wrench = wp.zeros(1, dtype=wp.spatial_vector, device=device)
     data.deferred_pending = wp.zeros(1, dtype=wp.int32, device=device)
     data.external_owner = wp.full(1, value=-1, dtype=wp.int32, device=device)
+    data.external_lowest = wp.full(1, value=-1, dtype=wp.int32, device=device)
+    data.external_highest = wp.full(1, value=-1, dtype=wp.int32, device=device)
+    data.external_delta_linear = wp.zeros(2, dtype=wp.vec3, device=device)
+    data.external_delta_angular = wp.zeros(2, dtype=wp.vec3, device=device)
     data.body_joint = wp.full(1, value=-1, dtype=wp.int32, device=device)
     data.body_path_start = wp.zeros(2, dtype=wp.int32, device=device)
     data.body_path_joint = wp.zeros(1, dtype=wp.int32, device=device)

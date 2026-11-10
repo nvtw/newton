@@ -89,6 +89,7 @@ from newton._src.solvers.phoenx.articulations.reduced import (
 from newton._src.solvers.phoenx.articulations.reduced_contact_block import (
     _CACHED_PAGE_COUNT,
     _POINTS_PER_PAGE,
+    _combine_shared_external_kernel,
     _gather_packed_contact_points,
     _gather_packed_patch_points,
     _patch_normal_row_update,
@@ -97,7 +98,7 @@ from newton._src.solvers.phoenx.articulations.reduced_contact_block import (
     _store_point_row_effective_mass,
     _sync_contact_warp,
 )
-from newton._src.solvers.phoenx.body import BodyContainer, DenseTreeData, mat33_from_sym6
+from newton._src.solvers.phoenx.body import EXTERNAL_SHARED, BodyContainer, DenseTreeData, mat33_from_sym6
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
     ContactColumnContainer,
     ContactViews,
@@ -947,6 +948,7 @@ def make_dense_substep_kernel(
         inverse_mass = wp.float32(0.0)
         # The free rigid body a row acts on, its slot in this chunk, and its whitened row part.
         row_external = wp.int32(-1)
+        row_half = wp.int32(-1)
         external_slot = wp.int32(-1)
         external_linear = wp.vec3(0.0)
         external_angular = wp.vec3(0.0)
@@ -1000,15 +1002,30 @@ def make_dense_substep_kernel(
                 other = contact_get_body1(columns, row_column)
                 if bodies.reduced.body_articulation[other] >= wp.int32(0):
                     other = contact_get_body2(columns, row_column)
-                if bodies.reduced.external_owner[other] >= wp.int32(0):
+                owner = bodies.reduced.external_owner[other]
+                if owner != wp.int32(-1):
                     row_external = other
                     direction = -wp.spatial_top(wrench)
                     moment = wp.cross(row_point - bodies.position[other], direction)
-                    velocity += wp.dot(direction, bodies.velocity[other]) + wp.dot(
-                        moment, bodies.angular_velocity[other]
-                    )
-                    external_linear = wp.sqrt(bodies.inverse_mass[other]) * direction
-                    external_angular = (
+                    linear_velocity = bodies.velocity[other]
+                    angular_velocity = bodies.angular_velocity[other]
+                    whitening = wp.float32(1.0)
+                    if owner == EXTERNAL_SHARED:
+                        # Two trees solve this body, each with half of its mass and its own
+                        # copy of the velocity, which a later kernel averages.
+                        tree = wp.max(
+                            bodies.reduced.body_articulation[contact_get_body1(columns, row_column)],
+                            bodies.reduced.body_articulation[contact_get_body2(columns, row_column)],
+                        )
+                        row_half = wp.int32(2) * other
+                        if tree != bodies.reduced.external_lowest[other]:
+                            row_half += wp.int32(1)
+                        linear_velocity += bodies.reduced.external_delta_linear[row_half]
+                        angular_velocity += bodies.reduced.external_delta_angular[row_half]
+                        whitening = wp.float32(1.4142135623730951)
+                    velocity += wp.dot(direction, linear_velocity) + wp.dot(moment, angular_velocity)
+                    external_linear = whitening * wp.sqrt(bodies.inverse_mass[other]) * direction
+                    external_angular = whitening * (
                         wp.transpose(_cholesky3(mat33_from_sym6(bodies.inverse_inertia_world[other]))) * moment
                     )
                     inverse_mass += wp.dot(external_linear, external_linear) + wp.dot(
@@ -1263,16 +1280,21 @@ def make_dense_substep_kernel(
             # The free bodies' velocity changes, unwhitened, by the lane that named each slot.
             if external_slot >= wp.int32(0) and lane == external_slot * wp.int32(1 if patch else 3):
                 first = wp.int32(rhs_base + max_dofs + 1) + wp.int32(6) * external_slot
-                bodies.velocity[row_external] += wp.sqrt(bodies.inverse_mass[row_external]) * wp.vec3(
+                delta_linear = wp.sqrt(bodies.inverse_mass[row_external]) * wp.vec3(
                     _load(shared, first), _load(shared, first + wp.int32(1)), _load(shared, first + wp.int32(2))
                 )
-                bodies.angular_velocity[row_external] += _cholesky3(
-                    mat33_from_sym6(bodies.inverse_inertia_world[row_external])
-                ) * wp.vec3(
+                delta_angular = _cholesky3(mat33_from_sym6(bodies.inverse_inertia_world[row_external])) * wp.vec3(
                     _load(shared, first + wp.int32(3)),
                     _load(shared, first + wp.int32(4)),
                     _load(shared, first + wp.int32(5)),
                 )
+                if row_half >= wp.int32(0):
+                    half_scale = wp.float32(1.4142135623730951)
+                    bodies.reduced.external_delta_linear[row_half] += half_scale * delta_linear
+                    bodies.reduced.external_delta_angular[row_half] += half_scale * delta_angular
+                else:
+                    bodies.velocity[row_external] += delta_linear
+                    bodies.angular_velocity[row_external] += delta_angular
         _sync_contact_warp()
 
     @wp.func
@@ -2268,6 +2290,13 @@ class DenseSubstep:
                     self.pose_changed,
                     articulation.bodies,
                 ],
+                device=model.device,
+            )
+        if contact.dynamic_external_owner:
+            wp.launch(
+                _combine_shared_external_kernel,
+                dim=int(model.body_count) + 1,
+                inputs=[articulation.bodies],
                 device=model.device,
             )
 

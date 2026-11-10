@@ -5149,6 +5149,10 @@ class ReducedPhoenXArticulation:
         reduced.deferred_wrench = self.system.deferred_wrench
         reduced.deferred_pending = self.system.deferred_pending
         reduced.external_owner = wp.full(int(model.body_count) + 1, value=-1, dtype=wp.int32, device=model.device)
+        reduced.external_lowest = wp.full_like(reduced.external_owner, value=-1)
+        reduced.external_highest = wp.full_like(reduced.external_owner, value=-1)
+        reduced.external_delta_linear = wp.zeros(2 * (int(model.body_count) + 1), dtype=wp.vec3, device=model.device)
+        reduced.external_delta_angular = wp.zeros_like(reduced.external_delta_linear)
         reduced.body_joint = wp.array(body_joint_np, device=model.device)
         reduced.body_path_start = wp.array(body_path_start_np, device=model.device)
         reduced.body_path_joint = wp.array(

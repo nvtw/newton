@@ -23,7 +23,13 @@ from newton._src.solvers.phoenx.articulations.reduced_contact import (
     reduced_contact_packed_owner,
     reduced_contact_prepare,
 )
-from newton._src.solvers.phoenx.body import MOTION_KINEMATIC, BodyContainer, ReducedArticulationData, mat33_from_sym6
+from newton._src.solvers.phoenx.body import (
+    EXTERNAL_SHARED,
+    MOTION_KINEMATIC,
+    BodyContainer,
+    ReducedArticulationData,
+    mat33_from_sym6,
+)
 from newton._src.solvers.phoenx.constraints.constraint_block import (
     BLOCK_LAMBDA_INF,
     BlockVector2Update,
@@ -241,15 +247,79 @@ def _mark_external_owner_kernel(
 
 
 @wp.kernel(enable_backward=False)
-def _resolve_external_owner_kernel(
-    lowest: wp.array[wp.int32], highest: wp.array[wp.int32], external_owner: wp.array[wp.int32]
+def _mark_third_external_owner_kernel(
+    columns: ContactColumnContainer,
+    bodies: BodyContainer,
+    num_columns: wp.array[wp.int32],
+    lowest: wp.array[wp.int32],
+    highest: wp.array[wp.int32],
+    crowded: wp.array[wp.int32],
 ):
-    """A free body touched by exactly one tree joins that tree's fused substep for this step."""
+    """Flag the free rigid bodies that more than two trees touch."""
+    column = wp.tid()
+    if column >= num_columns[0]:
+        return
+    if contact_get_side0_kind(columns, column) != wp.int32(SHAPE_ENDPOINT_KIND_RIGID) or contact_get_side1_kind(
+        columns, column
+    ) != wp.int32(SHAPE_ENDPOINT_KIND_RIGID):
+        return
+    body0 = contact_get_body1(columns, column)
+    body1 = contact_get_body2(columns, column)
+    articulation0 = bodies.reduced.body_articulation[body0]
+    articulation1 = bodies.reduced.body_articulation[body1]
+    if (articulation0 >= wp.int32(0)) == (articulation1 >= wp.int32(0)):
+        return
+    tree = articulation0
+    other = body1
+    if articulation1 >= wp.int32(0):
+        tree = articulation1
+        other = body0
+    if tree != lowest[other] and tree != highest[other]:
+        crowded[other] = wp.int32(1)
+
+
+@wp.kernel(enable_backward=False)
+def _resolve_external_owner_kernel(
+    lowest: wp.array[wp.int32],
+    highest: wp.array[wp.int32],
+    crowded: wp.array[wp.int32],
+    external_owner: wp.array[wp.int32],
+):
+    """Decide which fused substeps solve each free body's contacts in this step.
+
+    A body touched by one tree joins that tree. One touched by two is solved by both, each
+    with half of its mass. More trees leave it to the solve between the fused kernels.
+    """
     body = wp.tid()
     owner = wp.int32(-1)
-    if highest[body] >= wp.int32(0) and lowest[body] == highest[body]:
-        owner = lowest[body]
+    if highest[body] >= wp.int32(0):
+        if lowest[body] == highest[body]:
+            owner = lowest[body]
+        elif crowded[body] == wp.int32(0):
+            owner = EXTERNAL_SHARED
     external_owner[body] = owner
+    crowded[body] = wp.int32(0)
+
+
+@wp.kernel(enable_backward=False)
+def _combine_shared_external_kernel(bodies: BodyContainer):
+    """Give a shared free body the mean velocity change of its two halves.
+
+    Each half has half the mass, so the mean is the change the sum of both impulses gives
+    the whole body. The two terms always add in the same order.
+    """
+    body = wp.tid()
+    data = bodies.reduced
+    if data.external_owner[body] != EXTERNAL_SHARED:
+        return
+    low = 2 * body
+    high = low + 1
+    bodies.velocity[body] += 0.5 * (data.external_delta_linear[low] + data.external_delta_linear[high])
+    bodies.angular_velocity[body] += 0.5 * (data.external_delta_angular[low] + data.external_delta_angular[high])
+    data.external_delta_linear[low] = wp.vec3(0.0)
+    data.external_delta_linear[high] = wp.vec3(0.0)
+    data.external_delta_angular[low] = wp.vec3(0.0)
+    data.external_delta_angular[high] = wp.vec3(0.0)
 
 
 def _fallback_impossible_from_model_pairs(
@@ -1094,11 +1164,11 @@ def _gather_packed_patch_points(
                     # A free body the fused substep solves with moves during the solve.
                     if bodies.reduced.body_articulation[body1] < wp.int32(0) and _external_owner(
                         bodies, body1
-                    ) < wp.int32(0):
+                    ) == wp.int32(-1):
                         relative += _point_velocity(bodies, body1, contact_point)
                     if bodies.reduced.body_articulation[body0] < wp.int32(0) and _external_owner(
                         bodies, body0
-                    ) < wp.int32(0):
+                    ) == wp.int32(-1):
                         relative -= _point_velocity(bodies, body0, contact_point)
                 row_velocity[packed_articulation, point] = wp.dot(relative, n)
 
@@ -1380,12 +1450,12 @@ def _gather_packed_contact_points(
                     bodies, body0, contact_point
                 )
             else:
-                if bodies.reduced.body_articulation[body1] < wp.int32(0) and _external_owner(bodies, body1) < wp.int32(
-                    0
+                if bodies.reduced.body_articulation[body1] < wp.int32(0) and _external_owner(bodies, body1) == wp.int32(
+                    -1
                 ):
                     relative += _point_velocity(bodies, body1, contact_point)
-                if bodies.reduced.body_articulation[body0] < wp.int32(0) and _external_owner(bodies, body0) < wp.int32(
-                    0
+                if bodies.reduced.body_articulation[body0] < wp.int32(0) and _external_owner(bodies, body0) == wp.int32(
+                    -1
                 ):
                     relative -= _point_velocity(bodies, body0, contact_point)
             row = wp.int32(3) * point
@@ -3445,8 +3515,7 @@ class ReducedContactBlockSystem:
                     self.dynamic_external_owner = True
                     self.internal_rows = internal
                     body_slots = int(model.body_count) + 1
-                    self._external_owner_lowest = wp.zeros(body_slots, dtype=wp.int32, device=self.device)
-                    self._external_owner_highest = wp.zeros(body_slots, dtype=wp.int32, device=self.device)
+                    self._external_owner_crowded = wp.zeros(body_slots, dtype=wp.int32, device=self.device)
         (
             self._fallback_impossible_partitioned,
             self._fallback_impossible_rigid_only,
@@ -3648,23 +3717,27 @@ class ReducedContactBlockSystem:
         assert self.reorder_pair_source is not None
 
         if self.dynamic_external_owner:
-            wp.launch(
-                _reset_external_owner_kernel,
-                dim=self._external_owner_lowest.shape[0],
-                outputs=[self._external_owner_lowest, self._external_owner_highest],
-                device=self.device,
-            )
+            lowest = bodies.reduced.external_lowest
+            highest = bodies.reduced.external_highest
+            wp.launch(_reset_external_owner_kernel, dim=lowest.shape[0], outputs=[lowest, highest], device=self.device)
             wp.launch(
                 _mark_external_owner_kernel,
                 dim=self.schedule_capacity,
                 inputs=[columns, bodies, num_columns],
-                outputs=[self._external_owner_lowest, self._external_owner_highest],
+                outputs=[lowest, highest],
+                device=self.device,
+            )
+            wp.launch(
+                _mark_third_external_owner_kernel,
+                dim=self.schedule_capacity,
+                inputs=[columns, bodies, num_columns, lowest, highest],
+                outputs=[self._external_owner_crowded],
                 device=self.device,
             )
             wp.launch(
                 _resolve_external_owner_kernel,
-                dim=self._external_owner_lowest.shape[0],
-                inputs=[self._external_owner_lowest, self._external_owner_highest],
+                dim=lowest.shape[0],
+                inputs=[lowest, highest, self._external_owner_crowded],
                 outputs=[bodies.reduced.external_owner],
                 device=self.device,
             )

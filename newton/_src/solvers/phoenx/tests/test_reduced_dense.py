@@ -583,9 +583,13 @@ class TestReducedDenseBackend(unittest.TestCase):
                     # The one tree under the box solves it in its own block: nothing crosses.
                     self.assertEqual(int(owners[-1]), 1)
                     self.assertEqual(cross, 0)
+                elif scene == "carried":
+                    # Both trees solve the box, each with half of its mass: nothing crosses.
+                    self.assertEqual(int(owners[-1]), -2)
+                    self.assertEqual(cross, 0)
                 else:
-                    # Two trees touch each other, or the same box: no tree owns those contacts.
-                    self.assertTrue(np.all(owners < 0))
+                    # Two trees touch each other: their contacts are solved between the kernels.
+                    self.assertTrue(np.all(owners == -1))
                     self.assertGreater(cross, 0)
 
     def test_reduced_articulations_selects_by_index_or_label(self):

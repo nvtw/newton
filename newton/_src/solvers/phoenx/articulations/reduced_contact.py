@@ -7,7 +7,13 @@ from __future__ import annotations
 
 import warp as wp
 
-from newton._src.solvers.phoenx.body import MOTION_ARTICULATED, MOTION_KINEMATIC, BodyContainer, mat33_from_sym6
+from newton._src.solvers.phoenx.body import (
+    EXTERNAL_SHARED,
+    MOTION_ARTICULATED,
+    MOTION_KINEMATIC,
+    BodyContainer,
+    mat33_from_sym6,
+)
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
     ContactColumnContainer,
     ContactViews,
@@ -217,8 +223,21 @@ def _apply_pair_impulse(
 
 @wp.func
 def _external_owner(bodies: BodyContainer, body: wp.int32) -> wp.int32:
-    """Return the articulation whose fused substep solves contacts with a free rigid body, or -1."""
+    """Return how fused substeps solve contacts with a free rigid body: the one articulation
+    that does, -1 for none, or :data:`EXTERNAL_SHARED` for two that share it."""
     return bodies.reduced.external_owner[body]
+
+
+@wp.func
+def _externally_solved_by(bodies: BodyContainer, body: wp.int32, articulation: wp.int32) -> wp.bool:
+    """Return whether ``articulation``'s fused substep solves its contacts with a free rigid body."""
+    owner = bodies.reduced.external_owner[body]
+    if owner == EXTERNAL_SHARED:
+        return (
+            bodies.reduced.external_lowest[body] == articulation
+            or bodies.reduced.external_highest[body] == articulation
+        )
+    return owner == articulation
 
 
 @wp.func
@@ -235,12 +254,12 @@ def reduced_contact_deferred_owner(
     if articulation0 >= wp.int32(0) and articulation1 < wp.int32(0):
         if bodies.inverse_mass[body1] == wp.float32(0.0) or bodies.motion_type[body1] == MOTION_KINEMATIC:
             return articulation0
-        if _external_owner(bodies, body1) == articulation0:
+        if _externally_solved_by(bodies, body1, articulation0):
             return articulation0
     if articulation1 >= wp.int32(0) and articulation0 < wp.int32(0):
         if bodies.inverse_mass[body0] == wp.float32(0.0) or bodies.motion_type[body0] == MOTION_KINEMATIC:
             return articulation1
-        if _external_owner(bodies, body0) == articulation1:
+        if _externally_solved_by(bodies, body0, articulation1):
             return articulation1
     return wp.int32(-1)
 

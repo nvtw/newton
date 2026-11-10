@@ -1,0 +1,1 @@
+Solve a free body that two reduced-coordinate articulations touch at once, such as a part handed from one robot to another, inside both articulations' fused substeps with half of its mass each (1024 G1 robots with 64 shared boxes: 21.6 to 2.3 ms per step).

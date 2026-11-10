@@ -380,9 +380,8 @@ class TestDynamicBodies(unittest.TestCase):
         """Bodies spawned onto fused trees are solved with the tree they touch, and removal frees them.
 
         A spawned box that lands on one tree joins that tree's fused substep for as long as only
-        that tree touches it. One that lands across two trees belongs to neither: its contacts
-        are solved between the fused kernels. Removing a box leaves the trees at rest and its
-        row reusable.
+        that tree touches it. One that lands across two trees is solved by both, each with half
+        of its mass. Removing a box leaves the trees at rest and its row reusable.
         """
         builder = newton.ModelBuilder()
         # The trees lie 4 cm apart: keep their contact gap below that.
@@ -454,13 +453,13 @@ class TestDynamicBodies(unittest.TestCase):
                 self.assertTrue(np.all(owners < 0))
                 self.assertEqual(cross, 0)
 
-        # Across the gap between the trees both carry the box, so neither owns it.
+        # Across the gap between the trees both carry the box: each solves it with half its mass.
         box = spawn(0.46)
         body_q, owners, cross = settle()
         np.testing.assert_allclose(body_q[box, 2], top, atol=5.0e-3)
         np.testing.assert_allclose(body_q[links, 2], half, atol=5.0e-3)
-        self.assertLess(int(owners[box]), 0)
-        self.assertGreater(cross, 0)
+        self.assertEqual(int(owners[box]), -2)
+        self.assertEqual(cross, 0)
         self.assertEqual(int(solver.dynamics.error_count.numpy()[0]), 0)
 
 
