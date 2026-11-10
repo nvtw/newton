@@ -3035,6 +3035,7 @@ class TestReducedArticulation(unittest.TestCase):
         solver = newton.solvers.SolverPhoenX(
             model,
             joint_mode="reduced",
+            reduced_backend="aba",
             substeps=1,
             solver_iterations=1,
             velocity_iterations=0,
@@ -3801,42 +3802,52 @@ class TestReducedArticulation(unittest.TestCase):
         if not device.is_cuda:
             self.skipTest("reduced articulation tests require CUDA graph capture")
 
-        model = _make_self_contact_model(device)
-        state = model.state()
-        output = model.state()
-        qd = state.joint_qd.numpy()
-        qd[0] = 0.4
-        qd[1] = -0.15
-        qd[5] = 0.2
-        qd[6] = -0.3
-        qd[7] = 0.25
-        state.joint_qd.assign(qd)
-        newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+        # The articulated-body path solves the links' contact in the fallback, the fused
+        # dense substep as a row between two root paths.
+        for backend in ("aba", "auto"):
+            with self.subTest(backend=backend):
+                model = _make_self_contact_model(device)
+                state = model.state()
+                output = model.state()
+                qd = state.joint_qd.numpy()
+                qd[0] = 0.4
+                qd[1] = -0.15
+                qd[5] = 0.2
+                qd[6] = -0.3
+                qd[7] = 0.25
+                state.joint_qd.assign(qd)
+                newton.eval_fk(model, state.joint_q, state.joint_qd, state)
 
-        solver = newton.solvers.SolverPhoenX(
-            model,
-            joint_mode="reduced",
-            substeps=1,
-            solver_iterations=8,
-            velocity_iterations=0,
-        )
-        contacts = model.contacts()
-        momentum_before = _total_momentum(model, state)
-        dt = 1.0 / 2000.0
+                solver = newton.solvers.SolverPhoenX(
+                    model,
+                    joint_mode="reduced",
+                    reduced_backend=backend,
+                    substeps=1,
+                    solver_iterations=8,
+                    velocity_iterations=0,
+                )
+                contacts = model.contacts()
+                momentum_before = _total_momentum(model, state)
+                dt = 1.0 / 2000.0
 
-        with wp.ScopedCapture(device=device) as capture:
-            model.collide(state, contacts)
-            solver.step(state, output, None, contacts, dt)
-        wp.capture_launch(capture.graph)
+                with wp.ScopedCapture(device=device) as capture:
+                    model.collide(state, contacts)
+                    solver.step(state, output, None, contacts, dt)
+                wp.capture_launch(capture.graph)
 
-        self.assertGreater(int(contacts.rigid_contact_count.numpy()[0]), 0)
-        self.assertFalse(solver._reduced_articulation.contact_block_system._skip_fallback_coloring)
-        momentum_after = _total_momentum(model, output)
-        np.testing.assert_allclose(momentum_after, momentum_before, rtol=0.0, atol=1.0e-5)
+                self.assertGreater(int(contacts.rigid_contact_count.numpy()[0]), 0)
+                articulation = solver._reduced_articulation
+                if backend == "aba":
+                    self.assertFalse(articulation.contact_block_system._skip_fallback_coloring)
+                else:
+                    self.assertIsNotNone(articulation.fused_substep)
+                    self.assertTrue(articulation.contact_block_system.internal_rows)
+                momentum_after = _total_momentum(model, output)
+                np.testing.assert_allclose(momentum_after, momentum_before, rtol=0.0, atol=1.0e-5)
 
-        fk_state = model.state()
-        newton.eval_fk(model, output.joint_q, output.joint_qd, fk_state)
-        np.testing.assert_allclose(output.body_qd.numpy(), fk_state.body_qd.numpy(), atol=2.0e-5)
+                fk_state = model.state()
+                newton.eval_fk(model, output.joint_q, output.joint_qd, fk_state)
+                np.testing.assert_allclose(output.body_qd.numpy(), fk_state.body_qd.numpy(), atol=2.0e-5)
 
     def test_packed_self_contact_matches_world_serial_fallback_under_graph_capture(self):
         """Match packed two-link self-contact to the serial fallback.
@@ -3865,6 +3876,7 @@ class TestReducedArticulation(unittest.TestCase):
         solver_colored = newton.solvers.SolverPhoenX(
             model,
             joint_mode="reduced",
+            reduced_backend="aba",
             substeps=1,
             solver_iterations=4,
             velocity_iterations=1,
@@ -3872,6 +3884,7 @@ class TestReducedArticulation(unittest.TestCase):
         solver_serial = newton.solvers.SolverPhoenX(
             model,
             joint_mode="reduced",
+            reduced_backend="aba",
             substeps=1,
             solver_iterations=4,
             velocity_iterations=1,

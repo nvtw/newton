@@ -147,12 +147,13 @@ def _model_pair_endpoints(model: Model):
     return pairs, body0, body1, articulation0, articulation1, static0, static1
 
 
-def _external_rigid_owners(model: Model) -> np.ndarray | None:
+def _external_rigid_owners(model: Model, allow_internal: bool) -> tuple[np.ndarray, bool] | None:
     """Assign each free rigid body that pairs with a tree to that tree's fused substep.
 
-    Returns ``8 * articulation + slot`` per model body, -1 for the others, or ``None``
-    unless every pair is a tree against static geometry, a tree against a free body
-    that pairs with no other tree, or free of trees.
+    Returns ``8 * articulation + slot`` per model body, -1 for the others, and whether
+    two links of one tree may touch; or ``None`` unless every pair is a tree against
+    static geometry, a tree against a free body that pairs with no other tree, two
+    links of one tree where ``allow_internal``, or free of trees.
     """
     endpoints = _model_pair_endpoints(model)
     if endpoints is None:
@@ -160,11 +161,12 @@ def _external_rigid_owners(model: Model) -> np.ndarray | None:
     _pairs, body0, body1, articulation0, articulation1, static0, static1 = endpoints
     reduced0 = articulation0 >= 0
     reduced1 = articulation1 >= 0
-    if np.any(reduced0 & reduced1):
+    internal = reduced0 & reduced1 & (articulation0 == articulation1)
+    if np.any(reduced0 & reduced1 & ~internal) or (np.any(internal) and not allow_internal):
         return None
     owners = np.full(int(model.body_count), -1, dtype=np.int32)
     used = np.zeros(max(1, int(model.articulation_count)), dtype=np.int32)
-    coupled = (reduced0 & ~static1) | (reduced1 & ~static0)
+    coupled = ((reduced0 & ~static1) | (reduced1 & ~static0)) & ~internal
     bodies = np.where(reduced0, body1, body0)[coupled]
     articulations = np.where(reduced0, articulation0, articulation1)[coupled]
     for body, articulation in zip(bodies.tolist(), articulations.tolist(), strict=True):
@@ -177,7 +179,7 @@ def _external_rigid_owners(model: Model) -> np.ndarray | None:
             return None
         owners[body] = 8 * articulation + int(used[articulation])
         used[articulation] += 1
-    return owners
+    return owners, bool(np.any(internal))
 
 
 def _fallback_impossible_from_model_pairs(
@@ -3275,20 +3277,16 @@ class ReducedContactBlockSystem:
         self.device = model.device
         #: Per model body, the fused substep that solves its contacts, see
         #: :func:`_external_rigid_owners`; ``None`` without such a substep.
-        self.external_owner = _external_rigid_owners(model) if external_rigid_rows else None
+        self.external_owner = None
+        #: Whether the fused substep solves rows between two links of one tree.
+        self.internal_rows = False
+        self._external_rigid_rows = external_rigid_rows
         self.articulation_depth_start = articulation_depth_start
         self.articulation_depth_joint = articulation_depth_joint
         self.joint_parent_lane = joint_parent_lane
         self.row_tile_width = int(row_tile_width)
         self.max_depth = int(max_depth)
         self.fuse_apply = bool(self.device.is_cuda)
-        (
-            self._fallback_impossible_partitioned,
-            self._fallback_impossible_rigid_only,
-            self._shape_schedule_already_grouped,
-            self._body_schedule_already_grouped,
-            self.free_rigid_pairs_possible,
-        ) = _fallback_impossible_from_model_pairs(model, self.external_owner)
         self._skip_fallback_coloring = False
         self._schedule_already_grouped = False
         self._body_pair_grouping = False
@@ -3314,6 +3312,17 @@ class ReducedContactBlockSystem:
             patch_rows_requested = patch_rows_override
         self.patch_rows = allow_patch_rows and self.device.is_cuda and patch_rows_requested
         self.packed_internal_contacts = not self.patch_rows
+        if self._external_rigid_rows:
+            census = _external_rigid_owners(model, self.packed_internal_contacts)
+            if census is not None:
+                self.external_owner, self.internal_rows = census
+        (
+            self._fallback_impossible_partitioned,
+            self._fallback_impossible_rigid_only,
+            self._shape_schedule_already_grouped,
+            self._body_schedule_already_grouped,
+            self.free_rigid_pairs_possible,
+        ) = _fallback_impossible_from_model_pairs(model, self.external_owner)
         if self.patch_rows:
             occupancy_bound = self.articulation_count >= _PATCH_SOLVE_MIN_BLOCKS_PER_SM * sm_count
             self.solve_kernel = {

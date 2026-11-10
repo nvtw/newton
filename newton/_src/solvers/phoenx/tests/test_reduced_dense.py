@@ -212,6 +212,67 @@ class TestReducedDenseBackend(unittest.TestCase):
                 np.testing.assert_allclose(angular, angular_start, atol=5.0e-2)
                 self.assertGreater(float(state.body_qd.numpy()[box, 0]), 0.2)
 
+    def test_fused_substep_rests_a_link_on_another_link_under_graph_capture(self):
+        """A chain folded onto its own base rests there as it does with the articulated-body path."""
+        device = _require_cuda(self)
+        rest = {}
+        for backend in ("aba", "auto"):
+            builder = newton.ModelBuilder(gravity=(0.0, 0.0, -9.81), up_axis=newton.Axis.Z)
+            builder.default_shape_cfg.gap = 0.005
+            builder.default_shape_cfg.mu = 0.6
+            builder.add_ground_plane()
+            # A base on the ground, an upright link hinged at its end, and a link that folds back onto the base.
+            base = builder.add_link(xform=wp.transform(wp.vec3(0.0, 0.0, 0.1), wp.quat_identity()))
+            builder.add_shape_box(base, hx=0.5, hy=0.2, hz=0.1)
+            builder.add_joint_free(base)
+            upright = builder.add_link(xform=wp.transform(wp.vec3(0.5, 0.0, 0.5), wp.quat_identity()))
+            builder.add_shape_box(upright, hx=0.08, hy=0.15, hz=0.3)
+            builder.add_joint_revolute(
+                base,
+                upright,
+                parent_xform=wp.transform(wp.vec3(0.5, 0.0, 0.1), wp.quat_identity()),
+                child_xform=wp.transform(wp.vec3(0.0, 0.0, -0.3), wp.quat_identity()),
+                axis=newton.Axis.Y,
+            )
+            folded = builder.add_link(xform=wp.transform(wp.vec3(0.1, 0.0, 0.62), wp.quat_identity()))
+            builder.add_shape_box(folded, hx=0.4, hy=0.15, hz=0.08)
+            builder.add_joint_revolute(
+                upright,
+                folded,
+                parent_xform=wp.transform(wp.vec3(0.0, 0.0, 0.3), wp.quat_identity()),
+                child_xform=wp.transform(wp.vec3(0.4, 0.0, 0.0), wp.quat_identity()),
+                axis=newton.Axis.Y,
+            )
+            builder.add_articulation(list(range(builder.joint_count)))
+            model = builder.finalize(device=device)
+            pipeline = newton.CollisionPipeline(model, contact_matching="sticky")
+            solver = newton.solvers.SolverPhoenX(
+                model,
+                collision_pipeline=pipeline,
+                joint_mode="reduced",
+                reduced_backend=backend,
+                substeps=4,
+                solver_iterations=4,
+            )
+            state, output = model.state(), model.state()
+            newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+            contacts = pipeline.contacts()
+            with wp.ScopedCapture() as capture:
+                pipeline.collide(state, contacts)
+                solver.step(state, output, None, contacts, 1.0 / 60.0)
+                for name in ("body_q", "body_qd", "joint_q", "joint_qd"):
+                    wp.copy(getattr(state, name), getattr(output, name))
+            for _ in range(180):
+                wp.capture_launch(capture.graph)
+            articulation = solver._reduced_articulation
+            self.assertEqual(articulation.fused_substep is not None, backend == "auto")
+            self.assertEqual(articulation.contact_block_system.internal_rows, backend == "auto")
+            self.assertLess(float(np.abs(state.body_qd.numpy()).max()), 2.0e-2)
+            rest[backend] = state.body_q.numpy()[:, :3].copy()
+        # The folded link holds the upright one up.
+        self.assertGreater(float(rest["auto"][folded, 2]), 0.5)
+        np.testing.assert_allclose(rest["auto"], rest["aba"], atol=2.0e-2)
+
     def test_fused_substep_rests_a_tree_on_a_free_body_under_graph_capture(self):
         """A tree stands on a free rigid body whose ground contact the regular solver holds."""
         device = _require_cuda(self)
