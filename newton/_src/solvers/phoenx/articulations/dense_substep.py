@@ -573,21 +573,28 @@ def make_dense_substep_kernel(
         solve_mass(shared, wp.int32(rhs_base), n, lane)
 
     @wp.func
-    def row_dot(shared: _shared_handle, lane: wp.int32, row: wp.int32) -> wp.float32:
-        """Return ``z_row . w``, the velocity change of a row under the impulses applied so far.
+    def row_entries(shared: _shared_handle, row: wp.int32, positions: wp.vec4i, dofs: wp.vec4i) -> wp.vec4:
+        """Return ``z_row`` at a lane's DOFs ``dofs``, zero where a DOF is off the row's path.
 
-        Every lane calls this with the same ``row``: the lanes stride over the path
-        positions and sum their products across the warp.
+        A DOF sits at the same position, its depth, of every row through it, so the
+        row's DOF byte at that position tells whether the row passes it.
         """
-        total = wp.float32(0.0)
-        position = lane
-        while position < wp.int32(z_positions):
-            index = wp.int32(PAGE_ROWS) * position + row
-            total += _load(shared, wp.int32(z_base) + index) * _load(
-                shared, wp.int32(rhs_base) + _load_u8(shared, wp.int32(z_dof_byte) + index)
-            )
-            position += wp.int32(_LANES)
-        return _warp_sum_float(total)
+        entries = wp.vec4(0.0)
+        index = wp.int32(PAGE_ROWS) * positions[0] + row
+        if _load_u8(shared, wp.int32(z_dof_byte) + index) == dofs[0]:
+            entries[0] = _load(shared, wp.int32(z_base) + index)
+        if wp.static(max_dofs > _LANES):
+            index = wp.int32(PAGE_ROWS) * positions[1] + row
+            if _load_u8(shared, wp.int32(z_dof_byte) + index) == dofs[1]:
+                entries[1] = _load(shared, wp.int32(z_base) + index)
+        if wp.static(external):
+            index = wp.int32(PAGE_ROWS) * positions[2] + row
+            if _load_u8(shared, wp.int32(z_dof_byte) + index) == dofs[2]:
+                entries[2] = _load(shared, wp.int32(z_base) + index)
+            index = wp.int32(PAGE_ROWS) * positions[3] + row
+            if _load_u8(shared, wp.int32(z_dof_byte) + index) == dofs[3]:
+                entries[3] = _load(shared, wp.int32(z_base) + index)
+        return entries
 
     @wp.func
     def row_product(shared: _shared_handle, lane: wp.int32, row: wp.int32, other: wp.int32) -> wp.float32:
@@ -601,17 +608,6 @@ def make_dense_substep_kernel(
                 total += _load(shared, wp.int32(z_base) + index) * _load(shared, wp.int32(z_base) + other_index)
             position += wp.int32(_LANES)
         return _warp_sum_float(total)
-
-    @wp.func
-    def add_row(shared: _shared_handle, lane: wp.int32, row: wp.int32, impulse: wp.float32):
-        """Add ``impulse * z_row`` to ``w``; the lanes stride over the path positions, which hold distinct DOFs."""
-        position = lane
-        while position < wp.int32(z_positions):
-            index = wp.int32(PAGE_ROWS) * position + row
-            slot = wp.int32(rhs_base) + _load_u8(shared, wp.int32(z_dof_byte) + index)
-            _store(shared, slot, _load(shared, slot) + impulse * _load(shared, wp.int32(z_base) + index))
-            position += wp.int32(_LANES)
-        _sync_contact_warp()
 
     @wp.func
     def packed_row(chunk: wp.vec4i, point_total: wp.int32, local: wp.int32) -> wp.int32:
@@ -825,11 +821,36 @@ def make_dense_substep_kernel(
                     inverse_mass,
                     prepare,
                 )
-        k = lane
-        while k <= wp.int32(max_dofs + external_dofs):
-            _store(shared, wp.int32(rhs_base) + k, wp.float32(0.0))
-            k += wp.int32(_LANES)
         _sync_contact_warp()
+
+        # Each lane keeps w = sum_r lambda_r z_r at its own DOFs in registers: lane l holds DOF l
+        # and, in trees beyond a warp, DOF l + 32; with free bodies also their components l and
+        # l + 32. A DOF never on a path keeps the impossible id -1.
+        positions = wp.vec4i(0, 0, 0, 0)
+        dofs = wp.vec4i(-1, -1, -1, -1)
+        if lane < n:
+            dofs[0] = lane
+            positions[0] = (
+                _load_u16(shared, wp.int32(dof_entry) + lane + wp.int32(1))
+                - wp.int32(1)
+                - _load_u16(shared, wp.int32(dof_entry) + lane)
+            )
+        if wp.static(max_dofs > _LANES):
+            if lane + wp.int32(_LANES) < n:
+                dofs[1] = lane + wp.int32(_LANES)
+                positions[1] = (
+                    _load_u16(shared, wp.int32(dof_entry) + lane + wp.int32(_LANES + 1))
+                    - wp.int32(1)
+                    - _load_u16(shared, wp.int32(dof_entry) + lane + wp.int32(_LANES))
+                )
+        if wp.static(external):
+            dofs[2] = wp.int32(max_dofs + 1) + lane
+            positions[2] = wp.int32(path_capacity) + lane - wp.int32(6) * (lane // wp.int32(6))
+            if lane + wp.int32(_LANES) < wp.int32(external_dofs):
+                component = lane + wp.int32(_LANES)
+                dofs[3] = wp.int32(max_dofs + 1) + component
+                positions[3] = wp.int32(path_capacity) + component - wp.int32(6) * (component // wp.int32(6))
+        w = wp.vec4(0.0)
 
         # Biased solves restart from the accumulated impulses, relax solves add to them.
         if warm_start:
@@ -853,7 +874,7 @@ def make_dense_substep_kernel(
                     else:
                         lambda_row = cc_get_tangent2_lambda(cc, row_contact)
             for r in range(row_count):
-                add_row(shared, lane, r, _lane_float(lambda_row, r))
+                w += _lane_float(lambda_row, r) * row_entries(shared, r, positions, dofs)
         mass_coeff = wp.float32(1.0)
         impulse_coeff = wp.float32(0.0)
         if use_bias:
@@ -888,7 +909,8 @@ def make_dense_substep_kernel(
                     point = chunk_points - wp.int32(1) - wp.int32(point_offset)
                 if wp.static(patch):
                     delta_n = wp.float32(0.0)
-                    change = row_dot(shared, lane, point)
+                    entries = row_entries(shared, point, positions, dofs)
+                    change = _warp_sum_float(wp.dot(entries, w))
                     if lane == point:
                         update = _patch_normal_row_update(
                             bias_n,
@@ -906,14 +928,17 @@ def make_dense_substep_kernel(
                         _store(shared, wp.int32(point_load_base) + point, update[2])
                         # Columns that continue in another chunk read the load from there.
                         normal_load[packed_articulation, chunk[0] + point] = update[2]
-                    add_row(shared, lane, point, _lane_float(delta_n, point))
+                    w += _lane_float(delta_n, point) * entries
                 else:
                     row = wp.int32(3) * point
                     delta = wp.vec3(0.0)
+                    entries_n = row_entries(shared, row, positions, dofs)
+                    entries_t0 = row_entries(shared, row + wp.int32(1), positions, dofs)
+                    entries_t1 = row_entries(shared, row + wp.int32(2), positions, dofs)
                     change = wp.vec3(
-                        row_dot(shared, lane, row),
-                        row_dot(shared, lane, row + wp.int32(1)),
-                        row_dot(shared, lane, row + wp.int32(2)),
+                        _warp_sum_float(wp.dot(entries_n, w)),
+                        _warp_sum_float(wp.dot(entries_t0, w)),
+                        _warp_sum_float(wp.dot(entries_t1, w)),
                     )
                     if lane == point:
                         delta = _solve_reduced_contact_point(
@@ -935,15 +960,19 @@ def make_dense_substep_kernel(
                             impulse_coeff,
                             sor_boost,
                         )
-                    add_row(shared, lane, row, _lane_float(delta[0], point))
-                    add_row(shared, lane, row + wp.int32(1), _lane_float(delta[1], point))
-                    add_row(shared, lane, row + wp.int32(2), _lane_float(delta[2], point))
+                    w += (
+                        _lane_float(delta[0], point) * entries_n
+                        + _lane_float(delta[1], point) * entries_t0
+                        + _lane_float(delta[2], point) * entries_t1
+                    )
             if wp.static(patch):
                 # The chunk's columns' tangent rows, after the normals; they read the normal loads.
                 for column_offset in range(chunk[3] - chunk[2]):
                     row = chunk_points + wp.int32(2) * wp.int32(column_offset)
                     delta_t = wp.vec2f(0.0, 0.0)
-                    change_t = wp.vec2f(row_dot(shared, lane, row), row_dot(shared, lane, row + wp.int32(1)))
+                    entries_t0 = row_entries(shared, row, positions, dofs)
+                    entries_t1 = row_entries(shared, row + wp.int32(1), positions, dofs)
+                    change_t = wp.vec2f(_warp_sum_float(wp.dot(entries_t0, w)), _warp_sum_float(wp.dot(entries_t1, w)))
                     if lane == row:
                         load_sum = wp.float32(0.0)
                         for offset in range(column_points):
@@ -971,8 +1000,7 @@ def make_dense_substep_kernel(
                         )
                         delta_t = tangent_update.delta
                         lambda_t = tangent_update.lambda_new
-                    add_row(shared, lane, row, _lane_float(delta_t[0], row))
-                    add_row(shared, lane, row + wp.int32(1), _lane_float(delta_t[1], row))
+                    w += _lane_float(delta_t[0], row) * entries_t0 + _lane_float(delta_t[1], row) * entries_t1
         if wp.static(patch):
             # Store the swept impulses; a patch shares its impulse evenly among its points.
             if sweeps > wp.int32(0):
@@ -987,6 +1015,16 @@ def make_dense_substep_kernel(
                         cc_set_tangent2_lambda(cc, column_contact, point_lambda[1])
 
         # M^-1 J^T lambda = L^-1 w.
+        if dofs[0] >= wp.int32(0):
+            _store(shared, wp.int32(rhs_base) + lane, w[0])
+        if wp.static(max_dofs > _LANES):
+            if dofs[1] >= wp.int32(0):
+                _store(shared, wp.int32(rhs_base) + lane + wp.int32(_LANES), w[1])
+        if wp.static(external):
+            _store(shared, wp.int32(rhs_base + max_dofs + 1) + lane, w[2])
+            if dofs[3] >= wp.int32(0):
+                _store(shared, wp.int32(rhs_base + max_dofs + 1 + _LANES) + lane, w[3])
+        _sync_contact_warp()
         solve_lower(shared, wp.int32(rhs_base), n, lane)
         k = lane
         while k < n:
