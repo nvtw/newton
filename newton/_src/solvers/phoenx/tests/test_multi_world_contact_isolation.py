@@ -11,7 +11,6 @@ from types import SimpleNamespace
 import numpy as np
 import warp as wp
 
-from newton._src.viewer.kernels import PickingState
 from newton._src.viewer.picking import Picking
 from newton.examples.robot.example_robot_h1 import Example
 
@@ -21,11 +20,14 @@ class _PickViewer:
         self.picking: Picking | None = None
 
     def set_model(self, model) -> None:
+        # All worlds overlap without viewer offsets, so only world 0 may be hit.
+        first_world = wp.array(np.arange(model.world_count) == 0, dtype=int, device=model.device)
         self.picking = Picking(
             model,
             pick_stiffness=80.0,
             pick_damping=8.0,
             pick_max_acceleration=12.0,
+            visible_worlds_mask=first_world,
         )
 
     def set_world_offsets(self, _offsets) -> None:
@@ -36,7 +38,7 @@ class _PickViewer:
 
     def apply_forces(self, state) -> None:
         assert self.picking is not None
-        self.picking._apply_picking_force(state)
+        self.picking.apply_force(state)
 
     def activate_pick(
         self,
@@ -45,21 +47,16 @@ class _PickViewer:
         body: int = 5,
         delta: tuple[float, float, float] = (2.0, 0.0, 1.0),
     ) -> None:
+        """Grab ``body`` of world 0 with a ray and pull the grab point by ``delta`` [m]."""
         assert self.picking is not None
-        body_q = state.body_q.numpy()
-        hit = body_q[body, :3].astype(np.float32)
-
-        pick_state = np.empty(1, dtype=PickingState.numpy_dtype())
-        pick_state[0]["picked_point_local"] = np.array([0.0, 0.0, 0.0], dtype=np.float32)
-        pick_state[0]["picked_point_world"] = hit
-        pick_state[0]["picking_target_world"] = hit + np.array(delta, dtype=np.float32)
-        pick_state[0]["pick_stiffness"] = 80.0
-        pick_state[0]["pick_damping"] = 8.0
-        pick_state[0]["pick_max_acceleration"] = 12.0
-
-        self.picking.pick_state.assign(pick_state)
-        self.picking.pick_body.assign(np.array([body], dtype=np.int32))
-        self.picking.picking_active = True
+        origin = state.body_q.numpy()[body, :3]
+        # Shoot through the body origin from whichever side is unobstructed.
+        for direction in np.vstack((np.eye(3), -np.eye(3))).astype(np.float32):
+            self.picking.pick(state, wp.vec3f(*(origin - 5.0 * direction)), wp.vec3f(*direction))
+            if self.picking.pick_body == body:
+                break
+        assert self.picking.pick_body == body, f"ray picked body {self.picking.pick_body}, expected {body}"
+        self.picking.pick_target = wp.vec3(*(np.array(self.picking.pick_point) + np.array(delta)))
 
     def release_pick(self) -> None:
         assert self.picking is not None
