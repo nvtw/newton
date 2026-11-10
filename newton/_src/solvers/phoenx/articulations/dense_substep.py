@@ -256,7 +256,6 @@ class _TreeJoint:
     x_c: wp.transform
     com: wp.vec3
     mass: wp.float32
-    inertia: wp.mat33
 
 
 @wp.func
@@ -274,7 +273,6 @@ def _load_tree_joint(
     joint_dof_dim: wp.array2d[wp.int32],
     body_com: wp.array[wp.vec3],
     body_mass: wp.array[wp.float32],
-    body_inertia: wp.array[wp.mat33],
     joint_parent_local: wp.array[wp.int32],
     joint_depth: wp.array[wp.int32],
 ) -> _TreeJoint:
@@ -300,7 +298,6 @@ def _load_tree_joint(
         tree.x_c = joint_x_c[joint]
         tree.com = body_com[child]
         tree.mass = body_mass[child]
-        tree.inertia = body_inertia[child]
     return tree
 
 
@@ -1109,7 +1106,6 @@ def make_dense_substep_kernel(
             joint_dof_dim,
             body_com,
             body_mass,
-            body_inertia,
             joint_parent_local,
             joint_depth,
         )
@@ -1434,7 +1430,7 @@ def make_dense_substep_kernel(
         momentum = wp.spatial_vector()
         if tree.joint >= wp.int32(0):
             inertia = _unpack_symmetric_mat66(
-                _pack_transformed_body_inertia(local * body_x_com[tree.child], tree.mass, tree.inertia)
+                _pack_transformed_body_inertia(local * body_x_com[tree.child], tree.mass, body_inertia[tree.child])
             )
             momentum = inertia * twist
             midpoint.body_momentum[tree.child] = momentum
@@ -1642,7 +1638,7 @@ def make_dense_substep_kernel(
                 joint_s[tree.qd_start + offset] = subspace
                 _store_spatial(shared, wp.int32(motion_base) + wp.int32(_MOTION_STRIDE) * local_dof, subspace)
             body_i_s[tree.child] = _pack_transformed_body_inertia(
-                local * body_x_com[tree.child], tree.mass, tree.inertia
+                local * body_x_com[tree.child], tree.mass, body_inertia[tree.child]
             )
         x_com = wp.transform_get_translation(local * body_x_com[tree.child])
         _sync_contact_warp()
