@@ -400,9 +400,9 @@ def _mask_kernel(values: wp.array[wp.int32], mask: wp.array[wp.int32], masked: w
 def _load_u16(base: _shared_handle, index: wp.int32) -> wp.int32: ...
 
 
-@wp.func_native(_device_only("    return ((const unsigned short*)base[1])[index];", "return {};"))
-def _table_u16(base: _shared_handle, index: wp.int32) -> wp.int32:
-    """Load a halfword of the factor-only tables from the template image in global memory."""
+@wp.func_native(_device_only("    return ((const unsigned*)base[1])[index];", "return {};"))
+def _image_word(base: _shared_handle, index: wp.int32) -> wp.uint32:
+    """Load a word of the template image in global memory by its workspace word offset."""
     ...
 
 
@@ -613,6 +613,19 @@ def make_dense_tree_ops(
     table_base = layout.tables
     table_words = layout.staged_end - layout.tables
     table_rounds = (table_words + _LANES - 1) // _LANES
+    # The factorization's own tables are copied over the composite inertias once those are
+    # spent, so their halfword offsets shift from the image to the scratch region.
+    cold_source = layout.staged_end
+    cold_target = layout.scratch
+    cold_words = layout.tables_end - layout.staged_end
+    cold_rounds = (cold_words + _LANES - 1) // _LANES
+    cold_shift = 2 * (layout.scratch - layout.staged_end)
+    if cold_words > layout.spare - layout.scratch:
+        raise ValueError("the dense factor tables exceed the scratch region")
+    desc_start += cold_shift
+    desc_row += cold_shift
+    level_pair_start += cold_shift
+    level_pair += cold_shift
     joint_rounds = (joint_capacity + _LANES - 1) // _LANES
     dof_rounds = (max_dofs + _LANES) // _LANES
     motion_rounds = (6 * max_dofs + _LANES - 1) // _LANES
@@ -674,13 +687,13 @@ def make_dense_tree_ops(
         """
         products = wp.vec4()
         squares = wp.vec4()
-        index = _table_u16(shared, wp.int32(desc_start) + k)
-        end = _table_u16(shared, wp.int32(desc_start) + k + wp.int32(1))
+        index = _load_u16(shared, wp.int32(desc_start) + k)
+        end = _load_u16(shared, wp.int32(desc_start) + k + wp.int32(1))
         while index + wp.int32(3) < end:
-            row0 = _table_u16(shared, wp.int32(desc_row) + index)
-            row1 = _table_u16(shared, wp.int32(desc_row) + index + wp.int32(1))
-            row2 = _table_u16(shared, wp.int32(desc_row) + index + wp.int32(2))
-            row3 = _table_u16(shared, wp.int32(desc_row) + index + wp.int32(3))
+            row0 = _load_u16(shared, wp.int32(desc_row) + index)
+            row1 = _load_u16(shared, wp.int32(desc_row) + index + wp.int32(1))
+            row2 = _load_u16(shared, wp.int32(desc_row) + index + wp.int32(2))
+            row3 = _load_u16(shared, wp.int32(desc_row) + index + wp.int32(3))
             l0 = _load(shared, row0 + depth)
             l1 = _load(shared, row1 + depth)
             l2 = _load(shared, row2 + depth)
@@ -694,7 +707,7 @@ def make_dense_tree_ops(
             squares += wp.vec4(l0 * l0, l1 * l1, l2 * l2, l3 * l3)
             index += wp.int32(4)
         while index < end:
-            row0 = _table_u16(shared, wp.int32(desc_row) + index)
+            row0 = _load_u16(shared, wp.int32(desc_row) + index)
             l0 = _load(shared, row0 + depth)
             products[0] += l0 * _load(shared, row0 + column)
             squares[0] += l0 * l0
@@ -814,14 +827,21 @@ def make_dense_tree_ops(
             row += wp.int32(_LANES)
         _sync_contact_warp()
 
+        # The composite inertias are spent: stage the factorization's tables over them.
+        for r in range(cold_rounds):
+            word = lane + wp.int32(r * _LANES)
+            if word < wp.int32(cold_words):
+                _store_word(shared, wp.int32(cold_target) + word, _image_word(shared, wp.int32(cold_source) + word))
+        _sync_contact_warp()
+
         # M = L^T L by height levels: lane (k, t) forms entry t of row k from the scaled
         # rows of k's descendants, H_kt - sum_i L_ik L_it, and scales it by L_kk, which it
         # forms alike. Rows of equal height never read each other.
         for level in range(heights):
-            pair = _table_u16(shared, wp.int32(level_pair_start) + level) + lane
-            pair_end = _table_u16(shared, wp.int32(level_pair_start) + level + wp.int32(1))
+            pair = _load_u16(shared, wp.int32(level_pair_start) + level) + lane
+            pair_end = _load_u16(shared, wp.int32(level_pair_start) + level + wp.int32(1))
             while pair < pair_end:
-                packed = _table_u16(shared, wp.int32(level_pair) + pair)
+                packed = _load_u16(shared, wp.int32(level_pair) + pair)
                 k = packed >> wp.int32(8)
                 t = packed & wp.int32(0xFF)
                 entry = _load_u16(shared, wp.int32(dof_entry) + k)
@@ -997,7 +1017,8 @@ def dense_unroll(layout: DenseSharedLayout, joint_capacity: int) -> int:
     """Return the loop unrolling the staged loads of :class:`DenseTreeOps` need."""
     table_rounds = (layout.staged_end - layout.tables + _LANES - 1) // _LANES
     entry_rounds = (layout.motion + _LANES - 1) // _LANES
-    return max(_STAGE_ROUNDS, table_rounds, entry_rounds, 21 * ((joint_capacity + _LANES - 1) // _LANES))
+    cold_rounds = (layout.tables_end - layout.staged_end + _LANES - 1) // _LANES
+    return max(_STAGE_ROUNDS, table_rounds, cold_rounds, entry_rounds, 21 * ((joint_capacity + _LANES - 1) // _LANES))
 
 
 @functools.cache
