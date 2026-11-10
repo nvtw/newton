@@ -5199,6 +5199,8 @@ class ReducedPhoenXArticulation:
             owner_np = np.full(int(model.body_count) + 1, -1, dtype=np.int32)
             owner_np[1:] = external_owner
             reduced.external_owner.assign(owner_np)
+        elif self.contact_block_system.dynamic_external_owner:
+            self.external_rigid_rows = True
         if dense is not None:
             # Coupled contacts and loop closures still read the articulated-body factor.
             dense.requires_aba = (

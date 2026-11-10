@@ -536,11 +536,13 @@ class TestReducedDenseBackend(unittest.TestCase):
                 chain(0.0, 0.0, 0.145)
                 chain(0.05, 0.02, 0.44)
             else:
-                # A free box lies across two chains.
+                # A free box lies across two chains, or on one of them.
                 chain(0.0, -0.3, 0.145)
                 chain(0.0, 0.3, 0.145)
-                box = builder.add_body(xform=wp.transform(wp.vec3(0.15, 0.0, 0.4), wp.quat_identity()))
-                builder.add_shape_box(box, hx=0.12, hy=0.45, hz=0.1)
+                half_width = 0.45 if scene == "carried" else 0.1
+                center = 0.0 if scene == "carried" else 0.3
+                box = builder.add_body(xform=wp.transform(wp.vec3(0.15, center, 0.4), wp.quat_identity()))
+                builder.add_shape_box(box, hx=0.12, hy=half_width, hz=0.1)
             return builder.finalize(device=device)
 
         def settle(scene: str, backend: str) -> tuple[np.ndarray, np.ndarray]:
@@ -565,16 +567,26 @@ class TestReducedDenseBackend(unittest.TestCase):
                     wp.copy(getattr(state, name), getattr(output, name))
             for _ in range(120):
                 wp.capture_launch(capture.graph)
-            return state.body_q.numpy(), state.body_qd.numpy()
+            owners = solver.world.bodies.reduced.external_owner.numpy()[1:]
+            cross = int(solver._reduced_articulation.contact_block_system.cross_column_count.numpy()[0])
+            return state.body_q.numpy(), state.body_qd.numpy(), owners, cross
 
-        for scene in ("stacked", "carried"):
+        for scene in ("stacked", "carried", "owned"):
             with self.subTest(scene=scene):
-                reference_q, _ = settle(scene, "aba")
-                body_q, body_qd = settle(scene, "auto")
+                reference_q, _, _, _ = settle(scene, "aba")
+                body_q, body_qd, owners, cross = settle(scene, "auto")
                 self.assertTrue(np.isfinite(body_q).all())
                 # Nothing sinks into what carries it, and everything comes to rest.
                 np.testing.assert_allclose(body_q[:, 2], reference_q[:, 2], atol=5.0e-3)
                 self.assertLess(float(np.abs(body_qd[:, :3]).max()), 0.06)
+                if scene == "owned":
+                    # The one tree under the box solves it in its own block: nothing crosses.
+                    self.assertEqual(int(owners[-1]), 1)
+                    self.assertEqual(cross, 0)
+                else:
+                    # Two trees touch each other, or the same box: no tree owns those contacts.
+                    self.assertTrue(np.all(owners < 0))
+                    self.assertGreater(cross, 0)
 
     def test_reduced_articulations_selects_by_index_or_label(self):
         device = _require_cuda(self)

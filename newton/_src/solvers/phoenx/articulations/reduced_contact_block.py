@@ -23,7 +23,7 @@ from newton._src.solvers.phoenx.articulations.reduced_contact import (
     reduced_contact_packed_owner,
     reduced_contact_prepare,
 )
-from newton._src.solvers.phoenx.body import BodyContainer, ReducedArticulationData, mat33_from_sym6
+from newton._src.solvers.phoenx.body import MOTION_KINEMATIC, BodyContainer, ReducedArticulationData, mat33_from_sym6
 from newton._src.solvers.phoenx.constraints.constraint_block import (
     BLOCK_LAMBDA_INF,
     BlockVector2Update,
@@ -166,6 +166,74 @@ def _external_rigid_owners(model: Model, allow_internal: bool) -> tuple[np.ndarr
             return None
         owners[body] = articulation
     return owners, bool(np.any(internal))
+
+
+def _free_bodies_may_touch_trees(model: Model) -> tuple[bool, bool]:
+    """Return whether free rigid bodies may touch trees, and whether two links of one tree may.
+
+    Without a pair list, as with shapes created at runtime, any free body may.
+    """
+    endpoints = _model_pair_endpoints(model)
+    if endpoints is None:
+        return True, False
+    _pairs, _body0, _body1, articulation0, articulation1, static0, static1 = endpoints
+    reduced0 = articulation0 >= 0
+    reduced1 = articulation1 >= 0
+    internal = reduced0 & reduced1 & (articulation0 == articulation1)
+    free = (reduced0 & ~reduced1 & ~static1) | (reduced1 & ~reduced0 & ~static0)
+    return bool(np.any(free)), bool(np.any(internal))
+
+
+@wp.kernel(enable_backward=False)
+def _reset_external_owner_kernel(lowest: wp.array[wp.int32], highest: wp.array[wp.int32]):
+    body = wp.tid()
+    lowest[body] = wp.int32(2147483647)
+    highest[body] = wp.int32(-1)
+
+
+@wp.kernel(enable_backward=False)
+def _mark_external_owner_kernel(
+    columns: ContactColumnContainer,
+    bodies: BodyContainer,
+    num_columns: wp.array[wp.int32],
+    lowest: wp.array[wp.int32],
+    highest: wp.array[wp.int32],
+):
+    """Record the trees that touch each free rigid body in this step's contact columns."""
+    column = wp.tid()
+    if column >= num_columns[0]:
+        return
+    if contact_get_side0_kind(columns, column) != wp.int32(SHAPE_ENDPOINT_KIND_RIGID) or contact_get_side1_kind(
+        columns, column
+    ) != wp.int32(SHAPE_ENDPOINT_KIND_RIGID):
+        return
+    body0 = contact_get_body1(columns, column)
+    body1 = contact_get_body2(columns, column)
+    articulation0 = bodies.reduced.body_articulation[body0]
+    articulation1 = bodies.reduced.body_articulation[body1]
+    if (articulation0 >= wp.int32(0)) == (articulation1 >= wp.int32(0)):
+        return
+    tree = articulation0
+    other = body1
+    if articulation1 >= wp.int32(0):
+        tree = articulation1
+        other = body0
+    if bodies.inverse_mass[other] == wp.float32(0.0) or bodies.motion_type[other] == MOTION_KINEMATIC:
+        return
+    wp.atomic_min(lowest, other, tree)
+    wp.atomic_max(highest, other, tree)
+
+
+@wp.kernel(enable_backward=False)
+def _resolve_external_owner_kernel(
+    lowest: wp.array[wp.int32], highest: wp.array[wp.int32], external_owner: wp.array[wp.int32]
+):
+    """A free body touched by exactly one tree joins that tree's fused substep for this step."""
+    body = wp.tid()
+    owner = wp.int32(-1)
+    if highest[body] >= wp.int32(0) and lowest[body] == highest[body]:
+        owner = lowest[body]
+    external_owner[body] = owner
 
 
 def _fallback_impossible_from_model_pairs(
@@ -3312,6 +3380,8 @@ class ReducedContactBlockSystem:
         #: Per model body, the fused substep that solves its contacts, see
         #: :func:`_external_rigid_owners`; ``None`` without such a substep.
         self.external_owner = None
+        #: Whether the tree that solves a free body's contacts is chosen per step on the device.
+        self.dynamic_external_owner = False
         #: Whether the fused substep solves rows between two links of one tree.
         self.internal_rows = False
         self._external_rigid_rows = external_rigid_rows
@@ -3351,6 +3421,16 @@ class ReducedContactBlockSystem:
             census = _external_rigid_owners(model, self.packed_internal_contacts)
             if census is not None:
                 self.external_owner, self.internal_rows = census
+            else:
+                # Several trees may reach one free body, or each other: which tree a free body
+                # joins is then decided in every step, see build_schedule.
+                free_bodies, internal = _free_bodies_may_touch_trees(model)
+                if free_bodies:
+                    self.dynamic_external_owner = True
+                    self.internal_rows = internal
+                    body_slots = int(model.body_count) + 1
+                    self._external_owner_lowest = wp.zeros(body_slots, dtype=wp.int32, device=self.device)
+                    self._external_owner_highest = wp.zeros(body_slots, dtype=wp.int32, device=self.device)
         (
             self._fallback_impossible_partitioned,
             self._fallback_impossible_rigid_only,
@@ -3551,6 +3631,27 @@ class ReducedContactBlockSystem:
         assert self.reorder_data is not None
         assert self.reorder_pair_source is not None
 
+        if self.dynamic_external_owner:
+            wp.launch(
+                _reset_external_owner_kernel,
+                dim=self._external_owner_lowest.shape[0],
+                outputs=[self._external_owner_lowest, self._external_owner_highest],
+                device=self.device,
+            )
+            wp.launch(
+                _mark_external_owner_kernel,
+                dim=self.schedule_capacity,
+                inputs=[columns, bodies, num_columns],
+                outputs=[self._external_owner_lowest, self._external_owner_highest],
+                device=self.device,
+            )
+            wp.launch(
+                _resolve_external_owner_kernel,
+                dim=self._external_owner_lowest.shape[0],
+                inputs=[self._external_owner_lowest, self._external_owner_highest],
+                outputs=[bodies.reduced.external_owner],
+                device=self.device,
+            )
         if partition_ownership:
             wp.launch(
                 _clear_contact_ownership_counts_kernel,

@@ -1,0 +1,1 @@
+Solve the contacts between a reduced-coordinate articulation and the free bodies it touches inside that articulation's fused substep also where several articulations can reach the same bodies: the owning articulation is chosen per step (128 G1 robots with 64 boxes in one world: 7.5 to 1.6 ms per step).
