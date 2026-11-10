@@ -910,8 +910,8 @@ class TestReducedDenseBackend(unittest.TestCase):
             momentum_after, momentum_before, rtol=0.0, atol=2.0e-4 * np.abs(momentum_before).max()
         )
 
-    def test_heterogeneous_fleet_mixes_buckets_and_articulated_body_fallback_under_graph_capture(self):
-        """Trees of four DOF buckets and a 66-DOF chain share one model; the chain keeps the ABA path."""
+    def test_heterogeneous_fleet_mixes_sizes_and_articulated_body_fallback_under_graph_capture(self):
+        """Trees of four DOF sizes and a 66-DOF chain share one model; the chain keeps the ABA path."""
         device = _require_cuda(self)
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
         builder.add_ground_plane()
@@ -940,7 +940,9 @@ class TestReducedDenseBackend(unittest.TestCase):
             )
             if backend == "dense":
                 dense = solver._reduced_articulation.system.dense
-                self.assertEqual(sorted(bucket.max_dofs for bucket in dense.buckets), [16, 24, 40, 64])
+                # All dense trees step in one launch, in the workspace of the largest.
+                self.assertEqual([bucket.max_dofs for bucket in dense.buckets], [64])
+                self.assertEqual(int(dense.buckets[0].articulations.shape[0]), int(model.articulation_count) - 1)
                 self.assertTrue(dense.has_fallback and dense.requires_aba)
             state0, state1 = model.state(), model.state()
             newton.eval_fk(model, model.joint_q, model.joint_qd, state0)
