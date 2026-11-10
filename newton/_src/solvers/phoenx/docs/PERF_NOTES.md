@@ -633,6 +633,44 @@ consequences: do not model this kernel as address-latency-starved, and expect
 work removal to pay mainly on the large overflow partition (~32k rows), where
 item count is well above the floor knee, rather than on the ~5k regular colors.
 
+## Default single-world path (2026-11-10)
+
+`step_layout="single_world"` without mass splitting (what `"auto"` selects
+for a large jointless rigid world) keeps unpacked contact columns and drains
+an unbounded color count through `wp.capture_while`. Kapla arena (13,234
+bricks, 26 colors, 76,870 columns, 4 substeps x 4 iterations + 1 relax) on an
+RTX PRO 6000 Blackwell, captured graph, GPU otherwise idle. Every step keeps
+poses and velocities bitwise equal after 600 frames:
+
+| Change | ms/frame |
+| --- | --- |
+| Example as shipped (`max_thread_blocks=32`: seven columns per thread) | 15.98 |
+| Automatic grid, four blocks per SM | 7.90 |
+| Next color cursor published in a second array (no cursor kernel per launch) | 7.43 |
+| Relax rebase on 8 row lanes instead of 32 (23.3 M -> 5.8 M threads) | 7.10 |
+| Consecutive columns of a color handed to different warps | 6.58 |
+
+The 10,000-cube pile example improves 6.79--6.91 to 5.52 ms/frame; that
+example is not run-to-run deterministic, so only its timing is compared.
+
+- Spreading columns over warps only pays for unpacked columns. Color-packed
+  rows share coalesced loads between neighbouring lanes: spreading them
+  slowed Kapla+Hoberman from 13.6 to 15.1 ms/frame. A larger grid adds
+  nothing once columns are spread (1,504 and 2,256 blocks: 6.57, 6.64 ms).
+- Each `capture_while` condition costs about 3.7 us (0.6 us kernel plus 3 us
+  idle), about 8 per sweep: 0.73 ms/frame, 10% of the arena. Running the
+  fused tail inside the head loop body would save two per sweep (about
+  1.7%); not done.
+- A launch costs about 5 us for the smallest colors and about 0.7 us more
+  per 1,000 columns. The nine smallest head colors hold 8% of the columns
+  and take a third of a sweep, so fewer colors is the remaining lever; it
+  changes the PGS order.
+- Rejected: `parallel_contact_prepare` on the arena, bitwise equal but 8.77
+  versus 7.10 ms/frame.
+- Island sleeping (`sleeping_velocity_threshold=0.05`) leaves the settled
+  arena at 6.86 ms/frame: sleeping columns stay colored, so the launch
+  count and the per-launch latency floor are unchanged.
+
 ## Correctness traps
 
 - CUDA-graph state ping-pong requires either an even captured substep count or an
