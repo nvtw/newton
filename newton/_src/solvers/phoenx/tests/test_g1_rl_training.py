@@ -147,6 +147,7 @@ def _set_g1_standing_position_hold_gains(env: rl.EnvG1PhoenX) -> None:
     joint_target_kd[start:stop] = _G1_STANDING_HOLD_KD
     env.model.joint_target_ke.assign(joint_target_ke)
     env.model.joint_target_kd.assign(joint_target_kd)
+    env.solver.notify_model_changed(newton.ModelFlags.JOINT_DOF_PROPERTIES)
 
 
 def _gather_g1_ground_contact_force(env: rl.EnvG1PhoenX) -> tuple[np.ndarray, int, int]:
