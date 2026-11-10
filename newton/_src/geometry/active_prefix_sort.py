@@ -17,7 +17,7 @@ import warp as wp
 #: Smallest prefix worth a separate branch; below this one launch dominates.
 _ACTIVE_PREFIX_MIN_ITEMS = 1 << 16
 #: Largest capacity reduction tried, as a power of two.
-_ACTIVE_PREFIX_MAX_SHIFT = 5
+_ACTIVE_PREFIX_MAX_SHIFT = 12
 
 
 def active_prefix_sort_levels(count: int) -> int:

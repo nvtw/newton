@@ -11,6 +11,7 @@ import os
 import numpy as np
 import warp as wp
 
+from newton._src.geometry.active_prefix_sort import active_prefix_sort_levels
 from newton._src.sim import Model
 from newton._src.solvers.phoenx.articulations.reduced_contact import (
     _deferred_point_velocity,
@@ -3491,6 +3492,8 @@ class ReducedContactBlockSystem:
         self._solve_fallback_by_world = world_count >= worker_blocks
         self.schedule_keys = wp.empty(2 * capacity, dtype=wp.int64, device=self.device)
         self.schedule_columns = wp.empty(2 * capacity, dtype=wp.int32, device=self.device)
+        # A captured graph sorts only the smallest prefix that holds the active columns.
+        self.schedule_prefix_flags = wp.zeros(active_prefix_sort_levels(capacity), dtype=wp.int32, device=self.device)
         self.schedule_section_end = wp.zeros(self.articulation_count + world_count, dtype=wp.int32, device=self.device)
         self.classic_column_count = wp.zeros(1, dtype=wp.int32, device=self.device)
         self.reduced_column_count = wp.zeros(1, dtype=wp.int32, device=self.device)
@@ -3513,6 +3516,10 @@ class ReducedContactBlockSystem:
             enable_warm_start=True,
         )
         self.fallback_partitioner.set_symmetric_sweep(True)
+
+    def _schedule_sort_flags(self) -> wp.array[wp.int32] | None:
+        """Return the prefix-sort flags inside a captured graph, where the branch costs no readback."""
+        return self.schedule_prefix_flags if self.device.is_cuda and self.device.is_capturing else None
 
     def build_schedule(
         self,
@@ -3564,7 +3571,9 @@ class ReducedContactBlockSystem:
                 ],
                 device=self.device,
             )
-            sort_variable_length_int64(self.schedule_keys, self.schedule_columns, num_columns)
+            sort_variable_length_int64(
+                self.schedule_keys, self.schedule_columns, num_columns, prefix_flags=self._schedule_sort_flags()
+            )
             wp.launch(
                 _reorder_contact_columns_kernel,
                 dim=self.schedule_capacity,
@@ -3631,7 +3640,9 @@ class ReducedContactBlockSystem:
                 outputs=[self.schedule_keys, self.schedule_columns, self.schedule_section_end],
                 device=self.device,
             )
-            sort_variable_length_int64(self.schedule_keys, self.schedule_columns, num_columns)
+            sort_variable_length_int64(
+                self.schedule_keys, self.schedule_columns, num_columns, prefix_flags=self._schedule_sort_flags()
+            )
         wp.utils.array_scan(self.schedule_section_end, self.schedule_section_end, inclusive=True)
         assert self.fallback_count is not None
         assert self.fallback_column is not None
@@ -3655,7 +3666,9 @@ class ReducedContactBlockSystem:
             outputs=[self.fallback_count, self.fallback_key, self.fallback_column],
             device=self.device,
         )
-        sort_variable_length_int64(self.fallback_key, self.fallback_column, self.fallback_count)
+        sort_variable_length_int64(
+            self.fallback_key, self.fallback_column, self.fallback_count, prefix_flags=self._schedule_sort_flags()
+        )
         wp.launch(
             _mark_fallback_runs_kernel,
             dim=self.schedule_capacity,
