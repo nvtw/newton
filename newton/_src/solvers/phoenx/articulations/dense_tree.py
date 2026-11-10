@@ -536,8 +536,11 @@ class DenseSharedLayout:
         self.tables_end = (offset + 1) // 2
         # Spatial inertias are loaded as float4 words.
         self.scratch = 4 * ((self.staged_end + 3) // 4)
+        # The scratch region also takes the factorization's tables once the inertias are spent.
         # One spare word takes the stores of lanes without a row.
-        self.spare = self.scratch + max(_INERTIA_STRIDE * joint_capacity, scratch_words)
+        self.spare = self.scratch + max(
+            _INERTIA_STRIDE * joint_capacity, self.tables_end - self.staged_end, scratch_words
+        )
         self.size = self.spare + 1
 
     def pack_template(self, template: dict) -> np.ndarray:
@@ -620,8 +623,6 @@ def make_dense_tree_ops(
     cold_words = layout.tables_end - layout.staged_end
     cold_rounds = (cold_words + _LANES - 1) // _LANES
     cold_shift = 2 * (layout.scratch - layout.staged_end)
-    if cold_words > layout.spare - layout.scratch:
-        raise ValueError("the dense factor tables exceed the scratch region")
     desc_start += cold_shift
     desc_row += cold_shift
     level_pair_start += cold_shift
