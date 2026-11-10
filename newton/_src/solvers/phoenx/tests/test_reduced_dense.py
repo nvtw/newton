@@ -350,14 +350,15 @@ class TestReducedDenseBackend(unittest.TestCase):
         """A floating chain rests on a tilted plate that hangs on a sprung hinge, a second tree.
 
         The fused substep solves both trees in one block; the articulated-body path keeps
-        them apart and couples them through its fallback.
+        them apart and couples them through its fallback. With only the chain selected as
+        reduced, the plate is a rigid body on a regular joint that the chain's block pushes.
         """
         device = _require_cuda(self)
         tilt = 0.2
         rotation = wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), tilt)
         for friction in ("point", "patch"):
             results = {}
-            for backend in ("aba", "auto"):
+            for case, backend, reduced in (("aba", "aba", None), ("auto", "auto", None), ("chain", "auto", ["chain"])):
                 builder = newton.ModelBuilder(gravity=(0.0, 0.0, -9.81), up_axis=newton.Axis.Z)
                 builder.default_shape_cfg.gap = 0.005
                 builder.default_shape_cfg.mu = 0.6
@@ -379,7 +380,7 @@ class TestReducedDenseBackend(unittest.TestCase):
                             axis=newton.Axis.Z,
                         )
                     previous = body
-                builder.add_articulation(list(range(builder.joint_count)))
+                builder.add_articulation(list(range(builder.joint_count)), label="chain")
                 plate = builder.add_link(xform=wp.transform(wp.vec3(0.0, 0.0, 1.0), rotation))
                 builder.add_shape_box(plate, hx=1.0, hy=0.6, hz=0.1)
                 hinge = builder.add_joint_revolute(
@@ -392,7 +393,7 @@ class TestReducedDenseBackend(unittest.TestCase):
                     target_kd=50.0,
                     actuator_mode=newton.JointTargetMode.POSITION,
                 )
-                builder.add_articulation([hinge])
+                builder.add_articulation([hinge], label="plate")
                 builder.joint_q[-1] = tilt
                 builder.joint_target_q[-1] = tilt
                 model = builder.finalize(device=device)
@@ -402,6 +403,7 @@ class TestReducedDenseBackend(unittest.TestCase):
                     collision_pipeline=pipeline,
                     joint_mode="reduced",
                     reduced_backend=backend,
+                    reduced_articulations=reduced,
                     contact_friction_model=friction,
                     substeps=4,
                     solver_iterations=4,
@@ -422,14 +424,33 @@ class TestReducedDenseBackend(unittest.TestCase):
                 fused = backend == "auto"
                 self.assertEqual(articulation.fused_substep is not None, fused)
                 self.assertEqual(int(articulation.model.articulation_count), 1 if fused else 2)
+                # One block holds both trees, or the chain alone beside the plate's regular joint.
+                self.assertEqual(int(articulation.model.joint_count), model.joint_count)
+                self.assertEqual(articulation.external_rigid_rows, case == "chain")
                 slid = float(np.linalg.norm(state.body_q.numpy()[0, :3] - start))
-                results[backend] = (slid, float(state.joint_q.numpy()[-1]))
-            with self.subTest(friction=friction):
-                # Friction holds the chain on the slope, and its weight opens the hinge a little.
-                self.assertLess(results["auto"][0], 2.0e-2)
-                self.assertAlmostEqual(results["auto"][0], results["aba"][0], delta=5.0e-3)
-                self.assertAlmostEqual(results["auto"][1], results["aba"][1], delta=5.0e-3)
-                self.assertGreater(results["auto"][1], tilt + 1.0e-3)
+                # The plate's angle from its pose: a regular joint does not write joint_q.
+                results[case] = (slid, 2.0 * float(np.arcsin(state.body_q.numpy()[plate, 4])))
+            for case in ("auto", "chain"):
+                with self.subTest(friction=friction, case=case):
+                    # Friction holds the chain on the slope, and its weight opens the hinge a little.
+                    self.assertLess(results[case][0], 2.0e-2)
+                    self.assertAlmostEqual(results[case][0], results["aba"][0], delta=5.0e-3)
+                    self.assertAlmostEqual(results[case][1], results["aba"][1], delta=5.0e-3)
+                    self.assertGreater(results[case][1], tilt + 1.0e-3)
+
+    def test_reduced_articulations_selects_by_index_or_label(self):
+        device = _require_cuda(self)
+        fleet = _make_centipede_fleet(device, worlds=2)
+        labels = list(fleet.articulation_label)
+        solver = newton.solvers.SolverPhoenX(fleet, joint_mode="reduced", reduced_articulations=[0])
+        self.assertEqual(int(solver._reduced_articulation.model.articulation_count), 1)
+        # Every world's copy of a tree carries the same label.
+        solver = newton.solvers.SolverPhoenX(fleet, joint_mode="reduced", reduced_articulations=[labels[1]])
+        self.assertEqual(int(solver._reduced_articulation.model.articulation_count), labels.count(labels[1]))
+        with self.assertRaisesRegex(ValueError, "matches no articulation label"):
+            newton.solvers.SolverPhoenX(fleet, joint_mode="reduced", reduced_articulations=["no such tree"])
+        with self.assertRaisesRegex(ValueError, "outside the model"):
+            newton.solvers.SolverPhoenX(fleet, joint_mode="reduced", reduced_articulations=[len(labels)])
 
     def test_fused_substep_wakes_sleeping_free_bodies_under_graph_capture(self):
         """Free bodies that fell asleep wake when a tree of the fused substep pushes them."""

@@ -219,6 +219,7 @@ def build_joint_init_arrays(
     device: wp.context.Devicelike | None = None,
     *,
     reduced_articulations: bool = False,
+    reduced_selection: np.ndarray | None = None,
     reserved_joints: range = range(0),
 ) -> JointInitArrays:
     """Convert ``model``'s joints to joint constraint init arrays on ``device``.
@@ -228,6 +229,8 @@ def build_joint_init_arrays(
         device: Device for the generated Warp arrays.
         reduced_articulations: Whether tree joints are owned by the reduced
             articulation solver instead of maximal-coordinate joint constraint columns.
+        reduced_selection: Per articulation, whether the reduced solver owns it;
+            the joints of the others get constraint columns. ``None`` selects all.
         reserved_joints: Disabled placeholder joints that still get a column, so
             joints created at runtime can take it over.
 
@@ -326,7 +329,11 @@ def build_joint_init_arrays(
 
         # Reduced coordinates own articulation-tree joints directly; only
         # out-of-tree closure rows need maximal-coordinate joint constraint columns.
-        if reduced_articulations and int(joint_articulation[j]) >= 0:
+        if (
+            reduced_articulations
+            and int(joint_articulation[j]) >= 0
+            and (reduced_selection is None or bool(reduced_selection[int(joint_articulation[j])]))
+        ):
             continue
 
         # FREE and disabled joints don't get a constraint column.

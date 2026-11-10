@@ -4902,10 +4902,12 @@ def _merge_touching_trees(model: Model, starts: np.ndarray, ends: np.ndarray) ->
     return starts[keep], ends[last]
 
 
-def _get_reduced_model(model: Model, merge_trees: bool = False) -> Model:
+def _get_reduced_model(model: Model, merge_trees: bool = False, selected: np.ndarray | None = None) -> Model:
     """Keep trees with prescribed body motion and free rigid bodies outside reduced dynamics.
 
     ``merge_trees`` also joins trees that may touch, see :func:`_merge_touching_trees`.
+    ``selected`` keeps only the marked articulations reduced; the others become rigid
+    bodies whose joints the regular solver holds.
 
     A lone body on a free joint beside jointed trees is a rigid body: the
     maximal-coordinate solver integrates it and solves its contacts with other
@@ -4932,6 +4934,8 @@ def _get_reduced_model(model: Model, merge_trees: bool = False) -> Model:
         ],
         dtype=bool,
     )
+    if selected is not None:
+        eligible &= selected[: len(eligible)]
     if np.any(eligible & ~free_body):
         eligible &= ~free_body
     if np.all(eligible) and not merge_trees:

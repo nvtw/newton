@@ -1,0 +1,1 @@
+Add `reduced_articulations` to `SolverPhoenX` to choose, by index or label pattern, which articulations `joint_mode="reduced"` solves in reduced coordinates; the others become rigid bodies whose joints the regular solver holds

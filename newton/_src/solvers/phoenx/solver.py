@@ -11,6 +11,7 @@ PhoenX slot 0 is the static world anchor; pass ``substeps=1`` to substep outside
 
 from __future__ import annotations
 
+import fnmatch
 import warnings
 from collections.abc import Sequence
 
@@ -265,6 +266,31 @@ def _build_maximal_motor_body_inv_inertia(model: Model) -> wp.array[wp.mat33f]:
     return wp.array(body_inv.astype(np.float32), dtype=wp.mat33f, device=model.device)
 
 
+def _select_articulations(model: Model, selection: Sequence[int] | Sequence[str] | None) -> np.ndarray | None:
+    """Return which articulations ``selection`` names, as a mask, or ``None`` for all of them.
+
+    Integers are articulation indices; strings are shell-style patterns matched
+    against :attr:`~newton.Model.articulation_label`.
+    """
+    if selection is None:
+        return None
+    count = int(model.articulation_count)
+    mask = np.zeros(count, dtype=bool)
+    labels = list(model.articulation_label)
+    for item in selection:
+        if isinstance(item, str):
+            matches = [index for index, label in enumerate(labels) if fnmatch.fnmatchcase(label, item)]
+            if not matches:
+                raise ValueError(f"reduced_articulations pattern {item!r} matches no articulation label")
+            mask[matches] = True
+        else:
+            index = int(item)
+            if not 0 <= index < count:
+                raise ValueError(f"reduced_articulations index {index} is outside the model's {count} articulations")
+            mask[index] = True
+    return mask
+
+
 class SolverPhoenX(SolverBase):
     """Newton :class:`SolverBase` wrapper around :class:`PhoenXWorld`.
 
@@ -344,6 +370,7 @@ class SolverPhoenX(SolverBase):
         joint_mode: str = "maximal_direct",
         reduced_articulation_path: str = "reference",
         reduced_backend: str = "auto",
+        reduced_articulations: Sequence[int] | Sequence[str] | None = None,
         direct_joint_mask: np.ndarray | None = None,
         tracking_volumes: Sequence[int] | None = None,
     ):
@@ -546,6 +573,11 @@ class SolverPhoenX(SolverBase):
             reduced_articulation_path: ``"reference"`` uses the established
                 reduced solver. Experimental ``"persistent"`` enables
                 topology-proven cross-phase articulation fusion on CUDA.
+            reduced_articulations: Articulations that ``joint_mode="reduced"`` solves in
+                reduced coordinates, as articulation indices or shell-style patterns
+                on :attr:`~newton.Model.articulation_label`. The others become rigid
+                bodies whose joints the regular solver holds, like joints outside
+                every articulation. ``None`` reduces every articulation.
             reduced_backend: Generalized-mass operator of ``joint_mode="reduced"``
                 and ``"hybrid"`` trees. ``"aba"`` uses linear-time articulated-body
                 recurrences and handles any tree. ``"dense"`` assembles each
@@ -769,6 +801,7 @@ class SolverPhoenX(SolverBase):
             raise ValueError(f"reduced_backend must be 'aba', 'dense', or 'auto', got {reduced_backend!r}")
         self.reduced_articulation_path = reduced_articulation_path
         self.reduced_backend = reduced_backend
+        self._reduced_articulation_selection = _select_articulations(model, reduced_articulations)
         self._reduced_articulation: ReducedPhoenXArticulation | None = None
         self._maximal_tree_projector: MaximalTreeProjector | GeneralMaximalTreeProjector | None = None
         self._maximal_contact_response: MaximalContactResponse | None = None
@@ -884,6 +917,7 @@ class SolverPhoenX(SolverBase):
             model,
             device=self.device,
             reduced_articulations=self._uses_reduced_joint_ownership,
+            reduced_selection=self._reduced_articulation_selection,
             reserved_joints=reserved_joints,
         )
         num_joints = self._joint_constraints.num_joint_columns
@@ -1176,13 +1210,15 @@ class SolverPhoenX(SolverBase):
             self._articulation_mode in ("maximal_projected", "maximal_articulated", "hybrid", "reduced")
             and int(model.articulation_count) > 0
         ):
-            reduced_model = _get_reduced_model(model)
+            reduced_model = _get_reduced_model(model, selected=self._reduced_articulation_selection)
             if reduced_model.articulation_count > 0:
 
                 def build_reduced(backend: str, external_rigid_rows: bool = False) -> ReducedPhoenXArticulation:
                     return ReducedPhoenXArticulation(
                         # The fused substep solves trees that may touch in one block.
-                        _get_reduced_model(model, merge_trees=True) if external_rigid_rows else reduced_model,
+                        _get_reduced_model(model, merge_trees=True, selected=self._reduced_articulation_selection)
+                        if external_rigid_rows
+                        else reduced_model,
                         self.bodies,
                         execution_path=self.reduced_articulation_path,
                         contact_friction_model=contact_friction_model,
@@ -2001,6 +2037,7 @@ class SolverPhoenX(SolverBase):
             self._joint_constraints = build_joint_init_arrays(
                 self.model,
                 reduced_articulations=self._uses_reduced_joint_ownership,
+                reduced_selection=self._reduced_articulation_selection,
                 device=self.device,
             )
             self.world._combine_direct_prepare_projection = _can_combine_direct_prepare_projection(
