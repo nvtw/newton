@@ -636,6 +636,7 @@ def make_dense_tree_ops(
     dof_values = wp.types.vector(length=dof_rounds, dtype=wp.float32)
     entry_rounds = (entry_capacity + _LANES - 1) // _LANES
     factor_vector = wp.types.vector(length=entry_rounds, dtype=wp.float32)
+    stage_words = wp.types.vector(length=_STAGE_ROUNDS, dtype=wp.uint32)
 
     @wp.func
     def stage_motion(
@@ -658,6 +659,30 @@ def make_dense_tree_ops(
                 )
 
     @wp.func
+    def copy_image_words(
+        shared: _shared_handle,
+        lane: wp.int32,
+        image: wp.array[wp.uint32],
+        source: wp.int32,
+        target: wp.int32,
+        count: wp.int32,
+    ):
+        """Copy ``count`` global words into the workspace, a chunk of loads in flight at a time.
+
+        A store between two loads would make each global latency wait for the one before.
+        """
+        for chunk in range(0, table_rounds, _STAGE_ROUNDS):
+            words = stage_words()
+            for r in range(_STAGE_ROUNDS):
+                word = lane + wp.int32((chunk + r) * _LANES)
+                if word < count:
+                    words[r] = image[source + word]
+            for r in range(_STAGE_ROUNDS):
+                word = lane + wp.int32((chunk + r) * _LANES)
+                if word < count:
+                    _store_word(shared, target + word, words[r])
+
+    @wp.func
     def stage(
         shared: _shared_handle,
         articulation: wp.int32,
@@ -669,10 +694,7 @@ def make_dense_tree_ops(
         """Copy an articulation's template tables into the workspace; return its height level count."""
         template = dense.articulation_template[articulation]
         source = template_image_start[template]
-        for r in range(table_rounds):
-            word = lane + wp.int32(r * _LANES)
-            if word < wp.int32(table_words):
-                _store_word(shared, wp.int32(table_base) + word, template_image[source + word])
+        copy_image_words(shared, lane, template_image, source, wp.int32(table_base), wp.int32(table_words))
         heights = (
             dense.template_height_start[template + wp.int32(1)] - wp.int32(1) - dense.template_height_start[template]
         )
@@ -829,10 +851,16 @@ def make_dense_tree_ops(
         _sync_contact_warp()
 
         # The composite inertias are spent: stage the factorization's tables over them.
-        for r in range(cold_rounds):
-            word = lane + wp.int32(r * _LANES)
-            if word < wp.int32(cold_words):
-                _store_word(shared, wp.int32(cold_target) + word, _image_word(shared, wp.int32(cold_source) + word))
+        for chunk in range(0, cold_rounds, _STAGE_ROUNDS):
+            words = stage_words()
+            for r in range(_STAGE_ROUNDS):
+                word = lane + wp.int32((chunk + r) * _LANES)
+                if word < wp.int32(cold_words):
+                    words[r] = _image_word(shared, wp.int32(cold_source) + word)
+            for r in range(_STAGE_ROUNDS):
+                word = lane + wp.int32((chunk + r) * _LANES)
+                if word < wp.int32(cold_words):
+                    _store_word(shared, wp.int32(cold_target) + word, words[r])
         _sync_contact_warp()
 
         # M = L^T L by height levels: lane (k, t) forms entry t of row k from the scaled
