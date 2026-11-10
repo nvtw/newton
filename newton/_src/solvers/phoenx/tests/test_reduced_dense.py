@@ -354,6 +354,55 @@ class TestReducedDenseBackend(unittest.TestCase):
             self.assertTrue(np.all(trunk_height > 0.15), trunk_height)
             np.testing.assert_allclose(fused_q, unfused_q, rtol=0.0, atol=1.0e-3)
 
+    def test_fused_substep_solves_root_paths_longer_than_a_warp_under_graph_capture(self):
+        """A ball-jointed chain's contact rows span 42 DOFs, more path positions than lanes."""
+        device = _require_cuda(self)
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        builder.add_ground_plane()
+        cfg = newton.ModelBuilder.ShapeConfig()
+        cfg.collision_group = -7  # The links collide with the ground only.
+        parent = -1
+        joints = []
+        # The chain lies along x on the ground and is nudged sideways at its far end.
+        for link_index in range(14):
+            link = builder.add_link(mass=0.2)
+            builder.add_shape_sphere(link, radius=0.03, cfg=cfg)
+            xform = wp.transform(wp.vec3(0.0, 0.0, 0.031), wp.quat_identity())
+            if link_index > 0:
+                xform = wp.transform(wp.vec3(0.07, 0.0, 0.0), wp.quat_identity())
+            joints.append(builder.add_joint_ball(parent=parent, child=link, parent_xform=xform, armature=0.01))
+            parent = link
+        builder.add_articulation(joints)
+        builder.joint_qd[-1] = 2.0
+        model = builder.finalize(device=device)
+
+        def simulate(fused: bool) -> np.ndarray:
+            solver = newton.solvers.SolverPhoenX(
+                model, joint_mode="reduced", reduced_backend="dense", substeps=2, velocity_iterations=1
+            )
+            articulation = solver._reduced_articulation
+            self.assertIsNotNone(articulation.fused_substep)
+            if not fused:
+                articulation.fused_substep = None
+            state0, state1 = model.state(), model.state()
+            newton.eval_fk(model, model.joint_q, model.joint_qd, state0)
+            contacts = model.contacts()
+            with wp.ScopedCapture(device=device) as capture:
+                for _ in range(2):
+                    model.collide(state0, contacts)
+                    solver.step(state0, state1, None, contacts, 1.0 / 120.0)
+                    state0, state1 = state1, state0
+            for _ in range(30):
+                wp.capture_launch(capture.graph)
+            # Every link rests on the ground, the far ones through rows longer than a warp.
+            self.assertEqual(int(contacts.rigid_contact_count.numpy()[0]), 14)
+            return state0.body_q.numpy()
+
+        fused_q = simulate(True)
+        self.assertTrue(np.all(np.isfinite(fused_q)))
+        np.testing.assert_allclose(fused_q[:, 2], 0.03, rtol=0.0, atol=2.0e-3)
+        np.testing.assert_allclose(fused_q, simulate(False), rtol=0.0, atol=1.0e-3)
+
     def test_dense_backend_rejects_models_without_eligible_trees(self):
         device = _require_cuda(self)
         builder = newton.ModelBuilder()

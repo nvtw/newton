@@ -558,11 +558,13 @@ def make_dense_substep_kernel(
 
     @wp.func
     def add_row(shared: wp.uint64, lane: wp.int32, row: wp.int32, impulse: wp.float32):
-        """Add ``impulse * z_row`` to ``w``; lane ``p`` adds path position ``p``."""
-        if lane < wp.int32(path_capacity):
-            index = wp.int32(PAGE_ROWS) * lane + row
+        """Add ``impulse * z_row`` to ``w``; the lanes stride over the path positions, which hold distinct DOFs."""
+        position = lane
+        while position < wp.int32(path_capacity):
+            index = wp.int32(PAGE_ROWS) * position + row
             slot = wp.int32(rhs_base) + _load_u8(shared, wp.int32(z_dof_byte) + index)
             _store(shared, slot, _load(shared, slot) + impulse * _load(shared, wp.int32(z_base) + index))
+            position += wp.int32(_LANES)
         _sync_contact_warp()
 
     @wp.func
