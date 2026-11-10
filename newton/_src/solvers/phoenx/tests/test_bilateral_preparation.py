@@ -241,7 +241,10 @@ class TestBilateralPreparation(unittest.TestCase):
         world = solver.world
         data = world.constraints.bilateral
         rng = np.random.default_rng(7819)
-        fields = ("response0", "response1", "lower", "diagonal", "valid")
+        # The response arrays are scratch of the scalar kernels only; cooperative
+        # rows exchange responses through shuffles and leave them untouched.
+        scratch = ("response0", "response1")
+        fields = (*scratch, "lower", "diagonal", "valid")
         original_wrenches = {field: getattr(data, field).numpy().copy() for field in ("wrench0", "wrench1")}
         original_mass = world.bodies.inverse_mass.numpy().copy()
         original_inertia = world.bodies.inverse_inertia_world.numpy().copy()
@@ -293,11 +296,14 @@ class TestBilateralPreparation(unittest.TestCase):
                 for field in fields:
                     if not np.all(np.isfinite(outputs[0][field])):
                         raise AssertionError(f"Nonfinite reference: {case}, {field}")
-                    for actual in outputs[1:]:
-                        self.assertEqual(outputs[0][field].tobytes(), actual[field].tobytes(), f"{case}, field={field}")
+                    for index, actual in enumerate(outputs[1:]):
+                        expected = outputs[0][field]
+                        if index > 0 and field in scratch:
+                            expected = np.zeros_like(expected)
+                        self.assertEqual(expected.tobytes(), actual[field].tobytes(), f"{case}, field={field}")
 
     def test_cooperative_ragged_rows_invalid_pivots_and_capture(self):
-        """Complete subgroups preserve stale zero-row fields and invalid factors."""
+        """Complete subgroups match scalar factors and keep stale zero-row fields."""
         model = make_model(40.0)
         solver = make_solver(model, mass_splitting=True, max_colored_partitions=0)
         state = model.state()
@@ -316,7 +322,9 @@ class TestBilateralPreparation(unittest.TestCase):
         data.structural_index = wp.array(
             np.repeat(data.structural_index.numpy()[:1], count), dtype=wp.int32, device=model.device
         )
-        fields = ("response0", "response1", "lower", "diagonal", "valid")
+        # Only the scalar kernel stores responses; cooperative lanes shuffle them.
+        scratch = ("response0", "response1")
+        fields = (*scratch, "lower", "diagonal", "valid")
         for name, dtype, shape, scalar in (
             ("response0", wp.spatial_vector, (count, 6, 6), np.float32),
             ("response1", wp.spatial_vector, (count, 6, 6), np.float32),
@@ -361,9 +369,8 @@ class TestBilateralPreparation(unittest.TestCase):
                     expected = actual
                 else:
                     for name in fields:
-                        self.assertEqual(
-                            expected[name].tobytes(), actual[name].tobytes(), f"{invalid=}, {block=}, {name=}"
-                        )
+                        reference = initial[name] if name in scratch else expected[name]
+                        self.assertEqual(reference.tobytes(), actual[name].tobytes(), f"{invalid=}, {block=}, {name=}")
                 for name in fields[:-1]:
                     self.assertEqual(actual[name][0].tobytes(), initial[name][0].tobytes(), name)
                 self.assertEqual(int(actual["valid"][0]), 0)

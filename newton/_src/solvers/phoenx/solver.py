@@ -2075,7 +2075,7 @@ class SolverPhoenX(SolverBase):
                 if previous_direct_solver is not getattr(self._direct_equality_system, "solver", None):
                     self._rebuild_direct_contact_response()
                 self._refresh_direct_joint_ownership()
-        cable_rest_changed = bool(flags & int(ModelFlags.JOINT_PROPERTIES | ModelFlags.BODY_PROPERTIES))
+        cable_rest_changed = bool(flags & int(ModelFlags.JOINT_REFERENCE_POSE_PROPERTIES))
         if cable_rest_changed and self._direct_equality_system is not None:
             self._direct_equality_system.refresh_cable_rest_state()
         if flags & int(ModelFlags.MODEL_PROPERTIES):

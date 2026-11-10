@@ -1,0 +1,1 @@
+Map PhoenX rod stretch, shear, bend, and twist rows to Newton's ``[shear_x, shear_y, stretch_z, bend_x, bend_y, twist_z]`` material slots and read the rod rest rotation from ``Model.joint_rest_q``, refreshed by ``ModelFlags.JOINT_REFERENCE_POSE_PROPERTIES``.

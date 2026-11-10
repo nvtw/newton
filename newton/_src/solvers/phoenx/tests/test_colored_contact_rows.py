@@ -188,7 +188,7 @@ class TestColoredContactRows(unittest.TestCase):
     def test_packed_rows_match_canonical_stack(self) -> None:
         """Packed headers and rows must preserve canonical stack dynamics."""
 
-        def run(*, packed: bool) -> tuple[np.ndarray, np.ndarray]:
+        def run(*, packed: bool) -> tuple[np.ndarray, ...]:
             scene = _PhoenXScene(
                 fps=120,
                 substeps=6,
@@ -203,15 +203,29 @@ class TestColoredContactRows(unittest.TestCase):
                 mass_splitting_batch_size=1,
             )
             scene.add_ground_plane()
+            # Start in resting contact. A stack dropped as one block can
+            # settle into a lateral sway of about 1 mm/s; the two layouts then
+            # drift out of phase and differ by the sway instead of by round-off.
             for i in range(4):
-                scene.add_box((0.03 * (i % 2), 0.0, 0.21 + 0.4 * i), (0.4, 0.25, 0.2))
+                scene.add_box((0.03 * (i % 2), 0.0, 0.2 + 0.4 * i), (0.4, 0.25, 0.2))
             scene.finalize()
-            for _ in range(120):
+            for _ in range(6):
                 scene.step()
-            return scene.bodies.position.numpy(), scene.bodies.velocity.numpy()
+            early = scene.bodies.position.numpy(), scene.bodies.velocity.numpy()
+            for _ in range(114):
+                scene.step()
+            return *early, scene.bodies.position.numpy(), scene.bodies.velocity.numpy()
 
-        canonical_position, canonical_velocity = run(packed=False)
-        packed_position, packed_velocity = run(packed=True)
+        canonical_early_position, canonical_early_velocity, canonical_position, canonical_velocity = run(packed=False)
+        packed_early_position, packed_early_velocity, packed_position, packed_velocity = run(packed=True)
+        # The contacts compress at millimeters per second during the first
+        # frames. Both layouts solve the same rows there, so they agree to
+        # float32 resolution before contact switching amplifies round-off.
+        self.assertGreater(float(np.abs(canonical_early_velocity).max()), 1.0e-4)
+        np.testing.assert_allclose(packed_early_position, canonical_early_position, rtol=0.0, atol=1.0e-7)
+        np.testing.assert_allclose(packed_early_velocity, canonical_early_velocity, rtol=0.0, atol=1.0e-7)
+        # The tolerances below assume a stack that has come to rest.
+        self.assertLess(float(np.abs(canonical_velocity).max()), 1.0e-4)
         # Packed and canonical schedules round the cached contact-frame mobility
         # at different kernel boundaries. Allow 15 micrometers and 0.032 mm/s
         # of accumulated divergence after 120 PGS steps.

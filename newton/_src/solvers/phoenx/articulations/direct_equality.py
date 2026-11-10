@@ -191,7 +191,9 @@ def _generic_d6_constraint_bases(
     for joint in np.flatnonzero(common_rows):
         if joint_type[joint] == int(JointType.ROD):
             # Rod DoFs are material-property slots rather than free motion
-            # axes. Emit its complete material frame as common D6 rows.
+            # axes. Emit its complete material frame as common D6 rows, with
+            # the anchor +Z material tangent first: stretch, two shears, then
+            # twist, two bends.
             linear_axes[joint] = np.eye(3, dtype=np.float32)[[2, 0, 1]]
             angular_axes[joint] = np.eye(3, dtype=np.float32)[[2, 0, 1]]
             linear_count[joint] = 3
@@ -731,7 +733,9 @@ def _prepare_direct_rows(
             stiffness = wp.float32(0.0)
             damping = wp.float32(0.0)
             if material_rows:
-                dof = joint_qd_start[joint] + (wp.int32(0) if axis_index == 0 else wp.int32(1))
+                # Model slots follow the anchor axes [shear_x, shear_y, stretch_z];
+                # the rows above start at the +Z tangent.
+                dof = joint_qd_start[joint] + (wp.int32(axis_index) + wp.int32(2)) % wp.int32(3)
                 stiffness = joint_target_ke[dof]
                 damping = joint_target_kd[dof]
             if not material_rows or stiffness > wp.float32(0.0) or damping > wp.float32(0.0):
@@ -787,8 +791,9 @@ def _prepare_direct_rows(
             stiffness = wp.float32(0.0)
             damping = wp.float32(0.0)
             if material_rows:
+                # Model slots follow the anchor axes [bend_x, bend_y, twist_z].
                 linear_dofs = joint_dof_dim[joint, 0]
-                dof = joint_qd_start[joint] + linear_dofs + (wp.int32(1) if axis_index == 0 else wp.int32(0))
+                dof = joint_qd_start[joint] + linear_dofs + (wp.int32(axis_index) + wp.int32(2)) % wp.int32(3)
                 stiffness = joint_target_ke[dof]
                 damping = joint_target_kd[dof]
             if not material_rows or stiffness > wp.float32(0.0) or damping > wp.float32(0.0):
@@ -2004,41 +2009,26 @@ def _effective_joint_axes(
 
 
 def _material_rest_relative_orientations(model: Model) -> np.ndarray:
-    """Snapshot each rod parent-to-child anchor rotation at zero strain."""
+    """Read each rod's parent-to-child anchor rotation at zero strain.
+
+    Rods store their structural rest in :attr:`newton.Model.joint_rest_q`, in
+    the ``joint_q`` layout: zero translation followed by the relative anchor
+    rotation as an xyzw quaternion.
+    """
     rest = np.zeros((int(model.joint_count), 4), dtype=np.float32)
     rest[:, 3] = 1.0
-    body_q = np.asarray(model.body_q.numpy(), dtype=np.float32)
     joint_type = np.asarray(model.joint_type.numpy(), dtype=np.int32)
-    joint_parent = np.asarray(model.joint_parent.numpy(), dtype=np.int32)
-    joint_child = np.asarray(model.joint_child.numpy(), dtype=np.int32)
-    joint_x_p = np.asarray(model.joint_X_p.numpy(), dtype=np.float32)
-    joint_x_c = np.asarray(model.joint_X_c.numpy(), dtype=np.float32)
-
-    def multiply(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-        av, aw = a[:3], float(a[3])
-        bv, bw = b[:3], float(b[3])
-        return np.asarray(
-            [
-                aw * bv[0] + bw * av[0] + av[1] * bv[2] - av[2] * bv[1],
-                aw * bv[1] + bw * av[1] + av[2] * bv[0] - av[0] * bv[2],
-                aw * bv[2] + bw * av[2] + av[0] * bv[1] - av[1] * bv[0],
-                aw * bw - float(np.dot(av, bv)),
-            ],
-            dtype=np.float32,
-        )
-
-    for joint in np.flatnonzero(joint_type == int(JointType.ROD)):
-        parent = int(joint_parent[joint])
-        child = int(joint_child[joint])
-        q0 = joint_x_p[joint, 3:] if parent < 0 else multiply(body_q[parent, 3:], joint_x_p[joint, 3:])
-        q1 = joint_x_c[joint, 3:] if child < 0 else multiply(body_q[child, 3:], joint_x_c[joint, 3:])
-        relative = multiply(np.asarray([-q0[0], -q0[1], -q0[2], q0[3]], dtype=np.float32), q1)
-        norm = float(np.linalg.norm(relative))
-        if norm > 1.0e-12:
-            relative /= norm
-        if relative[3] < 0.0:
-            relative = -relative
-        rest[joint] = relative
+    rods = np.flatnonzero(joint_type == int(JointType.ROD))
+    if rods.size == 0:
+        return rest
+    rotation_start = np.asarray(model.joint_q_start.numpy(), dtype=np.int64)[rods] + 3
+    relative = np.asarray(model.joint_rest_q.numpy(), dtype=np.float32)[rotation_start[:, None] + np.arange(4)]
+    norm = np.linalg.norm(relative, axis=1)
+    valid = norm > 1.0e-12
+    relative[valid] /= norm[valid, None]
+    relative[~valid] = (0.0, 0.0, 0.0, 1.0)
+    relative[relative[:, 3] < 0.0] *= -1.0
+    rest[rods] = relative
     return rest
 
 
@@ -2481,7 +2471,7 @@ class DirectEqualitySystem:
         )
 
     def refresh_cable_rest_state(self) -> None:
-        """Refresh rod zero-strain rotations after joint or body pose edits."""
+        """Refresh rod zero-strain rotations after ``model.joint_rest_q`` edits."""
         if not self.enabled:
             return
         self.material_rest_relative_orientation.assign(_material_rest_relative_orientations(self.model))

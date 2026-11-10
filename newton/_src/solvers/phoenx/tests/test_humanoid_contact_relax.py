@@ -14,7 +14,6 @@ import warp as wp
 import newton
 import newton.examples
 from newton._src.solvers.phoenx.examples.example_humanoid import DEFAULT_CONTACT_GAP, Example
-from newton._src.viewer.kernels import PickingState
 from newton._src.viewer.picking import Picking
 
 
@@ -141,32 +140,26 @@ class TestPhoenXHumanoidContactRelax(unittest.TestCase):
             velocity_iterations=1,
             prepare_refresh_stride="auto",
         )
-        picking = Picking(model)
+        picking = Picking(model, pick_stiffness=50.0, pick_damping=5.0, pick_max_acceleration=1.0)
 
+        # Grab the body with a ray through its origin from whichever side is unobstructed.
         body = 5
-        q = state.body_q.numpy()
-        local = np.array([0.0, 0.0, 0.0], dtype=np.float32)
-        hit = q[body, :3]
-        pick_state = np.empty(1, dtype=PickingState.numpy_dtype())
-        pick_state[0]["picked_point_local"] = local
-        pick_state[0]["picked_point_world"] = hit
-        pick_state[0]["picking_target_world"] = hit + np.array([2.0, 0.0, 1.0], dtype=np.float32)
-        pick_state[0]["pick_stiffness"] = 50.0
-        pick_state[0]["pick_damping"] = 5.0
-        pick_state[0]["pick_max_acceleration"] = 1.0
-        picking.pick_state.assign(pick_state)
-        picking.pick_body.assign(np.array([body], dtype=np.int32))
-        picking.picking_active = True
+        origin = state.body_q.numpy()[body, :3]
+        for direction in np.vstack((np.eye(3), -np.eye(3))).astype(np.float32):
+            picking.pick(state, wp.vec3f(*(origin - 5.0 * direction)), wp.vec3f(*direction))
+            if picking.pick_body == body:
+                break
+        self.assertEqual(picking.pick_body, body)
+        target = np.array(picking.pick_point) + np.array([2.0, 0.0, 1.0])
+        picking.pick_target = wp.vec3(*target)
 
         for frame in range(80):
             if frame % 10 == 0:
-                target = pick_state[0]["picking_target_world"]
-                target[1] = np.float32(np.sin(frame * 0.05) * 1.5)
-                pick_state[0]["picking_target_world"] = target
-                picking.pick_state.assign(pick_state)
+                target[1] = np.sin(frame * 0.05) * 1.5
+                picking.pick_target = wp.vec3(*target)
 
             state.clear_forces()
-            picking._apply_picking_force(state)
+            picking.apply_force(state)
             solver.step(state, state, control, None, 1.0 / 60.0)
 
             q = state.body_q.numpy()
