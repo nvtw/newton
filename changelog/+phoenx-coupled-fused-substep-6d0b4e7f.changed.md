@@ -1,0 +1,1 @@
+Keep reduced-coordinate articulations on the fused dense substep when they can touch each other or share free bodies: contacts between articulations are solved between its kernels, only in steps where such contacts exist (64 G1 robots in one world: 3.08 to 0.93 ms per step while apart).

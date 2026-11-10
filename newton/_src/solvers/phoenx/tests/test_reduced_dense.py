@@ -502,6 +502,80 @@ class TestReducedDenseBackend(unittest.TestCase):
                 self.assertLess(soft, stiff - 1.0e-3)
                 self.assertGreater(soft, stiff - 2.0e-2)
 
+    def test_fused_substep_couples_trees_like_the_articulated_body_path_under_graph_capture(self):
+        """Contacts between two trees, or through a body both carry, match the coupled reference."""
+        device = _require_cuda(self)
+
+        def make(scene: str) -> newton.Model:
+            builder = newton.ModelBuilder(gravity=(0.0, 0.0, -9.81), up_axis=newton.Axis.Z)
+            builder.default_shape_cfg.gap = 0.005
+            builder.default_shape_cfg.mu = 0.6
+            builder.add_ground_plane()
+
+            def chain(x: float, y: float, z: float) -> None:
+                first = builder.joint_count
+                previous = -1
+                for i in range(2):
+                    body = builder.add_link(xform=wp.transform(wp.vec3(x + 0.3 * i, y, z), wp.quat_identity()))
+                    builder.add_shape_box(body, hx=0.14, hy=0.14, hz=0.14)
+                    if previous < 0:
+                        builder.add_joint_free(body)
+                    else:
+                        builder.add_joint_revolute(
+                            previous,
+                            body,
+                            parent_xform=wp.transform(wp.vec3(0.15, 0.0, 0.0), wp.quat_identity()),
+                            child_xform=wp.transform(wp.vec3(-0.15, 0.0, 0.0), wp.quat_identity()),
+                            axis=newton.Axis.Y,
+                        )
+                    previous = body
+                builder.add_articulation(list(range(first, builder.joint_count)))
+
+            if scene == "stacked":
+                # One chain lies on the other.
+                chain(0.0, 0.0, 0.145)
+                chain(0.05, 0.02, 0.44)
+            else:
+                # A free box lies across two chains.
+                chain(0.0, -0.3, 0.145)
+                chain(0.0, 0.3, 0.145)
+                box = builder.add_body(xform=wp.transform(wp.vec3(0.15, 0.0, 0.4), wp.quat_identity()))
+                builder.add_shape_box(box, hx=0.12, hy=0.45, hz=0.1)
+            return builder.finalize(device=device)
+
+        def settle(scene: str, backend: str) -> tuple[np.ndarray, np.ndarray]:
+            model = make(scene)
+            pipeline = newton.CollisionPipeline(model, contact_matching="sticky")
+            solver = newton.solvers.SolverPhoenX(
+                model,
+                collision_pipeline=pipeline,
+                joint_mode="reduced",
+                reduced_backend=backend,
+                substeps=4,
+                solver_iterations=4,
+            )
+            self.assertEqual(solver._reduced_articulation.fused_substep is not None, backend == "auto")
+            state, output = model.state(), model.state()
+            newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+            contacts = pipeline.contacts()
+            with wp.ScopedCapture() as capture:
+                pipeline.collide(state, contacts)
+                solver.step(state, output, None, contacts, 1.0 / 60.0)
+                for name in ("body_q", "body_qd", "joint_q", "joint_qd"):
+                    wp.copy(getattr(state, name), getattr(output, name))
+            for _ in range(120):
+                wp.capture_launch(capture.graph)
+            return state.body_q.numpy(), state.body_qd.numpy()
+
+        for scene in ("stacked", "carried"):
+            with self.subTest(scene=scene):
+                reference_q, _ = settle(scene, "aba")
+                body_q, body_qd = settle(scene, "auto")
+                self.assertTrue(np.isfinite(body_q).all())
+                # Nothing sinks into what carries it, and everything comes to rest.
+                np.testing.assert_allclose(body_q[:, 2], reference_q[:, 2], atol=5.0e-3)
+                self.assertLess(float(np.abs(body_qd[:, :3]).max()), 0.06)
+
     def test_reduced_articulations_selects_by_index_or_label(self):
         device = _require_cuda(self)
         fleet = _make_centipede_fleet(device, worlds=2)
@@ -919,11 +993,12 @@ class TestReducedDenseBackend(unittest.TestCase):
         self.assertEqual(solver.reduced_backend, "dense")
         self.assertTrue(solver._reduced_articulation.external_rigid_rows)
 
-        # A second floating tree cannot share a block, and their contacts need the coupled
-        # response of the articulated-body path.
+        # A second floating tree cannot share a block. Both keep their fused substep, and the
+        # contacts between them are solved between its kernels.
         solver = newton.solvers.SolverPhoenX(make(True), joint_mode="reduced", reduced_backend="auto")
-        self.assertEqual(solver.reduced_backend, "aba")
-        self.assertIsNone(solver._reduced_articulation.fused_substep)
+        self.assertEqual(solver.reduced_backend, "dense")
+        self.assertIsNotNone(solver._reduced_articulation.fused_substep)
+        self.assertTrue(solver._reduced_articulation.contact_block_system.requires_impulse_response)
 
     def test_dense_backend_rejects_models_without_eligible_trees(self):
         device = _require_cuda(self)

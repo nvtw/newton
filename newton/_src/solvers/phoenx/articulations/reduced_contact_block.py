@@ -259,6 +259,17 @@ def _classify_contact_ownership_kernel(
 
 
 @wp.kernel(enable_backward=False)
+def _count_cross_columns_kernel(
+    section_end: wp.array[wp.int32], articulation_count: wp.int32, cross_column_count: wp.array[wp.int32]
+):
+    """Count the scheduled columns that no articulation owns: the sections after the articulations'."""
+    owned = wp.int32(0)
+    if articulation_count > 0:
+        owned = section_end[articulation_count - 1]
+    cross_column_count[0] = section_end[section_end.shape[0] - 1] - owned
+
+
+@wp.kernel(enable_backward=False)
 def _reorder_contact_columns_kernel(
     source_data: wp.array2d[wp.float32],
     source_pair: wp.array[wp.int32],
@@ -3488,6 +3499,8 @@ class ReducedContactBlockSystem:
         # A captured graph sorts only the smallest prefix that holds the active columns.
         self.schedule_prefix_flags = wp.zeros(active_prefix_sort_levels(capacity), dtype=wp.int32, device=self.device)
         self.schedule_section_end = wp.zeros(self.articulation_count + world_count, dtype=wp.int32, device=self.device)
+        #: Columns of the current schedule that cross between articulations or reach unowned bodies.
+        self.cross_column_count = wp.zeros(1, dtype=wp.int32, device=self.device)
         self.classic_column_count = wp.zeros(1, dtype=wp.int32, device=self.device)
         self.reduced_column_count = wp.zeros(1, dtype=wp.int32, device=self.device)
         self.reorder_data = wp.empty((CONTACT_DWORDS, capacity), dtype=wp.float32, device=self.device)
@@ -3648,6 +3661,13 @@ class ReducedContactBlockSystem:
                 tail_masked=True,
             )
         wp.utils.array_scan(self.schedule_section_end, self.schedule_section_end, inclusive=True)
+        wp.launch(
+            _count_cross_columns_kernel,
+            dim=1,
+            inputs=[self.schedule_section_end, wp.int32(self.articulation_count)],
+            outputs=[self.cross_column_count],
+            device=self.device,
+        )
         assert self.fallback_count is not None
         assert self.fallback_column is not None
         assert self.fallback_element is not None
