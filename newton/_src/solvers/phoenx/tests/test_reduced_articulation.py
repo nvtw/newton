@@ -4078,7 +4078,9 @@ class TestReducedArticulation(unittest.TestCase):
         self.assertGreaterEqual(int(contacts.rigid_contact_count.numpy()[0]), 2)
         self.assertFalse(block._skip_fallback_coloring)
         self.assertFalse(block._schedule_already_grouped)
-        self.assertGreater(int(block.fallback_count.numpy()[0]), 0)
+        # The maximal sphere's ground contact belongs to the regular solver.
+        self.assertGreater(int(block.classic_column_count.numpy()[0]), 0)
+        self.assertEqual(int(block.fallback_count.numpy()[0]), 0)
         self.assertTrue(np.isfinite(state.body_q.numpy()).all())
         self.assertTrue(np.isfinite(state.body_qd.numpy()).all())
 
@@ -4718,7 +4720,71 @@ def _simulate_isolated_contact_scene(model, frames: int) -> np.ndarray:
     return state_0.body_qd.numpy()
 
 
+def _make_chains_on_free_platforms_scene(device, chains: int = 3):
+    """Two-link chains that each rest on a free platform, which rests on the ground."""
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, -9.81), up_axis=newton.Axis.Z)
+    builder.default_shape_cfg.gap = 0.005
+    builder.add_ground_plane()
+    links = []
+    for chain in range(chains):
+        previous = -1
+        first = builder.joint_count
+        for i in range(2):
+            body = builder.add_link(xform=wp.transform(wp.vec3(2.0 * chain + 0.3 * i, 0.0, 0.34), wp.quat_identity()))
+            builder.add_shape_box(body, hx=0.14, hy=0.14, hz=0.14)
+            if previous < 0:
+                builder.add_joint_free(body)
+            else:
+                builder.add_joint_revolute(
+                    previous,
+                    body,
+                    parent_xform=wp.transform(wp.vec3(0.15, 0.0, 0.0), wp.quat_identity()),
+                    child_xform=wp.transform(wp.vec3(-0.15, 0.0, 0.0), wp.quat_identity()),
+                    axis=newton.Axis.Y,
+                )
+            previous = body
+            links.append(body)
+        builder.add_articulation(list(range(first, builder.joint_count)))
+    platforms = []
+    for chain in range(chains):
+        body = builder.add_body(xform=wp.transform(wp.vec3(2.0 * chain + 0.15, 0.0, 0.1), wp.quat_identity()))
+        builder.add_shape_box(body, hx=0.6, hy=0.4, hz=0.1)
+        platforms.append(body)
+    return builder.finalize(device=device), links, platforms
+
+
 class TestReducedContactIsolation(unittest.TestCase):
+    def test_trees_rest_on_free_bodies_solved_by_the_regular_solver(self):
+        """Free bodies beside trees are rigid bodies, and every tree contact on them is still solved."""
+        device = wp.get_preferred_device()
+        if not device.is_cuda:
+            self.skipTest("reduced articulation tests require CUDA graph capture")
+        model, links, platforms = _make_chains_on_free_platforms_scene(device)
+        pipeline = newton.CollisionPipeline(model, contact_matching="sticky")
+        solver = newton.solvers.SolverPhoenX(
+            model, collision_pipeline=pipeline, joint_mode="reduced", substeps=4, solver_iterations=4
+        )
+        state_0, state_1 = model.state(), model.state()
+        newton.eval_fk(model, model.joint_q, model.joint_qd, state_0)
+        contacts = pipeline.contacts()
+        with wp.ScopedCapture() as capture:
+            pipeline.collide(state_0, contacts)
+            solver.step(state_0, state_1, None, contacts, 1.0 / 60.0)
+            for name in ("body_q", "body_qd", "joint_q", "joint_qd"):
+                wp.copy(getattr(state_0, name), getattr(state_1, name))
+        for _ in range(60):
+            wp.capture_launch(capture.graph)
+
+        self.assertEqual(solver._reduced_articulation.model.articulation_count, 3)
+        block = solver._reduced_articulation.contact_block_system
+        # Platform-ground columns belong to the regular solver, link-platform columns to the trees.
+        self.assertEqual(int(block.classic_column_count.numpy()[0]), 3)
+        self.assertEqual(int(block.reduced_column_count.numpy()[0]), 6)
+        body_q = state_0.body_q.numpy()
+        np.testing.assert_allclose(body_q[platforms, 2], 0.1, atol=2.0e-3)
+        np.testing.assert_allclose(body_q[links, 2], 0.34, atol=4.0e-3)
+        self.assertLess(float(np.abs(state_0.body_qd.numpy()).max()), 2.0e-2)
+
     def test_articulations_with_different_dof_counts_do_not_share_contact_rows(self):
         """Contact rows of one articulation must not leak into another's DOF columns."""
         device = wp.get_preferred_device()
@@ -4735,7 +4801,8 @@ class TestReducedContactIsolation(unittest.TestCase):
                 both = _simulate_isolated_contact_scene(scene, frames)
                 chain_rows, box_rows = (slice(1, 4), slice(0, 1)) if box_first else (slice(0, 3), slice(3, 4))
                 np.testing.assert_allclose(both[chain_rows], chain, atol=1.0e-5)
-                np.testing.assert_allclose(both[box_rows], box, atol=1.0e-5)
+                # Beside the chain the box is a maximal rigid body; alone it is reduced.
+                np.testing.assert_allclose(both[box_rows], box, atol=1.0e-4)
 
 
 def _make_colliding_chains_model(device):

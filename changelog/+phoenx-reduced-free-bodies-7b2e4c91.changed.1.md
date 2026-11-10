@@ -1,0 +1,1 @@
+Simulate free rigid bodies beside reduced articulations as rigid bodies in `SolverPhoenX(joint_mode="reduced")`, so their contacts with each other and with static geometry use the regular contact solver

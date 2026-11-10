@@ -4867,11 +4867,26 @@ def _build_persistent_articulation_eligibility(
 
 
 def _get_reduced_model(model: Model) -> Model:
-    """Keep trees with prescribed body motion outside reduced dynamics."""
+    """Keep trees with prescribed body motion and free rigid bodies outside reduced dynamics.
+
+    A lone body on a free joint beside jointed trees is a rigid body: the
+    maximal-coordinate solver integrates it and solves its contacts with other
+    such bodies and static geometry directly, without an articulated response.
+    A model of free bodies only keeps them reduced.
+    """
     starts = model.articulation_start.numpy()[: model.articulation_count]
     ends = model.articulation_end.numpy()
     children = model.joint_child.numpy()
+    parents = model.joint_parent.numpy()
+    kinds = model.joint_type.numpy()
     flags = model.body_flags.numpy()
+    free_body = np.array(
+        [
+            end - start == 1 and parents[start] < 0 and kinds[start] == int(JointType.FREE)
+            for start, end in zip(starts, ends, strict=False)
+        ],
+        dtype=bool,
+    )
     eligible = np.array(
         [
             not np.any(flags[children[start:end]] & int(BodyFlags.KINEMATIC))
@@ -4879,6 +4894,8 @@ def _get_reduced_model(model: Model) -> Model:
         ],
         dtype=bool,
     )
+    if np.any(eligible & ~free_body):
+        eligible &= ~free_body
     if np.all(eligible):
         return model
     reduced_model = copy.copy(model)

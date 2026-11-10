@@ -751,6 +751,7 @@ class PhoenXWorld:
         self._contact_input_active_this_step = False
         self._regular_pgs_active_this_step = True
         self._reduced_contacts_active_this_step = False
+        self._free_rigid_contacts_classic = False
         #: Counts contact ingests, so cached contact rows can tell whether they predate one.
         self._contact_ingest_count = 0
         self._reduced_constraints_active_this_step = False
@@ -1888,6 +1889,9 @@ class PhoenXWorld:
             contact_capacity=self._contact_container.impulses.shape[1],
         )
         self._has_reduced_loops = articulation.loop_system.count > 0
+        # Contacts that move a body but touch no tree go to the regular solver, which the
+        # reduced system's fallback would solve far slower.
+        self._free_rigid_contacts_classic = bool(articulation.contact_block_system.free_rigid_pairs_possible)
         self._has_maximal_dynamic_bodies = bool(np.any(self.bodies.motion_type.numpy() == int(MOTION_DYNAMIC)))
 
     def set_collision_filter_pairs(self, pairs: Iterable[tuple[int, int]]) -> None:
@@ -2674,7 +2678,9 @@ class PhoenXWorld:
             has_contact_input or self._has_reduced_loops
         )
         self._regular_pgs_active_this_step = bool(
-            has_deformable_rows or has_enabled_joint_rows or (has_contact_input and self._reduced_articulation is None)
+            has_deformable_rows
+            or has_enabled_joint_rows
+            or (has_contact_input and (self._reduced_articulation is None or self._free_rigid_contacts_classic))
         )
         self._partition_active_this_step = self._regular_pgs_active_this_step
 
@@ -2718,12 +2724,13 @@ class PhoenXWorld:
                     self._ingest_scratch.num_contact_columns,
                     self._num_active_constraints,
                     self._contact_offset,
-                    partition_ownership=self._shape_endpoints is not None,
+                    partition_ownership=self._shape_endpoints is not None or self._free_rigid_contacts_classic,
+                    free_rigid_classic=self._shape_endpoints is None and self._free_rigid_contacts_classic,
                 )
                 # Column ownership is now stable-partitioned: classic deformable
                 # contacts form the prefix consumed by regular PGS; reduced rigid
                 # contacts form the suffix consumed by the articulation scheduler.
-                if self._shape_endpoints is not None:
+                if self._shape_endpoints is not None or self._free_rigid_contacts_classic:
                     stamp_forward_contact_map(
                         cid_base=self._contact_offset,
                         scratch=self._ingest_scratch,

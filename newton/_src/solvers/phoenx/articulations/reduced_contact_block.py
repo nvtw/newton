@@ -113,17 +113,21 @@ def _fallback_world_block_dim(world_count: int, sm_count: int) -> int:
     return 1 if world_count < _FALLBACK_SERIAL_WORLDS_PER_SM * sm_count else 32
 
 
-def _fallback_impossible_from_model_pairs(model: Model) -> tuple[bool, bool, bool, bool]:
-    """Prove whether model-generated rigid pairs can require fallback."""
+def _fallback_impossible_from_model_pairs(model: Model) -> tuple[bool, bool, bool, bool, bool]:
+    """Prove whether model-generated rigid pairs can require fallback.
+
+    The last entry tells whether a pair without an articulated endpoint can move a
+    body, which makes it a contact for the regular solver.
+    """
     capacity = getattr(model, "_dynamic_capacity", None)
     if capacity is not None and capacity.shape_count:
-        return False, False, False, False  # runtime shapes create pairs the model never listed
+        return False, False, False, False, True  # runtime shapes create pairs the model never listed
     pairs_array = getattr(model, "shape_contact_pairs", None)
     if pairs_array is None or model.shape_body is None:
-        return False, False, False, False
+        return False, False, False, False, True
     pairs = pairs_array.numpy()
     if pairs.size == 0:
-        return True, True, True, True
+        return True, True, True, True, False
 
     body_articulation = np.full(int(model.body_count), -1, dtype=np.int32)
     articulation_start = model.articulation_start.numpy()
@@ -156,7 +160,8 @@ def _fallback_impossible_from_model_pairs(model: Model) -> tuple[bool, bool, boo
     body_order = np.argsort(body_key, kind="stable")
     body_owner = owner[body_order]
     body_grouped = bool(np.all(body_owner[1:] >= body_owner[:-1]))
-    return safe, safe, safe and shape_grouped, safe and body_grouped
+    free_rigid = bool(np.any(~reduced0 & ~reduced1 & ~(static0 & static1)))
+    return safe, safe, safe and shape_grouped, safe and body_grouped, free_rigid
 
 
 @wp.kernel(enable_backward=False)
@@ -176,6 +181,8 @@ def _clear_contact_ownership_counts_kernel(
 @wp.kernel(enable_backward=False)
 def _classify_contact_ownership_kernel(
     columns: ContactColumnContainer,
+    bodies: BodyContainer,
+    free_rigid_classic: wp.bool,
     num_columns: wp.array[wp.int32],
     key_stride: wp.int64,
     keys: wp.array[wp.int64],
@@ -191,6 +198,11 @@ def _classify_contact_ownership_kernel(
     is_rigid = contact_get_side0_kind(columns, column) == wp.int32(
         SHAPE_ENDPOINT_KIND_RIGID
     ) and contact_get_side1_kind(columns, column) == wp.int32(SHAPE_ENDPOINT_KIND_RIGID)
+    if free_rigid_classic:
+        # Contacts without an articulated endpoint need no reduced response.
+        is_rigid = bodies.reduced.body_articulation[contact_get_body1(columns, column)] >= wp.int32(
+            0
+        ) or bodies.reduced.body_articulation[contact_get_body2(columns, column)] >= wp.int32(0)
     ownership = wp.int32(1) if is_rigid else wp.int32(0)
     keys[column] = wp.int64(ownership) * key_stride + wp.int64(column)
     if is_rigid:
@@ -244,6 +256,7 @@ def _classify_reduced_contact_columns_kernel(
     columns: ContactColumnContainer,
     bodies: BodyContainer,
     num_columns: wp.array[wp.int32],
+    classic_column_count: wp.array[wp.int32],
     articulation_count: wp.int32,
     key_stride: wp.int64,
     allow_internal: wp.bool,
@@ -258,9 +271,11 @@ def _classify_reduced_contact_columns_kernel(
         keys[column] = wp.int64(_INT64_MAX)
         return
 
-    if contact_get_side0_kind(columns, column) != wp.int32(SHAPE_ENDPOINT_KIND_RIGID) or contact_get_side1_kind(
-        columns, column
-    ) != wp.int32(SHAPE_ENDPOINT_KIND_RIGID):
+    # The classic prefix belongs to the regular solver.
+    if column < classic_column_count[0] or (
+        contact_get_side0_kind(columns, column) != wp.int32(SHAPE_ENDPOINT_KIND_RIGID)
+        or contact_get_side1_kind(columns, column) != wp.int32(SHAPE_ENDPOINT_KIND_RIGID)
+    ):
         keys[column] = wp.int64(_INT64_MAX)
         return
 
@@ -287,9 +302,10 @@ def _classify_grouped_reduced_contact_columns_kernel(
     column = wp.tid()
     if column >= num_columns[0]:
         return
-    if contact_get_side0_kind(columns, column) != wp.int32(SHAPE_ENDPOINT_KIND_RIGID) or contact_get_side1_kind(
-        columns, column
-    ) != wp.int32(SHAPE_ENDPOINT_KIND_RIGID):
+    if column < classic_column_count[0] or (
+        contact_get_side0_kind(columns, column) != wp.int32(SHAPE_ENDPOINT_KIND_RIGID)
+        or contact_get_side1_kind(columns, column) != wp.int32(SHAPE_ENDPOINT_KIND_RIGID)
+    ):
         return
     owner = reduced_contact_packed_owner(columns, column, bodies, allow_internal)
     if owner < wp.int32(0):
@@ -3206,6 +3222,7 @@ class ReducedContactBlockSystem:
             self._fallback_impossible_rigid_only,
             self._shape_schedule_already_grouped,
             self._body_schedule_already_grouped,
+            self.free_rigid_pairs_possible,
         ) = _fallback_impossible_from_model_pairs(model)
         self._skip_fallback_coloring = False
         self._schedule_already_grouped = False
@@ -3403,8 +3420,13 @@ class ReducedContactBlockSystem:
         contact_offset: int,
         *,
         partition_ownership: bool,
+        free_rigid_classic: bool = False,
     ) -> None:
-        """Partition classic/reduced ownership, then build reduced contact runs."""
+        """Partition classic/reduced ownership, then build reduced contact runs.
+
+        ``free_rigid_classic`` leaves rigid contacts without an articulated endpoint
+        to the regular solver as well.
+        """
         if self.schedule_keys is None or self.schedule_columns is None or self.schedule_section_end is None:
             raise RuntimeError("Reduced contact schedule has not been configured")
         assert self.classic_column_count is not None
@@ -3423,7 +3445,13 @@ class ReducedContactBlockSystem:
             wp.launch(
                 _classify_contact_ownership_kernel,
                 dim=self.schedule_capacity,
-                inputs=[columns, num_columns, wp.int64(self.schedule_capacity + 1)],
+                inputs=[
+                    columns,
+                    bodies,
+                    wp.bool(free_rigid_classic),
+                    num_columns,
+                    wp.int64(self.schedule_capacity + 1),
+                ],
                 outputs=[
                     self.schedule_keys,
                     self.schedule_columns,
@@ -3491,6 +3519,7 @@ class ReducedContactBlockSystem:
                     columns,
                     bodies,
                     num_columns,
+                    self.classic_column_count,
                     wp.int32(self.articulation_count),
                     wp.int64(self.schedule_capacity + 1),
                     wp.bool(self.packed_internal_contacts),
