@@ -410,8 +410,8 @@ class TestAnymalArticulationParity(unittest.TestCase):
         # joint_target_q[6], both length 12.
         model = _anymal_model()
         q = model.joint_q.numpy()
-        target = np.zeros(int(model.joint_dof_count), dtype=np.float32)
-        target[6:] = q[7:]
+        # Position targets share the coordinate layout of ``joint_q``.
+        target = q.copy()
 
         bq_mj, _ = _run_joint_state(_mj_factory, _anymal_model, n, dt, target_pos=target)
         bq_px, _ = _run_joint_state(_px_factory, _anymal_model, n, dt, target_pos=target)

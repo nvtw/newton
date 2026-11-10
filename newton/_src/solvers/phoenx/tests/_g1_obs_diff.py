@@ -95,8 +95,8 @@ def _step_n(solver_factory, n_frames: int) -> tuple[newton.Model, newton.State]:
     s1 = model.state()
     newton.eval_fk(model, model.joint_q, model.joint_qd, s0)
     ctl = model.control()
-    target = np.zeros(int(model.joint_dof_count), dtype=np.float32)
-    target[6:] = model.joint_q.numpy()[7:]
+    # Position targets share the coordinate layout of ``joint_q``.
+    target = model.joint_q.numpy().copy()
     ctl.joint_target_q.assign(target)
 
     is_phoenx = isinstance(solver, newton.solvers.SolverPhoenX)

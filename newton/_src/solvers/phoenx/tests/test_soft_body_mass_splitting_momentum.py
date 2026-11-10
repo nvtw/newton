@@ -277,7 +277,7 @@ class TestSoftBodyMassSplittingMomentum(unittest.TestCase):
         )
 
     def test_settled_height_above_ground(self) -> None:
-        """Sanity: every particle must remain above ground (z >= 0)
+        """Sanity: every particle must rest on the ground at its radius
         and the cube's z extent must stay near its original size --
         validates that the contact pipeline doesn't leak particles
         through the plane and that the soft-tet didn't collapse."""
@@ -290,23 +290,25 @@ class TestSoftBodyMassSplittingMomentum(unittest.TestCase):
         p = scene.world.particles.position.numpy()
         self.assertTrue(np.all(np.isfinite(p)), "non-finite particle position after settle")
 
+        # Particles collide as spheres, so the lowest ones rest one radius above the plane.
+        radius = float(scene.model.particle_radius.numpy().max())
         z_min = float(p[:, 2].min())
         z_max = float(p[:, 2].max())
         self.assertGreater(
             z_min,
-            -0.02,
-            f"soft cube penetrated ground: min z = {z_min:.4f}",
+            radius - 0.02,
+            f"soft cube penetrated ground: min z = {z_min:.4f}, particle radius = {radius:.4f}",
         )
         self.assertLess(
             z_min,
-            0.05,
-            f"soft cube didn't reach ground: min z = {z_min:.4f}",
+            radius + 0.05,
+            f"soft cube didn't reach ground: min z = {z_min:.4f}, particle radius = {radius:.4f}",
         )
         self.assertLess(
             z_max,
-            _CUBE_SIZE + _DROP_HEIGHT + 0.05,
+            radius + _CUBE_SIZE + _DROP_HEIGHT + 0.05,
             f"soft cube did not settle to expected height: max z = {z_max:.4f}, "
-            f"expected near {_CUBE_SIZE + _DROP_HEIGHT:.4f}",
+            f"expected near {radius + _CUBE_SIZE:.4f}",
         )
 
 

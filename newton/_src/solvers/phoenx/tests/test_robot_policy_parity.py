@@ -478,9 +478,8 @@ class TestG1HoldPoseParity(unittest.TestCase):
     def _make_target(self) -> np.ndarray:
         sample = _g1_robot_model()
         q = sample.joint_q.numpy()
-        target = np.zeros(int(sample.joint_dof_count), dtype=np.float32)
-        target[6:] = q[7:]
-        return target
+        # Position targets share the coordinate layout of ``joint_q``.
+        return q.copy()
 
     @unittest.expectedFailure
     def test_standing_pose_held_two_seconds(self) -> None:
@@ -727,8 +726,8 @@ def _diagnose_robot_contacts() -> None:
     print()
     print("Steady-state ankle pitch (1 s hold-pose):")
     cfg = _g1_29dof_yaml()
-    target = np.zeros(int(model.joint_dof_count), dtype=np.float32)
-    target[6:] = model.joint_q.numpy()[7:]
+    # Position targets share the coordinate layout of ``joint_q``.
+    target = model.joint_q.numpy().copy()
     n_frames = 200
     dt = 1.0 / 200.0
     for solver_name, fac in (("MuJoCo", _mj_solver), ("PhoenX", _px_solver)):

@@ -79,9 +79,8 @@ def _g1_robot_policy_model() -> newton.Model:
 
 
 def _standing_target(model: newton.Model) -> np.ndarray:
-    target = np.zeros(int(model.joint_dof_count), dtype=np.float32)
-    target[6:] = model.joint_q.numpy()[7:]
-    return target
+    # Position targets share the coordinate layout of ``joint_q``.
+    return model.joint_q.numpy().copy()
 
 
 def _make_g1_hold_solver(model: newton.Model) -> newton.solvers.SolverPhoenX:
