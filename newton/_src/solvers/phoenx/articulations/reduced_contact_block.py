@@ -6,12 +6,14 @@
 from __future__ import annotations
 
 import functools
+import itertools
 import os
 
 import numpy as np
 import warp as wp
 
 from newton._src.geometry.active_prefix_sort import active_prefix_sort_levels
+from newton._src.geometry.flags import ShapeFlags
 from newton._src.sim import Model
 from newton._src.solvers.phoenx.articulations.reduced_contact import (
     _deferred_point_velocity,
@@ -191,14 +193,57 @@ def _external_rigid_owners(model: Model, allow_internal: bool) -> tuple[np.ndarr
     return owners, bool(np.any(internal))
 
 
+def _links_of_a_tree_may_touch(model: Model) -> bool:
+    """Return whether the collision groups and filters let two links of one tree collide."""
+    capacity = getattr(model, "_dynamic_capacity", None)
+    if capacity is not None and capacity.shape_count:
+        return True  # shapes created at runtime may join any link
+    shape_body = model.shape_body.numpy()
+    flags = model.shape_flags.numpy()
+    group = model.shape_collision_group.numpy()
+    body_articulation = np.full(int(model.body_count), -1, dtype=np.int64)
+    articulation_start = model.articulation_start.numpy()
+    articulation_end = model.articulation_end.numpy()
+    joint_child = model.joint_child.numpy()
+    for articulation in range(int(model.articulation_count)):
+        body_articulation[joint_child[articulation_start[articulation] : articulation_end[articulation]]] = articulation
+    shapes = np.flatnonzero((shape_body >= 0) & ((flags & int(ShapeFlags.COLLIDE_SHAPES)) != 0) & (group != 0))
+    shapes = shapes[body_articulation[shape_body[shapes]] >= 0]
+    owner = body_articulation[shape_body[shapes]]
+    order = np.argsort(owner, kind="stable")
+    shapes, owner = shapes[order], owner[order]
+    starts = np.flatnonzero(np.r_[True, owner[1:] != owner[:-1], True])
+    upper: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+    first, second = [], []
+    for begin, end in itertools.pairwise(starts):
+        count = int(end - begin)
+        if count not in upper:
+            upper[count] = np.triu_indices(count, 1)
+        rows, columns = upper[count]
+        first.append(shapes[begin + rows])
+        second.append(shapes[begin + columns])
+    if not first:
+        return False
+    a = np.concatenate(first)
+    b = np.concatenate(second)
+    # Positive groups meet themselves and negative ones; negative groups meet all but themselves.
+    meet = np.where(group[a] > 0, (group[a] == group[b]) | (group[b] < 0), group[a] != group[b])
+    meet &= shape_body[a] != shape_body[b]
+    a, b = a[meet], b[meet]
+    if a.size == 0:
+        return False
+    return not bool(np.all(model.shape_collision_filter_mask(np.stack((a, b), axis=1))))
+
+
 def _free_bodies_may_touch_trees(model: Model) -> tuple[bool, bool]:
     """Return whether free rigid bodies may touch trees, and whether two links of one tree may.
 
-    Without a pair list, as with shapes created at runtime, any of them may.
+    Without a pair list, as with shapes created at runtime, any free body may; two links of
+    one tree may unless the collision filters keep all of its shapes apart.
     """
     endpoints = _model_pair_endpoints(model)
     if endpoints is None:
-        return True, True
+        return True, _links_of_a_tree_may_touch(model)
     _pairs, _body0, _body1, articulation0, articulation1, static0, static1 = endpoints
     reduced0 = articulation0 >= 0
     reduced1 = articulation1 >= 0

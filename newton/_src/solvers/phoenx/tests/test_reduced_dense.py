@@ -647,6 +647,30 @@ class TestReducedDenseBackend(unittest.TestCase):
         np.testing.assert_allclose(linear, linear_start, atol=0.05)
         np.testing.assert_allclose(angular, angular_start, atol=0.03)
 
+    def test_two_link_rows_follow_the_collision_filters_without_a_pair_list(self):
+        """Whether links of one tree may touch is read from groups and filters when pairs are unknown."""
+        from newton._src.solvers.phoenx.articulations.reduced_contact_block import (  # noqa: PLC0415
+            _links_of_a_tree_may_touch,
+        )
+
+        device = _require_cuda(self)
+        for separate_groups in (False, True):
+            builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+            previous = -1
+            for i in range(3):
+                body = builder.add_link(xform=wp.transform(wp.vec3(0.3 * i, 0.0, 1.0), wp.quat_identity()))
+                cfg = newton.ModelBuilder.ShapeConfig(collision_group=i + 1 if separate_groups else 1)
+                builder.add_shape_box(body, hx=0.14, hy=0.14, hz=0.14, cfg=cfg)
+                if previous < 0:
+                    builder.add_joint_free(body)
+                else:
+                    builder.add_joint_revolute(previous, body, axis=newton.Axis.Y)
+                previous = body
+            builder.add_articulation(list(range(builder.joint_count)))
+            model = builder.finalize(device=device)
+            # The first and the last link share no joint, so only their groups keep them apart.
+            self.assertEqual(_links_of_a_tree_may_touch(model), not separate_groups)
+
     def test_reduced_articulations_selects_by_index_or_label(self):
         device = _require_cuda(self)
         fleet = _make_centipede_fleet(device, worlds=2)
