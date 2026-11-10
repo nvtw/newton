@@ -233,12 +233,19 @@ def _classify_contact_ownership_kernel(
     values: wp.array[wp.int32],
     classic_count: wp.array[wp.int32],
     reduced_count: wp.array[wp.int32],
+    pair_source: wp.array[wp.int32],
+    snapshot_data: wp.array2d[wp.float32],
+    snapshot_pair: wp.array[wp.int32],
 ):
     column = wp.tid()
     values[column] = column
     if column >= num_columns[0]:
         keys[column] = wp.int64(_INT64_MAX)
         return
+    # Snapshot the active columns for the reorder that follows the sort.
+    for row in range(snapshot_data.shape[0]):
+        snapshot_data[row, column] = columns.data[row, column]
+    snapshot_pair[column] = pair_source[column]
     is_rigid = contact_get_side0_kind(columns, column) == wp.int32(
         SHAPE_ENDPOINT_KIND_RIGID
     ) and contact_get_side1_kind(columns, column) == wp.int32(SHAPE_ENDPOINT_KIND_RIGID)
@@ -3546,7 +3553,6 @@ class ReducedContactBlockSystem:
         assert self.reorder_pair_source is not None
 
         if partition_ownership:
-            wp.copy(self.reorder_data, columns.data)
             wp.launch(
                 _clear_contact_ownership_counts_kernel,
                 dim=1,
@@ -3568,6 +3574,9 @@ class ReducedContactBlockSystem:
                     self.schedule_columns,
                     self.classic_column_count,
                     self.reduced_column_count,
+                    pair_source,
+                    self.reorder_data,
+                    self.reorder_pair_source,
                 ],
                 device=self.device,
             )
@@ -3577,11 +3586,10 @@ class ReducedContactBlockSystem:
             wp.launch(
                 _reorder_contact_columns_kernel,
                 dim=self.schedule_capacity,
-                inputs=[self.reorder_data, pair_source, num_columns, self.schedule_columns],
-                outputs=[columns.data, self.reorder_pair_source],
+                inputs=[self.reorder_data, self.reorder_pair_source, num_columns, self.schedule_columns],
+                outputs=[columns.data, pair_source],
                 device=self.device,
             )
-            wp.copy(pair_source, self.reorder_pair_source, count=self.schedule_capacity)
             wp.launch(
                 _set_regular_constraint_count_kernel,
                 dim=1,
