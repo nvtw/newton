@@ -2242,6 +2242,7 @@ class ConfigEnvG1PhoenX:
     prepare_refresh_stride: int | str = g1_recipe.PREPARE_REFRESH_STRIDE
     joint_mode: str = "maximal_direct"
     reduced_articulation_path: str = "reference"
+    reduced_backend: str = "auto"
 
 
 class EnvG1PhoenX:
@@ -2553,6 +2554,7 @@ class EnvG1PhoenX:
             prepare_refresh_stride=self.config.prepare_refresh_stride,
             joint_mode=str(self.config.joint_mode),
             reduced_articulation_path=str(self.config.reduced_articulation_path),
+            reduced_backend=str(self.config.reduced_backend),
         )
 
     def _resolve_foot_body_local(self, side: str) -> int:

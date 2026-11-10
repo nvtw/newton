@@ -751,6 +751,8 @@ class PhoenXWorld:
         self._contact_input_active_this_step = False
         self._regular_pgs_active_this_step = True
         self._reduced_contacts_active_this_step = False
+        #: Counts contact ingests, so cached contact rows can tell whether they predate one.
+        self._contact_ingest_count = 0
         self._reduced_constraints_active_this_step = False
         self._has_reduced_loops = False
         self._partition_active_this_step = True
@@ -2682,6 +2684,7 @@ class PhoenXWorld:
         # within-frame contact warm-start is preserved -- the lambdas in the
         # reused columns are exactly the prior substep's converged values.
         if not reuse_partition:
+            self._contact_ingest_count += 1
             self._ingest_and_warmstart_contacts(contacts, shape_body, shape_type)
             if self._colored_singleton_contact_lanes:
                 # Soft-contact PD uses the existing contact iteration path.
@@ -2799,6 +2802,7 @@ class PhoenXWorld:
                         self._reduced_contacts_active_this_step
                         and self._reduced_articulation.contact_block_system.requires_impulse_response
                     ),
+                    world=self,
                 )
             direct = getattr(self, "_direct_equality_system", None)
             reuse_direct_factor = bool(
@@ -4101,7 +4105,11 @@ class PhoenXWorld:
             and next_substep < self.substeps
             and next_substep % self.prepare_refresh_stride != 0
         )
-        if self._contact_input_active_this_step and (rebase_levers or advance_gap):
+        # A fused reduced substep owns every contact row and gathers them again at the
+        # integrated pose, which rewrites the levers, biases, and effective masses.
+        reduced = self._reduced_articulation
+        fused_rows = reduced is not None and reduced.fused_substep is not None
+        if self._contact_input_active_this_step and (rebase_levers or advance_gap) and not fused_rows:
             # Color-packed rigid manifolds are short. A lane per column avoids
             # loading both bodies' state once for every mostly idle row lane.
             rows_per_column = 1 if self._colored_contact_headers else (32 if self.device.is_cuda else 1)
