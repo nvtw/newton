@@ -82,6 +82,10 @@ __all__ = ["SolverPhoenX"]
 
 
 _AUTO_SINGLE_WORLD_MIN_BODIES = 2048
+#: Free bodies from which one world with reduced articulations takes the single-world layout:
+#: its contact solve then runs on as many threads as a color has columns. A warehouse of mixed
+#: robots ties at 28k free bodies and steps 1.2x faster at 110k.
+_AUTO_SINGLE_WORLD_MIN_FREE_BODIES = 32768
 #: Broad-phase candidate pairs budgeted per shape of one large world.
 _DENSE_WORLD_PAIRS_PER_SHAPE = 32
 #: Shapes of one large world from which the solver's pipeline uses the implicit tree broad phase.
@@ -121,6 +125,18 @@ def _can_reuse_relax_direct_factor(direct, world, model, bodies, solver_scheme: 
     )
 
 
+def _free_body_count(model: Model) -> int:
+    """Count the bodies that move on their own: without a joint, or alone on a free joint."""
+    children = model.joint_child.numpy()
+    if children.size == 0:
+        return int(model.body_count)
+    articulation = model.joint_articulation.numpy()
+    sizes = np.bincount(articulation[articulation >= 0], minlength=max(1, int(model.articulation_count)))
+    alone = (articulation < 0) | (sizes[np.maximum(articulation, 0)] == 1)
+    free = (model.joint_type.numpy() == int(JointType.FREE)) & alone
+    return int(model.body_count) - int(np.unique(children).size) + int(np.count_nonzero(free))
+
+
 def _resolve_auto_step_layout(
     *,
     step_layout: str,
@@ -131,8 +147,12 @@ def _resolve_auto_step_layout(
     has_shapes: bool,
     contact_friction_model: str,
     articulation_mode: str,
+    free_body_count: int = 0,
 ) -> str:
-    """Resolve the model-facing PhoenX scheduler policy."""
+    """Resolve the model-facing PhoenX scheduler policy.
+
+    ``free_body_count`` counts the bodies that no joint moves.
+    """
     if step_layout not in ("auto", "multi_world", "single_world"):
         raise ValueError("step_layout must be auto, multi_world, or single_world")
 
@@ -145,8 +165,14 @@ def _resolve_auto_step_layout(
         and contact_friction_model == "point"
         and articulation_mode == "maximal"
     )
+    large_reduced_world = (
+        num_worlds == 1
+        and articulation_mode == "reduced"
+        and not has_deformables
+        and free_body_count >= _AUTO_SINGLE_WORLD_MIN_FREE_BODIES
+    )
     if step_layout == "auto":
-        return "single_world" if large_rigid_contact_world else "multi_world"
+        return "single_world" if large_rigid_contact_world or large_reduced_world else "multi_world"
     return step_layout
 
 
@@ -686,6 +712,7 @@ class SolverPhoenX(SolverBase):
             has_shapes=int(model.shape_count) > 0,
             contact_friction_model=contact_friction_model,
             articulation_mode=articulation_mode,
+            free_body_count=_free_body_count(model),
         )
         if joint_solver == "block_pgs" and (
             articulation_mode != "maximal"

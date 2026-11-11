@@ -1200,10 +1200,11 @@ class IncrementalContactPartitioner:
                 self._ws_pair_values,
             ],
         )
-        # Step 2: radix sort. ``radix_sort_pairs`` needs 2*N buffers
-        # (ping-pong); the emit kernel only writes the first N slots
-        # but the buffer is sized 2*N already.
-        wp.utils.radix_sort_pairs(self._ws_pair_keys, self._ws_pair_values, self.max_num_interactions)
+        # Step 2: radix sort of the active prefix; the tail already holds
+        # the sentinel. The sort needs 2*N buffers (ping-pong).
+        radix_sort_active_prefix(
+            self._ws_pair_keys, self._ws_pair_values, self._num_elements, self._locality_prefix_flags
+        )
         # Step 3: mark boundaries.
         wp.launch(
             warm_start_mark_boundaries_kernel,

@@ -53,6 +53,13 @@ class TestPhoenXAutoPerformancePolicy(unittest.TestCase):
             with self.subTest(**overrides):
                 self.assertEqual(self._resolve(**overrides), "multi_world")
 
+    def test_large_reduced_world_selects_single_world_by_free_bodies(self):
+        """One world of reduced robots among many free bodies solves its contacts color by color."""
+        reduced = {"articulation_mode": "reduced", "has_joints": True, "body_count": 200000}
+        self.assertEqual(self._resolve(**reduced, free_body_count=32768), "single_world")
+        self.assertEqual(self._resolve(**reduced, free_body_count=32767), "multi_world")
+        self.assertEqual(self._resolve(**reduced, free_body_count=32768, num_worlds=2), "multi_world")
+
     def test_combined_projection_requires_velocity_invariant_prepare(self) -> None:
         """Combine direct projection only when row preparation ignores velocity."""
         self.assertTrue(_can_combine_direct_prepare_projection(False, "point", "maximal"))

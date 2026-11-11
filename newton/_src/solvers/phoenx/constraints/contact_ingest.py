@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import warp as wp
 
+from newton._src.geometry.active_prefix_sort import active_prefix_sort_levels
 from newton._src.geometry.contact_reduction import (
     NUM_NORMAL_BINS,
     float_flip,
@@ -125,6 +126,7 @@ class IngestScratch:
         "rigid_contact_max",
         "selected_contact",
         "sort_perm",
+        "sort_prefix_flags",
         "sorted_damping",
         "sorted_friction",
         "sorted_margin0",
@@ -186,6 +188,8 @@ class IngestScratch:
             n_sort = 2 * max(1, self.rigid_contact_max)
             n_perm = max(1, self.rigid_contact_max)
             self.body_pair_keys = wp.zeros(n_sort, dtype=wp.int64, device=device)
+            #: Branch flags of the sort over the active contacts only, see radix_sort_active_prefix.
+            self.sort_prefix_flags = wp.zeros(active_prefix_sort_levels(n_sort // 2), dtype=wp.int32, device=device)
             self.sort_perm = wp.zeros(n_sort, dtype=wp.int32, device=device)
             self.inv_sort_perm = wp.full(n_perm, -1, dtype=wp.int32, device=device)
             #: Prev-frame inverse perm; lets warm-start translate Newton-order
@@ -205,6 +209,7 @@ class IngestScratch:
             self.selected_contact = wp.zeros(n_perm, dtype=wp.uint64, device=device)
         else:
             self.body_pair_keys = None
+            self.sort_prefix_flags = None
             self.sort_perm = None
             self.inv_sort_perm = None
             self.prev_inv_sort_perm = None
@@ -1415,6 +1420,7 @@ def ingest_contacts(
             outputs=[scratch.body_pair_keys, scratch.sort_perm],
             device=device,
         )
+        sort_device = scratch.body_pair_keys.device
         # Sort body-pair keys (in place); ``sort_perm`` becomes the
         # permutation: ``sort_perm[sorted_k] = newton_k``.
         # PhoenX body indices are nonnegative, so keys lie in [0, num_bodies**2).
@@ -1423,6 +1429,8 @@ def ingest_contacts(
             scratch.sort_perm,
             contacts.rigid_contact_count,
             end_bit=(int(max(1, num_bodies)) ** 2).bit_length(),
+            # Inside a captured graph the branch on the contact count costs no readback.
+            prefix_flags=scratch.sort_prefix_flags if sort_device.is_cuda and sort_device.is_capturing else None,
         )
         # Build the inverse permutation for the warm-start gather to
         # translate prev-frame Newton-order match indices into
