@@ -547,6 +547,7 @@ class TestReducedDenseBackend(unittest.TestCase):
 
         def settle(scene: str, backend: str) -> tuple[np.ndarray, np.ndarray]:
             model = make(scene)
+            model.request_contact_attributes("force")
             pipeline = newton.CollisionPipeline(model, contact_matching="sticky")
             solver = newton.solvers.SolverPhoenX(
                 model,
@@ -569,6 +570,16 @@ class TestReducedDenseBackend(unittest.TestCase):
                 wp.capture_launch(capture.graph)
             owners = solver.world.bodies.reduced.external_owner.numpy()[1:]
             cross = int(solver._reduced_articulation.contact_block_system.cross_column_count.numpy()[0])
+            # Reported force of the first chain on the second, summed over their contacts.
+            solver.update_contacts(contacts, state)
+            count = int(contacts.rigid_contact_count.numpy()[0])
+            shape_body = model.shape_body.numpy()
+            body0 = shape_body[contacts.rigid_contact_shape0.numpy()[:count]]
+            body1 = shape_body[contacts.rigid_contact_shape1.numpy()[:count]]
+            force = contacts.force.numpy()[:count, :3]
+            first, second = (body0 >= 0) & (body0 < 2), (body1 >= 2) & (body1 < 4)
+            swapped = (body1 >= 0) & (body1 < 2) & (body0 >= 2) & (body0 < 4)
+            self.pair_force = force[swapped].sum(axis=0) - force[first & second].sum(axis=0)
             return state.body_q.numpy(), state.body_qd.numpy(), owners, cross
 
         for scene in ("stacked", "carried", "owned"):
@@ -591,6 +602,9 @@ class TestReducedDenseBackend(unittest.TestCase):
                     # Two trees touch each other: their contacts are solved between the kernels.
                     self.assertTrue(np.all(owners == -1))
                     self.assertGreater(cross, 0)
+                    # The contacts between the trees report the weight of the upper chain.
+                    weight = 2.0 * 1000.0 * 0.28**3 * 9.81
+                    np.testing.assert_allclose(self.pair_force, [0.0, 0.0, weight], atol=0.01 * weight)
                     # A second run of the same scene repeats every bit.
                     repeat_q, repeat_qd, _, _ = settle(scene, "auto")
                     np.testing.assert_array_equal(body_q, repeat_q)
