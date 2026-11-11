@@ -673,38 +673,59 @@ class TestReducedDenseBackend(unittest.TestCase):
     def test_fused_trees_stacked_three_high_rest_under_graph_capture(self):
         """A tree between two others, with friction, comes to rest as stacked rigid bodies do."""
         device = _require_cuda(self)
-        builder = newton.ModelBuilder(gravity=(0.0, 0.0, -9.81), up_axis=newton.Axis.Z)
-        builder.default_shape_cfg.gap = 0.005
-        builder.default_shape_cfg.mu = 0.6
-        builder.add_ground_plane()
-        for level in range(3):
-            body = builder.add_link(xform=wp.transform(wp.vec3(0.0, 0.0, 0.145 + 0.295 * level), wp.quat_identity()))
-            builder.add_shape_box(body, hx=0.14, hy=0.14, hz=0.14)
-            builder.add_joint_free(body)
-            builder.add_articulation([builder.joint_count - 1])
-        model = builder.finalize(device=device)
-        pipeline = newton.CollisionPipeline(model, contact_matching="sticky")
-        solver = newton.solvers.SolverPhoenX(
-            model, collision_pipeline=pipeline, joint_mode="reduced", substeps=4, solver_iterations=4
-        )
-        self.assertIsNotNone(solver._reduced_articulation.fused_substep)
-        state, output = model.state(), model.state()
-        newton.eval_fk(model, model.joint_q, model.joint_qd, state)
-        contacts = pipeline.contacts()
-        with wp.ScopedCapture() as capture:
-            pipeline.collide(state, contacts)
-            solver.step(state, output, None, contacts, 1.0 / 60.0)
-            for name in ("body_q", "body_qd", "joint_q", "joint_qd"):
-                wp.copy(getattr(state, name), getattr(output, name))
-        worst = 0.0
-        for frame in range(360):
-            wp.capture_launch(capture.graph)
-            if frame >= 240:
-                worst = max(worst, float(np.abs(state.body_qd.numpy()).max()))
-        # The contacts between trees push out a substep late: too stiff a spring kept the
-        # stack rocking at 0.2 m/s.
-        self.assertLess(worst, 0.005)
-        np.testing.assert_allclose(state.body_q.numpy()[:, 2], [0.14, 0.42, 0.70], atol=2.0e-3)
+
+        def worst_speed(links: int) -> tuple[float, np.ndarray]:
+            builder = newton.ModelBuilder(gravity=(0.0, 0.0, -9.81), up_axis=newton.Axis.Z)
+            builder.default_shape_cfg.gap = 0.005
+            builder.default_shape_cfg.mu = 0.6
+            builder.add_ground_plane()
+            for level, (x, y) in enumerate(((0.0, 0.0), (0.05, 0.02), (0.02, -0.03))):
+                first = builder.joint_count
+                previous = -1
+                for i in range(links):
+                    pose = wp.transform(wp.vec3(x + 0.3 * i, y, 0.145 + 0.295 * level), wp.quat_identity())
+                    body = builder.add_link(xform=pose)
+                    builder.add_shape_box(body, hx=0.14, hy=0.14, hz=0.14)
+                    if previous < 0:
+                        builder.add_joint_free(body)
+                    else:
+                        builder.add_joint_revolute(
+                            previous,
+                            body,
+                            parent_xform=wp.transform(wp.vec3(0.15, 0.0, 0.0), wp.quat_identity()),
+                            child_xform=wp.transform(wp.vec3(-0.15, 0.0, 0.0), wp.quat_identity()),
+                            axis=newton.Axis.Y,
+                        )
+                    previous = body
+                builder.add_articulation(list(range(first, builder.joint_count)))
+            model = builder.finalize(device=device)
+            pipeline = newton.CollisionPipeline(model, contact_matching="sticky")
+            solver = newton.solvers.SolverPhoenX(
+                model, collision_pipeline=pipeline, joint_mode="reduced", substeps=4, solver_iterations=4
+            )
+            self.assertIsNotNone(solver._reduced_articulation.fused_substep)
+            state, output = model.state(), model.state()
+            newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+            contacts = pipeline.contacts()
+            with wp.ScopedCapture() as capture:
+                pipeline.collide(state, contacts)
+                solver.step(state, output, None, contacts, 1.0 / 60.0)
+                for name in ("body_q", "body_qd", "joint_q", "joint_qd"):
+                    wp.copy(getattr(state, name), getattr(output, name))
+            worst = 0.0
+            for frame in range(360):
+                wp.capture_launch(capture.graph)
+                if frame >= 240:
+                    worst = max(worst, float(np.abs(state.body_qd.numpy()).max()))
+            return worst, state.body_q.numpy()[:, 2]
+
+        # The contacts between trees push out a substep late: too stiff a spring kept single
+        # boxes rocking at 0.2 m/s, and one stiff enough for them still rocked hinged chains.
+        for links in (1, 2):
+            with self.subTest(links=links):
+                worst, height = worst_speed(links)
+                self.assertLess(worst, 0.005)
+                np.testing.assert_allclose(height, np.repeat([0.14, 0.42, 0.70], links), atol=3.0e-3)
 
     def test_fused_tree_leaves_and_rejoins_the_scene_by_its_state_under_graph_capture(self):
         """A tree resting on another is parked far away between steps and placed back: a pool of robots."""

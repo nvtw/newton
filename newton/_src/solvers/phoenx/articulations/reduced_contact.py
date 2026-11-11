@@ -595,7 +595,7 @@ def reduced_contact_prepare(
     count = contact_get_contact_count(columns, column)
     bias_rate, _mass_coeff, _impulse_coeff = cc_reduced_soft_coefficients(contacts_state, idt)
     if use_deferred and bodies.reduced.link_response != wp.int32(0):
-        bias_rate, _mass_coeff, _impulse_coeff = cc_lagged_soft_coefficients(contacts_state, idt)
+        bias_rate, _mass_coeff, _impulse_coeff = cc_lagged_soft_coefficients(contacts_state, idt, count)
 
     for offset in range(count):
         contact = first + offset
@@ -727,7 +727,7 @@ def reduced_contact_iterate(
     if use_bias:
         _bias_rate, mass_coeff, impulse_coeff = cc_reduced_soft_coefficients(contacts_state, idt)
         if use_deferred and bodies.reduced.link_response != wp.int32(0):
-            _bias_rate, mass_coeff, impulse_coeff = cc_lagged_soft_coefficients(contacts_state, idt)
+            _bias_rate, mass_coeff, impulse_coeff = cc_lagged_soft_coefficients(contacts_state, idt, count)
 
     for offset in range(count):
         contact = first + offset
