@@ -53,6 +53,32 @@ class TestPhoenXAutoPerformancePolicy(unittest.TestCase):
             with self.subTest(**overrides):
                 self.assertEqual(self._resolve(**overrides), "multi_world")
 
+    def test_requested_contact_capacity_sizes_the_solver_pipeline(self):
+        """``rigid_contact_max`` sizes the pipeline the solver creates and its contact columns."""
+        import warp as wp  # noqa: PLC0415
+
+        import newton  # noqa: PLC0415
+
+        def build() -> newton.Model:
+            builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+            builder.add_ground_plane()
+            for i in range(8):
+                body = builder.add_body(xform=wp.transform(wp.vec3(0.5 * i, 0.0, 0.2), wp.quat_identity()))
+                builder.add_shape_box(body, hx=0.1, hy=0.1, hz=0.1)
+            return builder.finalize(device="cuda:0" if wp.is_cuda_available() else "cpu")
+
+        model = build()
+        solver = newton.solvers.SolverPhoenX(model, rigid_contact_max=1234)
+        self.assertEqual(int(model._collision_pipeline.rigid_contact_max), 1234)
+        self.assertLessEqual(int(solver.world.max_contact_columns), 1234)
+
+        model = build()
+        pipeline = newton.CollisionPipeline(model, contact_matching="sticky")
+        with self.assertRaisesRegex(ValueError, "rigid_contact_max"):
+            newton.solvers.SolverPhoenX(model, collision_pipeline=pipeline, rigid_contact_max=1234)
+        with self.assertRaisesRegex(ValueError, "positive"):
+            newton.solvers.SolverPhoenX(build(), rigid_contact_max=0)
+
     def test_contact_columns_are_bounded_by_the_candidate_pairs(self):
         """One large world sizes its columns by the broad phase's pair budget, not by the contacts."""
         from newton._src.solvers.phoenx.solver import _estimate_contact_column_max_phoenx  # noqa: PLC0415

@@ -965,6 +965,11 @@ class Example:
             substeps=int(getattr(args, "substeps", 4)),
             solver_iterations=int(getattr(args, "iterations", 4)),
             velocity_iterations=1,
+            # Most of the stock rests and sleeps: at its peak, while everything settles at once,
+            # the scene has about two contacts per shape. The automatic capacity budgets a
+            # dense pile around every shape, and each kernel that walks the contact buffer
+            # pays for its length.
+            rigid_contact_max=8 * int(self.model.shape_count),
         )
         self.contacts = self.model._collision_pipeline.contacts()
         self.initial_poses = self.state.body_q.numpy().copy()
