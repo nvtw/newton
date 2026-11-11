@@ -130,7 +130,11 @@ def _free_body_count(model: Model) -> int:
     children = model.joint_child.numpy()
     if children.size == 0:
         return int(model.body_count)
-    articulation = model.joint_articulation.numpy()
+    if model.joint_articulation is None:
+        # No joint is declared part of an articulation.
+        articulation = np.full(children.size, -1, dtype=np.int32)
+    else:
+        articulation = model.joint_articulation.numpy()
     sizes = np.bincount(articulation[articulation >= 0], minlength=max(1, int(model.articulation_count)))
     alone = (articulation < 0) | (sizes[np.maximum(articulation, 0)] == 1)
     free = (model.joint_type.numpy() == int(JointType.FREE)) & alone
