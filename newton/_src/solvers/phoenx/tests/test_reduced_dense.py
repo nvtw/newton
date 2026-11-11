@@ -651,6 +651,85 @@ class TestReducedDenseBackend(unittest.TestCase):
         np.testing.assert_allclose(linear, linear_start, atol=0.05)
         np.testing.assert_allclose(angular, angular_start, atol=0.03)
 
+    def test_fused_tree_leaves_and_rejoins_the_scene_by_its_state_under_graph_capture(self):
+        """A tree resting on another is parked far away between steps and placed back: a pool of robots."""
+        device = _require_cuda(self)
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, -9.81), up_axis=newton.Axis.Z)
+        builder.default_shape_cfg.gap = 0.005
+        builder.default_shape_cfg.mu = 0.6
+        builder.add_ground_plane()
+        for x, y, z in ((0.0, 0.0, 0.145), (0.05, 0.02, 0.44)):
+            first = builder.joint_count
+            previous = -1
+            for i in range(2):
+                body = builder.add_link(xform=wp.transform(wp.vec3(x + 0.3 * i, y, z), wp.quat_identity()))
+                builder.add_shape_box(body, hx=0.14, hy=0.14, hz=0.14)
+                if previous < 0:
+                    builder.add_joint_free(body)
+                else:
+                    builder.add_joint_revolute(
+                        previous,
+                        body,
+                        parent_xform=wp.transform(wp.vec3(0.15, 0.0, 0.0), wp.quat_identity()),
+                        child_xform=wp.transform(wp.vec3(-0.15, 0.0, 0.0), wp.quat_identity()),
+                        axis=newton.Axis.Y,
+                    )
+                previous = body
+            builder.add_articulation(list(range(first, builder.joint_count)))
+        model = builder.finalize(device=device)
+        pipeline = newton.CollisionPipeline(model, contact_matching="sticky")
+        solver = newton.solvers.SolverPhoenX(
+            model, collision_pipeline=pipeline, joint_mode="reduced", substeps=4, solver_iterations=4
+        )
+        self.assertIsNotNone(solver._reduced_articulation.fused_substep)
+        state, output = model.state(), model.state()
+        newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+        contacts = pipeline.contacts()
+        with wp.ScopedCapture() as capture:
+            pipeline.collide(state, contacts)
+            solver.step(state, output, None, contacts, 1.0 / 60.0)
+            for name in ("body_q", "body_qd", "joint_q", "joint_qd"):
+                wp.copy(getattr(state, name), getattr(output, name))
+        coordinate = int(model.joint_q_start.numpy()[2])
+        rate = int(model.joint_qd_start.numpy()[2])
+        reduced = solver.world.bodies.reduced
+        cross_count = solver._reduced_articulation.contact_block_system.cross_column_count
+
+        def place(x: float, y: float, z: float) -> None:
+            joint_q = state.joint_q.numpy()
+            joint_qd = state.joint_qd.numpy()
+            joint_q[coordinate : coordinate + 7] = (x, y, z, 0.0, 0.0, 0.0, 1.0)
+            joint_q[coordinate + 7 :] = 0.0
+            joint_qd[rate:] = 0.0
+            state.joint_q.assign(joint_q)
+            state.joint_qd.assign(joint_qd)
+            newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+
+        def run(frames: int) -> tuple[np.ndarray, float]:
+            for _ in range(frames):
+                wp.capture_launch(capture.graph)
+            return state.body_q.numpy()[:, 2], float(np.abs(state.body_qd.numpy()).max())
+
+        height, speed = run(120)
+        np.testing.assert_allclose(height, [0.14, 0.14, 0.42, 0.42], atol=2.0e-3)
+        self.assertLess(speed, 0.005)
+        self.assertGreater(float(np.abs(reduced.carried_wrench.numpy()).max()), 0.5)
+
+        # Parked: both lie on the ground, and the impulses the contacts held are gone.
+        place(10.0, 0.0, 0.145)
+        height, speed = run(60)
+        np.testing.assert_allclose(height, 0.14, atol=2.0e-3)
+        self.assertLess(speed, 0.005)
+        self.assertEqual(int(cross_count.numpy()[0]), 0)
+        self.assertEqual(float(np.abs(reduced.carried_wrench.numpy()).max()), 0.0)
+
+        # Placed back: it rests on the other tree as before.
+        place(0.05, 0.02, 0.44)
+        height, speed = run(120)
+        np.testing.assert_allclose(height, [0.14, 0.14, 0.42, 0.42], atol=2.0e-3)
+        self.assertLess(speed, 0.005)
+        self.assertGreater(int(cross_count.numpy()[0]), 0)
+
     def test_two_link_rows_follow_the_collision_filters_without_a_pair_list(self):
         """Whether links of one tree may touch is read from groups and filters when pairs are unknown."""
         from newton._src.solvers.phoenx.articulations.reduced_contact_block import (  # noqa: PLC0415
