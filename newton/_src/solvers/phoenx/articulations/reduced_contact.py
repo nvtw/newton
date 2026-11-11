@@ -37,6 +37,7 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_get_tangent1,
     cc_get_tangent1_lambda,
     cc_get_tangent2_lambda,
+    cc_lagged_soft_coefficients,
     cc_reduced_soft_coefficients,
     cc_set_bias,
     cc_set_bias_t1,
@@ -593,6 +594,8 @@ def reduced_contact_prepare(
     first = contact_get_contact_first(columns, column)
     count = contact_get_contact_count(columns, column)
     bias_rate, _mass_coeff, _impulse_coeff = cc_reduced_soft_coefficients(contacts_state, idt)
+    if use_deferred and bodies.reduced.link_response != wp.int32(0):
+        bias_rate, _mass_coeff, _impulse_coeff = cc_lagged_soft_coefficients(contacts_state, idt)
 
     for offset in range(count):
         contact = first + offset
@@ -723,6 +726,8 @@ def reduced_contact_iterate(
     impulse_coeff = wp.float32(0.0)
     if use_bias:
         _bias_rate, mass_coeff, impulse_coeff = cc_reduced_soft_coefficients(contacts_state, idt)
+        if use_deferred and bodies.reduced.link_response != wp.int32(0):
+            _bias_rate, mass_coeff, impulse_coeff = cc_lagged_soft_coefficients(contacts_state, idt)
 
     for offset in range(count):
         contact = first + offset

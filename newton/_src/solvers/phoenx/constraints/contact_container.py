@@ -214,6 +214,22 @@ def cc_reduced_soft_coefficients(cc: ContactContainer, idt: wp.float32):
     return soft_constraint_coefficients(DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, wp.float32(1.0) / idt)
 
 
+@wp.func
+def cc_lagged_soft_coefficients(cc: ContactContainer, idt: wp.float32):
+    """Return ``(bias_rate, mass_coeff, impulse_coeff)`` of contact rows whose push-out acts a substep late.
+
+    The contacts between fused trees stop an approach at once, but the push-out of their
+    spring enters the next substep as a force. A spring of angular frequency ``omega`` and
+    damping ratio ``zeta`` that acts ``dt`` late stays damped while ``omega dt < 2 zeta``;
+    stiffer ones pump the rocking of stacked trees. The rows take half of that bound,
+    ``omega dt = zeta``, or a lower requested contact frequency.
+    """
+    hertz = DEFAULT_DAMPING_RATIO * idt * wp.float32(0.15915494)
+    if cc.hertz > 0.0:
+        hertz = wp.min(hertz, cc.hertz)
+    return soft_constraint_coefficients(hertz, DEFAULT_DAMPING_RATIO, wp.float32(1.0) / idt)
+
+
 def contact_container_set_sweeps(
     cc: ContactContainer,
     solver_iterations: int,
