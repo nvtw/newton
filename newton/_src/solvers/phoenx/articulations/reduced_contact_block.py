@@ -21,9 +21,13 @@ from newton._src.solvers.phoenx.articulations.reduced_contact import (
     _point_velocity,
     _prepare_contact_bias_geometry,
     flush_deferred_articulation,
+    reduced_contact_can_stage,
+    reduced_contact_commit,
     reduced_contact_iterate,
+    reduced_contact_iterate_staged,
     reduced_contact_packed_owner,
     reduced_contact_prepare,
+    reduced_contact_stage,
 )
 from newton._src.solvers.phoenx.body import (
     EXTERNAL_SHARED,
@@ -848,20 +852,47 @@ def _solve_fallback_single_color_kernel(
                     0,
                     use_bias,
                 )
-        for _sweep in range(sweeps):
-            for fallback in range(first, last):
-                _solve_fallback_contact_column(
+        column = fallback_column[first]
+        if last == first + wp.int32(1) and reduced_contact_can_stage(columns, column, bodies):
+            # The only column between these two trees: their links' deferred state stays in
+            # registers over all sweeps instead of being read from each root path again.
+            twist0, twist1 = reduced_contact_stage(columns, column, bodies)
+            wrench0 = wp.spatial_vector()
+            wrench1 = wp.spatial_vector()
+            for _sweep in range(sweeps):
+                twist0, twist1, wrench0, wrench1 = reduced_contact_iterate_staged(
                     columns,
+                    column,
                     bodies,
                     idt,
                     sor_boost,
                     cc,
                     contacts,
-                    cross_mobility,
-                    fallback_column[fallback],
-                    1,
                     use_bias,
+                    wp.bool(True),
+                    cross_mobility,
+                    wp.bool(True),
+                    twist0,
+                    twist1,
+                    wrench0,
+                    wrench1,
                 )
+            reduced_contact_commit(columns, column, bodies, wrench0, wrench1)
+        else:
+            for _sweep in range(sweeps):
+                for fallback in range(first, last):
+                    _solve_fallback_contact_column(
+                        columns,
+                        bodies,
+                        idt,
+                        sor_boost,
+                        cc,
+                        contacts,
+                        cross_mobility,
+                        fallback_column[fallback],
+                        1,
+                        use_bias,
+                    )
         index += worker_count
 
 

@@ -678,12 +678,12 @@ class TestReducedDenseBackend(unittest.TestCase):
         """A tree between two others, with friction, comes to rest as stacked rigid bodies do."""
         device = _require_cuda(self)
 
-        def worst_speed(links: int) -> tuple[float, np.ndarray]:
+        def worst_speed(links: int, levels: int) -> tuple[float, np.ndarray]:
             builder = newton.ModelBuilder(gravity=(0.0, 0.0, -9.81), up_axis=newton.Axis.Z)
             builder.default_shape_cfg.gap = 0.005
             builder.default_shape_cfg.mu = 0.6
             builder.add_ground_plane()
-            for level, (x, y) in enumerate(((0.0, 0.0), (0.05, 0.02), (0.02, -0.03))):
+            for level, (x, y) in enumerate(((0.0, 0.0), (0.05, 0.02), (0.02, -0.03))[:levels]):
                 first = builder.joint_count
                 previous = -1
                 for i in range(links):
@@ -725,11 +725,12 @@ class TestReducedDenseBackend(unittest.TestCase):
 
         # The contacts between trees push out a substep late: too stiff a spring kept single
         # boxes rocking at 0.2 m/s, and one stiff enough for them still rocked hinged chains.
-        for links in (1, 2):
-            with self.subTest(links=links):
-                worst, height = worst_speed(links)
+        # Two single boxes share one contact column, which the sweeps keep in registers.
+        for links, levels in ((1, 3), (2, 3), (1, 2)):
+            with self.subTest(links=links, levels=levels):
+                worst, height = worst_speed(links, levels)
                 self.assertLess(worst, 0.005)
-                np.testing.assert_allclose(height, np.repeat([0.14, 0.42, 0.70], links), atol=3.0e-3)
+                np.testing.assert_allclose(height, np.repeat([0.14, 0.42, 0.70][:levels], links), atol=3.0e-3)
 
     def test_fused_tree_leaves_and_rejoins_the_scene_by_its_state_under_graph_capture(self):
         """A tree resting on another is parked far away between steps and placed back: a pool of robots."""

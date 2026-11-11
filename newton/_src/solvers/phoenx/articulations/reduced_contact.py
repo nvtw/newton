@@ -339,6 +339,18 @@ def _deferred_inverse_mass(
 
 
 @wp.func
+def _defer_link_wrench(bodies: BodyContainer, link: wp.int32, wrench: wp.spatial_vector):
+    """Collect a wrench impulse on a link; the tree's deferred rates answer later queries on its links."""
+    data = bodies.reduced
+    data.deferred_wrench[link] = data.deferred_wrench[link] + wrench
+    for position in range(data.link_path.shape[1]):
+        dof = data.link_path_dof[link, position]
+        if dof < wp.int32(0):
+            break
+        data.deferred_rate[dof] = data.deferred_rate[dof] + wp.dot(data.link_path[link, position], wrench)
+
+
+@wp.func
 def _defer_articulation_impulse(bodies: BodyContainer, body: wp.int32, point: wp.vec3f, impulse: wp.vec3f):
     """Record a link impulse as articulated wrenches along its root path."""
     data = bodies.reduced
@@ -348,13 +360,7 @@ def _defer_articulation_impulse(bodies: BodyContainer, body: wp.int32, point: wp
     joint = data.body_joint[link]
     data.deferred_pending[data.body_articulation[body]] = wp.int32(1)
     if data.link_response != wp.int32(0):
-        # The tree's deferred rates answer every later query on any of its links.
-        data.deferred_wrench[link] = data.deferred_wrench[link] + wrench
-        for position in range(data.link_path.shape[1]):
-            dof = data.link_path_dof[link, position]
-            if dof < wp.int32(0):
-                break
-            data.deferred_rate[dof] = data.deferred_rate[dof] + wp.dot(data.link_path[link, position], wrench)
+        _defer_link_wrench(bodies, link, wrench)
         return
     while joint >= wp.int32(0):
         data.deferred_wrench[link] = data.deferred_wrench[link] + wrench
@@ -693,7 +699,7 @@ def reduced_contact_prepare(
 
 
 @wp.func
-def reduced_contact_iterate(
+def reduced_contact_iterate_staged(
     columns: ContactColumnContainer,
     column: wp.int32,
     bodies: BodyContainer,
@@ -704,8 +710,19 @@ def reduced_contact_iterate(
     use_bias: wp.bool,
     use_deferred: wp.bool,
     cross_mobility: wp.array[wp.vec3],
+    staged: wp.bool,
+    twist0: wp.spatial_vector,
+    twist1: wp.spatial_vector,
+    wrench0: wp.spatial_vector,
+    wrench1: wp.spatial_vector,
 ):
-    """Run one sequential contact-manifold PGS sweep."""
+    """Run one sequential contact-manifold PGS sweep.
+
+    ``staged`` keeps the deferred state of the column's two links with the caller, see
+    :func:`reduced_contact_stage`: ``twist0`` and ``twist1`` are their twist changes so far
+    and follow the column's impulses through each link's response to itself, and ``wrench0``
+    and ``wrench1`` collect those impulses. The four are returned.
+    """
     body0 = contact_get_body1(columns, column)
     body1 = contact_get_body2(columns, column)
     first = contact_get_contact_first(columns, column)
@@ -737,7 +754,19 @@ def reduced_contact_iterate(
             - contacts.rigid_contact_margin1[contact] * normal
         )
         contact_point = wp.float32(0.5) * (point0 + point1)
-        if use_deferred:
+        lever0 = wp.vec3f(0.0)
+        lever1 = wp.vec3f(0.0)
+        if staged:
+            relative_velocity = _point_velocity(bodies, body1, contact_point) - _point_velocity(
+                bodies, body0, contact_point
+            )
+            if bodies.reduced.body_articulation[body0] >= wp.int32(0):
+                lever0 = _reduced_point_local(bodies, body0, contact_point)
+                relative_velocity -= wp.spatial_top(twist0) + wp.cross(wp.spatial_bottom(twist0), lever0)
+            if bodies.reduced.body_articulation[body1] >= wp.int32(0):
+                lever1 = _reduced_point_local(bodies, body1, contact_point)
+                relative_velocity += wp.spatial_top(twist1) + wp.cross(wp.spatial_bottom(twist1), lever1)
+        elif use_deferred:
             relative_velocity = _deferred_point_velocity(bodies, body1, contact_point) - _deferred_point_velocity(
                 bodies, body0, contact_point
             )
@@ -793,15 +822,113 @@ def reduced_contact_iterate(
             cross_response[1],
             cross_response[2],
         )
-        if use_deferred:
+        if staged:
+            if bodies.reduced.body_articulation[body0] >= wp.int32(0):
+                change = wp.spatial_vector(-impulse, wp.cross(lever0, -impulse))
+                wrench0 += change
+                twist0 += _response_matrix_multiply(bodies, body0 - wp.int32(1), change)
+            else:
+                _apply_rigid_endpoint_impulse(bodies, body0, contact_point, -impulse)
+            if bodies.reduced.body_articulation[body1] >= wp.int32(0):
+                change = wp.spatial_vector(impulse, wp.cross(lever1, impulse))
+                wrench1 += change
+                twist1 += _response_matrix_multiply(bodies, body1 - wp.int32(1), change)
+            else:
+                _apply_rigid_endpoint_impulse(bodies, body1, contact_point, impulse)
+        elif use_deferred:
             _apply_deferred_impulse(bodies, body0, contact_point, body1, contact_point, impulse)
         else:
             _apply_pair_impulse(bodies, body0, contact_point, body1, contact_point, impulse)
+    return twist0, twist1, wrench0, wrench1
+
+
+@wp.func
+def reduced_contact_iterate(
+    columns: ContactColumnContainer,
+    column: wp.int32,
+    bodies: BodyContainer,
+    idt: wp.float32,
+    sor_boost: wp.float32,
+    contacts_state: ContactContainer,
+    contacts: ContactViews,
+    use_bias: wp.bool,
+    use_deferred: wp.bool,
+    cross_mobility: wp.array[wp.vec3],
+):
+    """Run one sequential contact-manifold PGS sweep."""
+    reduced_contact_iterate_staged(
+        columns,
+        column,
+        bodies,
+        idt,
+        sor_boost,
+        contacts_state,
+        contacts,
+        use_bias,
+        use_deferred,
+        cross_mobility,
+        wp.bool(False),
+        wp.spatial_vector(),
+        wp.spatial_vector(),
+        wp.spatial_vector(),
+        wp.spatial_vector(),
+    )
+
+
+@wp.func
+def reduced_contact_can_stage(columns: ContactColumnContainer, column: wp.int32, bodies: BodyContainer) -> wp.bool:
+    """Return whether a column's links may keep their deferred state with the caller.
+
+    That needs the links' responses to themselves and two different trees; no other column
+    may touch either tree meanwhile.
+    """
+    articulation0 = bodies.reduced.body_articulation[contact_get_body1(columns, column)]
+    articulation1 = bodies.reduced.body_articulation[contact_get_body2(columns, column)]
+    return bodies.reduced.link_response != wp.int32(0) and articulation0 != articulation1
+
+
+@wp.func
+def reduced_contact_stage(columns: ContactColumnContainer, column: wp.int32, bodies: BodyContainer):
+    """Return the deferred twist changes of a column's two links, zero for a free body."""
+    body0 = contact_get_body1(columns, column)
+    body1 = contact_get_body2(columns, column)
+    twist0 = wp.spatial_vector()
+    twist1 = wp.spatial_vector()
+    if bodies.reduced.body_articulation[body0] >= wp.int32(0):
+        twist0 = _deferred_link_delta_twist(bodies, body0)
+    if bodies.reduced.body_articulation[body1] >= wp.int32(0):
+        twist1 = _deferred_link_delta_twist(bodies, body1)
+    return twist0, twist1
+
+
+@wp.func
+def reduced_contact_commit(
+    columns: ContactColumnContainer,
+    column: wp.int32,
+    bodies: BodyContainer,
+    wrench0: wp.spatial_vector,
+    wrench1: wp.spatial_vector,
+):
+    """Hand the wrenches a staged column collected to its trees' deferred state."""
+    for side in range(2):
+        body = contact_get_body1(columns, column)
+        wrench = wrench0
+        if side == 1:
+            body = contact_get_body2(columns, column)
+            wrench = wrench1
+        articulation = bodies.reduced.body_articulation[body]
+        if articulation >= wp.int32(0):
+            bodies.reduced.deferred_pending[articulation] = wp.int32(1)
+            _defer_link_wrench(bodies, body - wp.int32(1), wrench)
 
 
 __all__ = [
     "flush_deferred_articulation",
+    "reduced_contact_can_stage",
+    "reduced_contact_commit",
     "reduced_contact_deferred_owner",
     "reduced_contact_iterate",
+    "reduced_contact_iterate_staged",
     "reduced_contact_prepare",
+    "reduced_contact_stage",
 ]
