@@ -180,26 +180,22 @@ class _MatchData:
 
 
 @wp.func
-def _match_distance_sq(data: _MatchData, old: int, p0w: wp.vec3, p1w: wp.vec3, body0: int, body1: int):
+def _match_distance_sq(data: _MatchData, old: int, p0w: wp.vec3, p1w: wp.vec3, p0: wp.vec3, p1: wp.vec3):
     """Squared drift [m^2] of a current contact from previous contact ``old``.
 
     Sticky matching transports the previous body-local witnesses with their
     bodies and takes the larger drift of the two. Compression moves the
     witnesses apart along the normal but keeps each on its own surface, so it
     does not age a match; a witness that jumps to another feature of its body,
-    such as the opposite face of a thin plate, does. Other modes compare
-    world-space midpoints.
+    such as the opposite face of a thin plate, does. Rigid transforms preserve
+    distance, so each witness is compared in its body's frame, ``p0`` and
+    ``p1``, free of world-space rounding far from the origin. Other modes
+    compare world-space midpoints.
     """
     if data.sticky == 0:
         diff = wp.float32(0.5) * (p0w + p1w) - data.prev_pos_world[old]
         return wp.dot(diff, diff)
-    q0 = data.prev_point0[old]
-    q1 = data.prev_point1[old]
-    if body0 >= 0:
-        q0 = wp.transform_point(data.body_q[body0], q0)
-    if body1 >= 0:
-        q1 = wp.transform_point(data.body_q[body1], q1)
-    return wp.max(wp.length_sq(p0w - q0), wp.length_sq(p1w - q1))
+    return wp.max(wp.length_sq(p0 - data.prev_point0[old]), wp.length_sq(p1 - data.prev_point1[old]))
 
 
 @wp.kernel(enable_backward=False)
@@ -285,7 +281,7 @@ def _match_contacts_kernel(data: _MatchData):
     best_idx = int(-1)
     best_dist_sq = float(data.pos_threshold_sq)
     for old_idx in range(range_lo, range_hi):
-        dist_sq = _match_distance_sq(data, old_idx, p0w, p1w, bid0, bid1)
+        dist_sq = _match_distance_sq(data, old_idx, p0w, p1w, p0, p1)
         if dist_sq <= best_dist_sq:
             old_n = data.prev_normal[old_idx]
             ndot = wp.dot(new_n, old_n)
@@ -401,13 +397,16 @@ def _contact_claim_priority(data: _MatchData, k: int, old: int):
     source = _contact_claim_source(data, k)
     p0 = data.new_point0[source]
     p1 = data.new_point1[source]
-    b0 = data.shape_body[data.new_shape0[source]]
-    b1 = data.shape_body[data.new_shape1[source]]
-    if b0 >= 0:
-        p0 = wp.transform_point(data.body_q[b0], p0)
-    if b1 >= 0:
-        p1 = wp.transform_point(data.body_q[b1], p1)
-    return _pack_claim(_match_distance_sq(data, old, p0, p1, b0, b1), data.new_keys[source])
+    p0w = p0
+    p1w = p1
+    if data.sticky == 0:
+        b0 = data.shape_body[data.new_shape0[source]]
+        b1 = data.shape_body[data.new_shape1[source]]
+        if b0 >= 0:
+            p0w = wp.transform_point(data.body_q[b0], p0)
+        if b1 >= 0:
+            p1w = wp.transform_point(data.body_q[b1], p1)
+    return _pack_claim(_match_distance_sq(data, old, p0w, p1w, p0, p1), data.new_keys[source])
 
 
 @wp.func

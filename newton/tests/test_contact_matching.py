@@ -1118,7 +1118,7 @@ def test_sticky_position_threshold_uses_body_witnesses(test, device):
     capacity = 1
     threshold = 0.0005
 
-    def match(*, sticky, body_z=0.0, point0=(0.0, 0.0, 0.0), point1=(0.0, 0.0, 0.0), margin=0.0):
+    def match(*, sticky, body_x=0.0, body_z=0.0, point0=(0.0, 0.0, 0.0), point1=(0.0, 0.0, 0.0), margin=0.0):
         """Match a ground (shape 0) to body (shape 1) contact saved at the origin with the body at rest."""
         matcher = ContactMatcher(
             capacity=capacity,
@@ -1148,7 +1148,9 @@ def test_sticky_position_threshold_uses_body_witnesses(test, device):
             normal=wp.array([[0.0, 0.0, 1.0]], dtype=wp.vec3, device=device),
             margin0=wp.full(capacity, margin, dtype=wp.float32, device=device),
             margin1=wp.zeros(capacity, dtype=wp.float32, device=device),
-            body_q=wp.array([wp.transform((0.0, 0.0, body_z), wp.quat_identity())], dtype=wp.transform, device=device),
+            body_q=wp.array(
+                [wp.transform((body_x, 0.0, body_z), wp.quat_identity())], dtype=wp.transform, device=device
+            ),
             shape_body=wp.array([-1, 0], dtype=wp.int32, device=device),
             match_index_out=match_index,
             buffer_id=1,
@@ -1175,6 +1177,9 @@ def test_sticky_position_threshold_uses_body_witnesses(test, device):
 
         # So does drift in the contact plane.
         test.assertEqual(match(sticky=True, point0=(0.002, 0.0, 0.0), point1=(0.002, 0.0, 0.0)), MATCH_BROKEN)
+
+        # World-space rounding must not hide local drift far from the origin.
+        test.assertEqual(match(sticky=True, body_x=1.0e6, point1=(0.0006, 0.0, 0.0)), MATCH_BROKEN)
 
 
 def _build_rolling_cylinder_scene(device, *, plane_first):
