@@ -518,6 +518,14 @@ def _link_path_kernel(
     template = dense.articulation_template[articulation]
     leaf = joint_last_dof[template_joint_start[template] + data.body_joint[link] - joint_start]
     length = wp.int32(0)
+    # The link's response to a wrench on itself, Z^T Z by columns: the inverse masses of its
+    # contact rows read six vectors instead of the path.
+    response0 = wp.spatial_vector()
+    response1 = wp.spatial_vector()
+    response2 = wp.spatial_vector()
+    response3 = wp.spatial_vector()
+    response4 = wp.spatial_vector()
+    response5 = wp.spatial_vector()
     if leaf >= wp.int32(0):
         base = dense.factor_start[articulation]
         dof_base = dense.template_dof_start[template]
@@ -531,20 +539,23 @@ def _link_path_kernel(
             for later in range(position + wp.int32(1), length):
                 row = dense.path[path + later]
                 value -= dense.factor[base + dense.dof_entry[dof_base + row] + position] * data.link_path[link, later]
-            data.link_path[link, position] = (
-                value / dense.factor[base + dense.dof_entry[dof_base + k + wp.int32(1)] - wp.int32(1)]
-            )
+            entry = value / dense.factor[base + dense.dof_entry[dof_base + k + wp.int32(1)] - wp.int32(1)]
+            data.link_path[link, position] = entry
             data.link_path_dof[link, position] = dof_start + k
+            response0 += entry * entry[0]
+            response1 += entry * entry[1]
+            response2 += entry * entry[2]
+            response3 += entry * entry[3]
+            response4 += entry * entry[4]
+            response5 += entry * entry[5]
     if length < data.link_path.shape[1]:
         data.link_path_dof[link, length] = wp.int32(-1)
-    # The link's response to a wrench on itself, Z^T Z by columns: the inverse masses of its
-    # contact rows read six vectors instead of the path.
-    for column in range(6):
-        twist = wp.spatial_vector()
-        for position in range(length):
-            entry = data.link_path[link, position]
-            twist += entry * entry[column]
-        data.impulse_response[link, column] = twist
+    data.impulse_response[link, 0] = response0
+    data.impulse_response[link, 1] = response1
+    data.impulse_response[link, 2] = response2
+    data.impulse_response[link, 3] = response3
+    data.impulse_response[link, 4] = response4
+    data.impulse_response[link, 5] = response5
 
 
 @wp.kernel(enable_backward=False)
