@@ -316,16 +316,6 @@ def _deferred_endpoint_inverse_mass(
         return _rigid_endpoint_inverse_mass(bodies, body, point, direction)
     point_local = _reduced_point_local(bodies, body, point)
     wrench = wp.spatial_vector(direction, wp.cross(point_local, direction))
-    data = bodies.reduced
-    if data.link_response != wp.int32(0):
-        link = body - wp.int32(1)
-        inverse_mass = wp.float32(0.0)
-        for position in range(data.link_path.shape[1]):
-            if data.link_path_dof[link, position] < wp.int32(0):
-                break
-            rate = wp.dot(data.link_path[link, position], wrench)
-            inverse_mass += rate * rate
-        return inverse_mass
     return wp.dot(wrench, _response_matrix_multiply(bodies, body - wp.int32(1), wrench))
 
 

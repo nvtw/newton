@@ -528,6 +528,14 @@ def _link_path_kernel(
             data.link_path_dof[link, position] = dof_start + k
     if length < data.link_path.shape[1]:
         data.link_path_dof[link, length] = wp.int32(-1)
+    # The link's response to a wrench on itself, Z^T Z by columns: the inverse masses of its
+    # contact rows read six vectors instead of the path.
+    for column in range(6):
+        twist = wp.spatial_vector()
+        for position in range(length):
+            entry = data.link_path[link, position]
+            twist += entry * entry[column]
+        data.impulse_response[link, column] = twist
 
 
 @wp.kernel(enable_backward=False)
