@@ -561,6 +561,10 @@ class TestReducedDenseBackend(unittest.TestCase):
                 solver_iterations=4,
             )
             self.assertEqual(solver._reduced_articulation.fused_substep is not None, backend == "auto")
+            # One world has no other worlds to share a block with: its rigid rows get a wide one.
+            self.assertEqual(
+                (solver.world._multi_world_scheduler, solver.world._multi_world_block_dim), ("block_world", 128)
+            )
             state, output = model.state(), model.state()
             newton.eval_fk(model, model.joint_q, model.joint_qd, state)
             contacts = pipeline.contacts()

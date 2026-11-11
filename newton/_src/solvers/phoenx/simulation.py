@@ -4421,7 +4421,7 @@ class PhoenXWorld:
     def _parse_multi_world_scheduler_policy(self, policy: str) -> tuple[str, int]:
         """Normalize a construction-time multi-world scheduler policy."""
         normalized = str(policy).strip().lower().replace("-", "_")
-        if normalized in ("auto", "fast_tail"):
+        if normalized in ("auto", "fast_tail", "one_world"):
             return normalized, 128
         if normalized == "fasttail":
             return "fast_tail", 128
@@ -4434,7 +4434,7 @@ class PhoenXWorld:
             return "block_world", block_dim
 
         raise ValueError(
-            "multi_world_scheduler must be 'auto', 'fast_tail', 'block_world', "
+            "multi_world_scheduler must be 'auto', 'fast_tail', 'one_world', 'block_world', "
             "'block_world_32', 'block_world_64', or 'block_world_128' "
             f"(got {policy!r})"
         )
@@ -4456,6 +4456,11 @@ class PhoenXWorld:
         kind, block_dim = self._parse_multi_world_scheduler_policy(policy)
         if kind == "auto":
             kind, block_dim = self._auto_multi_world_scheduler()
+        elif kind == "one_world":
+            # One world has nothing to pack into a block with other worlds: give its rows
+            # the 128 threads of a block of their own instead of the 32 of a fast-tail world.
+            wide = self.num_worlds == 1 and self._block_world_supported() and not self._contact_patch_enabled
+            kind = "block_world" if wide else "fast_tail"
         elif kind == "block_world" and not self._block_world_supported():
             raise NotImplementedError("block-world scheduler currently supports rigid multi-world scenes only")
 

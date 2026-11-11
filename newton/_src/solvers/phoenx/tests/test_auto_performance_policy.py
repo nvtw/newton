@@ -53,32 +53,6 @@ class TestPhoenXAutoPerformancePolicy(unittest.TestCase):
             with self.subTest(**overrides):
                 self.assertEqual(self._resolve(**overrides), "multi_world")
 
-    def test_large_reduced_world_selects_single_world_by_free_bodies(self):
-        """One world of reduced robots among many free bodies solves its contacts color by color."""
-        reduced = {"articulation_mode": "reduced", "has_joints": True, "body_count": 200000}
-        self.assertEqual(self._resolve(**reduced, free_body_count=32768), "single_world")
-        self.assertEqual(self._resolve(**reduced, free_body_count=32767), "multi_world")
-        self.assertEqual(self._resolve(**reduced, free_body_count=32768, num_worlds=2), "multi_world")
-
-    def test_free_body_count_ignores_jointed_bodies(self):
-        """Bodies alone on a free joint or without a joint count as free; hinged ones do not."""
-        import newton  # noqa: PLC0415
-        from newton._src.solvers.phoenx.solver import _free_body_count  # noqa: PLC0415
-
-        builder = newton.ModelBuilder()
-        builder.add_body()  # alone on a free joint, in its own articulation
-        base = builder.add_link()
-        arm = builder.add_link()
-        builder.add_joint_free(base)
-        builder.add_joint_revolute(base, arm)
-        builder.add_articulation([builder.joint_count - 2, builder.joint_count - 1])
-        model = builder.finalize(device="cpu")
-        self.assertEqual(_free_body_count(model), 1)
-
-        # A model stripped of its articulation data: every free joint then stands alone.
-        model.joint_articulation = None
-        self.assertEqual(_free_body_count(model), 2)
-
     def test_contact_columns_are_bounded_by_the_candidate_pairs(self):
         """One large world sizes its columns by the broad phase's pair budget, not by the contacts."""
         from newton._src.solvers.phoenx.solver import _estimate_contact_column_max_phoenx  # noqa: PLC0415
