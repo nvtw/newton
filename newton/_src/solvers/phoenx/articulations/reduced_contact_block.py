@@ -471,8 +471,9 @@ def _mark_cross_trees_kernel(
     articulation_count: wp.int32,
     section_end: wp.array[wp.int32],
     schedule_columns: wp.array[wp.int32],
+    cross_tree: wp.array[wp.int32],
 ):
-    """Flag the trees of the columns that no articulation owns as holding deferred wrenches."""
+    """Flag the trees of the columns that no articulation owns."""
     offset, side = wp.tid()
     first = wp.int32(0)
     if articulation_count > 0:
@@ -485,7 +486,7 @@ def _mark_cross_trees_kernel(
         body = contact_get_body2(columns, column)
     articulation = bodies.reduced.body_articulation[body]
     if articulation >= wp.int32(0):
-        bodies.reduced.deferred_pending[articulation] = wp.int32(1)
+        cross_tree[articulation] = wp.int32(1)
 
 
 @wp.kernel(enable_backward=False)
@@ -494,6 +495,7 @@ def _link_path_kernel(
     dense: DenseTreeData,
     joint_last_dof: wp.array[wp.int32],
     template_joint_start: wp.array[wp.int32],
+    cross_tree: wp.array[wp.int32],
 ):
     """Form ``Z = L^-T J^T`` along the root path of every link of a flagged tree.
 
@@ -506,7 +508,10 @@ def _link_path_kernel(
     articulation = data.body_articulation[link + 1]
     if articulation < wp.int32(0):
         return
-    if data.deferred_pending[articulation] == wp.int32(0):
+    if cross_tree[articulation] != wp.int32(0):
+        # A tree in a column between trees holds deferred wrenches from here on.
+        data.deferred_pending[articulation] = wp.int32(1)
+    elif data.deferred_pending[articulation] == wp.int32(0):
         return
     joint_start = data.articulation_start[articulation]
     dof_start = data.joint_qd_start[joint_start]
@@ -3715,6 +3720,8 @@ class ReducedContactBlockSystem:
         #: Whether fallback sweeps end by applying the deferred wrenches with the articulated-body
         #: recurrences. A fused substep applies them itself, see ``link_response``.
         self.flush_fallback = True
+        #: Per articulation, nonzero in steps in which a column between trees touches it.
+        self.cross_tree = wp.zeros(max(1, int(model.articulation_count)), dtype=wp.int32, device=self.device)
         #: Nonzero while the fallback runs share one color.
         self.fallback_single_color = wp.zeros(1, dtype=wp.int32, device=self.device)
         #: Whether the fused substep solves rows between two links of one tree.
@@ -4111,6 +4118,26 @@ class ReducedContactBlockSystem:
             outputs=[self.cross_column_count],
             device=self.device,
         )
+        self.cross_tree.zero_()
+
+        def mark_cross_trees() -> None:
+            wp.launch(
+                _mark_cross_trees_kernel,
+                dim=(self.schedule_capacity, 2),
+                inputs=[
+                    columns,
+                    bodies,
+                    self.reduced_column_count,
+                    wp.int32(self.articulation_count),
+                    self.schedule_section_end,
+                    self.schedule_columns,
+                ],
+                outputs=[self.cross_tree],
+                device=self.device,
+            )
+
+        # Once per step, and only in steps that have such columns.
+        wp.capture_if(self.cross_column_count, on_true=mark_cross_trees)
         assert self.fallback_count is not None
         assert self.fallback_column is not None
         assert self.fallback_element is not None
@@ -4177,27 +4204,14 @@ class ReducedContactBlockSystem:
     def refresh_link_responses(self, columns: ContactColumnContainer, bodies: BodyContainer) -> None:
         """Form the link responses of the trees in unowned columns from the stored dense factor.
 
-        Trees whose links still hold deferred wrenches are flagged already; their deferred
-        rates start from those wrenches.
+        :meth:`build_schedule` flagged those trees for the step. Trees whose links still hold
+        deferred wrenches are flagged too; their deferred rates start from those wrenches.
         """
         dense = self.dense_rows
         wp.launch(
-            _mark_cross_trees_kernel,
-            dim=(self.schedule_capacity, 2),
-            inputs=[
-                columns,
-                bodies,
-                self.reduced_column_count,
-                wp.int32(self.articulation_count),
-                self.schedule_section_end,
-                self.schedule_columns,
-            ],
-            device=self.device,
-        )
-        wp.launch(
             _link_path_kernel,
             dim=bodies.reduced.link_path.shape[0],
-            inputs=[bodies, dense.data, dense.joint_last_dof, dense.template_joint_start],
+            inputs=[bodies, dense.data, dense.joint_last_dof, dense.template_joint_start, self.cross_tree],
             device=self.device,
         )
         wp.launch(_seed_deferred_rate_kernel, dim=self.articulation_count, inputs=[bodies], device=self.device)
