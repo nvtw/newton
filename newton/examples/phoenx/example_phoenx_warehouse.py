@@ -5,14 +5,16 @@
 A fleet of Unitree G1 and H1 humanoids, ANYmal quadrupeds, Kiva-style drive units, and
 forklifts stands in the aisles between rows of shelving pods and pallets. Every robot is its
 own articulation, held in its standing pose by position drives, and is solved in reduced
-coordinates. Everything else is a free rigid body or a regular joint: pods loaded with
-packages, pallets stacked with cartons, loose packages on the robots' feet, mesh totes with
-signed distance fields, hinged gates, and drawers.
+coordinates. Everything else is a free rigid body or an ordinary hinge or slider: pods loaded
+with packages, pallets stacked with cartons, loose packages on the robots' feet, mesh totes
+with signed distance fields, hinged gates, and drawers. The gates and drawers are solved in
+reduced coordinates too, next to the robots; ``--mechanism-solver regular`` leaves them to
+the solver's regular joint rows.
 
 The scene exercises what one large world mixes: robots that touch free bodies (a package on a
 humanoid's foot, a pod carried by a drive unit, a loaded pallet on a forklift), free bodies
 shared by two robots (a long package across the feet of two humanoids), robots that touch each
-other, sleeping stacks next to awake robots, and mechanisms outside the reduced solver. All
+other, sleeping stacks next to awake robots, and jointed mechanisms of the building. All
 robots and bodies share one world, and collision detection and stepping run in one CUDA
 graph.
 
@@ -605,6 +607,8 @@ class Scene:
     settled_bodies: list[int] = field(default_factory=list)
     #: Joints of the gates and drawers.
     mechanism_joints: list[int] = field(default_factory=list)
+    #: Articulations of the gates and drawers, one joint each.
+    mechanism_articulations: list[int] = field(default_factory=list)
 
 
 class _SceneAssembler:
@@ -685,6 +689,7 @@ class _SceneAssembler:
         builder.joint_q[builder.joint_q_start[joint]] = 0.5  # starts ajar and swings shut
         builder.add_articulation([joint], label="gate")
         self.scene.mechanism_joints.append(joint)
+        self.scene.mechanism_articulations.append(builder.articulation_count - 1)
 
     def add_drawer_cabinet(self, x: float, y: float) -> None:
         """Static cabinet whose drawer slides on a prismatic joint and holds a package."""
@@ -747,6 +752,7 @@ class _SceneAssembler:
         builder.joint_q[builder.joint_q_start[joint]] = -opening
         builder.add_articulation([joint], label="drawer")
         self.scene.mechanism_joints.append(joint)
+        self.scene.mechanism_articulations.append(builder.articulation_count - 1)
         self.add_free_box((x - opening, y, 0.31 + 0.05 + REST_GAP), (0.12, 0.14, 0.05), COLORS["package"])
 
     def add_ramp(self, x: float, y: float, ramp: newton.Mesh, slope: float, tote: newton.Mesh) -> None:
@@ -956,11 +962,16 @@ class Example:
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state)
         self.control = self.model.control()
         # The solver builds the collision pipeline: it picks the broad phase for one large
-        # world and filters pairs of sleeping bodies. Gates and drawers stay regular joints.
+        # world and filters pairs of sleeping bodies. Gates and drawers ride along with the
+        # robots in reduced coordinates: as regular joints they need solves of their own between
+        # the contact sweeps (4.5 against 4.0 ms per step at 1024 robots).
+        reduced = list(self.scene.robot_articulations)
+        if getattr(args, "mechanism_solver", "reduced") == "reduced":
+            reduced += self.scene.mechanism_articulations
         self.solver = SolverPhoenX(
             self.model,
             joint_mode="reduced",
-            reduced_articulations=self.scene.robot_articulations,
+            reduced_articulations=reduced,
             sleeping_velocity_threshold=0.05,
             substeps=int(getattr(args, "substeps", 4)),
             solver_iterations=int(getattr(args, "iterations", 4)),
@@ -1121,6 +1132,12 @@ if __name__ == "__main__":
         action=argparse.BooleanOptionalAction,
         default=None,
         help="Show the humanoids' visual meshes. Defaults to on unless the viewer is null.",
+    )
+    parser.add_argument(
+        "--mechanism-solver",
+        choices=("reduced", "regular"),
+        default="reduced",
+        help="Solve the gates and drawers in reduced coordinates with the robots, or as regular joints.",
     )
     parser.add_argument("--substeps", type=int, default=4)
     parser.add_argument("--iterations", type=int, default=4)
