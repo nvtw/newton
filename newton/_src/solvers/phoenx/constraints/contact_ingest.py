@@ -14,7 +14,11 @@ from __future__ import annotations
 
 import warp as wp
 
-from newton._src.geometry.active_prefix_sort import active_prefix_sort_levels
+from newton._src.geometry.active_prefix_sort import (
+    active_prefix_sort_levels,
+    dispatch_active_prefix,
+    radix_sort_prefix,
+)
 from newton._src.geometry.contact_reduction import (
     NUM_NORMAL_BINS,
     float_flip,
@@ -98,6 +102,11 @@ def _body_pair_support_direction(direction: wp.int32) -> wp.vec3f:
     z = wp.float32(code / wp.int32(3) - wp.int32(1))
     result = wp.vec3f(x, y, z)
     return result / wp.length(result)
+
+
+#: Contact capacity from which the grouping path launches over a size class of the contacts
+#: in use: each of its four branches costs about 10 us, a kernel over 4M idle threads 20 us.
+_ACTIVE_DISPATCH_MIN_CONTACTS = 1 << 21
 
 
 class IngestScratch:
@@ -1388,6 +1397,27 @@ def ingest_contacts(
         else wp.zeros(0, dtype=wp.float32, device=device)
     )
 
+    def over_active(body) -> None:
+        """Run ``body(dim)`` over the contacts in use instead of the whole capacity.
+
+        Every kernel of the grouping path reads and writes entries below the contact count,
+        or fills a tail behind it that only the kernels of the same call read. A captured
+        graph picks the size class per step; small buffers are not worth the branch.
+        """
+        if dispatched:
+            dispatch_active_prefix(contacts.rigid_contact_count, rigid_contact_max, scratch.sort_prefix_flags, body)
+        else:
+            body(rigid_contact_max)
+
+    flags = scratch.sort_prefix_flags
+    dispatched = (
+        flags is not None
+        and flags.device.is_cuda
+        and flags.device.is_capturing
+        and rigid_contact_max >= _ACTIVE_DISPATCH_MIN_CONTACTS
+        and rigid_contact_max == scratch.rigid_contact_max
+    )
+
     if enable_body_pair_grouping:
         if scratch.body_pair_keys is None:
             raise RuntimeError(
@@ -1401,92 +1431,104 @@ def ingest_contacts(
                 scratch.sorted_surface_velocity = wp.empty(rigid_contact_max, dtype=wp.vec3f, device=device)
         else:
             surface_velocity = scratch.surface_velocity_sentinel
+
         # ---- Compound-body grouping path -----------------------------
         #
         # Sort contacts by body-pair key, gather narrow-phase data into
         # PhoenX scratch (translating match indices into prev-frame
         # sorted-k space along the way), then run the existing pipeline
         # against the sorted scratch.
-        wp.launch(
-            kernel=_build_body_pair_keys_kernel,
-            dim=rigid_contact_max,
-            inputs=[
-                contacts.rigid_contact_count,
-                contacts.rigid_contact_shape0,
-                contacts.rigid_contact_shape1,
-                shape_body,
-                int(max(1, num_bodies)),
-            ],
-            outputs=[scratch.body_pair_keys, scratch.sort_perm],
-            device=device,
-        )
-        sort_device = scratch.body_pair_keys.device
-        # Sort body-pair keys (in place); ``sort_perm`` becomes the
-        # permutation: ``sort_perm[sorted_k] = newton_k``.
-        # PhoenX body indices are nonnegative, so keys lie in [0, num_bodies**2).
-        sort_variable_length_int64(
-            scratch.body_pair_keys,
-            scratch.sort_perm,
-            contacts.rigid_contact_count,
-            end_bit=(int(max(1, num_bodies)) ** 2).bit_length(),
-            # Inside a captured graph the branch on the contact count costs no readback.
-            prefix_flags=scratch.sort_prefix_flags if sort_device.is_cuda and sort_device.is_capturing else None,
-        )
-        # Build the inverse permutation for the warm-start gather to
-        # translate prev-frame Newton-order match indices into
-        # prev-frame PhoenX-sorted-k.
-        wp.launch(
-            kernel=_build_inv_sort_perm_kernel,
-            dim=rigid_contact_max,
-            inputs=[contacts.rigid_contact_count, scratch.sort_perm],
-            outputs=[scratch.inv_sort_perm],
-            device=device,
-        )
-        # Gather narrow-phase arrays into PhoenX scratch in sorted-k
-        # order, applying the prev-frame inverse perm to the match
-        # index so ``sorted_match_index[sorted_k]`` is the prev frame's
-        # PhoenX-sorted-k (or -1).
-        wp.launch(
-            kernel=_gather_sorted_contacts_kernel,
-            dim=rigid_contact_max,
-            inputs=[
-                contacts.rigid_contact_count,
-                scratch.sort_perm,
-                shape_body,
-                contacts.rigid_contact_shape0,
-                contacts.rigid_contact_shape1,
-                contacts.rigid_contact_match_index,
-                contacts.rigid_contact_normal,
-                contacts.rigid_contact_point0,
-                contacts.rigid_contact_point1,
-                contacts.rigid_contact_margin0,
-                contacts.rigid_contact_margin1,
-                contacts.rigid_contact_stiffness
-                if getattr(contacts, "rigid_contact_stiffness", None) is not None
-                else wp.zeros(0, dtype=wp.float32, device=device),
-                contacts.rigid_contact_damping
-                if getattr(contacts, "rigid_contact_damping", None) is not None
-                else wp.zeros(0, dtype=wp.float32, device=device),
-                contact_friction,
-                surface_velocity,
-                scratch.prev_inv_sort_perm,
-            ],
-            outputs=[
-                scratch.sorted_shape0,
-                scratch.sorted_shape1,
-                scratch.sorted_match_index,
-                scratch.sorted_normal,
-                scratch.sorted_point0,
-                scratch.sorted_point1,
-                scratch.sorted_margin0,
-                scratch.sorted_margin1,
-                scratch.sorted_stiffness,
-                scratch.sorted_damping,
-                scratch.sorted_friction,
-                scratch.sorted_surface_velocity,
-            ],
-            device=device,
-        )
+        def gather(dim: int) -> None:
+            """Sort the contacts by body pair and gather them in that order."""
+            wp.launch(
+                kernel=_build_body_pair_keys_kernel,
+                dim=dim,
+                inputs=[
+                    contacts.rigid_contact_count,
+                    contacts.rigid_contact_shape0,
+                    contacts.rigid_contact_shape1,
+                    shape_body,
+                    int(max(1, num_bodies)),
+                ],
+                outputs=[scratch.body_pair_keys, scratch.sort_perm],
+                device=device,
+            )
+            # Sort body-pair keys (in place); ``sort_perm`` becomes the
+            # permutation: ``sort_perm[sorted_k] = newton_k``.
+            # PhoenX body indices are nonnegative, so keys lie in [0, num_bodies**2).
+            end_bit = (int(max(1, num_bodies)) ** 2).bit_length()
+            if dispatched:
+                # The key kernel wrote the sentinel behind the contacts in use.
+                radix_sort_prefix(scratch.body_pair_keys, scratch.sort_perm, dim, end_bit)
+            else:
+                sort_device = scratch.body_pair_keys.device
+                sort_variable_length_int64(
+                    scratch.body_pair_keys,
+                    scratch.sort_perm,
+                    contacts.rigid_contact_count,
+                    end_bit=end_bit,
+                    # Inside a captured graph the branch on the contact count costs no readback.
+                    prefix_flags=scratch.sort_prefix_flags
+                    if sort_device.is_cuda and sort_device.is_capturing
+                    else None,
+                )
+            # Build the inverse permutation for the warm-start gather to
+            # translate prev-frame Newton-order match indices into
+            # prev-frame PhoenX-sorted-k.
+            wp.launch(
+                kernel=_build_inv_sort_perm_kernel,
+                dim=dim,
+                inputs=[contacts.rigid_contact_count, scratch.sort_perm],
+                outputs=[scratch.inv_sort_perm],
+                device=device,
+            )
+            # Gather narrow-phase arrays into PhoenX scratch in sorted-k
+            # order, applying the prev-frame inverse perm to the match
+            # index so ``sorted_match_index[sorted_k]`` is the prev frame's
+            # PhoenX-sorted-k (or -1).
+            wp.launch(
+                kernel=_gather_sorted_contacts_kernel,
+                dim=dim,
+                inputs=[
+                    contacts.rigid_contact_count,
+                    scratch.sort_perm,
+                    shape_body,
+                    contacts.rigid_contact_shape0,
+                    contacts.rigid_contact_shape1,
+                    contacts.rigid_contact_match_index,
+                    contacts.rigid_contact_normal,
+                    contacts.rigid_contact_point0,
+                    contacts.rigid_contact_point1,
+                    contacts.rigid_contact_margin0,
+                    contacts.rigid_contact_margin1,
+                    contacts.rigid_contact_stiffness
+                    if getattr(contacts, "rigid_contact_stiffness", None) is not None
+                    else wp.zeros(0, dtype=wp.float32, device=device),
+                    contacts.rigid_contact_damping
+                    if getattr(contacts, "rigid_contact_damping", None) is not None
+                    else wp.zeros(0, dtype=wp.float32, device=device),
+                    contact_friction,
+                    surface_velocity,
+                    scratch.prev_inv_sort_perm,
+                ],
+                outputs=[
+                    scratch.sorted_shape0,
+                    scratch.sorted_shape1,
+                    scratch.sorted_match_index,
+                    scratch.sorted_normal,
+                    scratch.sorted_point0,
+                    scratch.sorted_point1,
+                    scratch.sorted_margin0,
+                    scratch.sorted_margin1,
+                    scratch.sorted_stiffness,
+                    scratch.sorted_damping,
+                    scratch.sorted_friction,
+                    scratch.sorted_surface_velocity,
+                ],
+                device=device,
+            )
+
+        over_active(gather)
         # The downstream pipeline uses these sorted arrays in place of
         # Use sorted narrow-phase arrays downstream. Material coefficients and
         # per-contact friction scales delimit compatible grouped columns.
@@ -1546,133 +1588,148 @@ def ingest_contacts(
             device=device,
         )
     else:
-        wp.launch(
-            kernel=_body_pair_boundary_kernel,
-            dim=rigid_contact_max,
-            inputs=[
-                contacts.rigid_contact_count,
-                scratch.body_pair_keys,
-                ingest_shape0,
-                ingest_shape1,
-                ingest_friction,
-                shape_material,
-                materials,
-                wp.float32(default_friction),
-            ],
-            outputs=[scratch.pair_boundary, cid_of_contact],
-            device=device,
-        )
+
+        def mark(dim: int) -> None:
+            """Mark where a new body pair starts."""
+            wp.launch(
+                kernel=_body_pair_boundary_kernel,
+                dim=dim,
+                inputs=[
+                    contacts.rigid_contact_count,
+                    scratch.body_pair_keys,
+                    ingest_shape0,
+                    ingest_shape1,
+                    ingest_friction,
+                    shape_material,
+                    materials,
+                    wp.float32(default_friction),
+                ],
+                outputs=[scratch.pair_boundary, cid_of_contact],
+                device=device,
+            )
+
+        over_active(mark)
 
         wp.utils.array_scan(scratch.pair_boundary, scratch.pair_id, inclusive=True)
-        wp.launch(
-            kernel=_scatter_pair_starts_kernel,
-            dim=rigid_contact_max,
-            inputs=[
-                contacts.rigid_contact_count,
-                scratch.pair_boundary,
-                scratch.pair_id,
-                ingest_shape0,
-                ingest_shape1,
-            ],
-            outputs=[
-                scratch.pair_shape_a,
-                scratch.pair_shape_b,
-                scratch.pair_first,
-                scratch.pair_columns,
-                scratch.num_pairs,
-            ],
-            device=device,
-        )
-        wp.launch(
-            kernel=_pair_counts_and_columns_kernel,
-            dim=rigid_contact_max,
-            inputs=[
-                contacts.rigid_contact_count,
-                wp.int32(rigid_contact_max),
-                scratch.num_pairs,
-                scratch.pair_first,
-                scratch.pair_shape_a,
-                scratch.pair_shape_b,
-                filter_id_arr,
-                int(num_bodies),
-                filter_keys,
-                int(filter_count),
-                shape_no_response,
-            ],
-            outputs=[scratch.pair_count, scratch.pair_columns],
-            device=device,
-        )
-        wp.launch(
-            kernel=_clear_body_pair_manifold_slots_kernel,
-            dim=rigid_contact_max,
-            inputs=[
-                scratch.num_pairs,
-                scratch.pair_first,
-                scratch.pair_count,
-                scratch.selected_contact,
-            ],
-            device=device,
-        )
-        wp.launch(
-            kernel=_select_body_pair_manifold_kernel,
-            dim=rigid_contact_max,
-            inputs=[
-                scratch.pair_id,
-                scratch.pair_first,
-                scratch.pair_count,
-                bodies,
-                shape_body,
-                scratch.sorted_shape0,
-                scratch.sorted_shape1,
-                scratch.sorted_normal,
-                scratch.sorted_point0,
-                scratch.sorted_point1,
-                scratch.sorted_margin0,
-                scratch.sorted_margin1,
-                scratch.selected_contact,
-            ],
-            device=device,
-        )
-        wp.launch(
-            kernel=_compact_body_pair_manifolds_kernel,
-            dim=rigid_contact_max,
-            inputs=[
-                scratch.num_pairs,
-                scratch.pair_first,
-                scratch.pair_count,
-                scratch.pair_id,
-                scratch.sorted_shape0,
-                scratch.sorted_shape1,
-                scratch.sorted_match_index,
-                scratch.sorted_normal,
-                scratch.sorted_point0,
-                scratch.sorted_point1,
-                scratch.sorted_margin0,
-                scratch.sorted_margin1,
-                scratch.sorted_stiffness,
-                scratch.sorted_damping,
-                scratch.sorted_friction,
-                scratch.sorted_surface_velocity,
-                scratch.sort_perm,
-                scratch.selected_contact,
-                scratch.inv_sort_perm,
-            ],
-            device=device,
-        )
+
+        def group(dim: int) -> None:
+            """Count the contacts of each body pair and keep its manifold."""
+            wp.launch(
+                kernel=_scatter_pair_starts_kernel,
+                dim=dim,
+                inputs=[
+                    contacts.rigid_contact_count,
+                    scratch.pair_boundary,
+                    scratch.pair_id,
+                    ingest_shape0,
+                    ingest_shape1,
+                ],
+                outputs=[
+                    scratch.pair_shape_a,
+                    scratch.pair_shape_b,
+                    scratch.pair_first,
+                    scratch.pair_columns,
+                    scratch.num_pairs,
+                ],
+                device=device,
+            )
+            wp.launch(
+                kernel=_pair_counts_and_columns_kernel,
+                dim=dim,
+                inputs=[
+                    contacts.rigid_contact_count,
+                    wp.int32(rigid_contact_max),
+                    scratch.num_pairs,
+                    scratch.pair_first,
+                    scratch.pair_shape_a,
+                    scratch.pair_shape_b,
+                    filter_id_arr,
+                    int(num_bodies),
+                    filter_keys,
+                    int(filter_count),
+                    shape_no_response,
+                ],
+                outputs=[scratch.pair_count, scratch.pair_columns],
+                device=device,
+            )
+            wp.launch(
+                kernel=_clear_body_pair_manifold_slots_kernel,
+                dim=dim,
+                inputs=[
+                    scratch.num_pairs,
+                    scratch.pair_first,
+                    scratch.pair_count,
+                    scratch.selected_contact,
+                ],
+                device=device,
+            )
+            wp.launch(
+                kernel=_select_body_pair_manifold_kernel,
+                dim=dim,
+                inputs=[
+                    scratch.pair_id,
+                    scratch.pair_first,
+                    scratch.pair_count,
+                    bodies,
+                    shape_body,
+                    scratch.sorted_shape0,
+                    scratch.sorted_shape1,
+                    scratch.sorted_normal,
+                    scratch.sorted_point0,
+                    scratch.sorted_point1,
+                    scratch.sorted_margin0,
+                    scratch.sorted_margin1,
+                    scratch.selected_contact,
+                ],
+                device=device,
+            )
+            wp.launch(
+                kernel=_compact_body_pair_manifolds_kernel,
+                dim=dim,
+                inputs=[
+                    scratch.num_pairs,
+                    scratch.pair_first,
+                    scratch.pair_count,
+                    scratch.pair_id,
+                    scratch.sorted_shape0,
+                    scratch.sorted_shape1,
+                    scratch.sorted_match_index,
+                    scratch.sorted_normal,
+                    scratch.sorted_point0,
+                    scratch.sorted_point1,
+                    scratch.sorted_margin0,
+                    scratch.sorted_margin1,
+                    scratch.sorted_stiffness,
+                    scratch.sorted_damping,
+                    scratch.sorted_friction,
+                    scratch.sorted_surface_velocity,
+                    scratch.sort_perm,
+                    scratch.selected_contact,
+                    scratch.inv_sort_perm,
+                ],
+                device=device,
+            )
+
+        over_active(group)
         wp.utils.array_scan(scratch.pair_columns, scratch.pair_col_offset, inclusive=False)
-        wp.launch(
-            kernel=_pair_source_idx_kernel,
-            dim=scratch.pair_columns.shape[0],
-            inputs=[
-                scratch.pair_col_offset,
-                scratch.pair_columns,
-                scratch.num_pairs,
-                int(max_contact_columns),
-                int(active_constraint_base),
-            ],
-            outputs=[scratch.pair_source_idx, scratch.num_contact_columns, num_active_constraints],
-            device=device,
-        )
+
+        def index(dim: int) -> None:
+            """Give every pair with columns its place in the column list."""
+            wp.launch(
+                kernel=_pair_source_idx_kernel,
+                dim=min(dim, scratch.pair_columns.shape[0]),
+                inputs=[
+                    scratch.pair_col_offset,
+                    scratch.pair_columns,
+                    scratch.num_pairs,
+                    int(max_contact_columns),
+                    int(active_constraint_base),
+                ],
+                outputs=[scratch.pair_source_idx, scratch.num_contact_columns, num_active_constraints],
+                device=device,
+            )
+
+        over_active(index)
 
     # Step 5: write the contact column headers + ranges.
     wp.launch(

@@ -79,6 +79,46 @@ class TestPhoenXAutoPerformancePolicy(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "positive"):
             newton.solvers.SolverPhoenX(build(), rigid_contact_max=0)
 
+    def test_large_contact_buffer_steps_like_a_small_one(self):
+        """Kernels launched over a size class of the contacts in use give the result of full launches."""
+        import numpy as np  # noqa: PLC0415
+        import warp as wp  # noqa: PLC0415
+
+        import newton  # noqa: PLC0415
+        from newton._src.solvers.phoenx.constraints.contact_ingest import (  # noqa: PLC0415
+            _ACTIVE_DISPATCH_MIN_CONTACTS,
+        )
+
+        if not wp.is_cuda_available():
+            self.skipTest("size classes are chosen inside a captured CUDA graph")
+
+        def settle(capacity: int) -> np.ndarray:
+            builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+            builder.add_ground_plane()
+            for i in range(24):
+                x, y, z = 0.3 * (i % 4), 0.02 * (i % 3), 0.11 + 0.21 * (i // 4)
+                body = builder.add_body(xform=wp.transform(wp.vec3(x, y, z), wp.quat_identity()))
+                builder.add_shape_box(body, hx=0.1, hy=0.1, hz=0.1)
+            model = builder.finalize(device="cuda:0")
+            solver = newton.solvers.SolverPhoenX(model, rigid_contact_max=capacity, enable_body_pair_grouping=True)
+            self.assertIsNotNone(solver.world._ingest_scratch.body_pair_keys)
+            pipeline = model._collision_pipeline
+            contacts = pipeline.contacts()
+            state, output = model.state(), model.state()
+            with wp.ScopedCapture() as capture:
+                pipeline.collide(state, contacts)
+                solver.step(state, output, None, contacts, 1.0 / 60.0)
+                wp.copy(state.body_q, output.body_q)
+                wp.copy(state.body_qd, output.body_qd)
+            for _ in range(90):
+                wp.capture_launch(capture.graph)
+            return np.concatenate((state.body_q.numpy().ravel(), state.body_qd.numpy().ravel()))
+
+        small = settle(4096)
+        large = settle(int(_ACTIVE_DISPATCH_MIN_CONTACTS))
+        self.assertTrue(np.isfinite(small).all())
+        np.testing.assert_array_equal(small, large)
+
     def test_contact_columns_are_bounded_by_the_candidate_pairs(self):
         """One large world sizes its columns by the broad phase's pair budget, not by the contacts."""
         from newton._src.solvers.phoenx.solver import _estimate_contact_column_max_phoenx  # noqa: PLC0415

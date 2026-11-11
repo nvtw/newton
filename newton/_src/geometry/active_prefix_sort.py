@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import warp as wp
 
 # Active-prefix sort: CUB sorts a host-sized range, but the active count is
@@ -80,45 +82,32 @@ def _restore_sort_scratch_int_kernel(keys: wp.array[int], values: wp.array[int],
     values[prefix + tid] = values[prefix - 1]
 
 
-def radix_sort_active_prefix(
-    keys: wp.array,
-    values: wp.array[int],
+def dispatch_active_prefix(
     active_length: wp.array[int],
+    count: int,
     flags: wp.array[wp.int32],
-    end_bit: int | None = None,
+    body: Callable[[int], None],
 ) -> None:
-    """Sort int32 or int64 ``keys[:count]`` whose entries past ``active_length`` hold one sentinel.
+    """Call ``body(prefix)`` for the smallest size ``count >> k`` that strictly contains the active entries.
 
-    ``count = keys.shape[0] // 2`` and ``flags`` must contain
-    :func:`active_prefix_sort_levels` entries. The sentinel must sort after
-    every active key. Afterwards all of ``keys[:count]`` is sorted and its
-    tail again holds the sentinel; tail values are unspecified.
+    ``body`` launches its kernels over ``prefix`` instead of ``count`` threads. Inside a
+    captured graph the size is chosen on the device in every replay: ``body`` is captured
+    once per size, and a search tree of conditional nodes picks one. ``flags`` must contain
+    :func:`active_prefix_sort_levels` entries for ``count``. ``body`` must not allocate.
     """
-    count = keys.shape[0] // 2
     levels = flags.shape[0]
     if levels != active_prefix_sort_levels(count):
         raise ValueError(f"flags must contain {active_prefix_sort_levels(count)} entries, got {levels}")
-    if levels == 1 or not keys.device.is_cuda:
-        wp.utils.radix_sort_pairs(keys, values, count, end_bit=end_bit)
+    if levels == 1 or not flags.device.is_cuda:
+        body(count)
         return
     wp.launch(
         _select_active_prefix_kernel,
         dim=levels - 1,
-        inputs=[active_length, count, _search_pivots(levels, keys.device)],
+        inputs=[active_length, count, _search_pivots(levels, flags.device)],
         outputs=[flags],
-        device=keys.device,
+        device=flags.device,
     )
-
-    def sort_prefix(shift: int) -> None:
-        prefix = count >> shift
-        wp.utils.radix_sort_pairs(keys, values, prefix, end_bit=end_bit)
-        if prefix < count:
-            wp.launch(
-                _restore_sort_scratch_kernel if keys.dtype == wp.int64 else _restore_sort_scratch_int_kernel,
-                dim=min(prefix, count - prefix),
-                inputs=[keys, values, prefix],
-                device=keys.device,
-            )
 
     # A conditional graph node costs a few microseconds: descend a search tree over the
     # prefix sizes instead of testing each in turn. Nodes are numbered in preorder.
@@ -127,7 +116,7 @@ def radix_sort_active_prefix(
     def descend(low: int, high: int) -> None:
         nonlocal node
         if low == high:
-            sort_prefix(low)
+            body(count >> low)
             return
         flag = flags[node : node + 1]
         node += 1
@@ -152,4 +141,40 @@ def radix_sort_active_prefix(
     descend(0, levels - 1)
 
 
-__all__ = ["active_prefix_sort_levels", "radix_sort_active_prefix"]
+def radix_sort_prefix(keys: wp.array, values: wp.array[int], prefix: int, end_bit: int | None = None) -> None:
+    """Sort the first ``prefix`` of ``keys.shape[0] // 2`` int32 or int64 keys with their values.
+
+    The sort uses the entries after the prefix as scratch; they get the sentinel back, which
+    the last entry of the sorted prefix must hold.
+    """
+    count = keys.shape[0] // 2
+    wp.utils.radix_sort_pairs(keys, values, prefix, end_bit=end_bit)
+    if prefix < count:
+        wp.launch(
+            _restore_sort_scratch_kernel if keys.dtype == wp.int64 else _restore_sort_scratch_int_kernel,
+            dim=min(prefix, count - prefix),
+            inputs=[keys, values, prefix],
+            device=keys.device,
+        )
+
+
+def radix_sort_active_prefix(
+    keys: wp.array,
+    values: wp.array[int],
+    active_length: wp.array[int],
+    flags: wp.array[wp.int32],
+    end_bit: int | None = None,
+) -> None:
+    """Sort int32 or int64 ``keys[:count]`` whose entries past ``active_length`` hold one sentinel.
+
+    ``count = keys.shape[0] // 2`` and ``flags`` must contain
+    :func:`active_prefix_sort_levels` entries. The sentinel must sort after
+    every active key. Afterwards all of ``keys[:count]`` is sorted and its
+    tail again holds the sentinel; tail values are unspecified.
+    """
+    dispatch_active_prefix(
+        active_length, keys.shape[0] // 2, flags, lambda prefix: radix_sort_prefix(keys, values, prefix, end_bit)
+    )
+
+
+__all__ = ["active_prefix_sort_levels", "dispatch_active_prefix", "radix_sort_active_prefix", "radix_sort_prefix"]
