@@ -798,6 +798,71 @@ def _flush_fallback_contacts_kernel(bodies: BodyContainer):
 
 
 @wp.kernel(enable_backward=False, module="reduced_contact_fallback")
+def _solve_fallback_single_color_kernel(
+    columns: ContactColumnContainer,
+    bodies: BodyContainer,
+    idt: wp.float32,
+    sor_boost: wp.float32,
+    cc: ContactContainer,
+    contacts: ContactViews,
+    cross_mobility: wp.array[wp.vec3],
+    fallback_column: wp.array[wp.int32],
+    fallback_run_start: wp.array[wp.int32],
+    element_ids_by_color: wp.array[wp.int32],
+    color_starts: wp.array[wp.int32],
+    worker_count: wp.int32,
+    prepare: wp.bool,
+    sweeps: wp.int32,
+    use_bias: wp.bool,
+):
+    """Prepare and sweep the runs of the only color in one launch.
+
+    Runs of one color share no body, so each run takes all its sweeps on its own with the
+    result of one launch per sweep.
+    """
+    index = color_starts[0] + wp.tid()
+    end = color_starts[1]
+    while index < end:
+        run = element_ids_by_color[index]
+        first = fallback_run_start[run]
+        last = fallback_run_start[run + wp.int32(1)]
+        if prepare:
+            for fallback in range(first, last):
+                _solve_fallback_contact_column(
+                    columns,
+                    bodies,
+                    idt,
+                    sor_boost,
+                    cc,
+                    contacts,
+                    cross_mobility,
+                    fallback_column[fallback],
+                    0,
+                    use_bias,
+                )
+        for _sweep in range(sweeps):
+            for fallback in range(first, last):
+                _solve_fallback_contact_column(
+                    columns,
+                    bodies,
+                    idt,
+                    sor_boost,
+                    cc,
+                    contacts,
+                    cross_mobility,
+                    fallback_column[fallback],
+                    1,
+                    use_bias,
+                )
+        index += worker_count
+
+
+@wp.kernel(enable_backward=False)
+def _single_color_kernel(num_colors: wp.array[wp.int32], single: wp.array[wp.int32]):
+    single[0] = wp.where(num_colors[0] == 1, 1, 0)
+
+
+@wp.kernel(enable_backward=False, module="reduced_contact_fallback")
 def _solve_fallback_contact_color_kernel(
     columns: ContactColumnContainer,
     bodies: BodyContainer,
@@ -3611,6 +3676,8 @@ class ReducedContactBlockSystem:
         #: Whether fallback sweeps end by applying the deferred wrenches with the articulated-body
         #: recurrences. A fused substep applies them itself, see ``link_response``.
         self.flush_fallback = True
+        #: Nonzero while the fallback runs share one color.
+        self.fallback_single_color = wp.zeros(1, dtype=wp.int32, device=self.device)
         #: Whether the fused substep solves rows between two links of one tree.
         self.internal_rows = False
         self._external_rigid_rows = external_rigid_rows
@@ -4060,6 +4127,13 @@ class ReducedContactBlockSystem:
         assert self.fallback_count is not None
         self.fallback_partitioner.reset(self.fallback_element, self.fallback_run_count)
         self.fallback_partitioner.build_csr()
+        wp.launch(
+            _single_color_kernel,
+            dim=1,
+            inputs=[self.fallback_partitioner.num_colors],
+            outputs=[self.fallback_single_color],
+            device=self.device,
+        )
 
     def refresh_link_responses(self, columns: ContactColumnContainer, bodies: BodyContainer) -> None:
         """Form the link responses of the trees in unowned columns from the stored dense factor.
@@ -4202,10 +4276,43 @@ class ReducedContactBlockSystem:
             wp.capture_while(partitioner.color_cursor, solve_color)
             flush()
 
-        if prepare:
-            sweep(0)
-        for _ in range(iterations):
-            sweep(1)
+        def stepped() -> None:
+            if prepare:
+                sweep(0)
+            for _ in range(iterations):
+                sweep(1)
+
+        def fused() -> None:
+            wp.launch(
+                _solve_fallback_single_color_kernel,
+                dim=self.fallback_worker_count,
+                block_dim=_FALLBACK_BLOCK_DIM,
+                inputs=[
+                    columns,
+                    bodies,
+                    idt,
+                    wp.float32(sor_boost),
+                    cc,
+                    contacts,
+                    self.cross_mobility,
+                    self.fallback_column,
+                    self.fallback_run_start,
+                    partitioner.element_ids_by_color,
+                    partitioner.color_starts,
+                    wp.int32(self.fallback_worker_count),
+                    wp.bool(prepare),
+                    wp.int32(iterations),
+                    wp.bool(use_bias),
+                ],
+                device=self.device,
+            )
+
+        if self.flush_fallback or self._solve_fallback_by_world:
+            stepped()
+        else:
+            # With link responses nothing is flushed between sweeps: one color, the usual
+            # case of a few touching trees, needs one launch instead of one per sweep.
+            wp.capture_if(self.fallback_single_color, on_true=fused, on_false=stepped)
 
     def solve(
         self,
