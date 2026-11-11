@@ -16,6 +16,7 @@ import unittest
 import numpy as np
 import warp as wp
 
+import newton
 import newton.viewer
 from newton.examples.phoenx import example_phoenx_warehouse as warehouse
 
@@ -41,6 +42,41 @@ class TestWarehouseScene(unittest.TestCase):
         # The run exercised contacts between robots, not only robots apart.
         cross = first.solver._reduced_articulation.contact_block_system.cross_column_count
         self.assertGreater(int(cross.numpy()[0]), 0)
+
+    def test_a_robot_leaves_and_rejoins_the_running_warehouse(self):
+        """A robot of the pool is parked far away between steps and placed back later."""
+        example = _run(60)
+        model, state = example.model, example.state
+        root = int(example.scene.robot_roots["g1"][0])
+        joint = int(np.flatnonzero(model.joint_child.numpy() == root)[0])
+        coordinate = int(model.joint_q_start.numpy()[joint])
+        home = state.joint_q.numpy()[coordinate : coordinate + 3].copy()
+        others = np.setdiff1d(np.concatenate(list(example.scene.robot_roots.values())), [root])
+        others_before = state.body_q.numpy()[others, :3].copy()
+
+        def place(position: np.ndarray) -> None:
+            joint_q = state.joint_q.numpy()
+            joint_q[coordinate : coordinate + 3] = position
+            state.joint_q.assign(joint_q)
+            newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+
+        def run(frames: int) -> None:
+            for _ in range(frames):
+                example.step()
+                example.test_post_step()
+
+        # Parked two kilometers away it keeps standing, and nobody else notices.
+        place(home + np.array([2000.0, 0.0, 0.0], dtype=np.float32))
+        run(60)
+        self.assertAlmostEqual(float(state.body_q.numpy()[root, 0]), float(home[0]) + 2000.0, delta=0.05)
+        np.testing.assert_allclose(state.body_q.numpy()[others, :3], others_before, atol=0.02)
+
+        # Back at its place it stands where it stood.
+        place(home)
+        run(60)
+        np.testing.assert_allclose(state.body_q.numpy()[root, :3], home, atol=0.05)
+        np.testing.assert_allclose(state.body_q.numpy()[others, :3], others_before, atol=0.02)
+        example.test_final()
 
 
 if __name__ == "__main__":
