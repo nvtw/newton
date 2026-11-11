@@ -591,6 +591,10 @@ class TestReducedDenseBackend(unittest.TestCase):
                     # Two trees touch each other: their contacts are solved between the kernels.
                     self.assertTrue(np.all(owners == -1))
                     self.assertGreater(cross, 0)
+                    # A second run of the same scene repeats every bit.
+                    repeat_q, repeat_qd, _, _ = settle(scene, "auto")
+                    np.testing.assert_array_equal(body_q, repeat_q)
+                    np.testing.assert_array_equal(body_qd, repeat_qd)
 
     def test_fused_substep_conserves_momentum_when_trees_collide_under_graph_capture(self):
         """Two chains that meet in free flight, and then fold onto themselves, keep their momentum."""
