@@ -506,8 +506,11 @@ class TestReducedDenseBackend(unittest.TestCase):
         """Contacts between two trees, or through a body both carry, match the coupled reference."""
         device = _require_cuda(self)
 
+        # Tilted gravity stays inside the friction cone: friction holds everything in place.
+        gravity = ((0.0, 0.0, -9.81), (1.5, 0.8, -9.81))
+
         def make(scene: str) -> newton.Model:
-            builder = newton.ModelBuilder(gravity=(0.0, 0.0, -9.81), up_axis=newton.Axis.Z)
+            builder = newton.ModelBuilder(gravity=gravity[scene == "tilted"], up_axis=newton.Axis.Z)
             builder.default_shape_cfg.gap = 0.005
             builder.default_shape_cfg.mu = 0.6
             builder.add_ground_plane()
@@ -531,7 +534,7 @@ class TestReducedDenseBackend(unittest.TestCase):
                     previous = body
                 builder.add_articulation(list(range(first, builder.joint_count)))
 
-            if scene == "stacked":
+            if scene in ("stacked", "tilted"):
                 # One chain lies on the other.
                 chain(0.0, 0.0, 0.145)
                 chain(0.05, 0.02, 0.44)
@@ -582,14 +585,14 @@ class TestReducedDenseBackend(unittest.TestCase):
             self.pair_force = force[swapped].sum(axis=0) - force[first & second].sum(axis=0)
             return state.body_q.numpy(), state.body_qd.numpy(), owners, cross
 
-        for scene in ("stacked", "carried", "owned"):
+        for scene in ("stacked", "tilted", "carried", "owned"):
             with self.subTest(scene=scene):
                 reference_q, _, _, _ = settle(scene, "aba")
                 body_q, body_qd, owners, cross = settle(scene, "auto")
                 self.assertTrue(np.isfinite(body_q).all())
                 # Nothing sinks into what carries it, and everything comes to rest.
                 np.testing.assert_allclose(body_q[:, 2], reference_q[:, 2], atol=5.0e-3)
-                self.assertLess(float(np.abs(body_qd).max()), 0.005 if scene == "stacked" else 0.06)
+                self.assertLess(float(np.abs(body_qd).max()), 0.005 if scene in ("stacked", "tilted") else 0.06)
                 if scene == "owned":
                     # The one tree under the box solves it in its own block: nothing crosses.
                     self.assertEqual(int(owners[-1]), 1)
@@ -602,9 +605,11 @@ class TestReducedDenseBackend(unittest.TestCase):
                     # Two trees touch each other: their contacts are solved between the kernels.
                     self.assertTrue(np.all(owners == -1))
                     self.assertGreater(cross, 0)
-                    # The contacts between the trees report the weight of the upper chain.
-                    weight = 2.0 * 1000.0 * 0.28**3 * 9.81
-                    np.testing.assert_allclose(self.pair_force, [0.0, 0.0, weight], atol=0.01 * weight)
+                    # The contacts between the trees report the force that holds the upper chain:
+                    # its weight, and under tilted gravity the friction that keeps it from sliding.
+                    mass = 2.0 * 1000.0 * 0.28**3
+                    held = -mass * np.asarray(gravity[scene == "tilted"])
+                    np.testing.assert_allclose(self.pair_force, held, atol=0.002 * mass * 9.81)
                     # A second run of the same scene repeats every bit.
                     repeat_q, repeat_qd, _, _ = settle(scene, "auto")
                     np.testing.assert_array_equal(body_q, repeat_q)
