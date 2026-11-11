@@ -60,6 +60,22 @@ class TestPhoenXAutoPerformancePolicy(unittest.TestCase):
         self.assertEqual(self._resolve(**reduced, free_body_count=32767), "multi_world")
         self.assertEqual(self._resolve(**reduced, free_body_count=32768, num_worlds=2), "multi_world")
 
+    def test_contact_columns_are_bounded_by_the_candidate_pairs(self):
+        """One large world sizes its columns by the broad phase's pair budget, not by the contacts."""
+        from newton._src.solvers.phoenx.solver import _estimate_contact_column_max_phoenx  # noqa: PLC0415
+
+        # 4096 warehouse robots: 19.9M contact slots overflowed the 2^24 limit of the partitioner.
+        dense = SimpleNamespace(
+            shape_contact_pair_count=40_000_000, _collision_pipeline=SimpleNamespace(shape_pairs_max=8_271_072)
+        )
+        self.assertEqual(_estimate_contact_column_max_phoenx(dense, 19_896_785), 8_271_072)
+        listed = SimpleNamespace(
+            shape_contact_pair_count=5000, _collision_pipeline=SimpleNamespace(shape_pairs_max=5000)
+        )
+        self.assertEqual(_estimate_contact_column_max_phoenx(listed, 50_000), 5000)
+        unbounded = SimpleNamespace(shape_contact_pair_count=5000)
+        self.assertEqual(_estimate_contact_column_max_phoenx(unbounded, 3000), 3000)
+
     def test_combined_projection_requires_velocity_invariant_prepare(self) -> None:
         """Combine direct projection only when row preparation ignores velocity."""
         self.assertTrue(_can_combine_direct_prepare_projection(False, "point", "maximal"))

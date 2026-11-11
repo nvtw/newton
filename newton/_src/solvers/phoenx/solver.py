@@ -228,6 +228,12 @@ def _estimate_rigid_contact_max_phoenx(model) -> int | None:
 def _estimate_contact_column_max_phoenx(model: Model, rigid_contact_max: int) -> int:
     """Bound shape-pair contact columns independently from contact points."""
     pair_count = _shape_pair_estimate(model)
+    # A column needs a candidate pair of the broad phase, whose buffer one large world sizes
+    # by neighbors instead of by all pairs.
+    pipeline = getattr(model, "_collision_pipeline", None)
+    candidate_pairs = int(getattr(pipeline, "shape_pairs_max", 0) or 0)
+    if candidate_pairs > 0:
+        pair_count = min(pair_count, candidate_pairs) if pair_count > 0 else candidate_pairs
     if pair_count <= 0:
         return int(rigid_contact_max)
     return min(int(rigid_contact_max), max(1000, pair_count))
