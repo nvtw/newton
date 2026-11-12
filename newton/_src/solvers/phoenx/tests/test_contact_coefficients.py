@@ -164,13 +164,22 @@ def _resting_box_penetration(substeps: int, contact_hertz: float | None) -> floa
 @unittest.skipUnless(wp.is_cuda_available(), "PhoenX contact tests require CUDA")
 class TestContactHertz(unittest.TestCase):
     def test_resting_compression_follows_the_requested_frequency(self):
-        """A box rests ``g / omega**2`` deep at any substep count, unlike the substep-scaled default."""
-        hertz = 50.0
-        expected = 9.81 / (2.0 * math.pi * hertz) ** 2
-        for substeps in (4, 16):
-            with self.subTest(substeps=substeps):
-                self.assertAlmostEqual(_resting_box_penetration(substeps, hertz), expected, delta=0.05 * expected)
-        self.assertLess(_resting_box_penetration(16, None), 0.1 * expected)
+        """A box rests ``g / omega**2`` deep at any substep count.
+
+        Contact gaps are measured once per 1/60 s step, so the spring stays
+        within twice that rate (120 Hz): a lower requested frequency holds, a
+        higher one and the default stop at 120 Hz, whatever the substep count.
+        """
+
+        def compression(hertz):
+            return 9.81 / (2.0 * math.pi * hertz) ** 2
+
+        for requested, effective in ((50.0, 50.0), (500.0, 120.0), (None, 120.0)):
+            for substeps in (4, 16):
+                with self.subTest(requested=requested, substeps=substeps):
+                    expected = compression(effective)
+                    penetration = _resting_box_penetration(substeps, requested)
+                    self.assertAlmostEqual(penetration, expected, delta=0.05 * expected)
 
     def test_rejects_nonpositive_frequency(self):
         builder = newton.ModelBuilder()

@@ -239,6 +239,7 @@ def contact_container_set_sweeps(
     velocity_iterations: int,
     contact_hertz: float | None = None,
     dt: float = 0.0,
+    step_dt: float = 0.0,
 ) -> None:
     """Set the contact spring for a sweep schedule and substep ``dt`` [s].
 
@@ -246,8 +247,18 @@ def contact_container_set_sweeps(
     (:func:`contact_spring_omega_dt`), softened to ``contact_hertz`` [Hz]
     when that is given and lower. A fixed frequency gives each contact a
     stiffness that does not change with the substep count.
+
+    Contact gaps are measured once per ``step_dt`` [s] and only extrapolated
+    by its substeps. A spring that oscillates many times between two
+    measurements corrects the extrapolation error of curved, moving contacts
+    faster than it is measured and pumps energy into them (the analog-digital
+    clock's gears hop at 900 Hz with 120 Hz steps, and rest at 480 Hz), so
+    the spring stays within twice the step rate. Up to four substeps per step
+    the sweep bound is the lower one.
     """
     omega_dt = contact_spring_omega_dt(solver_iterations, velocity_iterations)
+    if step_dt > 0.0 and dt > 0.0:
+        omega_dt = min(omega_dt, 4.0 * math.pi * float(dt) / float(step_dt))
     if contact_hertz is not None:
         omega_dt = min(omega_dt, 2.0 * math.pi * float(contact_hertz) * float(dt))
     cc.hertz = 0.0 if contact_hertz is None else float(contact_hertz)

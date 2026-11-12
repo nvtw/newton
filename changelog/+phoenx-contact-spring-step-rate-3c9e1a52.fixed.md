@@ -1,0 +1,1 @@
+Keep PhoenX contact springs within twice the step rate at which contact gaps are measured, so scenes with many substeps per step no longer pump energy into curved, moving contacts (the analog-digital clock's gear train made its frame hop).

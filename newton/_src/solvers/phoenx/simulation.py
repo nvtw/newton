@@ -2587,17 +2587,21 @@ class PhoenXWorld:
         The stiffest spring that keeps a resting stack stable depends on how
         many biased and relax sweeps each substep runs; see
         :func:`contact_spring_omega_dt`. Substeps without relax bound it when
-        relaxation runs only on the final substep. A requested
-        :attr:`contact_hertz` softens it further at the current substep ``dt``.
+        relaxation runs only on the final substep. Its frequency stays within
+        twice the step rate, at which contact gaps are measured; a requested
+        :attr:`contact_hertz` softens it further.
         """
         relax = self.velocity_iterations
         if self.velocity_relaxation == "final_substep" and self.substeps > 1:
             relax = 0
         dt = float(self.substep_dt)
-        contact_container_set_sweeps(self._contact_container, self.solver_iterations, relax, self.contact_hertz, dt)
+        step_dt = float(self.step_dt)
+        contact_container_set_sweeps(
+            self._contact_container, self.solver_iterations, relax, self.contact_hertz, dt, step_dt
+        )
         if self._contact_container_solve is not self._contact_container:
             contact_container_set_sweeps(
-                self._contact_container_solve, self.solver_iterations, relax, self.contact_hertz, dt
+                self._contact_container_solve, self.solver_iterations, relax, self.contact_hertz, dt, step_dt
             )
 
     def step(
