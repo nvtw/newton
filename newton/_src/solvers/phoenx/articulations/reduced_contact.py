@@ -923,16 +923,27 @@ def reduced_contact_commit(
 
 
 @wp.func
-def reduced_contact_keep_biased(columns: ContactColumnContainer, column: wp.int32, bodies: BodyContainer):
-    """Record the wrenches the biased sweeps left on a column's links."""
+def reduced_contact_keep_biased(
+    columns: ContactColumnContainer,
+    column: wp.int32,
+    bodies: BodyContainer,
+    wrench0: wp.spatial_vector,
+    wrench1: wp.spatial_vector,
+):
+    """Record the wrenches the biased sweeps left on a column's links.
+
+    ``wrench0`` and ``wrench1`` are what a staged column still holds for them.
+    """
     data = bodies.reduced
     for side in range(2):
         body = contact_get_body1(columns, column)
+        wrench = wrench0
         if side == 1:
             body = contact_get_body2(columns, column)
+            wrench = wrench1
         if data.body_articulation[body] >= wp.int32(0):
             link = body - wp.int32(1)
-            data.biased_wrench[link] = data.deferred_wrench[link]
+            data.biased_wrench[link] = data.deferred_wrench[link] + wrench
 
 
 __all__ = [

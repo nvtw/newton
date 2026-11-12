@@ -879,24 +879,33 @@ def _solve_fallback_single_color_kernel(
                     use_bias,
                 )
         column = fallback_column[first]
-        staged = last == first + wp.int32(1) and reduced_contact_can_stage(columns, column, bodies)
-        # The sweeps, then with ``relax_sweeps`` the relax sweeps on the wrenches they left.
-        phase_count = wp.where(relax_sweeps >= wp.int32(0), 2, 1)
-        for phase in range(phase_count):
-            biased = use_bias
-            count = sweeps
-            if phase == 1:
-                for fallback in range(first, last):
-                    reduced_contact_keep_biased(columns, fallback_column[fallback], bodies)
-                biased = wp.bool(False)
-                count = relax_sweeps
-            if staged:
-                # The only column between these two trees: their links' deferred state stays in
-                # registers over all sweeps instead of being read from each root path again.
-                twist0, twist1 = reduced_contact_stage(columns, column, bodies)
-                wrench0 = wp.spatial_vector()
-                wrench1 = wp.spatial_vector()
-                for _sweep in range(count):
+        if last == first + wp.int32(1) and reduced_contact_can_stage(columns, column, bodies):
+            # The only column between these two trees: their links' deferred state stays in
+            # registers over all sweeps instead of being read from each root path again.
+            twist0, twist1 = reduced_contact_stage(columns, column, bodies)
+            wrench0 = wp.spatial_vector()
+            wrench1 = wp.spatial_vector()
+            for _sweep in range(sweeps):
+                twist0, twist1, wrench0, wrench1 = reduced_contact_iterate_staged(
+                    columns,
+                    column,
+                    bodies,
+                    idt,
+                    sor_boost,
+                    cc,
+                    contacts,
+                    use_bias,
+                    wp.bool(True),
+                    cross_mobility,
+                    wp.bool(True),
+                    twist0,
+                    twist1,
+                    wrench0,
+                    wrench1,
+                )
+            if relax_sweeps >= wp.int32(0):
+                reduced_contact_keep_biased(columns, column, bodies, wrench0, wrench1)
+                for _sweep in range(relax_sweeps):
                     twist0, twist1, wrench0, wrench1 = reduced_contact_iterate_staged(
                         columns,
                         column,
@@ -905,7 +914,7 @@ def _solve_fallback_single_color_kernel(
                         sor_boost,
                         cc,
                         contacts,
-                        biased,
+                        wp.bool(False),
                         wp.bool(True),
                         cross_mobility,
                         wp.bool(True),
@@ -914,8 +923,20 @@ def _solve_fallback_single_color_kernel(
                         wrench0,
                         wrench1,
                     )
-                reduced_contact_commit(columns, column, bodies, wrench0, wrench1)
-            else:
+            reduced_contact_commit(columns, column, bodies, wrench0, wrench1)
+        else:
+            # The sweeps, then with ``relax_sweeps`` the relax sweeps on the wrenches they left.
+            phase_count = wp.where(relax_sweeps >= wp.int32(0), 2, 1)
+            for phase in range(phase_count):
+                biased = use_bias
+                count = sweeps
+                if phase == 1:
+                    for fallback in range(first, last):
+                        reduced_contact_keep_biased(
+                            columns, fallback_column[fallback], bodies, wp.spatial_vector(), wp.spatial_vector()
+                        )
+                    biased = wp.bool(False)
+                    count = relax_sweeps
                 for _sweep in range(count):
                     for fallback in range(first, last):
                         _solve_fallback_contact_column(
