@@ -9,7 +9,7 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton._src.solvers.phoenx.articulations.dense_substep import PAGE_ROWS
+from newton._src.solvers.phoenx.articulations.dense_substep import CHUNK_POINTS, PATCH_CHUNK_POINTS
 from newton._src.solvers.phoenx.articulations.dense_tree import dense_link_path_group
 from newton._src.solvers.phoenx.tests.test_reduced_articulation import (
     _make_branched_tree,
@@ -60,17 +60,18 @@ def _make_legged_fleet(device, *, worlds: int, gravity: float = -9.81) -> newton
     return builder.finalize(device=device)
 
 
-def _make_centipede_fleet(device, *, worlds: int) -> newton.Model:
-    """Floating trunk on twelve driven legs with sphere feet, without self-collision, replicated.
+def _make_centipede_fleet(device, *, worlds: int, legs: int = 12) -> newton.Model:
+    """Floating trunk on driven legs with sphere feet, without self-collision, replicated.
 
-    Its ground contacts span two contact pages of the fused substep.
+    Twelve legs' ground contacts span two contact chunks of the fused substep with patch
+    friction, 24 legs' also with point friction.
     """
     template = newton.ModelBuilder(up_axis=newton.Axis.Z)
     trunk = template.add_link(mass=4.0)
     shapes = [template.add_shape_box(trunk, hx=0.36, hy=0.1, hz=0.04)]
     joints = [template.add_joint_free(parent=-1, child=trunk)]
-    for leg in range(12):
-        x = -0.3 + 0.6 * (leg // 2) / 5.0
+    for leg in range(legs):
+        x = -0.3 + 0.6 * (leg // 2) / (legs // 2 - 1)
         y = 0.12 if leg % 2 else -0.12
         link = template.add_link(mass=0.3)
         shapes.append(template.add_shape_sphere(link, radius=0.03))
@@ -1127,9 +1128,19 @@ class TestReducedDenseBackend(unittest.TestCase):
         np.testing.assert_allclose(dense_q, aba_q, rtol=0.0, atol=5.0e-3)
 
     def test_fused_substep_tracks_dense_operator_bitwise_deterministically_under_graph_capture(self):
-        """Fused point and patch substeps over two contact pages track the unfused dense backend."""
+        """Fused point and patch substeps over one or two contact chunks track the unfused dense backend.
+
+        Twelve legs' points take one chunk with point friction and two with patch friction;
+        24 legs' points take two chunks with either.
+        """
         device = _require_cuda(self)
-        model = _make_centipede_fleet(device, worlds=3)
+        for legs in (12, 24):
+            with self.subTest(legs=legs):
+                self._check_fused_substep_tracks_dense_operator(_make_centipede_fleet(device, worlds=3, legs=legs))
+
+    def _check_fused_substep_tracks_dense_operator(self, model: newton.Model):
+        device = model.device
+        legs = int(model.articulation_end.numpy()[0] - model.articulation_start.numpy()[0]) - 1
 
         def simulate(friction: str, fused: bool) -> tuple[np.ndarray, np.ndarray]:
             solver = newton.solvers.SolverPhoenX(
@@ -1157,8 +1168,11 @@ class TestReducedDenseBackend(unittest.TestCase):
                     state0, state1 = state1, state0
             for _ in range(30):
                 wp.capture_launch(capture.graph)
-            # More than one fused contact page per tree.
-            self.assertGreater(int(contacts.rigid_contact_count.numpy()[0]), PAGE_ROWS // 3 * model.articulation_count)
+            # One or more fused contact chunks per tree.
+            chunk = CHUNK_POINTS if friction == "point" else PATCH_CHUNK_POINTS
+            count = int(contacts.rigid_contact_count.numpy()[0])
+            self.assertGreaterEqual(count, legs * model.articulation_count)
+            self.assertEqual(count > chunk * model.articulation_count, legs > chunk)
             return state0.joint_q.numpy(), state0.joint_qd.numpy()
 
         for friction in ("point", "patch"):

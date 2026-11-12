@@ -33,6 +33,7 @@ the velocity changes of the previous ones.
 from __future__ import annotations
 
 import functools
+from typing import Any
 
 import numpy as np
 import warp as wp
@@ -122,14 +123,17 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_set_tangent2_lambda,
 )
 
-PAGE_ROWS = 30
-"""Contact rows one chunk solves at once; chunks hold ``PAGE_ROWS // 3`` points.
+CHUNK_POINTS = 20
+"""Contact points one chunk solves at once with point friction.
 
-One lane forms each row, so a chunk holds at most ten points. Two flat feet and a carried
-object's edge make ten: with eight, most robots that hold something needed a second chunk.
+A point's lane projects it, and each lane forms the rows ``lane`` and ``lane + 32`` of the
+chunk's three rows per point. Two flat feet with a carried object on them make up to
+eighteen points: in smaller chunks such robots formed every chunk's rows on every round, and
+set the kernels' time.
 """
 
-_CHUNK_POINTS = PAGE_ROWS // 3
+PATCH_CHUNK_POINTS = 10
+"""Contact points one chunk solves at once with patch friction, whose rows take one lane each."""
 _FULL_MASK = wp.constant(wp.uint32(0xFFFFFFFF))
 _BLOCKS_PER_SM = 11
 """Most blocks per SM the fused kernels are compiled for; more add little, see PERF_NOTES."""
@@ -532,16 +536,26 @@ def make_dense_substep_kernel(
     # Scratch after the factor's tables: the composite inertias while factoring, then the tree
     # recurrences and the contact pages share one region; the rates and a solve vector follow.
     tree_words = 3 * _MOTION_STRIDE * _LANES
-    # The first PAGE_ROWS lanes own contact rows: their vectors z by path position, the DOFs
-    # of those positions as bytes, their start velocities, z . z, and the points' normal loads.
-    # The solve vector ends with a
-    # spare DOF that the padding of short paths addresses.
+    # A chunk's rows: their vectors z by path position, the DOFs of those positions as bytes,
+    # their start velocities, z . z, and the points' normal loads. Lane l forms rows l and
+    # l + 32. The solve vector ends with a spare DOF that the padding of short paths addresses.
     # A row against a free rigid body carries that body's six whitened components after its path.
+    chunk_capacity = PATCH_CHUNK_POINTS if patch else CHUNK_POINTS
+    page_rows = 3 * chunk_capacity
+    row_slots = (page_rows + _LANES - 1) // _LANES
     ext_position = path_capacity * (2 if pairs else 1)
     z_positions = ext_position + (6 if external else 0)
-    external_dofs = 6 * _CHUNK_POINTS if external else 0
-    row_words = PAGE_ROWS * z_positions
-    contact_words = row_words + (row_words + 3) // 4 + 2 * PAGE_ROWS + _CHUNK_POINTS
+    # Each free body of a chunk takes six components, which lane l keeps at l + 32 g.
+    external_dofs = 6 * chunk_capacity if external else 0
+    external_groups = (external_dofs + _LANES - 1) // _LANES
+    lane_vector = wp.types.vector(length=2 + external_groups, dtype=wp.float32)
+    lane_indices = wp.types.vector(length=2 + external_groups, dtype=wp.int32)
+    # The DOF bytes of z: a point's three rows act on the same links and share them, while
+    # patch rows each take their own.
+    byte_rows = page_rows if patch else chunk_capacity
+    row_words = page_rows * z_positions
+    byte_words = (byte_rows * z_positions + 3) // 4
+    contact_words = row_words + byte_words + 2 * page_rows + chunk_capacity
     qd_offset = max(tree_words, contact_words, _INERTIA_STRIDE * joint_capacity)
     scratch_words = qd_offset + 2 * max_dofs + 1 + external_dofs
     ops = make_dense_tree_ops(max_dofs, joint_capacity, entry_capacity, subtree_capacity, scratch_words)
@@ -559,9 +573,9 @@ def make_dense_substep_kernel(
     third_base = second_base + _MOTION_STRIDE * _LANES
     z_base = layout.scratch
     z_dof_byte = 4 * (z_base + row_words)
-    start_velocity_base = z_base + row_words + (row_words + 3) // 4
-    row_mass_base = start_velocity_base + PAGE_ROWS
-    point_load_base = row_mass_base + PAGE_ROWS
+    start_velocity_base = z_base + row_words + byte_words
+    row_mass_base = start_velocity_base + page_rows
+    point_load_base = row_mass_base + page_rows
     gather = _gather_packed_patch_points if patch else _gather_packed_contact_points
     qd_base = layout.scratch + qd_offset
     rhs_base = qd_base + max_dofs
@@ -703,37 +717,61 @@ def make_dense_substep_kernel(
         solve_mass(shared, wp.int32(rhs_base), n, lane)
 
     @wp.func
-    def row_entries(shared: _shared_handle, row: wp.int32, positions: wp.vec4i, dofs: wp.vec4i) -> wp.vec4:
+    def dof_byte(position: wp.int32, row: wp.int32) -> wp.int32:
+        """Return the shared byte address of the DOF of row ``row``'s ``z`` at ``position``."""
+        byte_row = row
+        if wp.static(not patch):
+            byte_row = row // wp.int32(3)
+        return wp.int32(z_dof_byte) + wp.int32(byte_rows) * position + byte_row
+
+    @wp.func
+    def row_entries(shared: _shared_handle, row: wp.int32, positions: Any, dofs: Any):
         """Return ``z_row`` at a lane's DOFs ``dofs``, zero where a DOF is off the row's path.
 
         A DOF sits at the same position, its depth, of every row through it, so the
         row's DOF byte at that position tells whether the row passes it.
         """
-        entries = wp.vec4(0.0)
-        index = wp.int32(PAGE_ROWS) * positions[0] + row
-        if _load_u8(shared, wp.int32(z_dof_byte) + index) == dofs[0]:
+        entries = lane_vector()
+        index = wp.int32(page_rows) * positions[0] + row
+        if _load_u8(shared, dof_byte(positions[0], row)) == dofs[0]:
             entries[0] = _load(shared, wp.int32(z_base) + index)
         if wp.static(pairs):
             # The second link's path may pass the DOF too; both parts add.
-            index += wp.int32(PAGE_ROWS * path_capacity)
-            if _load_u8(shared, wp.int32(z_dof_byte) + index) == dofs[0]:
+            index += wp.int32(page_rows * path_capacity)
+            if _load_u8(shared, dof_byte(positions[0] + wp.int32(path_capacity), row)) == dofs[0]:
                 entries[0] += _load(shared, wp.int32(z_base) + index)
         if wp.static(max_dofs > _LANES):
-            index = wp.int32(PAGE_ROWS) * positions[1] + row
-            if _load_u8(shared, wp.int32(z_dof_byte) + index) == dofs[1]:
+            index = wp.int32(page_rows) * positions[1] + row
+            if _load_u8(shared, dof_byte(positions[1], row)) == dofs[1]:
                 entries[1] = _load(shared, wp.int32(z_base) + index)
             if wp.static(pairs):
-                index += wp.int32(PAGE_ROWS * path_capacity)
-                if _load_u8(shared, wp.int32(z_dof_byte) + index) == dofs[1]:
+                index += wp.int32(page_rows * path_capacity)
+                if _load_u8(shared, dof_byte(positions[1] + wp.int32(path_capacity), row)) == dofs[1]:
                     entries[1] += _load(shared, wp.int32(z_base) + index)
-        if wp.static(external):
-            index = wp.int32(PAGE_ROWS) * positions[2] + row
-            if _load_u8(shared, wp.int32(z_dof_byte) + index) == dofs[2]:
-                entries[2] = _load(shared, wp.int32(z_base) + index)
-            index = wp.int32(PAGE_ROWS) * positions[3] + row
-            if _load_u8(shared, wp.int32(z_dof_byte) + index) == dofs[3]:
-                entries[3] = _load(shared, wp.int32(z_base) + index)
+        for group in range(wp.static(external_groups)):
+            index = wp.int32(page_rows) * positions[2 + group] + row
+            if _load_u8(shared, dof_byte(positions[2 + group], row)) == dofs[2 + group]:
+                entries[2 + group] = _load(shared, wp.int32(z_base) + index)
         return entries
+
+    @wp.func
+    def point_entries(shared: _shared_handle, point: wp.int32, positions: Any, dofs: Any):
+        """Return :func:`row_entries` of a point's normal and tangent rows, which share DOF bytes."""
+        row = wp.int32(3) * point
+        normal_entries = lane_vector()
+        tangent0_entries = lane_vector()
+        tangent1_entries = lane_vector()
+        for entry in range(wp.static(2 + external_groups)):
+            if wp.static(entry == 1 and max_dofs <= _LANES):
+                continue
+            for part in range(wp.static(2 if pairs and entry < 2 else 1)):
+                position = positions[entry] + wp.int32(part * path_capacity)
+                if _load_u8(shared, dof_byte(position, row)) == dofs[entry]:
+                    index = wp.int32(z_base) + wp.int32(page_rows) * position + row
+                    normal_entries[entry] += _load(shared, index)
+                    tangent0_entries[entry] += _load(shared, index + wp.int32(1))
+                    tangent1_entries[entry] += _load(shared, index + wp.int32(2))
+        return normal_entries, tangent0_entries, tangent1_entries
 
     @wp.func
     def row_product(shared: _shared_handle, lane: wp.int32, row: wp.int32, other: wp.int32) -> wp.float32:
@@ -741,41 +779,38 @@ def make_dense_substep_kernel(
         total = wp.float32(0.0)
         position = lane
         while position < wp.int32(z_positions):
-            index = wp.int32(PAGE_ROWS) * position + row
-            other_index = wp.int32(PAGE_ROWS) * position + other
-            if _load_u8(shared, wp.int32(z_dof_byte) + index) == _load_u8(shared, wp.int32(z_dof_byte) + other_index):
-                total += _load(shared, wp.int32(z_base) + index) * _load(shared, wp.int32(z_base) + other_index)
+            if _load_u8(shared, dof_byte(position, row)) == _load_u8(shared, dof_byte(position, other)):
+                total += _load(shared, wp.int32(z_base) + wp.int32(page_rows) * position + row) * _load(
+                    shared, wp.int32(z_base) + wp.int32(page_rows) * position + other
+                )
             position += wp.int32(_LANES)
         if wp.static(pairs):
             # One row's first path against the other row's second path, and the reverse.
             position = lane
             while position < wp.int32(path_capacity):
-                index = wp.int32(PAGE_ROWS) * position + row
-                other_index = wp.int32(PAGE_ROWS) * (position + wp.int32(path_capacity)) + other
-                if _load_u8(shared, wp.int32(z_dof_byte) + index) == _load_u8(
-                    shared, wp.int32(z_dof_byte) + other_index
-                ):
-                    total += _load(shared, wp.int32(z_base) + index) * _load(shared, wp.int32(z_base) + other_index)
-                index += wp.int32(PAGE_ROWS * path_capacity)
-                other_index -= wp.int32(PAGE_ROWS * path_capacity)
-                if _load_u8(shared, wp.int32(z_dof_byte) + index) == _load_u8(
-                    shared, wp.int32(z_dof_byte) + other_index
-                ):
-                    total += _load(shared, wp.int32(z_base) + index) * _load(shared, wp.int32(z_base) + other_index)
+                second = position + wp.int32(path_capacity)
+                if _load_u8(shared, dof_byte(position, row)) == _load_u8(shared, dof_byte(second, other)):
+                    total += _load(shared, wp.int32(z_base) + wp.int32(page_rows) * position + row) * _load(
+                        shared, wp.int32(z_base) + wp.int32(page_rows) * second + other
+                    )
+                if _load_u8(shared, dof_byte(second, row)) == _load_u8(shared, dof_byte(position, other)):
+                    total += _load(shared, wp.int32(z_base) + wp.int32(page_rows) * second + row) * _load(
+                        shared, wp.int32(z_base) + wp.int32(page_rows) * position + other
+                    )
                 position += wp.int32(_LANES)
         return _warp_sum_float(total)
 
     @wp.func
     def row_path(
         shared: _shared_handle,
-        lane: wp.int32,
+        row: wp.int32,
         joint_start: wp.int32,
         bodies: BodyContainer,
         body: wp.int32,
         wrench: wp.spatial_vector,
         offset: wp.int32,
     ) -> wp.vec2:
-        """Form a lane's ``z = L^-T J^T`` for a wrench on ``body`` at the path positions from ``offset``.
+        """Form row ``row``'s ``z = L^-T J^T`` for a wrench on ``body`` at the path positions from ``offset``.
 
         Returns ``(J qd, z . z)``. ``J`` runs along the root path of the body; ``z``
         solves leaves first and pads the positions beyond the path with zeros on a DOF
@@ -792,26 +827,26 @@ def make_dense_substep_kernel(
                 k = _load_u8(shared, wp.int32(path) + path_entry + position)
                 value = wp.dot(_load_motion(shared, wp.int32(motion_base) + wp.int32(_MOTION_STRIDE) * k), wrench)
                 velocity += value * _load(shared, wp.int32(qd_base) + k)
-                _store(shared, wp.int32(z_base) + wp.int32(PAGE_ROWS) * (offset + position) + lane, value)
-                _store_u8(shared, wp.int32(z_dof_byte) + wp.int32(PAGE_ROWS) * (offset + position) + lane, k)
+                _store(shared, wp.int32(z_base) + wp.int32(page_rows) * (offset + position) + row, value)
+                _store_u8(shared, dof_byte(offset + position, row), k)
             for reverse in range(path_length):
                 position = path_length - wp.int32(1) - reverse
-                value = _load(shared, wp.int32(z_base) + wp.int32(PAGE_ROWS) * (offset + position) + lane)
+                value = _load(shared, wp.int32(z_base) + wp.int32(page_rows) * (offset + position) + row)
                 for later in range(position + wp.int32(1), path_length):
                     i = _load_u8(shared, wp.int32(path) + path_entry + later)
                     value -= _load(shared, _load_u16(shared, wp.int32(dof_entry) + i) + position) * _load(
-                        shared, wp.int32(z_base) + wp.int32(PAGE_ROWS) * (offset + later) + lane
+                        shared, wp.int32(z_base) + wp.int32(page_rows) * (offset + later) + row
                     )
                 k = _load_u8(shared, wp.int32(path) + path_entry + position)
                 value /= _load(shared, _load_u16(shared, wp.int32(dof_entry) + k + wp.int32(1)) - wp.int32(1))
-                _store(shared, wp.int32(z_base) + wp.int32(PAGE_ROWS) * (offset + position) + lane, value)
+                _store(shared, wp.int32(z_base) + wp.int32(page_rows) * (offset + position) + row, value)
                 inverse_mass += value * value
         for position in range(path_length, wp.int32(path_capacity)):
-            _store(shared, wp.int32(z_base) + wp.int32(PAGE_ROWS) * (offset + position) + lane, wp.float32(0.0))
+            _store(shared, wp.int32(z_base) + wp.int32(page_rows) * (offset + position) + row, wp.float32(0.0))
             # The padding of the two paths must not match each other.
             _store_u8(
                 shared,
-                wp.int32(z_dof_byte) + wp.int32(PAGE_ROWS) * (offset + position) + lane,
+                dof_byte(offset + position, row),
                 wp.where(offset > wp.int32(0), wp.int32(max_dofs + 1), wp.int32(max_dofs)),
             )
         return wp.vec2(velocity, inverse_mass)
@@ -948,138 +983,163 @@ def make_dense_substep_kernel(
                 friction_dynamic = contact_get_friction_dynamic(columns, patch_column)
                 lambda_t = patch_lambda[packed_articulation, column_ordinal]
 
-        # Row r: J_r along the root path of its body, its velocity J_r qd plus the gathered
-        # external part, then z_r = L^-T J_r^T leaves first, padded with zeros on the spare DOF.
-        velocity = wp.float32(0.0)
-        inverse_mass = wp.float32(0.0)
-        # The free rigid body a row acts on, its slot in this chunk, and its whitened row part.
-        row_external = wp.int32(-1)
-        row_half = wp.int32(-1)
+        # The free rigid body that a lane's point touches, if this tree solves it, with its half
+        # when two trees share it: with patch friction the body of the lane's row, which may be
+        # a tangent row of a column that began in an earlier chunk. A chunk's free bodies take
+        # the slot of the first such lane that touches them, and that lane applies the body's
+        # velocity change.
+        point_external = wp.int32(-1)
+        point_half = wp.int32(-1)
         external_slot = wp.int32(-1)
-        external_linear = wp.vec3(0.0)
-        external_angular = wp.vec3(0.0)
-        gathered_row = packed_row(chunk, point_total, lane)
-        if lane < row_count:
-            body = row_body[packed_articulation, gathered_row]
-            wrench = row_wrench[packed_articulation, gathered_row]
-            velocity = row_velocity[packed_articulation, gathered_row]
-            first_path = row_path(shared, lane, joint_start, bodies, body, wrench, wp.int32(0))
-            velocity += first_path[0]
-            inverse_mass = first_path[1]
-            body_pair = wp.int32(-1)
-            wrench_pair = wp.spatial_vector()
-            if wp.static(pairs):
-                # A row between two links is the sum of one row per link; their z add on the
-                # DOFs both root paths share, which sit at equal positions.
-                body_pair = row_body_pair[packed_articulation, gathered_row]
-                wrench_pair = row_wrench_pair[packed_articulation, gathered_row]
-                if body_pair >= wp.int32(0):
-                    second_path = row_path(
-                        shared, lane, joint_start, bodies, body_pair, wrench_pair, wp.int32(path_capacity)
-                    )
-                    velocity += second_path[0]
-                    # z . z with the two parts added on shared DOFs before squaring: links that
-                    # cannot move against each other then cancel to rounding squared, not to the
-                    # rounding of the two parts' squares.
-                    inverse_mass = wp.float32(0.0)
-                    for position in range(path_capacity):
-                        slot = wp.int32(PAGE_ROWS * position) + lane
-                        first_value = _load(shared, wp.int32(z_base) + slot)
-                        second_value = _load(shared, wp.int32(z_base) + slot + wp.int32(PAGE_ROWS * path_capacity))
-                        if _load_u8(shared, wp.int32(z_dof_byte) + slot) == _load_u8(
-                            shared, wp.int32(z_dof_byte) + slot + wp.int32(PAGE_ROWS * path_capacity)
-                        ):
-                            inverse_mass += (first_value + second_value) * (first_value + second_value)
-                        else:
-                            inverse_mass += first_value * first_value + second_value * second_value
-                else:
-                    for position in range(path_capacity, 2 * path_capacity):
-                        _store(shared, wp.int32(z_base) + wp.int32(PAGE_ROWS * position) + lane, wp.float32(0.0))
-                        _store_u8(
-                            shared, wp.int32(z_dof_byte) + wp.int32(PAGE_ROWS * position) + lane, wp.int32(max_dofs + 1)
-                        )
-            if wp.static(external):
-                # The other endpoint, if a free rigid body of this tree: the row's impulse acts on
-                # it reversed, and its mass is diagonal after whitening by the factor of its
-                # inverse inertia. Its components take the DOFs after the spare one.
-                if wp.static(not patch):
-                    row_column = point_column[packed_articulation, gathered_row // wp.int32(3)]
-                    row_point = point0[packed_articulation, gathered_row // wp.int32(3)]
-                other = contact_get_body1(columns, row_column)
+        if wp.static(external):
+            external_column = column
+            external_lanes = chunk_points
+            if wp.static(patch):
+                external_column = row_column
+                external_lanes = row_count
+            if lane < external_lanes:
+                other = contact_get_body1(columns, external_column)
                 if bodies.reduced.body_articulation[other] >= wp.int32(0):
-                    other = contact_get_body2(columns, row_column)
+                    other = contact_get_body2(columns, external_column)
                 owner = bodies.reduced.external_owner[other]
                 if owner != wp.int32(-1):
-                    row_external = other
-                    direction = -wp.spatial_top(wrench)
-                    moment = wp.cross(row_point - bodies.position[other], direction)
-                    linear_velocity = bodies.velocity[other]
-                    angular_velocity = bodies.angular_velocity[other]
-                    whitening = wp.float32(1.0)
+                    point_external = other
                     if owner == EXTERNAL_SHARED:
                         # Two trees solve this body, each with half of its mass and its own
                         # copy of the velocity, which a later kernel averages.
                         tree = wp.max(
-                            bodies.reduced.body_articulation[contact_get_body1(columns, row_column)],
-                            bodies.reduced.body_articulation[contact_get_body2(columns, row_column)],
+                            bodies.reduced.body_articulation[contact_get_body1(columns, external_column)],
+                            bodies.reduced.body_articulation[contact_get_body2(columns, external_column)],
                         )
-                        row_half = wp.int32(2) * other
+                        point_half = wp.int32(2) * other
                         if tree != bodies.reduced.external_lowest[other]:
-                            row_half += wp.int32(1)
-                        linear_velocity += bodies.reduced.external_delta_linear[row_half]
-                        angular_velocity += bodies.reduced.external_delta_angular[row_half]
-                        whitening = wp.float32(1.4142135623730951)
-                    velocity += wp.dot(direction, linear_velocity) + wp.dot(moment, angular_velocity)
-                    external_linear = whitening * wp.sqrt(bodies.inverse_mass[other]) * direction
-                    external_angular = whitening * (
-                        wp.transpose(_cholesky3(mat33_from_sym6(bodies.inverse_inertia_world[other]))) * moment
-                    )
-                    inverse_mass += wp.dot(external_linear, external_linear) + wp.dot(
-                        external_angular, external_angular
-                    )
-            _store(shared, wp.int32(start_velocity_base) + lane, velocity)
-            _store(shared, wp.int32(row_mass_base) + lane, inverse_mass)
-            if wp.static(not patch):
-                _store_point_row_effective_mass(
-                    bodies,
-                    cc,
-                    point_contact,
-                    packed_articulation,
-                    gathered_row,
-                    body,
-                    wrench,
-                    body_pair,
-                    wrench_pair,
-                    inverse_mass,
-                    prepare,
-                )
-        if wp.static(external):
-            # A chunk's free bodies take the slot of the first of its points that touches them;
-            # a chunk has at most as many bodies as points, so a tree may touch any number.
-            for point_offset in range(_CHUNK_POINTS):
-                candidate = _lane_int(row_external, wp.int32(point_offset * (1 if patch else 3)))
-                if external_slot < wp.int32(0) and row_external >= wp.int32(0) and candidate == row_external:
+                            point_half += wp.int32(1)
+            for point_offset in range(chunk_capacity):
+                candidate = _lane_int(point_external, wp.int32(point_offset))
+                if external_slot < wp.int32(0) and point_external >= wp.int32(0) and candidate == point_external:
                     external_slot = wp.int32(point_offset)
-            if lane < row_count:
-                first_dof = wp.int32(max_dofs)
-                stride = wp.int32(0)
-                if external_slot >= wp.int32(0):
-                    first_dof = wp.int32(max_dofs + 1) + wp.int32(6) * external_slot
-                    stride = wp.int32(1)
-                for axis in range(3):
-                    slot = wp.int32(PAGE_ROWS) * wp.int32(ext_position + axis) + lane
-                    _store(shared, wp.int32(z_base) + slot, external_linear[axis])
-                    _store_u8(shared, wp.int32(z_dof_byte) + slot, first_dof + stride * wp.int32(axis))
-                    slot += wp.int32(3 * PAGE_ROWS)
-                    _store(shared, wp.int32(z_base) + slot, external_angular[axis])
-                    _store_u8(shared, wp.int32(z_dof_byte) + slot, first_dof + stride * wp.int32(axis + 3))
+
+        # Row r: J_r along the root path of its body, its velocity J_r qd plus the gathered
+        # external part, then z_r = L^-T J_r^T leaves first, padded with zeros on the spare DOF.
+        # Lane l forms the rows l and l + 32.
+        velocity = wp.float32(0.0)
+        inverse_mass = wp.float32(0.0)
+        for row_slot in range(row_slots):
+            row = lane + wp.int32(_LANES * row_slot)
+            # The free body of the row's point and its slot.
+            row_external = point_external
+            row_half = point_half
+            row_external_slot = external_slot
+            if wp.static(external and not patch):
+                source = wp.min(row // wp.int32(3), wp.int32(_LANES - 1))
+                row_external = _lane_int(point_external, source)
+                row_half = _lane_int(point_half, source)
+                row_external_slot = _lane_int(external_slot, source)
+            gathered_row = packed_row(chunk, point_total, row)
+            if row < row_count:
+                body = row_body[packed_articulation, gathered_row]
+                wrench = row_wrench[packed_articulation, gathered_row]
+                row_velocity_value = row_velocity[packed_articulation, gathered_row]
+                first_path = row_path(shared, row, joint_start, bodies, body, wrench, wp.int32(0))
+                row_velocity_value += first_path[0]
+                row_inverse_mass = first_path[1]
+                body_pair = wp.int32(-1)
+                wrench_pair = wp.spatial_vector()
+                if wp.static(pairs):
+                    # A row between two links is the sum of one row per link; their z add on the
+                    # DOFs both root paths share, which sit at equal positions.
+                    body_pair = row_body_pair[packed_articulation, gathered_row]
+                    wrench_pair = row_wrench_pair[packed_articulation, gathered_row]
+                    if body_pair >= wp.int32(0):
+                        second_path = row_path(
+                            shared, row, joint_start, bodies, body_pair, wrench_pair, wp.int32(path_capacity)
+                        )
+                        row_velocity_value += second_path[0]
+                        # z . z with the two parts added on shared DOFs before squaring: links that
+                        # cannot move against each other then cancel to rounding squared, not to the
+                        # rounding of the two parts' squares.
+                        row_inverse_mass = wp.float32(0.0)
+                        for position in range(path_capacity):
+                            slot = wp.int32(page_rows * position) + row
+                            first_value = _load(shared, wp.int32(z_base) + slot)
+                            second_value = _load(shared, wp.int32(z_base) + slot + wp.int32(page_rows * path_capacity))
+                            if _load_u8(shared, dof_byte(position, row)) == _load_u8(
+                                shared, dof_byte(position + path_capacity, row)
+                            ):
+                                row_inverse_mass += (first_value + second_value) * (first_value + second_value)
+                            else:
+                                row_inverse_mass += first_value * first_value + second_value * second_value
+                    else:
+                        for position in range(path_capacity, 2 * path_capacity):
+                            _store(shared, wp.int32(z_base) + wp.int32(page_rows * position) + row, wp.float32(0.0))
+                            _store_u8(shared, dof_byte(position, row), wp.int32(max_dofs + 1))
+                if wp.static(external):
+                    # The other endpoint, if a free rigid body of this tree: the row's impulse acts
+                    # on it reversed, and its mass is diagonal after whitening by the factor of its
+                    # inverse inertia. Its components take the DOFs after the spare one.
+                    if wp.static(not patch):
+                        row_point = point0[packed_articulation, gathered_row // wp.int32(3)]
+                    external_linear = wp.vec3(0.0)
+                    external_angular = wp.vec3(0.0)
+                    if row_external >= wp.int32(0):
+                        direction = -wp.spatial_top(wrench)
+                        moment = wp.cross(row_point - bodies.position[row_external], direction)
+                        linear_velocity = bodies.velocity[row_external]
+                        angular_velocity = bodies.angular_velocity[row_external]
+                        whitening = wp.float32(1.0)
+                        if row_half >= wp.int32(0):
+                            linear_velocity += bodies.reduced.external_delta_linear[row_half]
+                            angular_velocity += bodies.reduced.external_delta_angular[row_half]
+                            whitening = wp.float32(1.4142135623730951)
+                        row_velocity_value += wp.dot(direction, linear_velocity) + wp.dot(moment, angular_velocity)
+                        external_linear = whitening * wp.sqrt(bodies.inverse_mass[row_external]) * direction
+                        external_angular = whitening * (
+                            wp.transpose(_cholesky3(mat33_from_sym6(bodies.inverse_inertia_world[row_external])))
+                            * moment
+                        )
+                        row_inverse_mass += wp.dot(external_linear, external_linear) + wp.dot(
+                            external_angular, external_angular
+                        )
+                    first_dof = wp.int32(max_dofs)
+                    stride = wp.int32(0)
+                    if row_external_slot >= wp.int32(0):
+                        first_dof = wp.int32(max_dofs + 1) + wp.int32(6) * row_external_slot
+                        stride = wp.int32(1)
+                    for axis in range(3):
+                        position = wp.int32(ext_position + axis)
+                        _store(shared, wp.int32(z_base) + wp.int32(page_rows) * position + row, external_linear[axis])
+                        _store_u8(shared, dof_byte(position, row), first_dof + stride * wp.int32(axis))
+                        position += wp.int32(3)
+                        _store(shared, wp.int32(z_base) + wp.int32(page_rows) * position + row, external_angular[axis])
+                        _store_u8(shared, dof_byte(position, row), first_dof + stride * wp.int32(axis + 3))
+                _store(shared, wp.int32(start_velocity_base) + row, row_velocity_value)
+                _store(shared, wp.int32(row_mass_base) + row, row_inverse_mass)
+                if row_slot == 0:
+                    velocity = row_velocity_value
+                    inverse_mass = row_inverse_mass
+                if wp.static(not patch):
+                    _store_point_row_effective_mass(
+                        bodies,
+                        cc,
+                        point_contact,
+                        packed_articulation,
+                        gathered_row,
+                        body,
+                        wrench,
+                        body_pair,
+                        wrench_pair,
+                        row_inverse_mass,
+                        prepare,
+                    )
         _sync_contact_warp()
 
         # Each lane keeps w = sum_r lambda_r z_r at its own DOFs in registers: lane l holds DOF l
-        # and, in trees beyond a warp, DOF l + 32; with free bodies also their components l and
-        # l + 32. A DOF never on a path keeps the impossible id -1.
-        positions = wp.vec4i(0, 0, 0, 0)
-        dofs = wp.vec4i(-1, -1, -1, -1)
+        # and, in trees beyond a warp, DOF l + 32; with free bodies also their components
+        # l + 32 g. A DOF never on a path keeps the impossible id -1.
+        positions = lane_indices()
+        dofs = lane_indices()
+        for entry in range(2 + external_groups):
+            dofs[entry] = wp.int32(-1)
         if lane < n:
             dofs[0] = lane
             positions[0] = (
@@ -1095,19 +1155,17 @@ def make_dense_substep_kernel(
                     - wp.int32(1)
                     - _load_u16(shared, wp.int32(dof_entry) + lane + wp.int32(_LANES))
                 )
-        if wp.static(external):
-            dofs[2] = wp.int32(max_dofs + 1) + lane
-            positions[2] = wp.int32(ext_position) + lane - wp.int32(6) * (lane // wp.int32(6))
-            if lane + wp.int32(_LANES) < wp.int32(external_dofs):
-                component = lane + wp.int32(_LANES)
-                dofs[3] = wp.int32(max_dofs + 1) + component
-                positions[3] = wp.int32(ext_position) + component - wp.int32(6) * (component // wp.int32(6))
-        w = wp.vec4(0.0)
+        for group in range(external_groups):
+            component = lane + wp.int32(_LANES * group)
+            if component < wp.int32(external_dofs):
+                dofs[2 + group] = wp.int32(max_dofs + 1) + component
+                positions[2 + group] = wp.int32(ext_position) + component - wp.int32(6) * (component // wp.int32(6))
+        w = lane_vector()
 
         # Biased solves restart from the accumulated impulses, relax solves add to them.
         if warm_start:
-            lambda_row = wp.float32(0.0)
             if wp.static(patch):
+                lambda_row = wp.float32(0.0)
                 if lane < chunk_points:
                     lambda_row = cc_get_normal_lambda(cc, contact)
                 elif lane < row_count:
@@ -1115,18 +1173,22 @@ def make_dense_substep_kernel(
                     lambda_row = patch_lambda[packed_articulation, chunk[2] + (tangent >> wp.int32(1))][
                         tangent & wp.int32(1)
                     ]
+                for r in range(row_count):
+                    w += _lane_float(lambda_row, r) * row_entries(shared, r, positions, dofs)
             else:
-                if lane < row_count:
-                    row_contact = point_contact[packed_articulation, gathered_row // wp.int32(3)]
-                    axis = gathered_row - wp.int32(3) * (gathered_row // wp.int32(3))
-                    if axis == wp.int32(0):
-                        lambda_row = cc_get_normal_lambda(cc, row_contact)
-                    elif axis == wp.int32(1):
-                        lambda_row = cc_get_tangent1_lambda(cc, row_contact)
-                    else:
-                        lambda_row = cc_get_tangent2_lambda(cc, row_contact)
-            for r in range(row_count):
-                w += _lane_float(lambda_row, r) * row_entries(shared, r, positions, dofs)
+                # A point's lane holds its three impulses.
+                point_lambda = wp.vec3(0.0)
+                if lane < chunk_points:
+                    point_lambda = wp.vec3(
+                        cc_get_normal_lambda(cc, contact),
+                        cc_get_tangent1_lambda(cc, contact),
+                        cc_get_tangent2_lambda(cc, contact),
+                    )
+                for point in range(chunk_points):
+                    entries_n, entries_t0, entries_t1 = point_entries(shared, point, positions, dofs)
+                    w += _lane_float(point_lambda[0], point) * entries_n
+                    w += _lane_float(point_lambda[1], point) * entries_t0
+                    w += _lane_float(point_lambda[2], point) * entries_t1
         mass_coeff = wp.float32(1.0)
         impulse_coeff = wp.float32(0.0)
         if use_bias:
@@ -1143,16 +1205,36 @@ def make_dense_substep_kernel(
                         coupling[0] = product
         elif first_visit:
             # A chunk's first visit may only apply its impulses; its later visits read these.
-            for point_offset in range(chunk_points):
-                row = wp.int32(3) * wp.int32(point_offset)
-                products = wp.vec3(
-                    row_product(shared, lane, row, row + wp.int32(1)),
-                    row_product(shared, lane, row, row + wp.int32(2)),
-                    row_product(shared, lane, row + wp.int32(1), row + wp.int32(2)),
-                )
-                if lane == wp.int32(point_offset):
-                    coupling = products
-                    point_coupling[packed_articulation, chunk[0] + lane] = products
+            # A point's rows act on the same links and share their DOF bytes, so its lane sums
+            # their products position by position. A DOF on both paths of a row between two
+            # links adds the products of the two parts too.
+            if lane < chunk_points:
+                row = wp.int32(3) * lane
+                for position in range(z_positions):
+                    index = wp.int32(z_base + page_rows * position) + row
+                    z_n = _load(shared, index)
+                    z_t0 = _load(shared, index + wp.int32(1))
+                    z_t1 = _load(shared, index + wp.int32(2))
+                    coupling += wp.vec3(z_n * z_t0, z_n * z_t1, z_t0 * z_t1)
+                if wp.static(pairs):
+                    for position in range(path_capacity):
+                        if _load_u8(shared, dof_byte(wp.int32(position), row)) == _load_u8(
+                            shared, dof_byte(wp.int32(position + path_capacity), row)
+                        ):
+                            first = wp.int32(z_base + page_rows * position) + row
+                            second = first + wp.int32(page_rows * path_capacity)
+                            n_first = _load(shared, first)
+                            t0_first = _load(shared, first + wp.int32(1))
+                            t1_first = _load(shared, first + wp.int32(2))
+                            n_second = _load(shared, second)
+                            t0_second = _load(shared, second + wp.int32(1))
+                            t1_second = _load(shared, second + wp.int32(2))
+                            coupling += wp.vec3(
+                                n_first * t0_second + n_second * t0_first,
+                                n_first * t1_second + n_second * t1_first,
+                                t0_first * t1_second + t0_second * t1_first,
+                            )
+                point_coupling[packed_articulation, chunk[0] + lane] = coupling
         elif lane < chunk_points:
             # The rows are those of the chunk's first visit: so are their products.
             coupling = point_coupling[packed_articulation, chunk[0] + lane]
@@ -1187,9 +1269,7 @@ def make_dense_substep_kernel(
                 else:
                     row = wp.int32(3) * point
                     delta = wp.vec3(0.0)
-                    entries_n = row_entries(shared, row, positions, dofs)
-                    entries_t0 = row_entries(shared, row + wp.int32(1), positions, dofs)
-                    entries_t1 = row_entries(shared, row + wp.int32(2), positions, dofs)
+                    entries_n, entries_t0, entries_t1 = point_entries(shared, point, positions, dofs)
                     change = wp.vec3(
                         _warp_sum_float(wp.dot(entries_n, w)),
                         _warp_sum_float(wp.dot(entries_t0, w)),
@@ -1275,10 +1355,9 @@ def make_dense_substep_kernel(
         if wp.static(max_dofs > _LANES):
             if dofs[1] >= wp.int32(0):
                 _store(shared, wp.int32(rhs_base) + lane + wp.int32(_LANES), w[1])
-        if wp.static(external):
-            _store(shared, wp.int32(rhs_base + max_dofs + 1) + lane, w[2])
-            if dofs[3] >= wp.int32(0):
-                _store(shared, wp.int32(rhs_base + max_dofs + 1 + _LANES) + lane, w[3])
+        for group in range(external_groups):
+            if dofs[2 + group] >= wp.int32(0):
+                _store(shared, wp.int32(rhs_base + max_dofs + 1 + _LANES * group) + lane, w[2 + group])
         _sync_contact_warp()
         solve_lower(shared, wp.int32(rhs_base), n, lane)
         k = lane
@@ -1289,23 +1368,23 @@ def make_dense_substep_kernel(
             k += wp.int32(_LANES)
         if wp.static(external):
             # The free bodies' velocity changes, unwhitened, by the lane that named each slot.
-            if external_slot >= wp.int32(0) and lane == external_slot * wp.int32(1 if patch else 3):
+            if external_slot == lane:
                 first = wp.int32(rhs_base + max_dofs + 1) + wp.int32(6) * external_slot
-                delta_linear = wp.sqrt(bodies.inverse_mass[row_external]) * wp.vec3(
+                delta_linear = wp.sqrt(bodies.inverse_mass[point_external]) * wp.vec3(
                     _load(shared, first), _load(shared, first + wp.int32(1)), _load(shared, first + wp.int32(2))
                 )
-                delta_angular = _cholesky3(mat33_from_sym6(bodies.inverse_inertia_world[row_external])) * wp.vec3(
+                delta_angular = _cholesky3(mat33_from_sym6(bodies.inverse_inertia_world[point_external])) * wp.vec3(
                     _load(shared, first + wp.int32(3)),
                     _load(shared, first + wp.int32(4)),
                     _load(shared, first + wp.int32(5)),
                 )
-                if row_half >= wp.int32(0):
+                if point_half >= wp.int32(0):
                     half_scale = wp.float32(1.4142135623730951)
-                    bodies.reduced.external_delta_linear[row_half] += half_scale * delta_linear
-                    bodies.reduced.external_delta_angular[row_half] += half_scale * delta_angular
+                    bodies.reduced.external_delta_linear[point_half] += half_scale * delta_linear
+                    bodies.reduced.external_delta_angular[point_half] += half_scale * delta_angular
                 else:
-                    bodies.velocity[row_external] += delta_linear
-                    bodies.angular_velocity[row_external] += delta_angular
+                    bodies.velocity[point_external] += delta_linear
+                    bodies.angular_velocity[point_external] += delta_angular
         _sync_contact_warp()
 
     @wp.func
@@ -1787,7 +1866,7 @@ def make_dense_substep_kernel(
                         )
                     _sync_contact_warp()
                 # Chunks of rows that fit the lanes; several chunks alternate within each sweep.
-                chunks = (page_points + wp.int32(_CHUNK_POINTS - 1)) // wp.int32(_CHUNK_POINTS)
+                chunks = (page_points + wp.int32(chunk_capacity - 1)) // wp.int32(chunk_capacity)
                 # Several chunks first apply every chunk's accumulated impulses, then sweep in turn.
                 rounds = wp.int32(1)
                 sweeps = iterations
@@ -1812,8 +1891,8 @@ def make_dense_substep_kernel(
                         chunk_index = wp.int32(chunk_offset)
                         if (round_index & wp.int32(1)) != wp.int32(0):
                             chunk_index = chunks - wp.int32(1) - wp.int32(chunk_offset)
-                        first = wp.int32(_CHUNK_POINTS) * chunk_index
-                        last = wp.min(first + wp.int32(_CHUNK_POINTS), page_points)
+                        first = wp.int32(chunk_capacity) * chunk_index
+                        last = wp.min(first + wp.int32(chunk_capacity), page_points)
                         chunk = wp.vec4i(
                             first,
                             last,
@@ -2404,4 +2483,4 @@ class DenseSubstep:
             self._gathered_rows = (float(dt), world._contact_ingest_count)
 
 
-__all__ = ["PAGE_ROWS", "DenseSubstep", "dense_substep_blockers", "make_dense_substep_kernel"]
+__all__ = ["CHUNK_POINTS", "PATCH_CHUNK_POINTS", "DenseSubstep", "dense_substep_blockers", "make_dense_substep_kernel"]
