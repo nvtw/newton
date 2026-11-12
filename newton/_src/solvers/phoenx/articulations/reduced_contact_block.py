@@ -30,6 +30,7 @@ from newton._src.solvers.phoenx.articulations.reduced_contact import (
     reduced_contact_commit,
     reduced_contact_iterate,
     reduced_contact_iterate_staged,
+    reduced_contact_keep_biased,
     reduced_contact_packed_owner,
     reduced_contact_prepare,
     reduced_contact_stage,
@@ -849,11 +850,13 @@ def _solve_fallback_single_color_kernel(
     prepare: wp.bool,
     sweeps: wp.int32,
     use_bias: wp.bool,
+    relax_sweeps: wp.int32,
 ):
     """Prepare and sweep the runs of the only color in one launch.
 
     Runs of one color share no body, so each run takes all its sweeps on its own with the
-    result of one launch per sweep.
+    result of one launch per sweep. A nonnegative ``relax_sweeps`` records the links'
+    wrenches after the sweeps and adds that many sweeps without bias.
     """
     index = color_starts[0] + wp.tid()
     end = color_starts[1]
@@ -876,46 +879,57 @@ def _solve_fallback_single_color_kernel(
                     use_bias,
                 )
         column = fallback_column[first]
-        if last == first + wp.int32(1) and reduced_contact_can_stage(columns, column, bodies):
-            # The only column between these two trees: their links' deferred state stays in
-            # registers over all sweeps instead of being read from each root path again.
-            twist0, twist1 = reduced_contact_stage(columns, column, bodies)
-            wrench0 = wp.spatial_vector()
-            wrench1 = wp.spatial_vector()
-            for _sweep in range(sweeps):
-                twist0, twist1, wrench0, wrench1 = reduced_contact_iterate_staged(
-                    columns,
-                    column,
-                    bodies,
-                    idt,
-                    sor_boost,
-                    cc,
-                    contacts,
-                    use_bias,
-                    wp.bool(True),
-                    cross_mobility,
-                    wp.bool(True),
-                    twist0,
-                    twist1,
-                    wrench0,
-                    wrench1,
-                )
-            reduced_contact_commit(columns, column, bodies, wrench0, wrench1)
-        else:
-            for _sweep in range(sweeps):
+        staged = last == first + wp.int32(1) and reduced_contact_can_stage(columns, column, bodies)
+        # The sweeps, then with ``relax_sweeps`` the relax sweeps on the wrenches they left.
+        phase_count = wp.where(relax_sweeps >= wp.int32(0), 2, 1)
+        for phase in range(phase_count):
+            biased = use_bias
+            count = sweeps
+            if phase == 1:
                 for fallback in range(first, last):
-                    _solve_fallback_contact_column(
+                    reduced_contact_keep_biased(columns, fallback_column[fallback], bodies)
+                biased = wp.bool(False)
+                count = relax_sweeps
+            if staged:
+                # The only column between these two trees: their links' deferred state stays in
+                # registers over all sweeps instead of being read from each root path again.
+                twist0, twist1 = reduced_contact_stage(columns, column, bodies)
+                wrench0 = wp.spatial_vector()
+                wrench1 = wp.spatial_vector()
+                for _sweep in range(count):
+                    twist0, twist1, wrench0, wrench1 = reduced_contact_iterate_staged(
                         columns,
+                        column,
                         bodies,
                         idt,
                         sor_boost,
                         cc,
                         contacts,
+                        biased,
+                        wp.bool(True),
                         cross_mobility,
-                        fallback_column[fallback],
-                        1,
-                        use_bias,
+                        wp.bool(True),
+                        twist0,
+                        twist1,
+                        wrench0,
+                        wrench1,
                     )
+                reduced_contact_commit(columns, column, bodies, wrench0, wrench1)
+            else:
+                for _sweep in range(count):
+                    for fallback in range(first, last):
+                        _solve_fallback_contact_column(
+                            columns,
+                            bodies,
+                            idt,
+                            sor_boost,
+                            cc,
+                            contacts,
+                            cross_mobility,
+                            fallback_column[fallback],
+                            1,
+                            biased,
+                        )
         index += worker_count
 
 
@@ -4279,8 +4293,13 @@ class ReducedContactBlockSystem:
         *,
         use_bias: bool,
         prepare: bool,
+        relax_iterations: int | None = None,
     ) -> None:
-        """Solve only conflicting fallback contacts with deterministic coloring."""
+        """Solve only conflicting fallback contacts with deterministic coloring.
+
+        With ``relax_iterations`` the links' wrenches are recorded as the biased ones after
+        the sweeps, and that many sweeps without bias follow.
+        """
         if self._skip_fallback_coloring:
             return
         assert self.fallback_count is not None
@@ -4294,6 +4313,7 @@ class ReducedContactBlockSystem:
             iterations=iterations,
             use_bias=use_bias,
             prepare=prepare,
+            relax_iterations=relax_iterations,
         )
 
     def _solve_fallback_coloring(
@@ -4308,6 +4328,7 @@ class ReducedContactBlockSystem:
         iterations: int,
         use_bias: bool,
         prepare: bool,
+        relax_iterations: int | None,
     ) -> None:
         assert self.fallback_partitioner is not None
         assert self.fallback_column is not None
@@ -4320,7 +4341,7 @@ class ReducedContactBlockSystem:
                     _flush_fallback_contacts_kernel, dim=self.articulation_count, inputs=[bodies], device=self.device
                 )
 
-        def sweep(phase: int) -> None:
+        def sweep(phase: int, use_bias: bool = use_bias) -> None:
             partitioner.begin_sweep()
             if self._solve_fallback_by_world:
                 assert self.schedule_section_end is not None
@@ -4385,6 +4406,11 @@ class ReducedContactBlockSystem:
                 sweep(0)
             for _ in range(iterations):
                 sweep(1)
+            if relax_iterations is not None:
+                # Sweeps leave the wrenches of the links outside these columns as they were.
+                wp.copy(bodies.reduced.biased_wrench, bodies.reduced.deferred_wrench)
+                for _ in range(relax_iterations):
+                    sweep(1, use_bias=False)
 
         def fused() -> None:
             wp.launch(
@@ -4407,6 +4433,7 @@ class ReducedContactBlockSystem:
                     wp.bool(prepare),
                     wp.int32(iterations),
                     wp.bool(use_bias),
+                    wp.int32(-1 if relax_iterations is None else relax_iterations),
                 ],
                 device=self.device,
             )

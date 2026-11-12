@@ -922,6 +922,19 @@ def reduced_contact_commit(
             _defer_link_wrench(bodies, body - wp.int32(1), wrench)
 
 
+@wp.func
+def reduced_contact_keep_biased(columns: ContactColumnContainer, column: wp.int32, bodies: BodyContainer):
+    """Record the wrenches the biased sweeps left on a column's links."""
+    data = bodies.reduced
+    for side in range(2):
+        body = contact_get_body1(columns, column)
+        if side == 1:
+            body = contact_get_body2(columns, column)
+        if data.body_articulation[body] >= wp.int32(0):
+            link = body - wp.int32(1)
+            data.biased_wrench[link] = data.deferred_wrench[link]
+
+
 __all__ = [
     "flush_deferred_articulation",
     "reduced_contact_can_stage",
@@ -929,6 +942,7 @@ __all__ = [
     "reduced_contact_deferred_owner",
     "reduced_contact_iterate",
     "reduced_contact_iterate_staged",
+    "reduced_contact_keep_biased",
     "reduced_contact_prepare",
     "reduced_contact_stage",
 ]

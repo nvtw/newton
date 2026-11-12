@@ -5320,20 +5320,8 @@ class ReducedPhoenXArticulation:
                 world.solver_iterations,
                 use_bias=True,
                 prepare=True,
+                relax_iterations=world._active_velocity_iterations,
             )
-            wp.copy(self.system.biased_wrench, self.system.deferred_wrench)
-            if world._active_velocity_iterations > 0:
-                contacts.solve_fallback(
-                    world._contact_cols,
-                    world.bodies,
-                    wp.float32(1.0 / float(dt)),
-                    world.sor_boost,
-                    world._contact_container,
-                    world._active_contact_views(),
-                    world._active_velocity_iterations,
-                    use_bias=False,
-                    prepare=False,
-                )
 
         # Most steps of a large scene have no such contact: skip the stage on the device.
         wp.capture_if(contacts.cross_column_count, on_true=solve)
