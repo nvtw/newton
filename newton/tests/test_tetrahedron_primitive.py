@@ -41,7 +41,11 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton._src.geometry.inertia import compute_inertia_shape
+from newton._src.geometry.support_function import decode_vec3
 from newton._src.geometry.types import GeoType
+from newton._src.geometry.utils import compute_shape_radius
+from newton._src.sim.builder import _TetrahedronVertexD
 
 _cuda_available = wp.is_cuda_available()
 
@@ -147,8 +151,6 @@ class TestTetrahedronBuilder(unittest.TestCase):
         model = builder.finalize()
         encoded = model.shape_source_ptr.numpy()[0]
 
-        from newton._src.geometry.support_function import decode_vec3
-
         @wp.kernel
         def decode_kernel(p: wp.array[wp.uint64], out: wp.array[wp.vec3]):
             out[0] = decode_vec3(p[0])
@@ -203,13 +205,9 @@ class TestTetrahedronInertia(unittest.TestCase):
     """Solid-tet inertia (Tonon 2005)."""
 
     def _make_carrier(self, d_x: float, d_y: float, d_z: float):
-        from newton._src.sim.builder import _TetrahedronVertexD
-
         return _TetrahedronVertexD(d_x, d_y, d_z)
 
     def test_volume_matches_six_volume_formula(self):
-        from newton._src.geometry.inertia import compute_inertia_shape
-
         # Volume = | edge_ab * c_y * d_x | / 6.
         edge_ab, c_y, c_z = 2.0, 3.0, 0.5
         d_x, d_y, d_z = 1.5, 0.7, -0.4
@@ -231,8 +229,6 @@ class TestTetrahedronInertia(unittest.TestCase):
         )
 
     def test_zero_density_returns_zero_mass(self):
-        from newton._src.geometry.inertia import compute_inertia_shape
-
         scale = wp.vec3(1.0, 1.0, 0.0)
         m, _, _ = compute_inertia_shape(
             int(GeoType.TETRAHEDRON),
@@ -243,8 +239,6 @@ class TestTetrahedronInertia(unittest.TestCase):
         self.assertEqual(m, 0.0)
 
     def test_inertia_tensor_is_symmetric_and_positive_definite(self):
-        from newton._src.geometry.inertia import compute_inertia_shape
-
         scale = wp.vec3(1.0, 1.0, 0.0)
         _m, _com, inertia = compute_inertia_shape(
             int(GeoType.TETRAHEDRON),
@@ -269,8 +263,6 @@ class TestTetrahedronInertia(unittest.TestCase):
         #     trace(I) = 3 * m * L^2 / 20.
         # Reference: any rigid-body dynamics textbook; trivially
         # derivable from the Tonon formula by symmetry.
-        from newton._src.geometry.inertia import compute_inertia_shape
-
         L = 1.0
         # Regular tet with edge L, vertex A at origin and B along +Z:
         #   A = (0, 0, 0)
@@ -300,8 +292,6 @@ class TestTetrahedronInertia(unittest.TestCase):
         self.assertAlmostEqual(eigvals[1], eigvals[2], places=5)
 
     def test_compute_shape_radius(self):
-        from newton._src.geometry.utils import compute_shape_radius
-
         # A=origin, B=(0,0,3), C=(0,4,0), D=(5,0,0). Bounding sphere
         # centered at A must enclose D at distance 5.
         r = compute_shape_radius(
