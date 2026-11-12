@@ -110,6 +110,7 @@ class TestMultiWorldStableBucketing(unittest.TestCase):
                 bodies,
                 particle_world,
                 wp.int32(element_count),
+                wp.empty(0, dtype=wp.int32, device=device),  # rows go by world, not by island group
             ],
             outputs=[counts, shifted, run_flags],
             device=device,
@@ -131,6 +132,7 @@ class TestMultiWorldStableBucketing(unittest.TestCase):
                 bodies,
                 particle_world,
                 wp.int32(element_count),
+                wp.empty(0, dtype=wp.int32, device=device),  # rows go by world, not by island group
                 wp.int32(4),
                 offsets,
                 num_elements,

@@ -210,6 +210,7 @@ from newton._src.solvers.phoenx.simulation_kernels import (
     _collapse_direct_equality_elements_kernel,
     _constraints_to_elements_kernel,
     _count_and_mark_world_runs_kernel,
+    _group_bodies_by_island_kernel,
     _initialize_rigid_topology_rebuild_kernel,
     _integrate_velocities_kernel,
     _kinematic_interpolate_substep_kernel,
@@ -332,6 +333,10 @@ def _build_gravity_array(gravity, num_worlds: int, device) -> wp.array[wp.vec3f]
             data.append((float(r[0]), float(r[1]), float(r[2])))
     arr_np = np.asarray(data, dtype=np.float32)
     return wp.array(arr_np, dtype=wp.vec3f, device=device)
+
+
+#: Solver blocks that the islands of one world are spread over.
+_ISLAND_ROW_GROUPS = 64
 
 
 class PhoenXWorld:
@@ -1133,15 +1138,6 @@ class PhoenXWorld:
         cap = self._constraint_capacity
         nw = self.num_worlds
         self._world_element_ids_by_color: wp.array[wp.int32] = wp.zeros(cap, dtype=wp.int32, device=self.device)
-        self._world_color_starts: wp.array2d[wp.int32] = wp.zeros(
-            (nw, MAX_COLORS + 1), dtype=wp.int32, device=self.device
-        )
-        self._world_color_family_starts: wp.array2d[wp.int32] = wp.zeros(
-            (nw, int(GREEDY_MAX_COLORS) * int(_PER_WORLD_FAST_FAMILIES)),
-            dtype=wp.int32,
-            device=self.device,
-        )
-        self._world_csr_offsets: wp.array[wp.int32] = wp.zeros(nw + 1, dtype=wp.int32, device=self.device)
         self._fused_multiworld_mass_splitting = False
         self._overflow_only_mass_splitting = False
         self._world_body_ids = wp.zeros(1, dtype=wp.int32, device=self.device)
@@ -1162,23 +1158,13 @@ class PhoenXWorld:
                 self._world_body_offsets = wp.array(world_body_offsets, dtype=wp.int32, device=self.device)
                 self._fused_multiworld_mass_splitting = True
                 self._overflow_only_mass_splitting = self.num_joints == 0
-        # Sized nw+1 so the inclusive scan output lands in world_csr_offsets.
-        self._world_totals_shifted: wp.array[wp.int32] = wp.zeros(nw + 1, dtype=wp.int32, device=self.device)
         self._per_world_num_runs: wp.array[wp.int32] = wp.zeros(1, dtype=wp.int32, device=self.device)
-        self._world_num_colors: wp.array[wp.int32] = wp.zeros(nw, dtype=wp.int32, device=self.device)
 
         # Per-world coloring scratch. The first/second halves hold the stable
         # world stream/run starts and run flags/scanned run ids, respectively.
         # _per_world_assigned is 1-based colour (0 = unassigned).
-        self._per_world_element_count: wp.array[wp.int32] = wp.zeros(nw, dtype=wp.int32, device=self.device)
-        self._per_world_element_offsets: wp.array[wp.int32] = wp.zeros(nw + 1, dtype=wp.int32, device=self.device)
         self._per_world_elements: wp.array[wp.int32] = wp.zeros(2 * cap, dtype=wp.int32, device=self.device)
         self._per_world_run_scan: wp.array[wp.int32] = wp.zeros(2 * cap, dtype=wp.int32, device=self.device)
-        scan_count = max(cap, nw + 1) if self._conditional_world_coloring else 1
-        scan_blocks = (scan_count + 255) // 256
-        self._conditional_scan_scratch: wp.array[wp.int32] = wp.zeros(
-            2 * scan_blocks, dtype=wp.int32, device=self.device
-        )
         self._per_world_assigned: wp.array[wp.int32] = wp.zeros(cap, dtype=wp.int32, device=self.device)
         # Explicit copy-state partition for every row in a multi-world
         # mass-splitting schedule. Rigid contact-only worlds mark regular
@@ -1191,16 +1177,11 @@ class PhoenXWorld:
         )
         # Greedy per-world scratch. overflow flag is surfaced via step_report
         # but not raised mid-step (fallback is to flip _use_greedy_coloring off).
-        self._per_world_greedy_color_family_count: wp.array2d[wp.int32] = wp.zeros(
-            (nw, int(GREEDY_MAX_COLORS) * int(_PER_WORLD_FAST_FAMILIES)),
-            dtype=wp.int32,
-            device=self.device,
-        )
-        self._per_world_greedy_color_family_offsets: wp.array2d[wp.int32] = wp.zeros(
-            (nw, int(GREEDY_MAX_COLORS) * int(_PER_WORLD_FAST_FAMILIES)),
-            dtype=wp.int32,
-            device=self.device,
-        )
+        #: Blocks the per-world coloring sorts the rows into: the worlds, or in one world the
+        #: groups its islands are spread over, see :meth:`_group_rows_by_island`.
+        self._partition_count = 0
+        self._body_group: wp.array[wp.int32] = wp.empty(0, dtype=wp.int32, device=self.device)
+        self._allocate_partition(nw)
         self._per_world_greedy_overflow: wp.array[wp.int32] = wp.zeros(1, dtype=wp.int32, device=self.device)
 
         # Contact state split across two narrow containers:
@@ -1400,6 +1381,8 @@ class PhoenXWorld:
             self._body_aabb_upper = wp.zeros((self.num_bodies, 3), dtype=wp.float32, device=self.device)
             self._body_aabb_diagonal = wp.zeros(self.num_bodies, dtype=wp.float32, device=self.device)
             self._sleeping_num_bodies_device = wp.array([self.num_bodies], dtype=wp.int32, device=self.device)
+            if self._multi_world_scheduler_policy == "one_world" and self._multi_world_scheduler == "block_world":
+                self._group_rows_by_island()
 
         # Cached references installed by :meth:`attach_collision_pipeline`.
         # When non-None, :meth:`step` falls back to them for the optional
@@ -2778,7 +2761,7 @@ class PhoenXWorld:
                         on_true=self._rebuild_rigid_partition_conditional,
                         on_false=None,
                     )
-                    self._maybe_fallback_from_per_world_greedy_overflow(self.num_worlds)
+                    self._maybe_fallback_from_per_world_greedy_overflow(self._partition_count)
                 else:
                     self._rebuild_partition()
 
@@ -3606,6 +3589,15 @@ class PhoenXWorld:
             device=self.device,
         )
 
+        if self._body_group.shape[0] > 0:
+            wp.launch(
+                _group_bodies_by_island_kernel,
+                dim=self.num_bodies,
+                inputs=[self.bodies, self._island_builder.set_nr, wp.int32(self._partition_count)],
+                outputs=[self._body_group],
+                device=self.device,
+            )
+
         # --- Collapse sleeping body slots in _elements for the partitioner. ---
         wp.launch(
             _phoenx_collapse_sleeping_elements_kernel,
@@ -3838,6 +3830,40 @@ class PhoenXWorld:
             device=self.device,
         )
 
+    def _allocate_partition(self, count: int) -> None:
+        """Allocate the per-world coloring's tables for ``count`` worlds or row groups."""
+        cap = self._constraint_capacity
+        nw = self._partition_count = int(count)
+        self._world_color_starts: wp.array2d[wp.int32] = wp.zeros(
+            (nw, MAX_COLORS + 1), dtype=wp.int32, device=self.device
+        )
+        self._world_color_family_starts: wp.array2d[wp.int32] = wp.zeros(
+            (nw, int(GREEDY_MAX_COLORS) * int(_PER_WORLD_FAST_FAMILIES)),
+            dtype=wp.int32,
+            device=self.device,
+        )
+        self._world_csr_offsets: wp.array[wp.int32] = wp.zeros(nw + 1, dtype=wp.int32, device=self.device)
+        # Sized nw+1 so the inclusive scan output lands in world_csr_offsets.
+        self._world_totals_shifted: wp.array[wp.int32] = wp.zeros(nw + 1, dtype=wp.int32, device=self.device)
+        self._world_num_colors: wp.array[wp.int32] = wp.zeros(nw, dtype=wp.int32, device=self.device)
+        self._per_world_element_count: wp.array[wp.int32] = wp.zeros(nw, dtype=wp.int32, device=self.device)
+        self._per_world_element_offsets: wp.array[wp.int32] = wp.zeros(nw + 1, dtype=wp.int32, device=self.device)
+        scan_count = max(cap, nw + 1) if self._conditional_world_coloring else 1
+        scan_blocks = (scan_count + 255) // 256
+        self._conditional_scan_scratch: wp.array[wp.int32] = wp.zeros(
+            2 * scan_blocks, dtype=wp.int32, device=self.device
+        )
+        self._per_world_greedy_color_family_count: wp.array2d[wp.int32] = wp.zeros(
+            (nw, int(GREEDY_MAX_COLORS) * int(_PER_WORLD_FAST_FAMILIES)),
+            dtype=wp.int32,
+            device=self.device,
+        )
+        self._per_world_greedy_color_family_offsets: wp.array2d[wp.int32] = wp.zeros(
+            (nw, int(GREEDY_MAX_COLORS) * int(_PER_WORLD_FAST_FAMILIES)),
+            dtype=wp.int32,
+            device=self.device,
+        )
+
     def _maybe_fallback_from_per_world_greedy_overflow(self, nw: int) -> None:
         """Multi-world analogue of
         :meth:`_maybe_fallback_from_greedy_overflow`. Flips the
@@ -3882,7 +3908,7 @@ class PhoenXWorld:
         The CID stream is split into monotone world-id runs and stable-merged
         in original order. Worlds are disjoint after static-null-out.
         """
-        nw = self.num_worlds
+        nw = self._partition_count
         cap = self._constraint_capacity
 
         self._per_world_element_count.zero_()
@@ -3898,6 +3924,7 @@ class PhoenXWorld:
                 self.bodies,
                 self._particle_world_id,
                 wp.int32(self.num_bodies),
+                self._body_group,
             ],
             outputs=[self._per_world_element_count, self._world_totals_shifted, run_flags],
             device=self.device,
@@ -3928,7 +3955,7 @@ class PhoenXWorld:
 
     def _finish_per_world_coloring(self) -> None:
         """Merge deterministic world streams and color changed topology."""
-        nw = self.num_worlds
+        nw = self._partition_count
         cap = self._constraint_capacity
         run_flags = self._per_world_run_scan[:cap]
         run_ids = self._per_world_run_scan[cap:]
@@ -3949,6 +3976,7 @@ class PhoenXWorld:
                 self.bodies,
                 self._particle_world_id,
                 wp.int32(self.num_bodies),
+                self._body_group,
                 wp.int32(nw),
                 self._per_world_element_offsets,
                 self._num_active_constraints,
@@ -4454,6 +4482,10 @@ class PhoenXWorld:
     def _configure_multi_world_scheduler(self, policy: str) -> None:
         """Resolve the multi-world scheduler once before any graph capture."""
         kind, block_dim = self._parse_multi_world_scheduler_policy(policy)
+        if getattr(self, "_partition_count", self.num_worlds) != self.num_worlds:
+            # Rows were grouped by island for another policy.
+            self._allocate_partition(self.num_worlds)
+            self._body_group = wp.empty(0, dtype=wp.int32, device=self.device)
         if kind == "auto":
             kind, block_dim = self._auto_multi_world_scheduler()
         elif kind == "one_world":
@@ -4461,12 +4493,26 @@ class PhoenXWorld:
             # the 128 threads of a block of their own instead of the 32 of a fast-tail world.
             wide = self.num_worlds == 1 and self._block_world_supported() and not self._contact_patch_enabled
             kind = "block_world" if wide else "fast_tail"
+            if wide and getattr(self, "_island_builder", None) is not None:
+                self._group_rows_by_island()
         elif kind == "block_world" and not self._block_world_supported():
             raise NotImplementedError("block-world scheduler currently supports rigid multi-world scenes only")
 
         self._multi_world_scheduler_policy = str(policy)
         self._multi_world_scheduler = kind
         self._multi_world_block_dim = self._validate_block_world_dim(block_dim)
+
+    def _group_rows_by_island(self) -> None:
+        """Spread one world's islands over several solver blocks.
+
+        Rows of different islands share no body that moves, so they need no common order.
+        One block walks its colors at the pace of its slowest lane and reads every row
+        from memory that many blocks' rows have pushed out of its cache; a block per
+        island, as far as the groups go, sweeps its few rows on its own. Each island keeps
+        the colors and the order it had.
+        """
+        self._allocate_partition(_ISLAND_ROW_GROUPS)
+        self._body_group = wp.full(self.num_bodies, -1, dtype=wp.int32, device=self.device)
 
     def _block_world_supported(self) -> bool:
         """Return whether the private block-world scheduler can run this scene."""
@@ -4483,7 +4529,7 @@ class PhoenXWorld:
 
     def _block_world_launch_dim(self, block_dim: int) -> int:
         """Launch one physical block per world for the block-world scheduler."""
-        return max(1, int(self.num_worlds) * int(block_dim))
+        return max(1, int(self._partition_count) * int(block_dim))
 
     def _validate_block_world_dim(self, block_dim: int) -> int:
         block_dim = int(block_dim)
@@ -4533,7 +4579,7 @@ class PhoenXWorld:
                 self._contact_container,
                 contact_views,
                 wp.int32(self.solver_iterations if num_iterations is None else num_iterations),
-                wp.int32(self.num_worlds),
+                wp.int32(self._partition_count),
                 wp.int32(self.num_joints),
                 self._joint_pgs_enabled,
                 wp.int32(self.num_bodies),
@@ -4575,7 +4621,7 @@ class PhoenXWorld:
                 self._active_contact_views(),
                 wp.int32(1),
                 wp.int32(iteration),
-                wp.int32(self.num_worlds),
+                wp.int32(self._partition_count),
                 wp.int32(self.num_joints),
                 self._joint_pgs_enabled,
                 self._copy_state,
@@ -4624,7 +4670,7 @@ class PhoenXWorld:
                 contact_views,
                 wp.int32(self._active_velocity_iterations if num_iterations is None else num_iterations),
                 wp.int32(iteration_offset),
-                wp.int32(self.num_worlds),
+                wp.int32(self._partition_count),
                 wp.int32(self.num_joints),
                 self._joint_pgs_enabled,
                 self._copy_state,

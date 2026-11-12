@@ -238,6 +238,7 @@ __all__ = [
     "_constraint_gather_wrenches_kernel",
     "_constraints_to_elements_kernel",
     "_count_and_mark_world_runs_kernel",
+    "_group_bodies_by_island_kernel",
     "_initialize_rigid_topology_rebuild_kernel",
     "_integrate_velocities_kernel",
     "_kinematic_interpolate_substep_kernel",
@@ -409,7 +410,9 @@ def _element_world_id(
     bodies: BodyContainer,
     particle_world_id: wp.array[wp.int32],
     num_bodies: wp.int32,
+    body_group: wp.array[wp.int32],
 ) -> wp.int32:
+    """World of an element's nodes, or with ``body_group`` the group of its first body that has one."""
     seen_node = wp.int32(0)
     for i in range(MAX_BODIES):
         node = element.bodies[i]
@@ -417,11 +420,26 @@ def _element_world_id(
             break
         seen_node = wp.int32(1)
         world_id = _node_world_id(node, bodies, particle_world_id, num_bodies)
-        if world_id >= wp.int32(0):
+        if body_group.shape[0] > 0:
+            if node < num_bodies and body_group[node] >= wp.int32(0):
+                return body_group[node]
+        elif world_id >= wp.int32(0):
             return world_id
     if seen_node != wp.int32(0):
         return wp.int32(0)
     return wp.int32(-1)
+
+
+@wp.kernel(enable_backward=False)
+def _group_bodies_by_island_kernel(
+    bodies: BodyContainer, island: wp.array[wp.int32], group_count: wp.int32, body_group: wp.array[wp.int32]
+):
+    """Give each body that can move the solver block of its island; others have none."""
+    body = wp.tid()
+    group = wp.int32(-1)
+    if bodies.inverse_mass[body] != wp.float32(0.0) and bodies.motion_type[body] != MOTION_KINEMATIC:
+        group = island[body] % group_count
+    body_group[body] = group
 
 
 @wp.kernel(enable_backward=False)
@@ -431,6 +449,7 @@ def _count_and_mark_world_runs_kernel(
     bodies: BodyContainer,
     particle_world_id: wp.array[wp.int32],
     num_bodies: wp.int32,
+    body_group: wp.array[wp.int32],
     # out
     world_element_count: wp.array[wp.int32],  # [nw]
     world_element_offsets_shifted: wp.array[wp.int32],  # [nw+1], will be inclusive-scanned
@@ -445,12 +464,14 @@ def _count_and_mark_world_runs_kernel(
         run_flags[tid] = wp.int32(0)
         return
 
-    world_id = _element_world_id(elements[tid], bodies, particle_world_id, num_bodies)
+    world_id = _element_world_id(elements[tid], bodies, particle_world_id, num_bodies, body_group)
     run_flags[tid] = wp.int32(0)
     if tid == wp.int32(0):
         run_flags[tid] = wp.int32(1)
     else:
-        previous_world_id = _element_world_id(elements[tid - wp.int32(1)], bodies, particle_world_id, num_bodies)
+        previous_world_id = _element_world_id(
+            elements[tid - wp.int32(1)], bodies, particle_world_id, num_bodies, body_group
+        )
         if world_id < previous_world_id:
             run_flags[tid] = wp.int32(1)
 
@@ -490,6 +511,7 @@ def _lower_bound_element_world(
     bodies: BodyContainer,
     particle_world_id: wp.array[wp.int32],
     num_bodies: wp.int32,
+    body_group: wp.array[wp.int32],
     start: wp.int32,
     end: wp.int32,
     target_world: wp.int32,
@@ -498,7 +520,7 @@ def _lower_bound_element_world(
     hi = end
     while lo < hi:
         mid = lo + (hi - lo) / wp.int32(2)
-        world_id = _element_world_id(elements[mid], bodies, particle_world_id, num_bodies)
+        world_id = _element_world_id(elements[mid], bodies, particle_world_id, num_bodies, body_group)
         if world_id < target_world:
             lo = mid + wp.int32(1)
         else:
@@ -512,6 +534,7 @@ def _merge_monotone_world_runs_kernel(
     bodies: BodyContainer,
     particle_world_id: wp.array[wp.int32],
     num_bodies: wp.int32,
+    body_group: wp.array[wp.int32],
     num_worlds: wp.int32,
     world_element_offsets: wp.array[wp.int32],
     num_elements: wp.array[wp.int32],
@@ -531,9 +554,11 @@ def _merge_monotone_world_runs_kernel(
         end = num_elements[0]
         if run + wp.int32(1) < run_count:
             end = run_starts[run + wp.int32(1)]
-        first = _lower_bound_element_world(elements, bodies, particle_world_id, num_bodies, start, end, world_id)
+        first = _lower_bound_element_world(
+            elements, bodies, particle_world_id, num_bodies, body_group, start, end, world_id
+        )
         last = _lower_bound_element_world(
-            elements, bodies, particle_world_id, num_bodies, first, end, world_id + wp.int32(1)
+            elements, bodies, particle_world_id, num_bodies, body_group, first, end, world_id + wp.int32(1)
         )
         cid = first
         while cid < last:
