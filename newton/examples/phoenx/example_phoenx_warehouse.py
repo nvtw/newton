@@ -198,6 +198,7 @@ KIVA_DRIVE_KD = 40.0  # [N*m*s/rad] of a wheel's velocity drive
 BALANCE_HIP_GAIN = wp.constant(1.0)  # [rad/m]
 BALANCE_HIP_DAMPING = wp.constant(0.3)  # [rad*s/m]
 BALANCE_HIP_RANGE = wp.constant(0.35)  # [rad]
+BALANCE_LANES = 32  # one warp per humanoid, one body per lane
 SORT_ARM_LEAD = wp.constant(0.15)  # [rad] most a sorter's arm targets lead the arm
 SORT_ARM_YIELD = wp.constant(0.25)  # [rad] the push waits while the arm is farther behind it
 SORT_ARM_SWEEP = ((0.4, 0.15), (0.2, 0.3), (0.0, 0.5), (-0.2, 0.75), (-0.4, 1.05), (-0.6, 1.4))
@@ -1319,6 +1320,12 @@ def _add_body_momentum(
     return mass, mass * center, mass * wp.spatial_top(body_qd[body])
 
 
+@wp.func
+def _lane_sum(value: float) -> float:
+    """Sum of a value over the block's lanes, in a fixed order."""
+    return wp.tile_sum(wp.tile(value))[0]
+
+
 @wp.kernel(enable_backward=False)
 def _balance_kernel(
     body_q: wp.array[wp.transform],
@@ -1336,17 +1343,22 @@ def _balance_kernel(
     rest_offset: float,
     joint_target_q: wp.array[float],
 ):
-    """Hip strategy of every standing sorter: the hips bend against the center of mass's drift."""
-    sorter = wp.tid()
+    """Hip strategy of every standing sorter: the hips bend against the center of mass's drift.
+
+    One warp per sorter, one body per lane; the tile sums keep the result deterministic.
+    """
+    sorter, lane = wp.tid()
     root = roots[sorter]
-    total = float(0.0)
-    com_x = wp.vec3(0.0)
-    com_v = wp.vec3(0.0)
-    for i in range(body_count):
-        mass, moment, momentum = _add_body_momentum(body_q, body_qd, body_com, body_mass, root + i)
-        total += mass
-        com_x += moment
-        com_v += momentum
+    mass = float(0.0)
+    moment = wp.vec3(0.0)
+    momentum = wp.vec3(0.0)
+    if lane < body_count:
+        mass, moment, momentum = _add_body_momentum(body_q, body_qd, body_com, body_mass, root + lane)
+    total = _lane_sum(mass)
+    com_x = wp.vec3(_lane_sum(moment[0]), _lane_sum(moment[1]), _lane_sum(moment[2]))
+    com_v = wp.vec3(_lane_sum(momentum[0]), _lane_sum(momentum[1]), _lane_sum(momentum[2]))
+    if lane != 0:
+        return
     offset = _hip_balance(
         body_q,
         body_qd,
@@ -1770,6 +1782,7 @@ class Example:
         )
         self.balance_hip_rest = float(G1_JOINT_POS[0])
         self.balance_body_count = int(roots[1] - roots[0]) if len(roots) > 1 else model.body_count - int(roots[0])
+        assert self.balance_body_count <= BALANCE_LANES, "a sorter has more bodies than its balance warp has lanes"
         rest = self.state.body_q.numpy()
         masses = model.body_mass.numpy()
         centers = model.body_com.numpy()
@@ -1831,9 +1844,10 @@ class Example:
     def _sort(self):
         """Spawn packages and set the arm and balance targets for this frame."""
         dyn = self.solver.dynamics.data
-        wp.launch(
+        wp.launch_tiled(
             _balance_kernel,
-            dim=self.sort_q_start.shape[0],
+            dim=[self.sort_q_start.shape[0]],
+            block_dim=BALANCE_LANES,
             inputs=[
                 self.state.body_q,
                 self.state.body_qd,
