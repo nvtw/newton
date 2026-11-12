@@ -57,9 +57,10 @@ def _tree_keys(
     if displacement.shape[0] > 0:
         center += displacement[shape] * 0.5
     # Quantization affects traversal locality only; node bounds remain exact.
-    x = wp.uint64(wp.int32(wp.clamp(wp.floor(center[0] * 100.0) + 524288.0, 0.0, 1048575.0)))
-    y = wp.uint64(wp.int32(wp.clamp(wp.floor(center[1] * 100.0) + 524288.0, 0.0, 1048575.0)))
-    z = wp.uint64(wp.int32(wp.clamp(wp.floor(center[2] * 100.0) + 524288.0, 0.0, 1048575.0)))
+    # 16 bits per axis on a 2 cm grid span 1.3 km; six radix passes sort the 48-bit keys.
+    x = wp.uint64(wp.int32(wp.clamp(wp.floor(center[0] * 50.0) + 32768.0, 0.0, 65535.0)))
+    y = wp.uint64(wp.int32(wp.clamp(wp.floor(center[1] * 50.0) + 32768.0, 0.0, 65535.0)))
+    z = wp.uint64(wp.int32(wp.clamp(wp.floor(center[2] * 50.0) + 32768.0, 0.0, 65535.0)))
     keys[leaf] = (_spread_20(x) << wp.uint64(2)) | (_spread_20(y) << wp.uint64(1)) | _spread_20(z)
     values[leaf] = leaf
 
@@ -255,7 +256,7 @@ class BroadPhaseImplicitTree:
         self.tree = ImplicitBvh(max(1, self.shape_count), device=device, slack=1.0, power_of_two=True)
         self.tree.item_count = self.shape_count
         self.tree.data.item_count = self.shape_count
-        # 60-bit Morton keys on a fixed 1 cm grid; the tree's sort order buffer
+        # 48-bit Morton keys on a fixed 2 cm grid; the tree's sort order buffer
         # holds the sorted leaf -> shape_index permutation.
         self.keys = wp.empty(2 * self.shape_count, dtype=wp.uint64, device=device)
         # Own sort values: the tree's build scratch aliases its node buffer,
@@ -319,7 +320,7 @@ class BroadPhaseImplicitTree:
             device=device,
             record_tape=False,
         )
-        wp.utils.radix_sort_pairs(self.keys, self.values, self.shape_count)
+        wp.utils.radix_sort_pairs(self.keys, self.values, self.shape_count, end_bit=48)
         wp.launch(
             _tree_leaves,
             dim=self.leaf_base,
