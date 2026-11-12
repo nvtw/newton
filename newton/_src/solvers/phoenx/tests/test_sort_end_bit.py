@@ -70,7 +70,25 @@ class TestSortEndBit(unittest.TestCase):
             wp.copy(keys, source_keys, dest_offset=capacity, count=capacity)
             sort_variable_length_int64(keys, values, count, end_bit=41, prefix_flags=flags)
         sentinel = np.iinfo(np.int64).max
-        for active in (0, 1, 4097, 65535, 65536, 131071, 131072, 200001, 524287, 524288, capacity):
+        # Up to 1024 active keys are ranked against each other instead of radix sorted.
+        for active in (
+            0,
+            1,
+            2,
+            37,
+            1023,
+            1024,
+            1025,
+            4097,
+            65535,
+            65536,
+            131071,
+            131072,
+            200001,
+            524287,
+            524288,
+            capacity,
+        ):
             with self.subTest(active=active):
                 count.fill_(active)
                 wp.capture_launch(capture.graph)

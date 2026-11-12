@@ -31,9 +31,7 @@ def active_prefix_sort_levels(count: int) -> int:
 
 
 @wp.kernel(enable_backward=False)
-def _select_active_prefix_kernel(
-    active_length: wp.array[int], count: int, pivots: wp.array[wp.int32], flags: wp.array[wp.int32]
-):
+def _select_active_prefix_kernel(active_length: wp.array[int], count: int, flags: wp.array[wp.int32]):
     # One flag per node of the search tree over the prefix sizes: whether the
     # chosen size ``count >> chosen`` lies at or before the node's pivot.
     node = wp.tid()
@@ -42,28 +40,23 @@ def _select_active_prefix_kernel(
     for shift in range(1, flags.shape[0]):
         if n < (count >> shift):
             chosen = shift
-    flags[node] = wp.int32(1) if chosen <= pivots[node] else wp.int32(0)
-
-
-_PIVOTS: dict[tuple[str, int], wp.array] = {}
-
-
-def _search_pivots(levels: int, device) -> wp.array:
-    """Return the pivots of a balanced search tree over ``levels`` leaves, in preorder."""
-    key = (str(device), levels)
-    if key not in _PIVOTS:
-        pivots: list[int] = []
-
-        def visit(low: int, high: int) -> None:
-            if low < high:
-                middle = (low + high) // 2
-                pivots.append(middle)
-                visit(low, middle)
-                visit(middle + 1, high)
-
-        visit(0, levels - 1)
-        _PIVOTS[key] = wp.array(pivots, dtype=wp.int32, device=device)
-    return _PIVOTS[key]
+    # The pivot of a node of the balanced tree over the sizes, nodes in preorder. A table of
+    # them would be uploaded while a graph is captured, and uploaded again from memory that
+    # is long gone on every replay.
+    low = int(0)
+    high = flags.shape[0] - 1
+    index = int(0)
+    pivot = (low + high) // 2
+    while index != node:
+        # The left subtree holds one node less than its sizes.
+        if node <= index + (pivot - low):
+            high = pivot
+            index += 1
+        else:
+            index += 1 + (pivot - low)
+            low = pivot + 1
+        pivot = (low + high) // 2
+    flags[node] = wp.int32(1) if chosen <= pivot else wp.int32(0)
 
 
 @wp.kernel(enable_backward=False)
@@ -80,6 +73,67 @@ def _restore_sort_scratch_int_kernel(keys: wp.array[int], values: wp.array[int],
     tid = wp.tid()
     keys[prefix + tid] = keys[prefix - 1]
     values[prefix + tid] = values[prefix - 1]
+
+
+#: Active entries up to which one pass that ranks every key against all others beats the
+#: radix sort, whose eight passes over 64-bit keys each cost a launch however few keys there are.
+_RANK_SORT_MAX_ITEMS = 1024
+
+
+@wp.kernel(enable_backward=False)
+def _select_rank_sort_kernel(active_length: wp.array[int], flag: wp.array[wp.int32]):
+    flag[0] = wp.int32(1) if active_length[0] <= wp.static(_RANK_SORT_MAX_ITEMS) else wp.int32(0)
+
+
+@wp.kernel(enable_backward=False)
+def _rank_sort_scatter_kernel(
+    keys: wp.array[wp.int64], values: wp.array[int], active_length: wp.array[int], count: int
+):
+    # Stable: equal keys keep their order. The sorted entries land in the ping-pong half.
+    i = wp.tid()
+    n = active_length[0]
+    if i >= n:
+        return
+    key = keys[i]
+    rank = int(0)
+    for j in range(n):
+        other = keys[j]
+        if other < key or (other == key and j < i):
+            rank += 1
+    keys[count + rank] = key
+    values[count + rank] = values[i]
+
+
+@wp.kernel(enable_backward=False)
+def _rank_sort_scatter_int_kernel(keys: wp.array[int], values: wp.array[int], active_length: wp.array[int], count: int):
+    i = wp.tid()
+    n = active_length[0]
+    if i >= n:
+        return
+    key = keys[i]
+    rank = int(0)
+    for j in range(n):
+        other = keys[j]
+        if other < key or (other == key and j < i):
+            rank += 1
+    keys[count + rank] = key
+    values[count + rank] = values[i]
+
+
+@wp.kernel(enable_backward=False)
+def _rank_sort_gather_kernel(keys: wp.array[wp.int64], values: wp.array[int], active_length: wp.array[int], count: int):
+    i = wp.tid()
+    if i < active_length[0]:
+        keys[i] = keys[count + i]
+        values[i] = values[count + i]
+
+
+@wp.kernel(enable_backward=False)
+def _rank_sort_gather_int_kernel(keys: wp.array[int], values: wp.array[int], active_length: wp.array[int], count: int):
+    i = wp.tid()
+    if i < active_length[0]:
+        keys[i] = keys[count + i]
+        values[i] = values[count + i]
 
 
 def dispatch_active_prefix(
@@ -104,7 +158,7 @@ def dispatch_active_prefix(
     wp.launch(
         _select_active_prefix_kernel,
         dim=levels - 1,
-        inputs=[active_length, count, _search_pivots(levels, flags.device)],
+        inputs=[active_length, count],
         outputs=[flags],
         device=flags.device,
     )
@@ -170,11 +224,32 @@ def radix_sort_active_prefix(
     ``count = keys.shape[0] // 2`` and ``flags`` must contain
     :func:`active_prefix_sort_levels` entries. The sentinel must sort after
     every active key. Afterwards all of ``keys[:count]`` is sorted and its
-    tail again holds the sentinel; tail values are unspecified.
+    tail again holds the sentinel; tail values are unspecified. Few active
+    entries are ranked against each other instead, in two launches.
     """
-    dispatch_active_prefix(
-        active_length, keys.shape[0] // 2, flags, lambda prefix: radix_sort_prefix(keys, values, prefix, end_bit)
-    )
+    count = keys.shape[0] // 2
+
+    def radix() -> None:
+        dispatch_active_prefix(
+            active_length, count, flags, lambda prefix: radix_sort_prefix(keys, values, prefix, end_bit)
+        )
+
+    if not keys.device.is_cuda or count <= _RANK_SORT_MAX_ITEMS:
+        radix()
+        return
+    # The last flag is free: the search tree over the prefix sizes uses one fewer.
+    few = flags[flags.shape[0] - 1 :]
+    wp.launch(_select_rank_sort_kernel, dim=1, inputs=[active_length], outputs=[few], device=keys.device)
+
+    def rank() -> None:
+        wide = keys.dtype == wp.int64
+        for kernel in (
+            _rank_sort_scatter_kernel if wide else _rank_sort_scatter_int_kernel,
+            _rank_sort_gather_kernel if wide else _rank_sort_gather_int_kernel,
+        ):
+            wp.launch(kernel, dim=_RANK_SORT_MAX_ITEMS, inputs=[keys, values, active_length, count], device=keys.device)
+
+    wp.capture_if(few, on_true=rank, on_false=radix)
 
 
 __all__ = ["active_prefix_sort_levels", "dispatch_active_prefix", "radix_sort_active_prefix", "radix_sort_prefix"]
