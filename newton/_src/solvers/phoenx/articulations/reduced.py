@@ -4217,6 +4217,8 @@ class ReducedArticulationSystem:
         # cooperative walk reads; the per-depth launches use host-built joint lists.
         capacity = getattr(model, "_dynamic_capacity", None)
         self.runtime_slots = bool(capacity is not None and capacity.slot_size)
+        #: Runtime instances own their state, whether in slots or built with their template's tree.
+        self.runtime_instances = self.runtime_slots or bool(capacity is not None and capacity.instance_counts)
         self.use_warp_factor = bool(
             self.device.is_cuda
             and (
@@ -5017,11 +5019,12 @@ class ReducedPhoenXArticulation:
         self._kinematics_current = False
         # Rows imported from the caller's state; runtime instance slots, if any, follow them.
         capacity = getattr(model, "_dynamic_capacity", None)
-        if capacity is not None and capacity.slot_size:
+        if self.system.runtime_instances:
+            first_joint = capacity.slot_joint_start if capacity.slot_size else capacity.instance_joint_start
             self._imported_rows = (
-                int(model.joint_q_start.numpy()[capacity.slot_joint_start]),
-                int(model.joint_qd_start.numpy()[capacity.slot_joint_start]),
-                capacity.slot_body_start,
+                int(model.joint_q_start.numpy()[first_joint]),
+                int(model.joint_qd_start.numpy()[first_joint]),
+                capacity.slot_body_start if capacity.slot_size else capacity.instance_body_start,
             )
         else:
             self._imported_rows = (
@@ -5217,10 +5220,10 @@ class ReducedPhoenXArticulation:
         # instance slots, the last model rows, change topology between steps and own their state:
         # their scenes rebuild the buffers every step from the PhoenX body poses, which spawns
         # write, and import only the rows before the slots.
-        self._kinematics_current = state_is_continuation and not self.system.runtime_slots
+        self._kinematics_current = state_is_continuation and not self.system.runtime_instances
         # A continuation also keeps the factor the last relax step left at this pose.
         self._relaxed_pose_factored = self._relaxed_pose_factored and self._kinematics_current
-        if self.system.runtime_slots:
+        if self.system.runtime_instances:
             wp.launch(
                 _phoenx_body_poses_kernel,
                 dim=int(self.model.body_count),

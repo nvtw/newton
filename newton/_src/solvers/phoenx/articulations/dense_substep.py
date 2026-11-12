@@ -1490,6 +1490,9 @@ def make_dense_substep_kernel(
         joint_start = data.articulation_start[articulation]
         joint_end = data.articulation_end[articulation]
         joint_count = joint_end - joint_start
+        if joint_count <= wp.int32(0):
+            # A runtime instance that is not in the scene: its whole block leaves.
+            return
         dof_start = joint_qd_start[joint_start]
         n = joint_qd_start[joint_end] - dof_start
         template = dense.articulation_template[articulation]

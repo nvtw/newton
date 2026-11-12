@@ -5854,7 +5854,7 @@ class ModelBuilder:
         joints: int = 0,
         max_dynamic_shapes_per_world: int | None = None,
         prototype_shapes: Sequence[int] = (),
-        articulations: int = 0,
+        articulations: int | Sequence[int] = 0,
         articulation_templates: Sequence[ModelBuilder] = (),
         articulation_coordinates: str = "maximal",
     ) -> None:
@@ -5873,6 +5873,11 @@ class ModelBuilder:
         articulation sized for the largest template, and templates must be joint trees. Shapes
         always come from the reserved shape rows.
 
+        A count per template instead of one count reserves that many instances of each template
+        with the template's own joint tree. The solver then simulates them like the
+        articulations the model was built with, which is the fastest way to simulate many
+        robots that come and go, at the price of instances that cannot change their template.
+
         .. experimental::
 
             Runtime creation may change without a deprecation period.
@@ -5885,7 +5890,8 @@ class ModelBuilder:
                 broad-phase buffers. Defaults to ``shapes``.
             prototype_shapes: Collision shapes whose mesh or convex-hull geometry runtime shapes may
                 reuse. They only provide geometry and neither collide nor render.
-            articulations: Most articulation instances alive at once.
+            articulations: Most articulation instances alive at once, or with ``"reduced"``
+                coordinates the most instances of each template.
             articulation_templates: Builders added by index with
                 :func:`newton.solvers.phoenx.add_articulation`. Supports fixed, revolute, prismatic,
                 ball, and D6 joints.
@@ -5910,6 +5916,12 @@ class ModelBuilder:
                 raise ValueError(f"Prototype shape {shape} is out of range")
             if not self.shape_flags[shape] & ShapeFlags.COLLIDE_SHAPES:
                 raise ValueError(f"Prototype shape {shape} must collide with shapes to carry collision data")
+        instance_counts: tuple[int, ...] = ()
+        if not isinstance(articulations, int):
+            instance_counts = tuple(int(count) for count in articulations)
+            if len(instance_counts) != len(articulation_templates) or min(instance_counts, default=0) < 0:
+                raise ValueError("articulations must hold one non-negative count per template")
+            articulations = sum(instance_counts)
         if articulations < 0:
             raise ValueError(f"articulations must be non-negative, got {articulations}")
         if articulation_templates and not articulations:
@@ -5919,6 +5931,8 @@ class ModelBuilder:
                 f"articulation_coordinates must be 'maximal' or 'reduced', got {articulation_coordinates!r}"
             )
         reduced = articulation_coordinates == "reduced"
+        if instance_counts and not reduced:
+            raise ValueError("A count per template requires articulation_coordinates='reduced'")
         templates = []
         for template in articulation_templates:
             data, mesh_prototypes = self._articulation_template(template)
@@ -5960,6 +5974,8 @@ class ModelBuilder:
         # deepest tree of its size, so any template tree laid out parent first fits its tables;
         # one spare link always remains to absorb the unused part of the slot's tables.
         slot_size = max((len(t["bodies"]) for t in templates), default=-1) + 1 if reduced else 0
+        if instance_counts:
+            slot_size = 0
         slot_body_start, slot_joint_start = self.body_count, self.joint_count
         parked = wp.transform(wp.vec3(0.0, 0.0, -1.0e4), wp.quat_identity())
         for slot in range(articulations if slot_size else 0):
@@ -5982,6 +5998,10 @@ class ModelBuilder:
                     )
                 previous = body
             self.add_articulation(list(range(first, self.joint_count)), label=f"articulation_slot_{slot}")
+        instance_body_start, instance_joint_start = self.body_count, self.joint_count
+        for index, count in enumerate(instance_counts):
+            for instance in range(count):
+                self._add_template_instance(templates[index], parked, f"articulation_{index}_{instance}")
         self._dynamic_capacity = {
             "body_start": body_start,
             "body_count": bodies,
@@ -5997,7 +6017,66 @@ class ModelBuilder:
             "slot_size": slot_size,
             "slot_body_start": slot_body_start,
             "slot_joint_start": slot_joint_start,
+            "instance_counts": instance_counts,
+            "instance_body_start": instance_body_start,
+            "instance_joint_start": instance_joint_start,
         }
+
+    def _add_template_instance(self, data: dict[str, list], xform: Transform, label: str) -> None:
+        """Add the joint tree of an articulation template without its shapes, lanes in order."""
+        tree = data["tree"]
+        first = self.joint_count
+        lane_body: list[int] = []
+        for lane, template_body in enumerate(tree["body"]):
+            desc = data["bodies"][template_body]
+            body = self.add_link(
+                xform=xform * desc["pose"],
+                com=desc["com"],
+                inertia=desc["inertia"],
+                mass=desc["mass"],
+                lock_inertia=True,
+                label=f"{label}_{lane}",
+            )
+            lane_body.append(body)
+            if tree["joint"][lane] < 0:
+                self.add_joint_free(body, label=f"{label}_root")
+                continue
+            joint = data["joints"][tree["joint"][lane]]
+            parent = tree["parent"][lane]
+            n_lin = joint["linear_count"]
+            dofs = [
+                self.JointDofConfig(
+                    axis=joint["axes"][k],
+                    limit_lower=joint["limit_lower"][k],
+                    limit_upper=joint["limit_upper"][k],
+                    limit_ke=joint["limit_ke"][k],
+                    limit_kd=joint["limit_kd"][k],
+                    target_ke=joint["target_ke"][k],
+                    target_kd=joint["target_kd"][k],
+                    damping=joint["damping"][k],
+                    armature=joint["armature"][k],
+                    effort_limit=MAXVAL,
+                    velocity_limit=joint["velocity_limit"][k],
+                    friction=joint["friction"][k],
+                    actuator_mode=JointTargetMode(joint["target_mode"][k]),
+                )
+                for k in range(n_lin + joint["angular_count"])
+            ]
+            index = self.add_joint(
+                JointType(joint["type"]),
+                lane_body[parent] if parent >= 0 else -1,
+                body,
+                linear_axes=dofs[:n_lin],
+                angular_axes=dofs[n_lin:],
+                # Anchored joints follow the spawn pose.
+                parent_xform=joint["parent_xform"] if parent >= 0 else xform * joint["parent_xform"],
+                child_xform=joint["child_xform"],
+                collision_filter_parent=False,
+                label=f"{label}_{lane}",
+            )
+            start = self.joint_q_start[index]
+            self.joint_q[start : start + len(joint["q"])] = joint["q"]
+        self.add_articulation(list(range(first, self.joint_count)), label=label)
 
     def _articulation_template(self, template: ModelBuilder) -> tuple[dict[str, list], list[int]]:
         """Describe ``template`` relative to its first body for runtime spawning.

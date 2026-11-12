@@ -1,0 +1,1 @@
+Add per-template instance counts to `ModelBuilder.reserve_dynamic_capacity(articulations=[...], articulation_coordinates="reduced")`, which `SolverPhoenX` simulates on its fused reduced-coordinate path like articulations built with the model.

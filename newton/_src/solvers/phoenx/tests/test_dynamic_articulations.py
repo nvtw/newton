@@ -295,11 +295,11 @@ def _spawn_posed_kernel(dyn: phoenx.DynamicsData, templates: wp.array[int], x: w
 class _ReducedScene:
     """Generalized-coordinate instance slots, stepped like any reduced scene in one captured graph."""
 
-    def __init__(self, slots: int, templates):
+    def __init__(self, slots: int | list[int], templates):
         builder = newton.ModelBuilder()
         builder.add_ground_plane()
         builder.reserve_dynamic_capacity(
-            shapes=slots * 16,
+            shapes=int(np.sum(slots)) * 16,
             articulations=slots,
             articulation_templates=templates,
             articulation_coordinates="reduced",
@@ -432,6 +432,91 @@ def _spider_template() -> newton.ModelBuilder:
             )
             parent, base = body, base + 0.24
     return builder
+
+
+@unittest.skipUnless(wp.is_cuda_available(), "runtime creation tests require CUDA graph capture")
+class TestBuiltRuntimeArticulations(unittest.TestCase):
+    """Instances reserved per template keep their joint tree, which the fused substep solves."""
+
+    @staticmethod
+    def _bodies(scene: _ReducedScene, instance: int, count: int) -> np.ndarray:
+        start = int(scene.dyn.data.instance_body_start.numpy()[instance])
+        return scene.state_0.body_q.numpy()[start : start + count]
+
+    def test_instances_fall_and_rest_on_the_fused_substep(self):
+        scene = _ReducedScene([2, 1, 2], [_ragdoll_template(), _chain_template(), _spider_template()])
+        self.assertIsNotNone(scene.solver._reduced_articulation.fused_substep)
+        instances = scene.spawn([0, 1, 2, 2], [-3.0, 0.0, 3.0, 6.0])
+        np.testing.assert_array_equal(instances, [0, 2, 3, 4])  # each template draws on its own instances
+        scene.run(150)
+        for instance, bodies in zip(instances, (5, 4, 9, 9), strict=True):
+            q = self._bodies(scene, instance, bodies)
+            self.assertTrue(np.isfinite(q).all())
+            self.assertLess(float(q[:, 2].max()), 0.6, f"instance {instance} did not come to rest on the ground")
+            self.assertGreater(float(q[:, 2].min()), 0.0, f"instance {instance} sank through the ground")
+        self.assertLess(float(self._bodies(scene, 1, 5)[:, 2].max()), -1.0e3)  # the spare ragdoll stays parked
+        self.assertLess(scene.joint_gap(), 1.0e-4)
+        self.assertEqual(int(scene.dyn.error_count.numpy()[0]), 0)
+
+    def test_removed_instance_is_inert_and_only_its_template_reuses_it(self):
+        scene = _ReducedScene([1, 1], [_chain_template(), _spider_template()])
+        scene.spawn([0, 1], [-2.0, 2.0])
+        scene.run(60)
+        contacts = int(scene.contacts.rigid_contact_count.numpy()[0])
+        wp.launch(_remove_kernel, dim=1, inputs=[scene.dyn.data, wp.array([1], dtype=int)])
+        scene.run(2)  # the instance passes quarantine
+        left = self._bodies(scene, 1, 9).copy()
+        scene.run(10)
+        np.testing.assert_array_equal(self._bodies(scene, 1, 9), left)
+        self.assertLess(int(scene.contacts.rigid_contact_count.numpy()[0]), contacts)  # its shapes are gone
+        # The chain's only instance is in the scene; the spider's is free again.
+        np.testing.assert_array_equal(scene.spawn([0, 1], [5.0, 5.0]), [-1, 1])
+        self.assertEqual(int(scene.dyn.error_count.numpy()[0]), 1)
+        scene.run(120)
+        q = self._bodies(scene, 1, 9)
+        self.assertTrue(np.isfinite(q).all())
+        self.assertLess(float(q[:, 2].max()), 0.6)
+        self.assertGreater(float(q[:, 2].min()), 0.0)
+        self.assertLess(scene.joint_gap(), 1.0e-4)
+
+    def test_respawned_instance_moves_like_a_fresh_one(self):
+        def fall(respawn: bool) -> np.ndarray:
+            scene = _ReducedScene([1], [_ragdoll_template()])
+            if respawn:
+                scene.spawn([0], [1.0])
+                scene.run(40)  # it lands and holds contacts
+                wp.launch(_remove_kernel, dim=1, inputs=[scene.dyn.data, wp.array([0], dtype=int)])
+                scene.run(2)
+            np.testing.assert_array_equal(scene.spawn([0], [-2.0]), [0])
+            scene.run(60)
+            return self._bodies(scene, 0, 5).copy()
+
+        np.testing.assert_array_equal(fall(True), fall(False))
+
+    def test_anchored_instance_follows_the_spawn_pose(self):
+        scene = _ReducedScene([1], [_pendulum_template()])
+        self.assertIsNotNone(scene.solver._reduced_articulation.fused_substep)
+        scene.spawn([0], [1.0])
+        pose = wp.transform(wp.vec3(1.0, 0.0, 1.5), wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), 0.4))
+        pivot = np.asarray(wp.transform_point(pose, wp.vec3(-0.5, 0.0, 0.0)))
+        scene.run(20)
+        q = self._bodies(scene, 0, 1)[0]
+        anchor = wp.transform_point(wp.transform(*q.tolist()), wp.vec3(-0.5, 0.0, 0.0))
+        np.testing.assert_allclose(np.asarray(anchor), pivot, atol=1.0e-4)
+        self.assertLess(float(q[2]), pivot[2] - 0.3)  # swung down
+
+    def test_counts_per_template_are_validated(self):
+        for coordinates, counts in (("maximal", [1]), ("reduced", [1, 1]), ("reduced", [-1])):
+            builder = newton.ModelBuilder()
+            with self.assertRaises(ValueError):
+                builder.reserve_dynamic_capacity(
+                    bodies=8,
+                    shapes=8,
+                    joints=8,
+                    articulations=counts,
+                    articulation_templates=[_chain_template()],
+                    articulation_coordinates=coordinates,
+                )
 
 
 if __name__ == "__main__":

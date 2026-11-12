@@ -899,7 +899,7 @@ class SolverPhoenX(SolverBase):
                 raise ValueError("Runtime body creation does not support deformables")
             if dynamic_capacity.joint_count and (joint_solver != "block_pgs" or direct_joint_mask is not None):
                 raise ValueError("Runtime joint creation requires joint_mode='maximal_pgs' without direct_joint_mask")
-            if dynamic_capacity.slot_size and articulation_mode != "reduced":
+            if (dynamic_capacity.slot_size or dynamic_capacity.instance_counts) and articulation_mode != "reduced":
                 raise ValueError("Reduced articulation slots require joint_mode='reduced'")
         self._body_fresh = wp.zeros(
             num_bodies_phoenx if dynamic_capacity is not None else 0, dtype=wp.int32, device=self.device
@@ -1317,6 +1317,15 @@ class SolverPhoenX(SolverBase):
                         cid = int(joint_idx_to_cid[joint])
                         if owned and cid >= 0:
                             joint_pgs_enabled[cid] = 0
+                if (
+                    dynamic_capacity is not None
+                    and dynamic_capacity.instance_counts
+                    and self._reduced_articulation.fused_substep is None
+                ):
+                    raise ValueError(
+                        "Articulation instances reserved per template require the fused dense substep: "
+                        "a CUDA device, reduced_backend 'auto' or 'dense', and a scene it can run"
+                    )
                 self.world.set_reduced_articulation(self._reduced_articulation, joint_pgs_enabled)
                 if dynamic_capacity is not None and dynamic_capacity.body_count:
                     # Reserved rows are static until filled; runtime bodies need gravity and integration.

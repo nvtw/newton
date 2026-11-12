@@ -331,6 +331,10 @@ class _DynamicCapacity:
     """Bodies and joints of every reduced instance slot; slot ``s`` starts ``s * slot_size`` rows in."""
     slot_body_start: int = 0
     slot_joint_start: int = 0
+    instance_counts: tuple[int, ...] = ()
+    """Reduced instances built per template, each with its template's joint tree; empty with shared slots."""
+    instance_body_start: int = 0
+    instance_joint_start: int = 0
 
 
 class Model:

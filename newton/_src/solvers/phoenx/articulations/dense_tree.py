@@ -1082,6 +1082,9 @@ def _make_dense_factor_kernel(max_dofs: int, joint_capacity: int, entry_capacity
         articulation = bucket_articulation[block]
         joint_start = articulation_start[articulation]
         joint_count = articulation_end[articulation] - joint_start
+        if joint_count <= wp.int32(0):
+            # A runtime instance that is not in the scene: its whole block leaves.
+            return
         dof_start = joint_qd_start[joint_start]
         n = joint_qd_start[articulation_end[articulation]] - dof_start
         shared = shared_base(template_image, template_image_start[dense.articulation_template[articulation]])

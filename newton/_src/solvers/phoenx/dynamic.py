@@ -342,6 +342,16 @@ class DynamicsData:
     slot_joint_start: wp.int32
     #: Runtime shapes of each reduced instance, removed with it.
     instance_shapes: wp.array2d[wp.int32]
+    #: Nonzero when every reduced instance is built with the joint tree of one template:
+    #: template ``t`` owns the instances from ``template_instance_start[t]`` on, and the free
+    #: ones among them are ``template_free_start[t]`` entries into the pool's free list.
+    built_instances: wp.int32
+    template_instance_start: wp.array[wp.int32]
+    template_free_start: wp.array[wp.int32]
+    template_free_next: wp.array[wp.int32]
+    #: First model body and joint of each reduced instance.
+    instance_body_start: wp.array[wp.int32]
+    instance_joint_start: wp.array[wp.int32]
 
 
 # ---------------------------------------------------------------------------
@@ -540,19 +550,38 @@ def _spawn_body(template_body: BodyDesc, pose: wp.transform, velocity: wp.spatia
 
 
 @wp.func
+def _has_reduced_instances(dyn: DynamicsData) -> wp.bool:
+    return dyn.slot_size > 0 or dyn.built_instances != 0
+
+
+@wp.func
+def _alloc_reduced(dyn: DynamicsData, template: wp.int32) -> wp.int32:
+    """Claim a free reduced instance that can hold ``template``, or ``-1``."""
+    if dyn.built_instances == 0:
+        return _pool_alloc(dyn.articulation_pool)
+    first = dyn.template_free_start[template]
+    i = wp.atomic_add(dyn.template_free_next, template, 1)
+    if i >= dyn.template_free_start[template + 1] - first:
+        return -1
+    instance = dyn.articulation_pool.free_list[first + i]
+    dyn.articulation_pool.state[instance] = _ADDED
+    return instance
+
+
+@wp.func
 def _add_reduced(
     dyn: DynamicsData, template: wp.int32, pose: wp.transform, velocity: wp.spatial_vector, world: wp.int32
 ) -> wp.int32:
-    """Claim a reduced instance slot; the commit lays the template tree into it."""
+    """Claim a reduced instance; the commit lays the template tree into it."""
     lanes = dyn.template_tree_count[template]
-    if lanes <= 0 or lanes > dyn.slot_size or world < 0 or world >= dyn.world_count:
+    if lanes <= 0 or (dyn.built_instances == 0 and lanes > dyn.slot_size) or world < 0 or world >= dyn.world_count:
         return _fail(dyn)
-    instance = _pool_alloc(dyn.articulation_pool)
+    instance = _alloc_reduced(dyn, template)
     if instance < 0:
         return _fail(dyn)
     _clear_instance_maps(dyn, instance)
-    b0 = dyn.slot_body_start + instance * dyn.slot_size
-    j0 = dyn.slot_joint_start + instance * dyn.slot_size
+    b0 = dyn.instance_body_start[instance]
+    j0 = dyn.instance_joint_start[instance]
     for lane in range(lanes):
         dyn.articulation_bodies[instance, dyn.template_tree_body[template, lane]] = b0 + lane
         dyn.body_world[b0 + lane] = world
@@ -584,7 +613,8 @@ def add_articulation(
     The instance is simulated from the next :meth:`~newton.solvers.SolverPhoenX.step` on, in the coordinates chosen by
     ``articulation_coordinates`` in :meth:`~newton.ModelBuilder.reserve_dynamic_capacity`. Its
     joints start at their template coordinates; drive targets come from :class:`~newton.Control`
-    at the rows of :func:`articulation_joint`.
+    at the rows of :func:`articulation_joint`. With instances reserved per template, the call
+    fails once every instance of ``template`` is in the scene.
 
     Args:
         dyn: ``solver.dynamics.data``.
@@ -596,10 +626,11 @@ def add_articulation(
     """
     if template < 0 or template >= dyn.template_body_start.shape[0] - 1:
         return _fail(dyn)
-    if dyn.slot_size == 0 and (world < 0 or world >= dyn.world_count):
+    reduced = _has_reduced_instances(dyn)
+    if not reduced and (world < 0 or world >= dyn.world_count):
         return _fail(dyn)
     instance = wp.int32(-1)
-    if dyn.slot_size > 0:
+    if reduced:
         instance = _add_reduced(dyn, template, pose, velocity, world)
     else:
         instance = _pool_alloc(dyn.articulation_pool)
@@ -611,7 +642,7 @@ def add_articulation(
     dyn.articulation_pose[instance] = pose
     dyn.articulation_velocity[instance] = velocity
     dyn.articulation_world[instance] = world
-    if dyn.slot_size > 0:
+    if reduced:
         return instance
     _clear_instance_maps(dyn, instance)
 
@@ -667,7 +698,7 @@ def remove_articulation(dyn: DynamicsData, instance: wp.int32) -> wp.bool:
     if not _pool_release(dyn.articulation_pool, instance):
         wp.atomic_add(dyn.error_count, 0, 1)
         return False
-    if dyn.slot_size > 0:
+    if _has_reduced_instances(dyn):
         _release_instance_shapes(dyn, instance)
     else:
         _remove_articulation_rows(dyn, instance)
@@ -1520,6 +1551,80 @@ def _spawn_reduced_kernel(
         )
 
 
+@wp.kernel(enable_backward=False)
+def _spawn_built_kernel(dyn: DynamicsData, bodies: _BodyRows, joints: _JointRows, slots: ReducedSlots):
+    """Pose each added instance that is built with its template's tree, one thread per lane."""
+    tid = wp.tid()
+    size = dyn.articulation_bodies.shape[1]
+    instance = tid // size
+    lane = tid - instance * size
+    if dyn.articulation_pool.state[instance] != _ADDED:
+        return
+    template = dyn.articulation_template[instance]
+    lanes = dyn.template_tree_count[template]
+    if lane >= lanes:
+        return
+    body = dyn.instance_body_start[instance] + lane
+    joint = dyn.instance_joint_start[instance] + lane
+    pose = dyn.articulation_pose[instance]
+    bdesc = _spawn_body(
+        dyn.template_bodies[dyn.template_body_start[template] + dyn.template_tree_body[template, lane]],
+        pose,
+        dyn.articulation_velocity[instance],
+        dyn.articulation_world[instance],
+    )
+    _write_body(bodies, body, bdesc)
+    bodies.bodies.motion_type[body + 1] = _ARTICULATED
+    slots.body_q[body] = bdesc.pose
+    slots.body_qd[body] = bdesc.velocity
+    # No contact between trees outlives the instance that held it.
+    reduced = bodies.bodies.reduced
+    reduced.carried_wrench[body] = wp.spatial_vector()
+    reduced.deferred_wrench[body] = wp.spatial_vector()
+    reduced.biased_wrench[body] = wp.spatial_vector()
+
+    q = slots.joint_q_start[joint]
+    qd = joints.qd_start[joint]
+    for k in range(joints.qd_start[joint + 1] - qd):
+        slots.joint_qd[qd + k] = 0.0
+        reduced.deferred_rate[qd + k] = 0.0
+    local_joint = dyn.template_tree_joint[template, lane]
+    if local_joint < 0:  # floating root: the free joint holds the root body's pose and motion
+        position = wp.transform_get_translation(bdesc.pose)
+        rotation = wp.transform_get_rotation(bdesc.pose)
+        v = wp.spatial_top(bdesc.velocity)
+        w = wp.spatial_bottom(bdesc.velocity)
+        for k in range(3):
+            slots.joint_q[q + k] = position[k]
+            slots.joint_qd[qd + k] = v[k]
+            slots.joint_qd[qd + 3 + k] = w[k]
+        for k in range(4):
+            slots.joint_q[q + 3 + k] = rotation[k]
+    else:
+        tj = dyn.template_joint_start[template] + local_joint
+        for k in range(slots.joint_q_start[joint + 1] - q):
+            slots.joint_q[q + k] = slots.template_joint_q[tj, k]
+        if lane == 0:  # anchored to the world at the spawn pose
+            joints.X_p[joint] = pose * dyn.template_joints[tj].parent_xform
+    if lane == 0:
+        a = slots.articulation + instance
+        slots.articulation_end[a] = slots.articulation_start[a] + lanes
+        reduced.deferred_pending[a] = 0
+
+
+@wp.kernel(enable_backward=False)
+def _template_free_lists_kernel(dyn: DynamicsData, free_prefix: wp.array[wp.int32]):
+    """Find each template's free instances in the pool's free list, which is sorted by instance."""
+    template = wp.tid()
+    first = dyn.template_instance_start[template]
+    start = dyn.articulation_pool.counts[1]
+    if first < free_prefix.shape[0]:
+        start = free_prefix[first]
+    dyn.template_free_start[template] = start
+    if template < dyn.template_free_next.shape[0]:
+        dyn.template_free_next[template] = 0
+
+
 @wp.func
 def _empty_slot(slots: ReducedSlots, joint_type: wp.array[wp.int32], instance: wp.int32):
     """Detach a slot from the reduced solver: no joints, no depth lanes, a fixed root."""
@@ -1542,12 +1647,27 @@ def _commit_articulations_kernel(
     dyn: DynamicsData,
     slots: ReducedSlots,
     joint_type: wp.array[wp.int32],
+    qd_start: wp.array[wp.int32],
+    bodies: BodyContainer,
     active: wp.array[wp.int32],
     free: wp.array[wp.int32],
 ):
     slot = wp.tid()
     old = _resolve(dyn.articulation_pool, slot, active, free)
-    if dyn.slot_size > 0:
+    if dyn.built_instances != 0:
+        if old == _REMOVED:
+            # An articulation without joints: the solver leaves its bodies where they are.
+            a = slots.articulation + slot
+            first = slots.articulation_start[a]
+            for dof in range(qd_start[first], qd_start[slots.articulation_end[a]]):
+                slots.joint_qd[dof] = 0.0
+            for lane in range(slots.articulation_end[a] - first):
+                body = dyn.instance_body_start[slot] + lane
+                slots.body_qd[body] = wp.spatial_vector()
+                bodies.velocity[body + 1] = wp.vec3(0.0)
+                bodies.angular_velocity[body + 1] = wp.vec3(0.0)
+            slots.articulation_end[a] = first
+    elif dyn.slot_size > 0:
         if old == _REMOVED:
             _empty_slot(slots, joint_type, slot)
         # Leaving quarantine: no contact of the slot's last occupant can be solved anymore.
@@ -1718,7 +1838,7 @@ class Dynamics:
         self._shape_rows = shape_rows
 
         joint_rows = _JointRows()
-        if capacity.joint_count or capacity.slot_size:
+        if capacity.joint_count or capacity.slot_size or capacity.instance_counts:
             _bind(
                 joint_rows,
                 model,
@@ -1850,7 +1970,8 @@ class Dynamics:
         child_start = np.zeros((len(templates), 33), dtype=np.int32)
         for t, template in enumerate(templates):
             tree = template.get("tree")
-            if (projector is None and not self.capacity.slot_size) or tree is None or not template["joints"]:
+            reduced = self.capacity.slot_size or self.capacity.instance_counts
+            if (projector is None and not reduced) or tree is None or not template["joints"]:
                 continue
             n = len(tree["body"])
             tree_count[t] = n
@@ -1883,6 +2004,22 @@ class Dynamics:
         d.slot_size = wp.int32(self.capacity.slot_size)
         d.slot_body_start = wp.int32(self.capacity.slot_body_start if self.capacity.slot_size else 0)
         d.slot_joint_start = wp.int32(self.capacity.slot_joint_start if self.capacity.slot_size else 0)
+        # First rows of each reduced instance: equal slots, or the trees built per template.
+        counts = self.capacity.instance_counts
+        first = np.arange(count, dtype=np.int32) * self.capacity.slot_size
+        body_start, joint_start = self.capacity.slot_body_start + first, self.capacity.slot_joint_start + first
+        if counts:
+            sizes = np.repeat([len(t["bodies"]) for t in templates], counts)
+            first = np.concatenate([[0], np.cumsum(sizes)[:-1]]).astype(np.int32)
+            body_start = self.capacity.instance_body_start + first
+            joint_start = self.capacity.instance_joint_start + first
+        d.built_instances = wp.int32(1 if counts else 0)
+        d.instance_body_start = wp.array(body_start[:count], dtype=wp.int32, device=device)
+        d.instance_joint_start = wp.array(joint_start[:count], dtype=wp.int32, device=device)
+        starts = np.concatenate([[0], np.cumsum(counts)]).astype(np.int32)
+        d.template_instance_start = wp.array(starts, dtype=wp.int32, device=device)
+        d.template_free_start = wp.array(starts, dtype=wp.int32, device=device)  # every instance starts free
+        d.template_free_next = wp.zeros(max(1, len(counts)), dtype=wp.int32, device=device)
         self._slots = self._init_slots(templates)
 
     def _init_slots(self, templates) -> ReducedSlots:
@@ -1891,17 +2028,32 @@ class Dynamics:
         device = self._solver.model.device
         slots = ReducedSlots()
         self._clear_slot_caches = False
-        if not capacity.slot_size:
+        if not capacity.slot_size and not capacity.instance_counts:
             return slots
         reduced = self._solver._reduced_articulation
         system, data = reduced.system, reduced.bodies.reduced
         starts = reduced.model.articulation_start.numpy()[: reduced.model.articulation_count]
-        first = np.flatnonzero(starts == capacity.slot_joint_start)
+        first_joint = capacity.slot_joint_start if capacity.slot_size else capacity.instance_joint_start
+        first = np.flatnonzero(starts == first_joint)
         if first.size != 1:
             raise RuntimeError("reduced articulation slots were not found in the reduced solver")
         slots.articulation = int(first[0])
         slots.articulation_start = data.articulation_start
         slots.articulation_end = data.articulation_end
+        if capacity.instance_counts:
+            # Built instances keep their tables; spawning only poses them.
+            _bind(slots, reduced.state, ("joint_q", "joint_qd", "body_q", "body_qd"))
+            slots.joint_q_start = reduced.model.joint_q_start
+            joint_q = np.zeros((max(1, sum(len(t["joints"]) for t in templates)), 7), np.float32)
+            for i, j in enumerate(j for t in templates for j in t["joints"]):
+                joint_q[i, : len(j["q"])] = j["q"]
+            slots.template_joint_q = wp.array(joint_q, dtype=wp.float32, device=device)
+            ends = data.articulation_end.numpy()
+            ends[slots.articulation : slots.articulation + capacity.articulation_count] = starts[slots.articulation :][
+                : capacity.articulation_count
+            ]
+            data.articulation_end.assign(ends)
+            return slots
         slots.depth_start = system.advance_articulation_depth_start
         slots.depth_joint = system.advance_articulation_depth_joint
         slots.parent_lane = system.advance_joint_parent_lane
@@ -1960,7 +2112,14 @@ class Dynamics:
         count = self.articulations.capacity
         if count:
             # Instances are laid out while still marked added; the state commit follows.
-            if self.capacity.slot_size:
+            if self.capacity.instance_counts:
+                wp.launch(
+                    _spawn_built_kernel,
+                    dim=count * d.articulation_bodies.shape[1],
+                    inputs=[d, self._body_rows, self._joint_rows, self._slots],
+                    device=device,
+                )
+            elif self.capacity.slot_size:
                 wp.launch(
                     _spawn_reduced_kernel,
                     dim=count * self.capacity.slot_size,
@@ -1977,7 +2136,15 @@ class Dynamics:
             wp.launch(
                 _commit_articulations_kernel,
                 dim=count,
-                inputs=[d, self._slots, self._joint_rows.type, self.articulations.active, self.articulations.free],
+                inputs=[
+                    d,
+                    self._slots,
+                    self._joint_rows.type,
+                    self._joint_rows.qd_start,
+                    self._body_rows.bodies,
+                    self.articulations.active,
+                    self.articulations.free,
+                ],
                 device=device,
             )
             if self._clear_slot_caches:
@@ -1988,6 +2155,13 @@ class Dynamics:
                     device=device,
                 )
             self.articulations.rebuild_lists()
+            if self.capacity.instance_counts:
+                wp.launch(
+                    _template_free_lists_kernel,
+                    dim=d.template_free_start.shape[0],
+                    inputs=[d, self.articulations.free_prefix],
+                    device=device,
+                )
         # Cascades read the removed bodies before their commit quarantines them.
         if self.shapes.capacity:
             wp.launch(
