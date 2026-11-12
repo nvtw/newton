@@ -54,6 +54,7 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_set_tangent2_lambda,
 )
 from newton._src.solvers.phoenx.constraints.contact_endpoint import _articulation_pair_response
+from newton._src.solvers.phoenx.constraints.contact_kinematics import rigid_contact_kinematics
 from newton._src.solvers.phoenx.constraints.contact_projection import contact_project_coupled_velocity_update_no_soft_pd
 from newton._src.solvers.phoenx.helpers.math_helpers import apply_body_spatial_impulse
 
@@ -609,19 +610,18 @@ def reduced_contact_prepare(
         normal = cc_get_normal(contacts_state, contact)
         tangent0 = cc_get_tangent1(contacts_state, contact)
         tangent1 = wp.cross(normal, tangent0)
-        local0 = contacts.rigid_contact_point0[contact]
-        local1 = contacts.rigid_contact_point1[contact]
-        point0 = (
-            bodies.position[body0]
-            + wp.quat_rotate(bodies.orientation[body0], local0 - bodies.body_com[body0])
-            + contacts.rigid_contact_margin0[contact] * normal
+        contact_point, separation = rigid_contact_kinematics(
+            bodies,
+            body0,
+            body1,
+            contacts.rigid_contact_point0[contact],
+            contacts.rigid_contact_point1[contact],
+            contacts.rigid_contact_margin0[contact],
+            contacts.rigid_contact_margin1[contact],
+            normal,
         )
-        point1 = (
-            bodies.position[body1]
-            + wp.quat_rotate(bodies.orientation[body1], local1 - bodies.body_com[body1])
-            - contacts.rigid_contact_margin1[contact] * normal
-        )
-        contact_point = wp.float32(0.5) * (point0 + point1)
+        point0 = contact_point - wp.float32(0.5) * separation
+        point1 = contact_point + wp.float32(0.5) * separation
 
         effective_mass = wp.vec3f(0.0)
         if compute_effective_mass:
@@ -752,19 +752,16 @@ def reduced_contact_iterate_staged(
         normal = cc_get_normal(contacts_state, contact)
         tangent0 = cc_get_tangent1(contacts_state, contact)
         tangent1 = wp.cross(normal, tangent0)
-        local0 = contacts.rigid_contact_point0[contact]
-        local1 = contacts.rigid_contact_point1[contact]
-        point0 = (
-            bodies.position[body0]
-            + wp.quat_rotate(bodies.orientation[body0], local0 - bodies.body_com[body0])
-            + contacts.rigid_contact_margin0[contact] * normal
+        contact_point, _separation = rigid_contact_kinematics(
+            bodies,
+            body0,
+            body1,
+            contacts.rigid_contact_point0[contact],
+            contacts.rigid_contact_point1[contact],
+            contacts.rigid_contact_margin0[contact],
+            contacts.rigid_contact_margin1[contact],
+            normal,
         )
-        point1 = (
-            bodies.position[body1]
-            + wp.quat_rotate(bodies.orientation[body1], local1 - bodies.body_com[body1])
-            - contacts.rigid_contact_margin1[contact] * normal
-        )
-        contact_point = wp.float32(0.5) * (point0 + point1)
         lever0 = wp.vec3f(0.0)
         lever1 = wp.vec3f(0.0)
         if staged:

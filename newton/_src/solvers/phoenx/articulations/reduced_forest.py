@@ -47,6 +47,7 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_set_tangent1_lambda,
     cc_set_tangent2_lambda,
 )
+from newton._src.solvers.phoenx.constraints.contact_kinematics import rigid_contact_kinematics
 from newton._src.solvers.phoenx.constraints.contact_projection import contact_project_coupled_velocity_update_no_soft_pd
 
 from .reduced_contact import _point_velocity, _prepare_contact_bias_geometry, _rigid_endpoint_inverse_mass
@@ -239,17 +240,16 @@ def _build_forest_contact_rows(
     normal = cc_get_normal(cc, contact)
     tangent0 = cc_get_tangent1(cc, contact)
     tangent1 = wp.cross(normal, tangent0)
-    point0 = (
-        bodies.position[body0]
-        + wp.quat_rotate(bodies.orientation[body0], contacts.rigid_contact_point0[contact] - bodies.body_com[body0])
-        + contacts.rigid_contact_margin0[contact] * normal
+    point, separation = rigid_contact_kinematics(
+        bodies,
+        body0,
+        body1,
+        contacts.rigid_contact_point0[contact],
+        contacts.rigid_contact_point1[contact],
+        contacts.rigid_contact_margin0[contact],
+        contacts.rigid_contact_margin1[contact],
+        normal,
     )
-    point1 = (
-        bodies.position[body1]
-        + wp.quat_rotate(bodies.orientation[body1], contacts.rigid_contact_point1[contact] - bodies.body_com[body1])
-        - contacts.rigid_contact_margin1[contact] * normal
-    )
-    point = wp.float32(0.5) * (point0 + point1)
     dof = compact_dofs[compact]
     for axis in range(3):
         direction = normal
@@ -292,7 +292,7 @@ def _build_forest_contact_rows(
             normal,
             tangent0,
             tangent1,
-            point1 - point0,
+            separation,
             point - bodies.position[body0],
             point - bodies.position[body1],
         )

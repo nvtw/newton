@@ -83,6 +83,7 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_set_tangent1_lambda,
     cc_set_tangent2_lambda,
 )
+from newton._src.solvers.phoenx.constraints.contact_kinematics import rigid_contact_kinematics
 from newton._src.solvers.phoenx.constraints.contact_patch_friction import contact_patch_project_velocity_update
 from newton._src.solvers.phoenx.constraints.contact_projection import (
     contact_project_coupled_velocity_update_no_soft_pd,
@@ -1171,22 +1172,20 @@ def _gather_reduced_contact_blocks_kernel(
             n = cc_get_normal(cc, contact)
             t0 = cc_get_tangent1(cc, contact)
             t1 = wp.cross(n, t0)
-            local0 = contacts.rigid_contact_point0[contact]
-            local1 = contacts.rigid_contact_point1[contact]
-            offset0 = (
-                wp.quat_rotate(bodies.orientation[body0], local0 - bodies.body_com[body0])
-                + contacts.rigid_contact_margin0[contact] * n
-            )
-            offset1 = (
-                wp.quat_rotate(bodies.orientation[body1], local1 - bodies.body_com[body1])
-                - contacts.rigid_contact_margin1[contact] * n
+            contact_point, separation = rigid_contact_kinematics(
+                bodies,
+                body0,
+                body1,
+                contacts.rigid_contact_point0[contact],
+                contacts.rigid_contact_point1[contact],
+                contacts.rigid_contact_margin0[contact],
+                contacts.rigid_contact_margin1[contact],
+                n,
             )
             position0 = bodies.position[body0]
             position1 = bodies.position[body1]
-            p0 = position0 + offset0
-            p1 = position1 + offset1
-            separation = p1 - p0
-            contact_point = p0 + wp.float32(0.5) * separation
+            p0 = contact_point - wp.float32(0.5) * separation
+            p1 = contact_point + wp.float32(0.5) * separation
             if prepare:
                 bias_contact_point = wp.float32(0.5) * (p0 + p1)
                 _prepare_contact_bias_geometry(
@@ -1330,22 +1329,22 @@ def _gather_packed_patch_points(
                 n = cc_get_normal(cc, contact)
                 t0 = cc_get_tangent1(cc, contact)
                 t1 = wp.cross(n, t0)
-                local0 = contacts.rigid_contact_point0[contact]
-                local1 = contacts.rigid_contact_point1[contact]
-                offset0 = (
-                    wp.quat_rotate(bodies.orientation[body0], local0 - bodies.body_com[body0])
-                    + contacts.rigid_contact_margin0[contact] * n
-                )
-                offset1 = (
-                    wp.quat_rotate(bodies.orientation[body1], local1 - bodies.body_com[body1])
-                    - contacts.rigid_contact_margin1[contact] * n
+                contact_point, separation = rigid_contact_kinematics(
+                    bodies,
+                    body0,
+                    body1,
+                    contacts.rigid_contact_point0[contact],
+                    contacts.rigid_contact_point1[contact],
+                    contacts.rigid_contact_margin0[contact],
+                    contacts.rigid_contact_margin1[contact],
+                    n,
                 )
                 position0 = bodies.position[body0]
                 position1 = bodies.position[body1]
-                p0 = position0 + offset0
-                p1 = position1 + offset1
-                separation = p1 - p0
-                contact_point = p0 + wp.float32(0.5) * separation
+                p0 = contact_point - wp.float32(0.5) * separation
+                p1 = contact_point + wp.float32(0.5) * separation
+                offset0 = p0 - position0
+                offset1 = p1 - position1
                 if prepare:
                     bias_contact_point = wp.float32(0.5) * (p0 + p1)
                     _prepare_contact_bias_geometry(
@@ -1619,22 +1618,20 @@ def _gather_packed_contact_points(
             n = cc_get_normal(cc, contact)
             t0 = cc_get_tangent1(cc, contact)
             t1 = wp.cross(n, t0)
-            local0 = contacts.rigid_contact_point0[contact]
-            local1 = contacts.rigid_contact_point1[contact]
-            offset0 = (
-                wp.quat_rotate(bodies.orientation[body0], local0 - bodies.body_com[body0])
-                + contacts.rigid_contact_margin0[contact] * n
-            )
-            offset1 = (
-                wp.quat_rotate(bodies.orientation[body1], local1 - bodies.body_com[body1])
-                - contacts.rigid_contact_margin1[contact] * n
+            contact_point, separation = rigid_contact_kinematics(
+                bodies,
+                body0,
+                body1,
+                contacts.rigid_contact_point0[contact],
+                contacts.rigid_contact_point1[contact],
+                contacts.rigid_contact_margin0[contact],
+                contacts.rigid_contact_margin1[contact],
+                n,
             )
             position0 = bodies.position[body0]
             position1 = bodies.position[body1]
-            p0 = position0 + offset0
-            p1 = position1 + offset1
-            separation = p1 - p0
-            contact_point = p0 + wp.float32(0.5) * separation
+            p0 = contact_point - wp.float32(0.5) * separation
+            p1 = contact_point + wp.float32(0.5) * separation
             if prepare:
                 bias_contact_point = wp.float32(0.5) * (p0 + p1)
                 _prepare_contact_bias_geometry(

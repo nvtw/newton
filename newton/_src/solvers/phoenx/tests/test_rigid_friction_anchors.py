@@ -159,6 +159,16 @@ class TestRigidFrictionAnchors(unittest.TestCase):
             orientations[index] = np.asarray(rotation * wp.quat(*orientations[index]))
         world.bodies.position.assign(rotated_positions)
         world.bodies.orientation.assign(orientations)
+        # The step's starting pose, from which contacts move their witnesses, is part of the state.
+        step_positions = world.bodies.position_step.numpy()
+        step_orientations = world.bodies.orientation_step.numpy()
+        for index in range(world.num_bodies):
+            step_positions[index] = np.asarray(wp.quat_rotate(rotation, wp.vec3(*step_positions[index]))) + np.array(
+                [0.1, -0.2, 0.3], dtype=np.float32
+            )
+            step_orientations[index] = np.asarray(rotation * wp.quat(*step_orientations[index]))
+        world.bodies.position_step.assign(step_positions)
+        world.bodies.orientation_step.assign(step_orientations)
         rows = world._contact_container.lambdas.numpy()
         rows[:3, 0] = np.asarray(wp.quat_rotate(rotation, wp.vec3(*rows[:3, 0])))
         rows[3:6, 0] = np.asarray(wp.quat_rotate(rotation, wp.vec3(*rows[3:6, 0])))
@@ -180,7 +190,8 @@ class TestRigidFrictionAnchors(unittest.TestCase):
             ],
             device=model.device,
         )
-        np.testing.assert_allclose(world._contact_container.derived.numpy()[4:6, 0], bias, rtol=0.0, atol=5.0e-6)
+        # One float32 ulp of a 1 m lever (1.2e-7 m) is 1e-5 of bias at this 1 us step.
+        np.testing.assert_allclose(world._contact_container.derived.numpy()[4:6, 0], bias, rtol=0.0, atol=1.0e-5)
 
     def test_material_history_follows_matching_and_colored_scatter(self):
         """Preserve reset references through solve order and matched contact IDs."""
