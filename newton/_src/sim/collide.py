@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import dataclasses
+import math
 import warnings
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
@@ -348,6 +349,10 @@ class ContactWriterData:
     body_q: wp.array[wp.transform]
     shape_body: wp.array[int]
     shape_gap: wp.array[float]
+    # Model shape types, scales, and body-relative transforms, to place cylinder side witnesses
+    shape_type: wp.array[int]
+    shape_scale: wp.array[wp.vec3]
+    shape_transform_local: wp.array[wp.transform]
     # Output arrays
     contact_count: wp.array[int]
     out_shape0: wp.array[int]
@@ -372,6 +377,42 @@ class ContactWriterData:
     shape_angular_velocity: wp.array[wp.vec3]
     collision_update_dt: float
     max_speculative_extension: float
+
+
+_CYLINDER_SIDE_SINE = wp.constant(math.sin(math.radians(2.0)))
+_CYLINDER_SIDE_COSINE = wp.constant(math.cos(math.radians(2.0)))
+
+
+@wp.func
+def _cylinder_side_radius(
+    writer_data: ContactWriterData,
+    shape: int,
+    body_rotation: wp.quat,
+    witness: wp.vec3,
+    outward: wp.vec3,
+) -> float:
+    """Radius of a cylinder whose curved side carries the contact, else zero.
+
+    ``witness`` is the contact's point on the shape's surface relative to the body origin, and
+    ``outward`` the contact normal out of the shape. On a cylinder's side the normal points
+    radially out of the axis through the witness: the side is the Minkowski sum of the axis
+    and the radius, like a capsule's. Its witness then belongs on the axis, with the radius in
+    the offset, so the witness stays below the axis while the cylinder turns about it instead
+    of turning away from the contact.
+    """
+    if shape >= writer_data.shape_type.shape[0] or writer_data.shape_type[shape] != GeoType.CYLINDER:
+        return 0.0
+    local = writer_data.shape_transform_local[shape]
+    axis = wp.quat_rotate(body_rotation * wp.transform_get_rotation(local), wp.vec3(0.0, 0.0, 1.0))
+    if wp.abs(wp.dot(axis, outward)) > _CYLINDER_SIDE_SINE:
+        return 0.0
+    offset = witness - wp.quat_rotate(body_rotation, wp.transform_get_translation(local))
+    radial = offset - axis * wp.dot(offset, axis)
+    radial_length = wp.length(radial)
+    radius = writer_data.shape_scale[shape][0]
+    if radial_length < 0.5 * radius or wp.dot(radial, outward) < _CYLINDER_SIDE_COSINE * radial_length:
+        return 0.0
+    return radius
 
 
 @wp.func
@@ -399,13 +440,19 @@ def _write_contact_at_index(
     relative_a = contact_data.contact_point_center - wp.transform_get_translation(X_wa)
     relative_b = contact_data.contact_point_center - wp.transform_get_translation(X_wb)
     half_distance = 0.5 * contact_data.contact_distance
-    point_a = relative_a - normal_a_to_b * (half_distance + contact_data.radius_eff_a)
-    point_b = relative_b + normal_a_to_b * (half_distance + contact_data.radius_eff_b)
+    radius_eff_a = contact_data.radius_eff_a + _cylinder_side_radius(
+        writer_data, contact_data.shape_a, rotation_a, relative_a - normal_a_to_b * half_distance, normal_a_to_b
+    )
+    radius_eff_b = contact_data.radius_eff_b + _cylinder_side_radius(
+        writer_data, contact_data.shape_b, rotation_b, relative_b + normal_a_to_b * half_distance, -normal_a_to_b
+    )
+    point_a = relative_a - normal_a_to_b * (half_distance + radius_eff_a)
+    point_b = relative_b + normal_a_to_b * (half_distance + radius_eff_b)
     writer_data.out_point0[index] = wp.quat_rotate_inv(rotation_a, point_a)
     writer_data.out_point1[index] = wp.quat_rotate_inv(rotation_b, point_b)
 
-    offset_mag_a = contact_data.radius_eff_a + contact_data.margin_a
-    offset_mag_b = contact_data.radius_eff_b + contact_data.margin_b
+    offset_mag_a = radius_eff_a + contact_data.margin_a
+    offset_mag_b = radius_eff_b + contact_data.margin_b
     writer_data.out_offset0[index] = wp.quat_rotate_inv(rotation_a, offset_mag_a * normal_a_to_b)
     writer_data.out_offset1[index] = wp.quat_rotate_inv(rotation_b, -offset_mag_b * normal_a_to_b)
     writer_data.out_normal[index] = normal_a_to_b
@@ -4155,6 +4202,9 @@ class CollisionPipeline:
         # for them, leaving contact points in world space.
         writer_data.shape_body = shape_body if shape_body is not None else model.shape_body
         writer_data.shape_gap = shape_base_gap
+        writer_data.shape_type = model.shape_type
+        writer_data.shape_scale = model.shape_scale
+        writer_data.shape_transform_local = model.shape_transform
         writer_data.contact_count = contacts.rigid_contact_count
         # Deterministic collision writes the unsorted record directly into the
         # sorter's source buffer. The radix permutation then needs one gather,
