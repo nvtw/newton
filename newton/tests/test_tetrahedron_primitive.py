@@ -353,6 +353,72 @@ class TestTetrahedronNarrowPhase(unittest.TestCase):
         count = int(contacts.rigid_contact_count.numpy()[0])
         self.assertGreater(count, 0, "Sphere at tet centroid must overlap and produce a contact")
 
+    def test_tetrahedron_on_plane_contacts_every_vertex_near_it(self):
+        """A plane touches a tetrahedron at its vertices: each one within the gap gets a contact.
+
+        One contact at the deepest vertex only lets a tumbling tetrahedron turn about it
+        and sink its other vertices into the ground.
+        """
+        builder = newton.ModelBuilder()
+        builder.default_shape_cfg.margin = 0.0
+        builder.default_shape_cfg.gap = 0.01
+        builder.add_ground_plane()
+        body = builder.add_body(xform=wp.transform_identity())
+        # Three vertices at different depths at the plane, the fourth far above it.
+        vertices = ((0.0, 0.0, -0.05), (1.0, 0.0, 0.0), (0.0, 1.0, -0.2), (0.3, 0.3, 1.0))
+        builder.add_shape_tetrahedron(
+            body=body, **{f"point_{n}": wp.vec3(*v) for n, v in zip("abcd", vertices, strict=True)}
+        )
+        model = builder.finalize()
+        cp = newton.CollisionPipeline(model, broad_phase="explicit")
+        state = model.state()
+        newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+        contacts = _collide(model, cp, state)
+        count = int(contacts.rigid_contact_count.numpy()[0])
+        self.assertEqual(count, 3)
+        plane_first = model.shape_body.numpy()[contacts.rigid_contact_shape0.numpy()[:count]] < 0
+        points = np.where(
+            plane_first[:, None],
+            contacts.rigid_contact_point1.numpy()[:count],
+            contacts.rigid_contact_point0.numpy()[:count],
+        )
+        np.testing.assert_allclose(
+            points[np.argsort(points[:, 2])], [vertices[2], vertices[0], vertices[1]], atol=1.0e-5
+        )
+        np.testing.assert_allclose(np.abs(contacts.rigid_contact_normal.numpy()[:count, 2]), 1.0, atol=1.0e-6)
+
+    def test_tumbling_tetrahedron_stays_above_the_ground(self):
+        """A tetrahedron that lands spinning must not turn its vertices into the ground."""
+        builder = newton.ModelBuilder()
+        builder.default_shape_cfg.gap = 0.03
+        builder.add_ground_plane()
+        body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.6), wp.quat_identity()))
+        vertices = ((0.0, 0.0, 0.0), (0.0, 0.0, 0.5), (0.0, 0.45, 0.1), (0.4, 0.2, 0.2))
+        builder.add_shape_tetrahedron(
+            body=body, **{f"point_{n}": wp.vec3(*v) for n, v in zip("abcd", vertices, strict=True)}
+        )
+        model = builder.finalize()
+        solver = newton.solvers.SolverXPBD(model, iterations=8)
+        state_0, state_1 = model.state(), model.state()
+        qd = state_0.body_qd.numpy()
+        qd[0] = (0.0, 0.0, -5.0, 6.0, 9.0, 0.0)
+        state_0.body_qd.assign(qd)
+        control = model.control()
+        pipeline = newton.CollisionPipeline(model)
+        contacts = pipeline.contacts()
+        lowest = np.inf
+        for _ in range(90):
+            pipeline.collide(state_0, contacts)
+            for _ in range(4):
+                state_0.clear_forces()
+                solver.step(state_0, state_1, control, contacts, 1.0 / 240.0)
+                state_0, state_1 = state_1, state_0
+            q = state_0.body_q.numpy()[0]
+            world = [wp.transform_point(wp.transform(*q.tolist()), wp.vec3(*v)) for v in vertices]
+            lowest = min(lowest, *(float(v[2]) for v in world))
+        self.assertTrue(np.isfinite(state_0.body_q.numpy()).all())
+        self.assertGreater(lowest, -0.03, f"a vertex sank {-lowest:.3f} m into the ground")
+
     def test_sphere_far_from_tet_no_contact(self):
         model, cp, state = _build_sphere_vs_tetrahedron(
             sphere_pos=(50.0, 50.0, 50.0),

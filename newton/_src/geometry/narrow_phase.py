@@ -33,6 +33,7 @@ from ..geometry.collision_primitive import (
     collide_plane_cylinder,
     collide_plane_ellipsoid,
     collide_plane_sphere,
+    collide_plane_tetrahedron,
     collide_sphere_box,
     collide_sphere_capsule,
     collide_sphere_cylinder,
@@ -86,6 +87,7 @@ from ..geometry.support_function import (
     GenericShapeData,
     SupportMapDataProvider,
     create_triangle_prism_penetration_refiner,
+    decode_vec3,
     extract_shape_data,
     support_map,
     support_map_accelerated,
@@ -833,6 +835,7 @@ def create_narrow_phase_primitive_kernel(
             is_ellipsoid_b = type_b == GeoType.ELLIPSOID
             is_cylinder_b = type_b == GeoType.CYLINDER
             is_box_b = type_b == GeoType.BOX
+            is_tetrahedron_b = type_b == GeoType.TETRAHEDRON
 
             use_plane_cylinder = is_plane_a and is_cylinder_b
             if use_plane_cylinder and scale_b[2] > 0.0:
@@ -909,6 +912,34 @@ def create_narrow_phase_primitive_kernel(
                 contact_pos_1 = wp.vec3(positions4_box[1, 0], positions4_box[1, 1], positions4_box[1, 2])
                 contact_pos_2 = wp.vec3(positions4_box[2, 0], positions4_box[2, 1], positions4_box[2, 2])
                 contact_pos_3 = wp.vec3(positions4_box[3, 0], positions4_box[3, 1], positions4_box[3, 2])
+
+            # -----------------------------------------------------------------
+            # Plane-Tetrahedron collision (type_a=PLANE=0, type_b=TETRAHEDRON=13)
+            # Produces up to 4 contacts, one per vertex
+            # -----------------------------------------------------------------
+            elif is_plane_a and is_tetrahedron_b:
+                plane_normal = wp.quat_rotate(quat_a, wp.vec3(0.0, 0.0, 1.0))
+                # Vertices as in the support map: A at the origin, B and C from the scale,
+                # D packed into the shape source.
+                dists4_tet, positions4_tet, contact_normal = collide_plane_tetrahedron(
+                    plane_normal,
+                    pos_a,
+                    pos_b,
+                    quat_b,
+                    wp.vec3(0.0, 0.0, scale_b[0]),
+                    wp.vec3(0.0, scale_b[1], scale_b[2]),
+                    decode_vec3(shape_source[shape_b]),
+                    gap_sum + margin_offset_a + margin_offset_b,
+                )
+
+                contact_dist_0 = dists4_tet[0]
+                contact_dist_1 = dists4_tet[1]
+                contact_dist_2 = dists4_tet[2]
+                contact_dist_3 = dists4_tet[3]
+                contact_pos_0 = wp.vec3(positions4_tet[0, 0], positions4_tet[0, 1], positions4_tet[0, 2])
+                contact_pos_1 = wp.vec3(positions4_tet[1, 0], positions4_tet[1, 1], positions4_tet[1, 2])
+                contact_pos_2 = wp.vec3(positions4_tet[2, 0], positions4_tet[2, 1], positions4_tet[2, 2])
+                contact_pos_3 = wp.vec3(positions4_tet[3, 0], positions4_tet[3, 1], positions4_tet[3, 2])
 
             # -----------------------------------------------------------------
             # Sphere-Sphere collision (type_a=SPHERE=2, type_b=SPHERE=2)
@@ -1159,7 +1190,17 @@ def create_narrow_phase_primitive_kernel(
                 continue
 
             if (
-                (is_plane_a and (is_sphere_b or is_capsule_b or is_ellipsoid_b or use_plane_cylinder or is_box_b))
+                (
+                    is_plane_a
+                    and (
+                        is_sphere_b
+                        or is_capsule_b
+                        or is_ellipsoid_b
+                        or use_plane_cylinder
+                        or is_box_b
+                        or is_tetrahedron_b
+                    )
+                )
                 or (is_sphere_a and (is_sphere_b or is_capsule_b or (is_cylinder_b and scale_b[2] == 0.0) or is_box_b))
                 or (is_capsule_a and is_capsule_b)
             ):

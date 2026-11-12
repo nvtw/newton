@@ -516,6 +516,59 @@ def collide_plane_box(
 
 
 @wp.func
+def collide_plane_tetrahedron(
+    # In:
+    plane_normal: wp.vec3,
+    plane_pos: wp.vec3,
+    tet_pos: wp.vec3,
+    tet_rot: wp.quat,
+    point_b: wp.vec3,
+    point_c: wp.vec3,
+    point_d: wp.vec3,
+    margin: float = 0.0,
+) -> tuple[wp.vec4, wp.types.matrix((4, 3), wp.float32), wp.vec3]:
+    """Core contact geometry calculation for plane-tetrahedron collision.
+
+    Report every vertex whose signed plane distance is at most ``margin``. A convex
+    body touches a half space at its vertices, so the four of them are the whole
+    manifold: the tetrahedron keeps the contact it stands on while it tips onto
+    the next vertex.
+
+    Args:
+      plane_normal: Normal vector of the plane
+      plane_pos: Position point on the plane
+      tet_pos: World position of the tetrahedron's first vertex, its local origin
+      tet_rot: World orientation of the tetrahedron
+      point_b: Second vertex in the tetrahedron's frame [m]
+      point_c: Third vertex in the tetrahedron's frame [m]
+      point_d: Fourth vertex in the tetrahedron's frame [m]
+      margin: Contact margin for early contact generation (default: 0.0)
+
+    Returns:
+      Tuple containing:
+        contact_dist: Vector of contact distances, one slot per vertex (MAXVAL for vertices beyond the margin)
+        contact_pos: Matrix of contact positions (one per row)
+        contact_normal: contact normal vector
+    """
+    dist = wp.vec4(MAXVAL)
+    pos = _mat43f()
+    for i in range(4):
+        vertex = wp.vec3(0.0)
+        if i == 1:
+            vertex = point_b
+        elif i == 2:
+            vertex = point_c
+        elif i == 3:
+            vertex = point_d
+        vertex = tet_pos + wp.quat_rotate(tet_rot, vertex)
+        vdist = wp.dot(vertex - plane_pos, plane_normal)
+        if vdist <= margin:
+            dist[i] = vdist
+            pos[i] = vertex - 0.5 * plane_normal * vdist
+    return dist, pos, plane_normal
+
+
+@wp.func
 def collide_sphere_cylinder(
     # In:
     sphere_pos: wp.vec3,
