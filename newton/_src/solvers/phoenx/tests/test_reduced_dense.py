@@ -10,6 +10,7 @@ import warp as wp
 
 import newton
 from newton._src.solvers.phoenx.articulations.dense_substep import PAGE_ROWS
+from newton._src.solvers.phoenx.articulations.dense_tree import dense_link_path_group
 from newton._src.solvers.phoenx.tests.test_reduced_articulation import (
     _make_branched_tree,
     _make_floating_mixed_tree,
@@ -1169,6 +1170,110 @@ class TestReducedDenseBackend(unittest.TestCase):
             trunk_height = fused_q.reshape(model.articulation_count, -1)[:, 2]
             self.assertTrue(np.all(trunk_height > 0.15), trunk_height)
             np.testing.assert_allclose(fused_q, unfused_q, rtol=0.0, atol=1.0e-3)
+
+    def test_link_responses_answer_wrenches_through_the_dense_factor_under_graph_capture(self):
+        """Links of trees that may touch answer a wrench ``w`` like ``J M^-1 J^T w``.
+
+        Each tree has more links than one group of link paths holds in shared memory, so
+        the paths are formed group after group. The deferred rates ``z`` that the links'
+        wrenches start from solve ``L^T z = sum J^T w`` with the stored factor ``M = L^T L``.
+        """
+        device = _require_cuda(self)
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
+        for tree in range(2):
+            root = builder.add_link(mass=1.0, xform=wp.transform(wp.vec3(0.0, 0.4 * tree, 0.5), wp.quat_identity()))
+            builder.add_shape_box(root, hx=0.05, hy=0.05, hz=0.05)
+            joints = [builder.add_joint_free(root)]
+            chain = [root]
+            # A ball-jointed chain with hinged side links near its end: 31 links, 63 DOFs.
+            for _ in range(14):
+                link = builder.add_link(mass=0.2)
+                builder.add_shape_sphere(link, radius=0.03)
+                xform = wp.transform(wp.vec3(0.07, 0.0, 0.0), wp.quat_identity())
+                joints.append(builder.add_joint_ball(parent=chain[-1], child=link, parent_xform=xform, armature=0.01))
+                chain.append(link)
+            for side in range(16):
+                link = builder.add_link(mass=0.1)
+                builder.add_shape_sphere(link, radius=0.02)
+                xform = wp.transform(wp.vec3(0.0, 0.05, 0.0), wp.quat_identity())
+                joints.append(
+                    builder.add_joint_revolute(
+                        parent=chain[-1 - side // 2], child=link, axis=newton.Axis.X, parent_xform=xform, armature=0.01
+                    )
+                )
+            builder.add_articulation(joints)
+        model = builder.finalize(device=device)
+        solver = newton.solvers.SolverPhoenX(model, joint_mode="reduced", reduced_backend="dense")
+        articulation = solver._reduced_articulation
+        self.assertIsNotNone(articulation.fused_substep)
+        dense = articulation.system.dense
+        bucket = dense.buckets[0]
+        joint_count = 31
+        group = dense_link_path_group(
+            bucket.max_dofs, bucket.joint_capacity, bucket.entry_capacity, bucket.path_capacity, bucket.subtree_capacity
+        )
+        self.assertLess(group, joint_count)
+
+        reduced_model = articulation.model
+        state = _randomize_state(model, 11)
+        output = model.state()
+        with wp.ScopedCapture(device=device) as capture:
+            solver.step(state, output, None, None, 1.0 / 240.0)
+        wp.capture_launch(capture.graph)
+        data = articulation.bodies.reduced
+        rng = np.random.default_rng(5)
+        wrenches = np.zeros((int(reduced_model.body_count), 6), dtype=np.float32)
+        joint_child = reduced_model.joint_child.numpy()
+        # A few links on either side of a group boundary hold wrenches.
+        holding = [joint_child[j] for j in (3, group - 1, group, joint_count - 1)]
+        wrenches[holding] = rng.normal(size=(len(holding), 6))
+        data.deferred_wrench.assign(wrenches)
+        cross_tree = wp.ones(int(reduced_model.articulation_count), dtype=wp.int32, device=device)
+        with wp.ScopedCapture(device=device) as capture:
+            dense.form_link_responses(cross_tree, articulation.bodies)
+        wp.capture_launch(capture.graph)
+
+        tree_data = dense.data
+        factor = tree_data.factor.numpy()
+        factor_start = tree_data.factor_start.numpy()
+        template_of = tree_data.articulation_template.numpy()
+        template_dof_start = tree_data.template_dof_start.numpy()
+        template_path_start = tree_data.template_path_start.numpy()
+        dof_entry = tree_data.dof_entry.numpy()
+        path = tree_data.path.numpy()
+        motion = articulation.system.joint_s.numpy().astype(np.float64)
+        response = data.impulse_response.numpy()
+        rate = data.deferred_rate.numpy()
+        articulation_start = reduced_model.articulation_start.numpy()
+        qd_start = reduced_model.joint_qd_start.numpy()
+        for tree in range(int(reduced_model.articulation_count)):
+            joint_start = articulation_start[tree]
+            dof_start = qd_start[joint_start]
+            n = qd_start[articulation_start[tree + 1]] - dof_start
+            template = template_of[tree]
+            d, p, base = template_dof_start[template], template_path_start[template], factor_start[tree]
+
+            def row_path(row, d=d, p=p):
+                return path[p + dof_entry[d + row] : p + dof_entry[d + row + 1]]
+
+            lower = np.zeros((n, n))
+            for row in range(n):
+                lower[row, row_path(row)] = factor[base + dof_entry[d + row] : base + dof_entry[d + row + 1]]
+            inverse_mass = np.linalg.inv(lower.T @ lower)
+            applied = np.zeros(n)
+            for joint in range(joint_start, articulation_start[tree + 1]):
+                link = joint_child[joint]
+                jacobian_t = np.zeros((n, 6))
+                dofs = row_path(qd_start[joint + 1] - 1 - dof_start)
+                jacobian_t[dofs] = motion[dof_start + dofs]
+                expected = jacobian_t.T @ inverse_mass @ jacobian_t
+                np.testing.assert_allclose(
+                    response[link].T, expected, rtol=0.0, atol=2.0e-3 * np.abs(expected).max(), err_msg=f"link {link}"
+                )
+                applied += jacobian_t @ wrenches[link]
+            np.testing.assert_allclose(
+                lower.T @ rate[dof_start : dof_start + n], applied, rtol=0.0, atol=2.0e-3 * np.abs(applied).max()
+            )
 
     def test_fused_substep_solves_root_paths_longer_than_a_warp_under_graph_capture(self):
         """A ball-jointed chain's contact rows span 42 DOFs, more path positions than lanes."""

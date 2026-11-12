@@ -39,7 +39,6 @@ from newton._src.solvers.phoenx.body import (
     EXTERNAL_SHARED,
     MOTION_KINEMATIC,
     BodyContainer,
-    DenseTreeData,
     ReducedArticulationData,
     mat33_from_sym6,
 )
@@ -493,104 +492,6 @@ def _mark_cross_trees_kernel(
     articulation = bodies.reduced.body_articulation[body]
     if articulation >= wp.int32(0):
         cross_tree[articulation] = wp.int32(1)
-
-
-@wp.kernel(enable_backward=False)
-def _link_path_kernel(
-    bodies: BodyContainer,
-    dense: DenseTreeData,
-    joint_last_dof: wp.array[wp.int32],
-    template_joint_start: wp.array[wp.int32],
-    cross_tree: wp.array[wp.int32],
-):
-    """Form ``Z = L^-T J^T`` along the root path of every link of a flagged tree.
-
-    ``J`` is the link's Jacobian about the articulation origin and ``M = L^T L`` the stored
-    factor. ``Z^T Z`` is the link's twist response to a wrench on itself, and two links of one
-    tree couple through the positions their paths share.
-    """
-    link = wp.tid()
-    data = bodies.reduced
-    articulation = data.body_articulation[link + 1]
-    if articulation < wp.int32(0):
-        return
-    if cross_tree[articulation] != wp.int32(0):
-        # A tree in a column between trees holds deferred wrenches from here on.
-        data.deferred_pending[articulation] = wp.int32(1)
-    elif data.deferred_pending[articulation] == wp.int32(0):
-        return
-    joint_start = data.articulation_start[articulation]
-    dof_start = data.joint_qd_start[joint_start]
-    template = dense.articulation_template[articulation]
-    leaf = joint_last_dof[template_joint_start[template] + data.body_joint[link] - joint_start]
-    length = wp.int32(0)
-    # The link's response to a wrench on itself, Z^T Z by columns: the inverse masses of its
-    # contact rows read six vectors instead of the path.
-    response0 = wp.spatial_vector()
-    response1 = wp.spatial_vector()
-    response2 = wp.spatial_vector()
-    response3 = wp.spatial_vector()
-    response4 = wp.spatial_vector()
-    response5 = wp.spatial_vector()
-    if leaf >= wp.int32(0):
-        base = dense.factor_start[articulation]
-        dof_base = dense.template_dof_start[template]
-        path = dense.template_path_start[template] + dense.dof_entry[dof_base + leaf]
-        length = dense.dof_entry[dof_base + leaf + wp.int32(1)] - dense.dof_entry[dof_base + leaf]
-        # L^T z = J^T, leaves first, for the six wrench axes at once.
-        for reverse in range(length):
-            position = length - wp.int32(1) - reverse
-            k = dense.path[path + position]
-            value = data.joint_s[dof_start + k]
-            for later in range(position + wp.int32(1), length):
-                row = dense.path[path + later]
-                value -= dense.factor[base + dense.dof_entry[dof_base + row] + position] * data.link_path[link, later]
-            entry = value / dense.factor[base + dense.dof_entry[dof_base + k + wp.int32(1)] - wp.int32(1)]
-            data.link_path[link, position] = entry
-            data.link_path_dof[link, position] = dof_start + k
-            response0 += entry * entry[0]
-            response1 += entry * entry[1]
-            response2 += entry * entry[2]
-            response3 += entry * entry[3]
-            response4 += entry * entry[4]
-            response5 += entry * entry[5]
-    if length < data.link_path.shape[1]:
-        data.link_path_dof[link, length] = wp.int32(-1)
-    data.impulse_response[link, 0] = response0
-    data.impulse_response[link, 1] = response1
-    data.impulse_response[link, 2] = response2
-    data.impulse_response[link, 3] = response3
-    data.impulse_response[link, 4] = response4
-    data.impulse_response[link, 5] = response5
-
-
-@wp.kernel(enable_backward=False)
-def _seed_deferred_rate_kernel(bodies: BodyContainer):
-    """Form each flagged tree's deferred rates from the wrenches its links already hold.
-
-    One lane per warp takes a tree: trees hold wrenches on different links, and a warp
-    walks the branches of its lanes one after the other.
-    """
-    tid = wp.tid()
-    if tid % wp.int32(32) != wp.int32(0):
-        return
-    articulation = tid / wp.int32(32)
-    data = bodies.reduced
-    if data.deferred_pending[articulation] == wp.int32(0):
-        return
-    joint_start = data.articulation_start[articulation]
-    joint_end = data.articulation_end[articulation]
-    for dof in range(data.joint_qd_start[joint_start], data.joint_qd_start[joint_end]):
-        data.deferred_rate[dof] = wp.float32(0.0)
-    for joint in range(joint_start, joint_end):
-        link = data.joint_child[joint]
-        wrench = data.deferred_wrench[link]
-        if wp.length_sq(wrench) > wp.float32(0.0):
-            for position in range(data.link_path.shape[1]):
-                dof = data.link_path_dof[link, position]
-                if dof < wp.int32(0):
-                    break
-                data.deferred_rate[dof] = data.deferred_rate[dof] + wp.dot(data.link_path[link, position], wrench)
 
 
 @wp.kernel(enable_backward=False)
@@ -4299,27 +4200,6 @@ class ReducedContactBlockSystem:
             dim=1,
             inputs=[self.fallback_partitioner.num_colors],
             outputs=[self.fallback_single_color],
-            device=self.device,
-        )
-
-    def refresh_link_responses(self, columns: ContactColumnContainer, bodies: BodyContainer) -> None:
-        """Form the link responses of the trees in unowned columns from the stored dense factor.
-
-        :meth:`build_schedule` flagged those trees for the step. Trees whose links still hold
-        deferred wrenches are flagged too; their deferred rates start from those wrenches.
-        """
-        dense = self.dense_rows
-        wp.launch(
-            _link_path_kernel,
-            dim=bodies.reduced.link_path.shape[0],
-            inputs=[bodies, dense.data, dense.joint_last_dof, dense.template_joint_start, self.cross_tree],
-            device=self.device,
-        )
-        wp.launch(
-            _seed_deferred_rate_kernel,
-            dim=32 * self.articulation_count,
-            block_dim=32,
-            inputs=[bodies],
             device=self.device,
         )
 

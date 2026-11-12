@@ -5311,8 +5311,7 @@ class ReducedPhoenXArticulation:
             return
 
         def solve() -> None:
-            self.system.dense.factor_mass()
-            contacts.refresh_link_responses(world._contact_cols, world.bodies)
+            self.system.dense.form_link_responses(contacts.cross_tree, world.bodies)
             contacts.solve_fallback(
                 world._contact_cols,
                 world.bodies,

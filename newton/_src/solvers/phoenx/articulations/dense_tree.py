@@ -53,6 +53,8 @@ DENSE_DOF_BUCKETS = (16, 24, 32, 40, 48, 56, 64)
 """Compile-time DOF capacities of the dense backend; larger trees keep the articulated-body path."""
 
 _LANES = 32
+# Words of the static shared memory one block may declare.
+_SHARED_WORDS = 48 * 1024 // 4
 _SYM66 = wp.types.vector(length=21, dtype=wp.float32)
 # Rounds of 32 entries that one staging chunk keeps in flight.
 _STAGE_ROUNDS = 8
@@ -472,6 +474,49 @@ def _warp_max_int(value: wp.int32) -> wp.int32:
 """
 )
 def _lane_float(value: wp.float32, source: wp.int32) -> wp.float32: ...
+
+
+@wp.func_native(
+    """
+#if defined(__CUDA_ARCH__)
+    return __shfl_sync(0xffffffffu, value, source);
+#else
+    return value;
+#endif
+"""
+)
+def _lane_int(value: wp.int32, source: wp.int32) -> wp.int32: ...
+
+
+@wp.func_native(
+    """
+#if defined(__CUDA_ARCH__)
+    return (int)__ballot_sync(0xffffffffu, value);
+#else
+    return value ? 1 : 0;
+#endif
+"""
+)
+def _warp_ballot(value: wp.bool) -> wp.int32:
+    """Return the mask of the lanes whose ``value`` is true."""
+    ...
+
+
+@wp.func_native(
+    """
+#if defined(__CUDA_ARCH__)
+    return __ffs(mask) - 1;
+#else
+    for (int bit = 0; bit < 32; ++bit)
+        if ((mask >> bit) & 1)
+            return bit;
+    return -1;
+#endif
+"""
+)
+def _lowest_lane(mask: wp.int32) -> wp.int32:
+    """Return the lowest lane set in ``mask``, -1 for none."""
+    ...
 
 
 class DenseSharedLayout:
@@ -1109,6 +1154,206 @@ def _make_dense_factor_kernel(max_dofs: int, joint_capacity: int, entry_capacity
     return dense_factor_kernel
 
 
+def dense_link_path_group(
+    max_dofs: int, joint_capacity: int, entry_capacity: int, path_capacity: int, subtree_capacity: int
+) -> int:
+    """Return how many links of a bucket's trees form their paths at once in shared memory.
+
+    See :func:`_make_dense_link_response_kernel`; a group of all the lanes, or of all a
+    bucket's joints, takes every link at once.
+    """
+    scratch = DenseSharedLayout(max_dofs, joint_capacity, entry_capacity, subtree_capacity).scratch
+    group = min(_LANES, joint_capacity, (_SHARED_WORDS - scratch - 1 - max_dofs) // (6 * path_capacity + 1))
+    if group < 1:
+        raise ValueError(f"the link paths of {max_dofs} DOFs on {path_capacity} positions exceed shared memory")
+    return group
+
+
+@functools.cache
+def _make_dense_link_response_kernel(
+    max_dofs: int, joint_capacity: int, entry_capacity: int, path_capacity: int, subtree_capacity: int
+):
+    """Factor the flagged trees of one bucket and form their links' responses from the factor.
+
+    A tree is flagged when a column between trees touches it or its links hold deferred
+    wrenches. Per link the kernel forms ``Z = L^-T J^T`` along the root path, where ``J`` is
+    the link's Jacobian about the articulation origin and ``M = L^T L`` the factor, and the
+    link's response to a wrench on itself, ``Z^T Z``. Two links of one tree couple through the
+    positions their paths share. The tree's deferred rates then start from the wrenches its
+    links already hold. Each lane owns one link and keeps its path in shared memory, next to
+    the factor and its tables.
+    """
+    # Per link the six components of z at each path position; the odd stride keeps the links
+    # of one position, and the positions of one link, on different banks. The links take
+    # their paths in groups that fit the static shared memory with the rates.
+    link_stride = 6 * path_capacity + 1
+    group = dense_link_path_group(max_dofs, joint_capacity, entry_capacity, path_capacity, subtree_capacity)
+    ops = make_dense_tree_ops(
+        max_dofs, joint_capacity, entry_capacity, subtree_capacity, max_dofs + group * link_stride
+    )
+    layout = ops.layout
+    shared_base = _make_shared_base(layout.size, layout.tables)
+    stage = ops.stage
+    factor = ops.factor
+    dof_entry = layout.dof_entry
+    path_table = layout.path
+    joint_last_dof = layout.joint_last_dof
+    motion_base = layout.motion
+    # The factorization's tables are spent: its scratch region takes the rates and the paths.
+    rate_base = layout.scratch
+    z_base = rate_base + max_dofs
+    module = _unrolled_module(
+        f"dense_tree_link_response_{max_dofs}_{joint_capacity}_{entry_capacity}_{path_capacity}_{subtree_capacity}",
+        dense_unroll(layout, joint_capacity),
+    )
+
+    @wp.func
+    def load_z(shared: _shared_handle, slot: wp.int32) -> wp.spatial_vector:
+        return wp.spatial_vector(
+            _load(shared, slot),
+            _load(shared, slot + 1),
+            _load(shared, slot + 2),
+            _load(shared, slot + 3),
+            _load(shared, slot + 4),
+            _load(shared, slot + 5),
+        )
+
+    @wp.kernel(enable_backward=False, module=module)
+    def dense_link_response_kernel(
+        bucket_articulation: wp.array[wp.int32],
+        motion: wp.array[wp.float32],
+        body_inertia: wp.array[wp.float32],
+        factor_diagonal: wp.array[wp.float32],
+        template_image: wp.array[wp.uint32],
+        template_image_start: wp.array[wp.int32],
+        cross_tree: wp.array[wp.int32],
+        bodies: BodyContainer,
+    ):
+        thread = wp.tid()
+        block = thread // wp.int32(_LANES)
+        lane = thread - block * wp.int32(_LANES)
+        articulation = bucket_articulation[block]
+        data = bodies.reduced
+        dense = data.dense
+        joint_start = data.articulation_start[articulation]
+        joint_count = data.articulation_end[articulation] - joint_start
+        if joint_count <= wp.int32(0):
+            # A runtime instance that is not in the scene: its whole block leaves.
+            return
+        if cross_tree[articulation] != wp.int32(0):
+            # A tree in a column between trees holds deferred wrenches from here on.
+            data.deferred_pending[articulation] = wp.int32(1)
+        elif data.deferred_pending[articulation] == wp.int32(0):
+            return
+        dof_start = data.joint_qd_start[joint_start]
+        n = data.joint_qd_start[data.articulation_end[articulation]] - dof_start
+        shared = shared_base(template_image, template_image_start[dense.articulation_template[articulation]])
+        heights = stage(shared, articulation, lane, dense, template_image, template_image_start)
+        factor(
+            shared,
+            articulation,
+            lane,
+            joint_start,
+            joint_count,
+            dof_start,
+            n,
+            heights,
+            data.joint_child,
+            motion,
+            body_inertia,
+            factor_diagonal,
+            dense,
+            wp.bool(True),
+        )
+
+        # Deferred rates from the wrenches the links hold, link after link: few links hold
+        # one. A DOF sits at the same path position, its depth, on every path through it, so
+        # lane p sums the DOFs at depth p.
+        k = lane
+        while k < n:
+            _store(shared, wp.int32(rate_base) + k, wp.float32(0.0))
+            k += wp.int32(_LANES)
+        wrench = wp.spatial_vector()
+        path_entry = wp.int32(0)
+        path_length = wp.int32(0)
+        for group_start in range(0, joint_count, wp.static(group)):
+            member = lane >= group_start and lane < wp.min(group_start + wp.int32(group), joint_count)
+            z_link = wp.int32(z_base) + (lane - group_start) * wp.int32(link_stride)
+            if member:
+                link = data.joint_child[joint_start + lane]
+                wrench = data.deferred_wrench[link]
+                leaf = _load_u8(shared, wp.int32(joint_last_dof) + lane) - wp.int32(1)
+                response0 = wp.spatial_vector()
+                response1 = wp.spatial_vector()
+                response2 = wp.spatial_vector()
+                response3 = wp.spatial_vector()
+                response4 = wp.spatial_vector()
+                response5 = wp.spatial_vector()
+                if leaf >= wp.int32(0):
+                    path_entry = _load_u16(shared, wp.int32(dof_entry) + leaf)
+                    path_length = _load_u16(shared, wp.int32(dof_entry) + leaf + wp.int32(1)) - path_entry
+                    # L^T z = J^T, leaves first, for the six wrench axes at once.
+                    for reverse in range(path_length):
+                        position = path_length - wp.int32(1) - reverse
+                        k = _load_u8(shared, wp.int32(path_table) + path_entry + position)
+                        value = _load_motion(shared, wp.int32(motion_base) + wp.int32(_MOTION_STRIDE) * k)
+                        for later in range(position + wp.int32(1), path_length):
+                            row = _load_u8(shared, wp.int32(path_table) + path_entry + later)
+                            value -= _load(shared, _load_u16(shared, wp.int32(dof_entry) + row) + position) * load_z(
+                                shared, z_link + wp.int32(6) * later
+                            )
+                        entry = value / _load(shared, _load_u16(shared, wp.int32(dof_entry) + k + wp.int32(1)) - 1)
+                        for component in range(6):
+                            _store(shared, z_link + wp.int32(6) * position + wp.int32(component), entry[component])
+                        data.link_path[link, position] = entry
+                        data.link_path_dof[link, position] = dof_start + k
+                        response0 += entry * entry[0]
+                        response1 += entry * entry[1]
+                        response2 += entry * entry[2]
+                        response3 += entry * entry[3]
+                        response4 += entry * entry[4]
+                        response5 += entry * entry[5]
+                if path_length < data.link_path.shape[1]:
+                    data.link_path_dof[link, path_length] = wp.int32(-1)
+                data.impulse_response[link, 0] = response0
+                data.impulse_response[link, 1] = response1
+                data.impulse_response[link, 2] = response2
+                data.impulse_response[link, 3] = response3
+                data.impulse_response[link, 4] = response4
+                data.impulse_response[link, 5] = response5
+            _sync_contact_warp()
+            holding = _warp_ballot(member and path_length > wp.int32(0) and wp.length_sq(wrench) > wp.float32(0.0))
+            while holding != wp.int32(0):
+                joint = _lowest_lane(holding)
+                holding = holding & (holding - wp.int32(1))
+                w = wp.spatial_vector(
+                    _lane_float(wrench[0], joint),
+                    _lane_float(wrench[1], joint),
+                    _lane_float(wrench[2], joint),
+                    _lane_float(wrench[3], joint),
+                    _lane_float(wrench[4], joint),
+                    _lane_float(wrench[5], joint),
+                )
+                entry_start = _lane_int(path_entry, joint)
+                length = _lane_int(path_length, joint)
+                z_joint = wp.int32(z_base) + (joint - group_start) * wp.int32(link_stride)
+                position = lane
+                while position < length:
+                    slot = wp.int32(rate_base) + _load_u8(shared, wp.int32(path_table) + entry_start + position)
+                    _store(
+                        shared, slot, _load(shared, slot) + wp.dot(load_z(shared, z_joint + wp.int32(6) * position), w)
+                    )
+                    position += wp.int32(_LANES)
+            # The next group's paths take the same words.
+            _sync_contact_warp()
+        k = lane
+        while k < n:
+            data.deferred_rate[dof_start + k] = _load(shared, wp.int32(rate_base) + k)
+            k += wp.int32(_LANES)
+
+    return dense_link_response_kernel
+
+
 @functools.cache
 def _make_dense_contact_rows_kernel(max_dofs: int, entry_capacity: int, patch_rows: bool):
     """Contact rows ``J`` and responses ``W = M^-1 J^T`` from the dense factor.
@@ -1634,6 +1879,36 @@ class DenseTreeOperator:
                     self.template_image,
                     self.template_image_start,
                     self.data,
+                ],
+                device=self.device,
+            )
+
+    def form_link_responses(self, cross_tree: wp.array[wp.int32], bodies: BodyContainer) -> None:
+        """Factor the trees that ``cross_tree`` flags or whose links hold deferred wrenches at
+        the current pose, form their links' responses, and seed their deferred rates.
+
+        See :func:`_make_dense_link_response_kernel`.
+        """
+        for bucket in self.buckets:
+            wp.launch(
+                _make_dense_link_response_kernel(
+                    bucket.max_dofs,
+                    bucket.joint_capacity,
+                    bucket.entry_capacity,
+                    bucket.path_capacity,
+                    bucket.subtree_capacity,
+                ),
+                dim=bucket.articulations.shape[0] * _LANES,
+                block_dim=_LANES,
+                inputs=[
+                    bucket.articulations,
+                    self.motion,
+                    self.body_inertia,
+                    self.system.joint_factor_diagonal,
+                    self.template_image,
+                    self.template_image_start,
+                    cross_tree,
+                    bodies,
                 ],
                 device=self.device,
             )
