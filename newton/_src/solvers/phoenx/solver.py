@@ -309,6 +309,10 @@ def _select_articulations(model: Model, selection: Sequence[int] | Sequence[str]
             if not 0 <= index < count:
                 raise ValueError(f"reduced_articulations index {index} is outside the model's {count} articulations")
             mask[index] = True
+    # Reduced instances reserved for runtime creation are the model's last articulations.
+    capacity = model._dynamic_capacity
+    if capacity is not None and (capacity.slot_size or capacity.instance_counts):
+        mask[count - capacity.articulation_count :] = True
     return mask
 
 

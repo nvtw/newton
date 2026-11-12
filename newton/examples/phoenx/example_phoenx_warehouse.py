@@ -9,7 +9,8 @@ coordinates. Everything else is a free rigid body or an ordinary hinge or slider
 with packages, pallets stacked with cartons, loose packages on the robots' feet, mesh totes
 with signed distance fields, hinged gates, and drawers. The gates and drawers are solved in
 reduced coordinates too, next to the robots; ``--mechanism-solver regular`` leaves them to
-the solver's regular joint rows.
+the solver's regular joint rows. With ``--runtime-robots`` further humanoids arrive at a dock
+beside the aisles and leave again while the simulation runs, created and removed on the device.
 
 The scene exercises what one large world mixes: robots that touch free bodies (a package on a
 humanoid's foot, a pod carried by a drive unit, a loaded pallet on a forklift), free bodies
@@ -25,11 +26,14 @@ Success criteria:
 - Stacked cartons and shelved packages stay within a few centimeters of where they started.
 - A meaningful fraction of the free bodies falls asleep.
 - The gates and drawers stay on their joints.
+- Every humanoid that arrives at the dock stands, and no arrival or departure fails.
 
 Runs:
 - `python -m newton.examples phoenx_warehouse`
 - `python -m newton.examples phoenx_warehouse --robots 1024`
   - The same warehouse with eight times the fleet and storage.
+- `python -m newton.examples phoenx_warehouse --runtime-robots 8`
+  - Eight more humanoids come and go at the dock, one every half second.
 - `python -m newton.examples phoenx_warehouse --viewer null --timing-frames 600`
   - Prints the scene counts and the milliseconds per captured step.
 """
@@ -45,7 +49,7 @@ import warp as wp
 import newton
 import newton.examples
 import newton.viewer
-from newton.solvers import SolverPhoenX
+from newton.solvers import SolverPhoenX, phoenx
 
 CONTACT_GAP = 0.005  # [m]; the default gap of 0.1 m pairs every shelf with all its packages
 REST_GAP = 0.0005  # [m], initial clearance between resting bodies
@@ -57,6 +61,9 @@ FLEET_MIX = (("g1", 0.40), ("h1", 0.20), ("anymal", 0.15), ("kiva", 0.15), ("for
 HAND_OVERLAP = 0.004  # [m] by which the hand colliders of two touching humanoids overlap
 
 SLOT_PITCH = 2.8  # [m] between robots along an aisle
+DOCK_DISTANCE = 3.0  # [m] from the first aisle's corner to the first dock
+DOCK_PITCH = 1.2  # [m] between docks
+DOCK_PERIOD = 30  # frames between two arrivals or departures
 AISLE_WIDTH = 3.2  # [m] clear width between storage rows
 STORAGE_PITCH = 1.3  # [m] between pods along a storage row
 STORAGE_DEPTH = 1.1  # [m] of one line of pods across a storage row
@@ -609,6 +616,8 @@ class Scene:
     mechanism_joints: list[int] = field(default_factory=list)
     #: Articulations of the gates and drawers, one joint each.
     mechanism_articulations: list[int] = field(default_factory=list)
+    #: Root poses at which humanoids arrive at runtime.
+    docks: list[wp.transform] = field(default_factory=list)
 
 
 class _SceneAssembler:
@@ -774,10 +783,13 @@ class _SceneAssembler:
                 self.add_free_box(center, (0.12, 0.16, height), COLORS["package"], rotation=tilt)
 
 
-def build_scene(robots: int = 128, storage_scale: float = 1.0, seed: int = 0, robot_meshes: bool = False) -> Scene:
+def build_scene(
+    robots: int = 128, storage_scale: float = 1.0, seed: int = 0, robot_meshes: bool = False, runtime_robots: int = 0
+) -> Scene:
     """Build the warehouse: robots in aisles between rows of pods and pallets.
 
-    ``robot_meshes`` shows the humanoids' visual meshes; they never collide.
+    ``robot_meshes`` shows the humanoids' visual meshes; they never collide. ``runtime_robots``
+    reserves that many G1 humanoids, which arrive at a dock beside the aisles at runtime.
     """
     if robots < 1:
         raise ValueError("The warehouse needs at least one robot")
@@ -933,7 +945,44 @@ def build_scene(robots: int = 128, storage_scale: float = 1.0, seed: int = 0, ro
     builder = assembler.builder
     for shape in range(builder.shape_count):
         builder.shape_gap[shape] = CONTACT_GAP  # imported sites and colliders keep their own otherwise
+    if runtime_robots > 0:
+        # Instances take their poses from the template's bodies: put them where its joints do.
+        g1.body_q[:] = [wp.transform(*pose) for pose in g1_pose]
+        g1.shape_gap[:] = [CONTACT_GAP] * g1.shape_count
+        builder.reserve_dynamic_capacity(
+            shapes=runtime_robots * g1.shape_count,
+            articulations=[runtime_robots],
+            articulation_templates=[g1],
+            articulation_coordinates="reduced",
+        )
+        assembler.scene.docks = [
+            wp.transform(
+                wp.vec3(-DOCK_DISTANCE, -DOCK_DISTANCE - DOCK_PITCH * dock, G1_ROOT_HEIGHT), wp.quat_identity()
+            )
+            for dock in range(runtime_robots)
+        ]
     return assembler.scene
+
+
+@wp.kernel(enable_backward=False)
+def _cycle_dock_kernel(
+    dyn: phoenx.DynamicsData,
+    docks: wp.array[wp.transform],
+    period: int,
+    frame: wp.array[int],
+    occupant: wp.array[int],
+):
+    """Every ``period`` frames the next dock's humanoid leaves, or one arrives at the empty dock."""
+    current = frame[0]
+    frame[0] = current + 1
+    if current % period != 0:
+        return
+    dock = (current // period) % docks.shape[0]
+    if occupant[dock] >= 0:
+        phoenx.remove_articulation(dyn, occupant[dock])
+        occupant[dock] = -1
+    else:
+        occupant[dock] = phoenx.add_articulation(dyn, 0, docks[dock], wp.spatial_vector(), 0)
 
 
 class Example:
@@ -956,6 +1005,7 @@ class Example:
             storage_scale=float(getattr(args, "storage_scale", 1.0)),
             seed=int(getattr(args, "seed", 0)),
             robot_meshes=bool(robot_meshes),
+            runtime_robots=int(getattr(args, "runtime_robots", 0)),
         )
         self.model = self.scene.builder.finalize()
         self.state = self.model.state()
@@ -983,6 +1033,9 @@ class Example:
             rigid_contact_max=8 * int(self.model.shape_count),
         )
         self.contacts = self.model._collision_pipeline.contacts()
+        self.docks = wp.array(self.scene.docks, dtype=wp.transform) if self.scene.docks else None
+        self.dock_frame = wp.zeros(1, dtype=int)
+        self.dock_occupant = wp.full(max(1, len(self.scene.docks)), -1, dtype=int)
         self.initial_poses = self.state.body_q.numpy().copy()
         self.free_bodies = np.asarray(self.scene.free_bodies, dtype=np.int64)
         self.settled_bodies = np.asarray(self.scene.settled_bodies, dtype=np.int64)
@@ -1001,6 +1054,12 @@ class Example:
     def simulate(self):
         self.state.clear_forces()
         self.viewer.apply_forces(self.state)
+        if self.docks is not None:
+            wp.launch(
+                _cycle_dock_kernel,
+                dim=1,
+                inputs=[self.solver.dynamics.data, self.docks, DOCK_PERIOD, self.dock_frame, self.dock_occupant],
+            )
         self.solver.collide(self.state, self.contacts)
         self.solver.step(self.state, self.state, self.control, self.contacts, self.frame_dt)
 
@@ -1062,7 +1121,15 @@ class Example:
         self.report(1.0e3 * (time.perf_counter() - start) / self.timing_frames)
 
     def _robot_heights(self, poses: np.ndarray) -> dict[str, np.ndarray]:
-        return {name: poses[roots, 2] for name, roots in self.scene.robot_roots.items() if roots}
+        heights = {name: poses[roots, 2] for name, roots in self.scene.robot_roots.items() if roots}
+        if self.docks is not None:
+            # The humanoids at the dock: the root is an instance's first body.
+            data = self.solver.dynamics.data
+            assert int(data.error_count.numpy()[0]) == 0, "a humanoid could not arrive at or leave the dock"
+            occupants = self.dock_occupant.numpy()
+            roots = data.instance_body_start.numpy()[occupants[occupants >= 0]]
+            heights["g1"] = np.concatenate([heights.get("g1", np.empty(0, dtype=poses.dtype)), poses[roots, 2]])
+        return heights
 
     def test_post_step(self):
         """Stop at the first frame that loses a robot or contact capacity."""
@@ -1127,6 +1194,9 @@ if __name__ == "__main__":
     parser.add_argument("--robots", type=int, default=128, help="Number of robots in the fleet.")
     parser.add_argument("--storage-scale", type=float, default=1.0, help="Scale of the number of pods and pallets.")
     parser.add_argument("--seed", type=int, default=0, help="Seed of the storage layout.")
+    parser.add_argument(
+        "--runtime-robots", type=int, default=0, help="Humanoids that arrive at the dock and leave again at runtime."
+    )
     parser.add_argument(
         "--robot-meshes",
         action=argparse.BooleanOptionalAction,

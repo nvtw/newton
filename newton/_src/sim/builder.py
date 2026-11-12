@@ -5867,6 +5867,7 @@ class ModelBuilder:
 
         Articulation templates are builders that are added as a whole: posed relative to their
         first body, without their free root joint, and without collisions between their own links.
+        Their body transforms must agree with their joint coordinates.
         With ``articulation_coordinates="maximal"`` (``joint_mode="maximal_pgs"``), instances draw
         on the reserved body and joint rows, which all templates share. With ``"reduced"``
         (``joint_mode="reduced"``), each of the ``articulations`` slots is reserved as an

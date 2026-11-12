@@ -21,8 +21,10 @@ import newton.viewer
 from newton.examples.phoenx import example_phoenx_warehouse as warehouse
 
 
-def _run(frames: int) -> warehouse.Example:
-    args = argparse.Namespace(robots=64, storage_scale=1.0, seed=0, substeps=4, iterations=4)
+def _run(frames: int, runtime_robots: int = 0) -> warehouse.Example:
+    args = argparse.Namespace(
+        robots=64, storage_scale=1.0, seed=0, substeps=4, iterations=4, runtime_robots=runtime_robots
+    )
     example = warehouse.Example(newton.viewer.ViewerNull(), args)
     for _ in range(frames):
         example.step()
@@ -42,6 +44,21 @@ class TestWarehouseScene(unittest.TestCase):
         # The run exercised contacts between robots, not only robots apart.
         cross = first.solver._reduced_articulation.contact_block_system.cross_column_count
         self.assertGreater(int(cross.numpy()[0]), 0)
+
+    def test_humanoids_arrive_and_leave_at_runtime(self):
+        """Humanoids created on the device join the fused robots, stand, and leave again."""
+        frames = 4 * warehouse.DOCK_PERIOD + 10  # three arrivals, then two departures
+        first = _run(frames, runtime_robots=3)
+        self.assertIsNotNone(first.solver._reduced_articulation.fused_substep)
+        dynamics = first.solver.dynamics
+        self.assertEqual(int(dynamics.error_count.numpy()[0]), 0)
+        np.testing.assert_array_equal(first.dock_occupant.numpy(), [-1, -1, 2])
+        start = int(dynamics.data.instance_body_start.numpy()[2])
+        self.assertAlmostEqual(float(first.state.body_q.numpy()[start, 2]), warehouse.G1_ROOT_HEIGHT, delta=0.01)
+        first.test_final()
+        second = _run(frames, runtime_robots=3)
+        for name in ("body_q", "body_qd", "joint_q", "joint_qd"):
+            np.testing.assert_array_equal(getattr(first.state, name).numpy(), getattr(second.state, name).numpy())
 
     def test_a_robot_leaves_and_rejoins_the_running_warehouse(self):
         """A robot of the pool is parked far away between steps and placed back later."""
