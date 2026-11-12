@@ -15,6 +15,47 @@ from newton._src.geometry.flags import ShapeFlags
 
 
 class TestBroadPhaseImplicitTree(unittest.TestCase):
+    def test_runtime_rows_pair_only_while_their_flags_collide(self):
+        if not wp.is_cuda_available():
+            self.skipTest("CUDA graph capture requires a CUDA device")
+        device = wp.get_device("cuda:0")
+        rng = np.random.default_rng(7)
+        n, reserved = 80, 24
+        dynamic_rows = np.arange(n) >= n - reserved
+        centers = rng.uniform(-1.0, 1.0, (n, 3)).astype(np.float32)
+        half = rng.uniform(0.05, 0.4, (n, 3)).astype(np.float32)
+        lower = wp.array(centers - half, dtype=wp.vec3, device=device)
+        upper = wp.array(centers + half, dtype=wp.vec3, device=device)
+        world = wp.zeros(n, dtype=wp.int32, device=device)
+        group = wp.full(n, 1, dtype=wp.int32, device=device)
+        flags_np = np.where(dynamic_rows, 0, int(ShapeFlags.COLLIDE_SHAPES)).astype(np.int32)
+        flags = wp.array(flags_np, dtype=wp.int32, device=device)
+        tree = BroadPhaseImplicitTree(world, shape_flags=flags, device=device, dynamic_rows=dynamic_rows)
+        pairs = wp.empty(n * n, dtype=wp.vec2i, device=device)
+        count = wp.zeros(1, dtype=wp.int32, device=device)
+        with wp.ScopedCapture(device=device) as capture:
+            tree.launch(lower, upper, None, group, world, n, pairs, count, device=device)
+
+        def expected(current: np.ndarray) -> set:
+            oracle = BroadPhaseAllPairs(world, shape_flags=current, device=device)
+            out = wp.empty(n * n, dtype=wp.vec2i, device=device)
+            size = wp.zeros(1, dtype=wp.int32, device=device)
+            oracle.launch(lower, upper, None, group, world, n, out, size, device=device)
+            return {tuple(pair) for pair in out.numpy()[: int(size.numpy()[0])]}
+
+        sizes = []
+        # No runtime shape, some, others, none again: the captured launch follows the flags.
+        for active in (np.zeros(n, bool), dynamic_rows & (np.arange(n) % 2 == 0), dynamic_rows, np.zeros(n, bool)):
+            current = np.where(active, int(ShapeFlags.COLLIDE_SHAPES), flags_np).astype(np.int32)
+            flags.assign(current)
+            wp.capture_launch(capture.graph)
+            found = {tuple(pair) for pair in pairs.numpy()[: int(count.numpy()[0])]}
+            self.assertEqual(found, expected(current))
+            sizes.append(len(found))
+        self.assertGreater(sizes[2], sizes[1])
+        self.assertGreater(sizes[1], sizes[0])
+        self.assertEqual(sizes[3], sizes[0])
+
     def test_swept_pairs_without_pair_queues_match_all_pairs(self):
         if not wp.is_cuda_available():
             self.skipTest("CUDA graph capture requires a CUDA device")

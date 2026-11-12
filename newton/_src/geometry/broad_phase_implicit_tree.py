@@ -19,6 +19,7 @@ import warp as wp
 
 from .broad_phase_common import EmptyFilterData, keep_all_filter, precompute_world_map
 from .broad_phase_sap import _make_sap_process_pair_func
+from .flags import ShapeFlags
 from .implicit_bvh import (
     ImplicitBvh,
     ImplicitBvhData,
@@ -71,6 +72,7 @@ def _tree_leaves(
     upper: wp.array[wp.vec3],
     gap: wp.array[float],
     displacement: wp.array[wp.vec3],
+    flags: wp.array[wp.int32],
     nodes: wp.array[ImplicitBvhNode],
     leaf_item: wp.array[wp.int32],
     leaf_base: int,
@@ -90,6 +92,10 @@ def _tree_leaves(
     shape = shape_index[sorted_values[slot]]
     leaf_item[slot] = shape
     record.last_leaf = slot
+    if flags.shape[0] > 0 and (flags[shape] & wp.static(int(ShapeFlags.COLLIDE_SHAPES))) == 0:
+        # A row for a runtime shape that holds none: a leaf that overlaps nothing.
+        nodes[node] = record
+        return
     margin = wp.float32(0.0)
     if gap.shape[0] > 0:
         margin = gap[shape]
@@ -212,7 +218,14 @@ class BroadPhaseImplicitTree:
         device: wp.Device | str | None = None,
         filter_func: Any | None = None,
         filter_data_type: Any | None = None,
+        dynamic_rows: np.ndarray | None = None,
     ) -> None:
+        """
+        Args:
+            dynamic_rows: Mask of the shapes whose flags change at runtime. They always have a
+                leaf, which overlaps nothing while ``shape_flags``, then a device array that
+                is read on every launch, does not let the shape collide.
+        """
         if queue_capacity_factor < 1:
             raise ValueError("queue_capacity_factor must be positive")
         if (filter_func is None) != (filter_data_type is None):
@@ -226,6 +239,12 @@ class BroadPhaseImplicitTree:
         flags_np = shape_flags.numpy() if isinstance(shape_flags, wp.array) else shape_flags
         index_map, _ = precompute_world_map(world_np, flags_np)
         valid = np.unique(index_map).astype(np.int32)
+        self._flags = wp.empty(0, dtype=wp.int32, device=device)
+        if dynamic_rows is not None:
+            if not isinstance(shape_flags, wp.array):
+                raise ValueError("dynamic_rows requires shape_flags as a device array")
+            valid = np.union1d(valid, np.flatnonzero(dynamic_rows)).astype(np.int32)
+            self._flags = shape_flags
         self.shape_index = wp.array(valid, dtype=wp.int32, device=device)
         self.shape_count = len(valid)
         # Retain the constructor argument for API compatibility. Stackless
@@ -248,6 +267,11 @@ class BroadPhaseImplicitTree:
         self._kernels = (
             _make_pair_kernels(filter_func, filter_data_type) if self._has_custom_filter else _DEFAULT_KERNELS
         )
+
+    def update_world_map(
+        self, shape_world: wp.array[wp.int32], shape_flags: wp.array[wp.int32], dirty: wp.array[wp.int32]
+    ) -> None:
+        """Do nothing: every launch reads the worlds and flags of runtime shapes anew."""
 
     def launch(
         self,
@@ -306,6 +330,7 @@ class BroadPhaseImplicitTree:
                 shape_upper,
                 shape_gap,
                 shape_displacement,
+                self._flags,
                 self.tree.nodes,
                 self.tree.leaf_item,
                 self.leaf_base,

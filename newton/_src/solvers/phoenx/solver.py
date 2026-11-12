@@ -1024,20 +1024,16 @@ class SolverPhoenX(SolverBase):
                     cp_kwargs["broad_phase"] = "sap"
                     cp_kwargs["shape_pairs_max"] = max(4096, _DENSE_WORLD_PAIRS_PER_SHAPE * int(model.shape_count))
                 model._collision_pipeline = newton.CollisionPipeline(model, **cp_kwargs)
-                if (
-                    cp_kwargs.get("broad_phase") == "sap"
-                    and dynamic_capacity is None
-                    and int(model.shape_count) >= _IMPLICIT_TREE_MIN_SHAPES
-                ):
-                    # Without rows for runtime shapes the implicit tree finds the pairs of a
-                    # very large world faster (70k shapes: 3.69 against 3.87 ms per step; at
-                    # 17k shapes sweep and prune still wins, 1.96 against 2.12 ms).
-                    tree_kwargs = {}
+                if cp_kwargs.get("broad_phase") == "sap" and int(model.shape_count) >= _IMPLICIT_TREE_MIN_SHAPES:
+                    # The implicit tree finds the pairs of a very large world faster (70k
+                    # shapes: 3.69 against 3.87 ms per step; at 17k shapes sweep and prune
+                    # still wins, 1.96 against 2.12 ms). With rows for runtime shapes the gap
+                    # is wider: 3.75 against 4.28 ms at 66k shapes.
+                    tree_kwargs = {"dynamic_rows": model._collision_pipeline._dynamic_rows}
                     if uses_broad_phase_filter:
-                        tree_kwargs = {
-                            "filter_func": phoenx_sleeping_filter,
-                            "filter_data_type": PhoenXSleepingFilterData,
-                        }
+                        tree_kwargs.update(
+                            filter_func=phoenx_sleeping_filter, filter_data_type=PhoenXSleepingFilterData
+                        )
                     model._collision_pipeline.broad_phase = BroadPhaseImplicitTree(
                         model.shape_world, shape_flags=model.shape_flags, device=model.device, **tree_kwargs
                     )
