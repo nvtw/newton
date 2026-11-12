@@ -188,18 +188,51 @@ def _generic_d6_constraint_bases(
             int(JointType.ROD),
         ),
     )
-    for joint in np.flatnonzero(common_rows):
-        if joint_type[joint] == int(JointType.ROD):
-            # Rod DoFs are material-property slots rather than free motion
-            # axes. Emit its complete material frame as common D6 rows, with
-            # the anchor +Z material tangent first: stretch, two shears, then
-            # twist, two bends.
-            linear_axes[joint] = np.eye(3, dtype=np.float32)[[2, 0, 1]]
-            angular_axes[joint] = np.eye(3, dtype=np.float32)[[2, 0, 1]]
-            linear_count[joint] = 3
-            angular_count[joint] = 3
-            structural_count[joint] = 6
-            continue
+    rods = np.flatnonzero(common_rows & (joint_type == int(JointType.ROD)))
+    # Rod DoFs are material-property slots rather than free motion axes. Emit
+    # its complete material frame as common D6 rows, with the anchor +Z
+    # material tangent first: stretch, two shears, then twist, two bends.
+    linear_axes[rods] = np.eye(3, dtype=np.float32)[[2, 0, 1]]
+    angular_axes[rods] = np.eye(3, dtype=np.float32)[[2, 0, 1]]
+    linear_count[rods] = 3
+    angular_count[rods] = 3
+    structural_count[rods] = 6
+
+    # The bases depend only on a joint's free axes. Replicated robots repeat a
+    # few configurations thousands of times: group the joints by their free
+    # axes and solve each group once, in the order of its first joint, so an
+    # invalid joint still reports the lowest such joint index.
+    others = np.flatnonzero(common_rows & (joint_type != int(JointType.ROD)))
+    if len(others) == 0:
+        return linear_axes, angular_axes, linear_count, angular_count, structural_count
+    slot = np.arange(3, dtype=np.int64)
+    # One padding entry keeps the gathers valid for joints without DoFs, also in a model without any.
+    padded_lower = np.append(lower, np.float32(1.0))
+    padded_upper = np.append(upper, np.float32(0.0))
+    padded_axes = np.concatenate([model_axes.reshape(-1, 3), np.zeros((1, 3), dtype=np.float32)])
+    signature = []
+    for offset, count in (
+        (qd_start[others], dof_dim[others, 0]),
+        (qd_start[others] + dof_dim[others, 0], dof_dim[others, 1]),
+    ):
+        dofs = offset[:, None].astype(np.int64) + slot[None, :]
+        present = slot[None, :] < count[:, None]
+        safe = np.where(present, dofs, len(lower))
+        free = present & (padded_lower[safe] <= padded_upper[safe])
+        signature.append(free.astype(np.float32))
+        signature.append(np.where(free[:, :, None], padded_axes[safe], np.float32(0.0)).reshape(len(others), 9))
+    keys = np.ascontiguousarray(np.concatenate(signature, axis=1))
+    _unique, first, inverse = np.unique(
+        keys.view(np.dtype((np.void, keys.dtype.itemsize * keys.shape[1]))).ravel(),
+        return_index=True,
+        return_inverse=True,
+    )
+    inverse = inverse.ravel()
+    by_group = others[np.argsort(inverse, kind="stable")]
+    group_end = np.cumsum(np.bincount(inverse, minlength=len(first)))
+    for group in np.argsort(first, kind="stable"):
+        joint = int(others[first[group]])
+        members = by_group[(group_end[group - 1] if group > 0 else 0) : group_end[group]]
         start = int(qd_start[joint])
         n_linear = int(dof_dim[joint, 0])
         n_angular = int(dof_dim[joint, 1])
@@ -214,15 +247,15 @@ def _generic_d6_constraint_bases(
             for axis in range(n_angular)
             if float(lower[angular_start + axis]) <= float(upper[angular_start + axis])
         ]
-        locked_linear = complement(free_linear, int(joint), "linear")
-        locked_angular = complement(free_angular, int(joint), "angular")
-        linear_count[joint] = len(locked_linear)
-        angular_count[joint] = len(locked_angular)
-        linear_axes[joint, : len(locked_linear)] = locked_linear
-        angular_axes[joint, : len(locked_angular)] = locked_angular
+        locked_linear = complement(free_linear, joint, "linear")
+        locked_angular = complement(free_angular, joint, "angular")
+        linear_count[members] = len(locked_linear)
+        angular_count[members] = len(locked_angular)
+        linear_axes[members, : len(locked_linear)] = locked_linear
+        angular_axes[members, : len(locked_angular)] = locked_angular
         if len(locked_angular) == 2:
-            angular_axes[joint, 2] = np.cross(locked_angular[0], locked_angular[1])
-        structural_count[joint] = len(locked_linear) + len(locked_angular)
+            angular_axes[members, 2] = np.cross(locked_angular[0], locked_angular[1])
+        structural_count[members] = len(locked_linear) + len(locked_angular)
 
     return linear_axes, angular_axes, linear_count, angular_count, structural_count
 
