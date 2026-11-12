@@ -17,6 +17,7 @@ import warp as wp
 
 from ..core.reset import reset_world_selected
 from ..core.types import Devicelike
+from .active_prefix_sort import ACTIVE_DISPATCH_MIN_ITEMS, active_prefix_sort_levels, dispatch_active_prefix
 from .contact_reduction_global import encode_oct
 from .contact_sort import SORT_KEY_SENTINEL
 
@@ -472,6 +473,11 @@ def _resolve_duplicate_claims_kernel(data: _MatchData, next_claim: wp.array[int]
 # ------------------------------------------------------------------
 
 
+@wp.kernel(enable_backward=False)
+def _larger_count_kernel(first: wp.array[wp.int32], second: wp.array[wp.int32], larger: wp.array[wp.int32]):
+    larger[0] = wp.max(first[0], second[0])
+
+
 @wp.struct
 class _SaveStateData:
     """Arrays used to retain matching keys, midpoints, and normals."""
@@ -698,6 +704,9 @@ class ContactMatcher:
             self._prev_claim = wp.empty(capacity, dtype=wp.int64)
             self._match_next_claim = wp.empty(capacity, dtype=wp.int32)
             self._match_claim_head = wp.zeros(capacity, dtype=wp.int32)
+            # Size-class dispatch of the kernels over the contacts, see ``_launch_over_active``.
+            self._prefix_flags = wp.zeros(active_prefix_sort_levels(capacity), dtype=wp.int32)
+            self._dispatch_count = wp.zeros(1, dtype=wp.int32)
             self._oct_offset_dummy = wp.zeros(1, dtype=wp.vec2)
 
             # Contact report (optional).
@@ -876,37 +885,67 @@ class ContactMatcher:
         data.pair_sub_key_mask = self._pair_sub_key_mask
         data.pair_key_stride = self._pair_key_stride
 
-        wp.launch(_match_contacts_kernel, dim=self._capacity, inputs=[data], device=device)
-        wp.launch(
-            _resolve_claims_kernel,
-            dim=self._capacity,
-            inputs=[
-                match_index_out,
-                sort_keys,
-                self._prev_claim,
-                self._prev_was_matched,
-                contact_count,
-                canonical_to_source if canonical_to_source is not None else match_index_out,
-                1 if canonical_to_source is not None else 0,
-                1 if self._has_report else 0,
-            ],
-            device=device,
-        )
+        def match(dim: int) -> None:
+            wp.launch(_match_contacts_kernel, dim=dim, inputs=[data], device=device)
+            wp.launch(
+                _resolve_claims_kernel,
+                dim=dim,
+                inputs=[
+                    match_index_out,
+                    sort_keys,
+                    self._prev_claim,
+                    self._prev_was_matched,
+                    contact_count,
+                    canonical_to_source if canonical_to_source is not None else match_index_out,
+                    1 if canonical_to_source is not None else 0,
+                    1 if self._has_report else 0,
+                ],
+                device=device,
+            )
 
-        # Fingerprints can collide after contact reduction. Repair duplicate
-        # ownership before any sticky geometry or solver history is transferred.
-        self._match_claim_head.fill_(wp.int32(-1))
-        wp.launch(
-            _build_match_claim_lists_kernel,
-            dim=self._capacity,
-            inputs=[data, self._match_next_claim, self._match_claim_head],
-            device=device,
-        )
-        wp.launch(
-            _resolve_duplicate_claims_kernel,
-            dim=self._capacity,
-            inputs=[data, self._match_next_claim, self._match_claim_head],
-            device=device,
+            # Fingerprints can collide after contact reduction. Repair duplicate
+            # ownership before any sticky geometry or solver history is transferred.
+            head = self._match_claim_head if dim == self._capacity else self._match_claim_head[:dim]
+            head.fill_(wp.int32(-1))
+            wp.launch(
+                _build_match_claim_lists_kernel,
+                dim=dim,
+                inputs=[data, self._match_next_claim, self._match_claim_head],
+                device=device,
+            )
+            wp.launch(
+                _resolve_duplicate_claims_kernel,
+                dim=dim,
+                inputs=[data, self._match_next_claim, self._match_claim_head],
+                device=device,
+            )
+
+        if self._launch_over_active():
+            # The size class covers the previous contacts too: their match indices return to
+            # MATCH_NOT_FOUND, so the tail of ``match_index_out`` reads as after a full launch.
+            wp.launch(
+                _larger_count_kernel,
+                dim=1,
+                inputs=[contact_count, self._prev_count],
+                outputs=[self._dispatch_count],
+                device=device,
+            )
+            dispatch_active_prefix(self._dispatch_count, self._capacity, self._prefix_flags, match)
+        else:
+            match(self._capacity)
+
+    def _launch_over_active(self) -> bool:
+        """Return whether kernels over the contacts launch over a size class of those in use.
+
+        A captured graph can pick the class per step. Each choice costs a few conditional
+        nodes, about as much as a kernel over two million idle threads.
+        """
+        device = self._prefix_flags.device
+        return (
+            self._capacity >= ACTIVE_DISPATCH_MIN_ITEMS
+            and self._prefix_flags.shape[0] > 1
+            and device.is_cuda
+            and device.is_capturing
         )
 
     @property
@@ -971,12 +1010,18 @@ class ContactMatcher:
         data.dst_prev_was_matched = self._prev_was_matched
         data.has_report = 1 if self._has_report else 0
 
-        wp.launch(
-            _save_sorted_state_kernel,
-            dim=max(self._capacity, self._reset_world_mask.shape[0], 1),
-            inputs=[data, self._reset_world_mask],
-            device=device,
-        )
+        def save(dim: int) -> None:
+            wp.launch(
+                _save_sorted_state_kernel,
+                dim=max(dim, self._reset_world_mask.shape[0], 1),
+                inputs=[data, self._reset_world_mask],
+                device=device,
+            )
+
+        if self._launch_over_active():
+            dispatch_active_prefix(contact_count, self._capacity, self._prefix_flags, save)
+        else:
+            save(self._capacity)
 
     def build_report(
         self,

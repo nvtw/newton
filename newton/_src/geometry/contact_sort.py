@@ -19,7 +19,13 @@ from dataclasses import dataclass
 import warp as wp
 
 from ..core.types import Devicelike
-from .active_prefix_sort import active_prefix_sort_levels, radix_sort_active_prefix
+from .active_prefix_sort import (
+    ACTIVE_DISPATCH_MIN_ITEMS,
+    active_prefix_sort_levels,
+    dispatch_active_prefix,
+    radix_sort_active_prefix,
+    radix_sort_prefix,
+)
 from .contact_reduction_global import decode_oct
 
 # Sentinel key for unused contact slots.  ``radix_sort_pairs`` treats
@@ -652,9 +658,15 @@ class ContactSorter:
         data.has_match_index = 1 if has_match else 0
         data.has_sticky_history = 1 if has_sticky_history else 0
 
-        if not source_is_buffer:
-            wp.launch(_backup_full_kernel, dim=n, inputs=[data, contact_count], device=device)
-        wp.launch(_gather_full_kernel, dim=n, inputs=[data, self._sort_indices, contact_count], device=device)
+        def gather(dim: int) -> None:
+            if not source_is_buffer:
+                wp.launch(_backup_full_kernel, dim=dim, inputs=[data, contact_count], device=device)
+            wp.launch(_gather_full_kernel, dim=dim, inputs=[data, self._sort_indices, contact_count], device=device)
+
+        if self._launch_over_active(n, self._sort_indices.device):
+            dispatch_active_prefix(contact_count, n, self._prefix_flags, gather)
+        else:
+            gather(n)
 
     def prepare_full_sort(self, sort_keys: wp.array, contact_count: wp.array, *, device: Devicelike = None) -> None:
         """Prepare the canonical permutation without gathering the full record."""
@@ -709,6 +721,19 @@ class ContactSorter:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def _launch_over_active(self, capacity: int, device) -> bool:
+        """Return whether kernels over the contacts launch over a size class of those in use.
+
+        A captured graph can pick the class per step. Each choice costs a few conditional
+        nodes, about as much as a kernel over two million idle threads.
+        """
+        return (
+            capacity >= ACTIVE_DISPATCH_MIN_ITEMS
+            and self._prefix_flags.shape[0] > 1
+            and device.is_cuda
+            and device.is_capturing
+        )
+
     def _radix_sort(self, keys: wp.array, contact_count: wp.array, end_bit: int) -> None:
         """Sort ``keys`` with the permutation, over the active prefix where a graph is being captured."""
         n = self._capacity
@@ -748,6 +773,20 @@ class ContactSorter:
                 device=device,
             )
             self._radix_sort(self._compact_sort_keys, contact_count, self._compact_key_bits + 1)
+        elif self._launch_over_active(n, sort_keys.device):
+
+            def prepare_and_sort(dim: int) -> None:
+                # The keys get their sentinel behind the contacts within the size class, which
+                # is all a sort of that class reads.
+                wp.launch(
+                    _prepare_sort,
+                    dim=dim,
+                    inputs=[contact_count, sort_keys, self._sort_keys_copy, self._sort_indices],
+                    device=device,
+                )
+                radix_sort_prefix(self._sort_keys_copy, self._sort_indices, dim, self._key_bit_count)
+
+            dispatch_active_prefix(contact_count, n, self._prefix_flags, prepare_and_sort)
         else:
             wp.launch(
                 _prepare_sort,

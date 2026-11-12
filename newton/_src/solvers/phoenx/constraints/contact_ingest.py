@@ -15,6 +15,7 @@ from __future__ import annotations
 import warp as wp
 
 from newton._src.geometry.active_prefix_sort import (
+    ACTIVE_DISPATCH_MIN_ITEMS,
     active_prefix_sort_levels,
     dispatch_active_prefix,
     radix_sort_prefix,
@@ -102,11 +103,6 @@ def _body_pair_support_direction(direction: wp.int32) -> wp.vec3f:
     z = wp.float32(code / wp.int32(3) - wp.int32(1))
     result = wp.vec3f(x, y, z)
     return result / wp.length(result)
-
-
-#: Contact capacity from which the grouping path launches over a size class of the contacts
-#: in use: each of its four branches costs about 10 us, a kernel over 4M idle threads 20 us.
-_ACTIVE_DISPATCH_MIN_CONTACTS = 1 << 21
 
 
 class IngestScratch:
@@ -1414,7 +1410,7 @@ def ingest_contacts(
         flags is not None
         and flags.device.is_cuda
         and flags.device.is_capturing
-        and rigid_contact_max >= _ACTIVE_DISPATCH_MIN_CONTACTS
+        and rigid_contact_max >= ACTIVE_DISPATCH_MIN_ITEMS
         and rigid_contact_max == scratch.rigid_contact_max
     )
 

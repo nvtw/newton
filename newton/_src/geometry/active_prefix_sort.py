@@ -75,6 +75,10 @@ def _restore_sort_scratch_int_kernel(keys: wp.array[int], values: wp.array[int],
     values[prefix + tid] = values[prefix - 1]
 
 
+#: Capacity from which a group of kernels is worth launching through :func:`dispatch_active_prefix`:
+#: the choice costs about 10 us, a kernel over two million idle threads about as much.
+ACTIVE_DISPATCH_MIN_ITEMS = 1 << 21
+
 #: Active entries up to which one pass that ranks every key against all others beats the
 #: radix sort, whose eight passes over 64-bit keys each cost a launch however few keys there are.
 _RANK_SORT_MAX_ITEMS = 1024
@@ -252,4 +256,10 @@ def radix_sort_active_prefix(
     wp.capture_if(few, on_true=rank, on_false=radix)
 
 
-__all__ = ["active_prefix_sort_levels", "dispatch_active_prefix", "radix_sort_active_prefix", "radix_sort_prefix"]
+__all__ = [
+    "ACTIVE_DISPATCH_MIN_ITEMS",
+    "active_prefix_sort_levels",
+    "dispatch_active_prefix",
+    "radix_sort_active_prefix",
+    "radix_sort_prefix",
+]

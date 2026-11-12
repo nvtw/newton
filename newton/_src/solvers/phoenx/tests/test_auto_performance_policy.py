@@ -85,9 +85,7 @@ class TestPhoenXAutoPerformancePolicy(unittest.TestCase):
         import warp as wp  # noqa: PLC0415
 
         import newton  # noqa: PLC0415
-        from newton._src.solvers.phoenx.constraints.contact_ingest import (  # noqa: PLC0415
-            _ACTIVE_DISPATCH_MIN_CONTACTS,
-        )
+        from newton._src.geometry.active_prefix_sort import ACTIVE_DISPATCH_MIN_ITEMS  # noqa: PLC0415
 
         if not wp.is_cuda_available():
             self.skipTest("size classes are chosen inside a captured CUDA graph")
@@ -110,12 +108,18 @@ class TestPhoenXAutoPerformancePolicy(unittest.TestCase):
                 solver.step(state, output, None, contacts, 1.0 / 60.0)
                 wp.copy(state.body_q, output.body_q)
                 wp.copy(state.body_qd, output.body_qd)
+            peak = 0
             for _ in range(90):
                 wp.capture_launch(capture.graph)
+                peak = max(peak, int(contacts.rigid_contact_count.numpy()[0]))
+            # Slots that held contacts earlier read as unmatched again, as after full launches.
+            count = int(contacts.rigid_contact_count.numpy()[0])
+            self.assertGreater(peak, count)
+            np.testing.assert_array_equal(contacts.rigid_contact_match_index.numpy()[count:], -1)
             return np.concatenate((state.body_q.numpy().ravel(), state.body_qd.numpy().ravel()))
 
         small = settle(4096)
-        large = settle(int(_ACTIVE_DISPATCH_MIN_CONTACTS))
+        large = settle(int(ACTIVE_DISPATCH_MIN_ITEMS))
         self.assertTrue(np.isfinite(small).all())
         np.testing.assert_array_equal(small, large)
 
