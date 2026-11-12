@@ -1,0 +1,1 @@
+Fix `SolverPhoenX` reduced articulations ignoring `Model.joint_effort_limit`: a position or velocity drive whose effort would exceed its limit now applies the limit as a constant effort for that step, as the maximal-coordinate direct drives already did. A limit of zero, a non-finite one, or one above `1e18` still leaves a drive unlimited.

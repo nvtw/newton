@@ -86,6 +86,7 @@ from newton._src.solvers.phoenx.articulations.reduced import (
     _vec8,
     initialize_reduced_joint,
     initialize_reduced_rates,
+    saturate_joint_drive,
 )
 from newton._src.solvers.phoenx.articulations.reduced_contact_block import (
     _CACHED_PAGE_COUNT,
@@ -379,7 +380,7 @@ def _in_first_tree(parent: wp.int32, lane: wp.int32, max_depth: wp.int32) -> wp.
 
 
 #: Columns of the packed per-DOF joint parameters, see _pack_dof_parameters_kernel.
-_DOF_PARAMETERS = 9
+_DOF_PARAMETERS = 10
 
 
 @wp.kernel(enable_backward=False)
@@ -393,12 +394,13 @@ def _pack_dof_parameters_kernel(
     joint_limit_kd: wp.array[wp.float32],
     joint_damping: wp.array[wp.float32],
     joint_armature: wp.array[wp.float32],
+    joint_effort_limit: wp.array[wp.float32],
     parameters: wp.array2d[wp.float32],
 ):
-    """Copy the drive, limit, damping, and armature parameters of each DOF into one row.
+    """Copy the drive, limit, damping, armature, and effort limit parameters of each DOF into one row.
 
-    The fused kernels read them for every DOF in every substep; from nine separate
-    arrays that is nine cache lines per DOF, from one row it is one.
+    The fused kernels read them for every DOF in every substep; from ten separate
+    arrays that is ten cache lines per DOF, from one row it is one.
     """
     dof = wp.tid()
     parameters[dof, 0] = joint_target_ke[dof]
@@ -410,6 +412,7 @@ def _pack_dof_parameters_kernel(
     parameters[dof, 6] = joint_limit_kd[dof]
     parameters[dof, 7] = joint_damping[dof]
     parameters[dof, 8] = joint_armature[dof]
+    parameters[dof, 9] = joint_effort_limit[dof]
 
 
 @wp.func
@@ -458,6 +461,9 @@ def _configure_implicit_joint_dynamics_packed(
                 target_velocity = wp.float32(0.0)
             elif target_mode == JointTargetMode.VELOCITY:
                 stiffness = wp.float32(0.0)
+            stiffness, drive_damping, drive_effort = saturate_joint_drive(
+                stiffness, drive_damping, target_position, target_velocity, q, qd, dt, params[dof, 9]
+            )
             predicted_q = q + dt * qd
             lower = params[dof, 3]
             upper = params[dof, 4]
@@ -466,16 +472,19 @@ def _configure_implicit_joint_dynamics_packed(
                 drive_damping = params[dof, 6]
                 target_position = lower
                 target_velocity = wp.float32(0.0)
+                drive_effort = wp.float32(0.0)
             elif q > upper or predicted_q > upper:
                 stiffness = params[dof, 5]
                 drive_damping = params[dof, 6]
                 target_position = upper
                 target_velocity = wp.float32(0.0)
+                drive_effort = wp.float32(0.0)
             passive_damping = params[dof, 7]
             damping = drive_damping + passive_damping
             diagonal += dt * damping + dt * dt * stiffness
             force = (
-                stiffness * (target_position - q)
+                drive_effort
+                + stiffness * (target_position - q)
                 + drive_damping * (target_velocity - qd)
                 - passive_damping * qd
                 - dt * stiffness * qd
@@ -2341,6 +2350,7 @@ class DenseSubstep:
                 model.joint_limit_kd,
                 model.joint_damping,
                 model.joint_armature,
+                model.joint_effort_limit,
             ],
             outputs=[self._dof_parameters],
             device=model.device,

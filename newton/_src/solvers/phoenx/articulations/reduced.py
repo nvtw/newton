@@ -976,6 +976,40 @@ def _sync_reduced_bodies_kernel(
 
 
 @wp.func
+def drive_effort_is_limited(limit: wp.float32) -> wp.bool:
+    """Whether an absolute effort limit bounds a drive; zero, non-finite, and huge limits do not."""
+    return limit > wp.float32(0.0) and wp.isfinite(limit) and limit <= wp.float32(1.0e18)
+
+
+@wp.func
+def saturate_joint_drive(
+    stiffness: wp.float32,
+    drive_damping: wp.float32,
+    target_position: wp.float32,
+    target_velocity: wp.float32,
+    q: wp.float32,
+    qd: wp.float32,
+    dt: wp.float32,
+    effort_limit: wp.float32,
+):
+    """Return a drive's implicit stiffness, damping, and explicit effort under its effort limit.
+
+    The drive's effort at the end of the step, predicted at the current velocity, is
+    ``stiffness * (target_position - q - dt * qd) + drive_damping * (target_velocity - qd)``.
+    Within ``effort_limit`` the drive stays implicit; beyond it the drive applies the limit as
+    a constant effort for this step, like the direct-equality path's saturated drive rows. A
+    limit of zero, a non-finite one, or one above ``1e18`` leaves the drive unlimited.
+    """
+    limit = wp.abs(effort_limit)
+    if not drive_effort_is_limited(limit):
+        return stiffness, drive_damping, wp.float32(0.0)
+    effort = stiffness * (target_position - q - dt * qd) + drive_damping * (target_velocity - qd)
+    if wp.abs(effort) <= limit:
+        return stiffness, drive_damping, wp.float32(0.0)
+    return wp.float32(0.0), wp.float32(0.0), wp.clamp(effort, -limit, limit)
+
+
+@wp.func
 def configure_implicit_joint_dynamics(
     joint: wp.int32,
     joint_type: wp.array[wp.int32],
@@ -989,6 +1023,7 @@ def configure_implicit_joint_dynamics(
     joint_target_ke: wp.array[wp.float32],
     joint_target_kd: wp.array[wp.float32],
     joint_target_mode: wp.array[wp.int32],
+    joint_effort_limit: wp.array[wp.float32],
     joint_limit_lower: wp.array[wp.float32],
     joint_limit_upper: wp.array[wp.float32],
     joint_limit_ke: wp.array[wp.float32],
@@ -1025,23 +1060,29 @@ def configure_implicit_joint_dynamics(
                 target_velocity = wp.float32(0.0)
             elif target_mode == JointTargetMode.VELOCITY:
                 stiffness = wp.float32(0.0)
+            stiffness, drive_damping, drive_effort = saturate_joint_drive(
+                stiffness, drive_damping, target_position, target_velocity, q, qd, dt, joint_effort_limit[dof]
+            )
             predicted_q = q + dt * qd
             if q < joint_limit_lower[dof] or predicted_q < joint_limit_lower[dof]:
                 stiffness = joint_limit_ke[dof]
                 drive_damping = joint_limit_kd[dof]
                 target_position = joint_limit_lower[dof]
                 target_velocity = wp.float32(0.0)
+                drive_effort = wp.float32(0.0)
             elif q > joint_limit_upper[dof] or predicted_q > joint_limit_upper[dof]:
                 stiffness = joint_limit_ke[dof]
                 drive_damping = joint_limit_kd[dof]
                 target_position = joint_limit_upper[dof]
                 target_velocity = wp.float32(0.0)
+                drive_effort = wp.float32(0.0)
 
             passive_damping = joint_damping[dof]
             damping = drive_damping + passive_damping
             factor_diagonal[dof] += dt * damping + dt * dt * stiffness
             implicit_force[dof] = (
-                stiffness * (target_position - q)
+                drive_effort
+                + stiffness * (target_position - q)
                 + drive_damping * (target_velocity - qd)
                 - passive_damping * qd
                 - dt * stiffness * qd
@@ -1061,6 +1102,7 @@ def _configure_implicit_joint_dynamics_kernel(
     joint_target_ke: wp.array[wp.float32],
     joint_target_kd: wp.array[wp.float32],
     joint_target_mode: wp.array[wp.int32],
+    joint_effort_limit: wp.array[wp.float32],
     joint_limit_lower: wp.array[wp.float32],
     joint_limit_upper: wp.array[wp.float32],
     joint_limit_ke: wp.array[wp.float32],
@@ -1084,6 +1126,7 @@ def _configure_implicit_joint_dynamics_kernel(
         joint_target_ke,
         joint_target_kd,
         joint_target_mode,
+        joint_effort_limit,
         joint_limit_lower,
         joint_limit_upper,
         joint_limit_ke,
@@ -1114,6 +1157,7 @@ def _compute_forward_dynamics_rhs_kernel(
     joint_target_qd: wp.array[wp.float32],
     joint_target_ke: wp.array[wp.float32],
     joint_target_kd: wp.array[wp.float32],
+    joint_effort_limit: wp.array[wp.float32],
     joint_limit_lower: wp.array[wp.float32],
     joint_limit_upper: wp.array[wp.float32],
     joint_limit_ke: wp.array[wp.float32],
@@ -1195,19 +1239,30 @@ def _compute_forward_dynamics_rhs_kernel(
             if joint_kind != JointType.FREE and joint_kind != JointType.DISTANCE:
                 applied = joint_f[dof]
             if joint_kind == JointType.REVOLUTE or joint_kind == JointType.PRISMATIC or joint_kind == JointType.D6:
+                q = joint_q[coord_start + local]
+                qd = joint_qd[dof]
+                # The drive's effort is bounded by its effort limit; joint limits are not.
                 applied += joint_force(
-                    joint_q[coord_start + local],
-                    joint_qd[dof],
-                    joint_target_q[target_start + local],
-                    joint_target_qd[dof],
-                    joint_target_ke[dof],
-                    joint_target_kd[dof],
+                    q,
+                    qd,
+                    wp.float32(0.0),
+                    wp.float32(0.0),
+                    wp.float32(0.0),
+                    wp.float32(0.0),
                     joint_limit_lower[dof],
                     joint_limit_upper[dof],
                     joint_limit_ke[dof],
                     joint_limit_kd[dof],
                     joint_damping[dof],
                 )
+                if q >= joint_limit_lower[dof] and q <= joint_limit_upper[dof]:
+                    limit = wp.abs(joint_effort_limit[dof])
+                    drive = joint_target_ke[dof] * (joint_target_q[target_start + local] - q) + joint_target_kd[dof] * (
+                        joint_target_qd[dof] - qd
+                    )
+                    if drive_effort_is_limited(limit):
+                        drive = wp.clamp(drive, -limit, limit)
+                    applied += drive
             generalized_rhs[dof] = applied - wp.dot(joint_s[dof], subtree_bias)
         if parent >= wp.int32(0):
             body_bias[parent] = body_bias[parent] + subtree_bias
@@ -4497,6 +4552,7 @@ class ReducedArticulationSystem:
                     self.model.joint_target_ke,
                     self.model.joint_target_kd,
                     self.model.joint_target_mode,
+                    self.model.joint_effort_limit,
                     self.model.joint_limit_lower,
                     self.model.joint_limit_upper,
                     self.model.joint_limit_ke,
@@ -4643,6 +4699,7 @@ class ReducedArticulationSystem:
                 control.joint_target_qd,
                 self.model.joint_target_ke,
                 self.model.joint_target_kd,
+                self.model.joint_effort_limit,
                 self.model.joint_limit_lower,
                 self.model.joint_limit_upper,
                 self.model.joint_limit_ke,
