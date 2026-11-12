@@ -2850,9 +2850,9 @@ class CollisionPipeline:
             split_gjk_mpr = (
                 device.is_cuda and has_generic_convex_pairs and generic_convex_pair_work_estimate >= split_threshold
             )
-            filter_split_gjk_box_pairs = split_gjk_mpr and box_candidate_count >= 2
-            # Virtual suffix shapes have no entries in model.shape_type. The
-            # runtime filter reads the unified type array after binding.
+            # Virtual suffix shapes have no entries in model.shape_type: any of them may be a
+            # box. The runtime filter reads the unified type array after binding.
+            filter_split_gjk_box_pairs = split_gjk_mpr and box_candidate_count + self.extra_shape_count >= 2
             if filter_split_gjk_box_pairs and self.broad_phase_mode == "explicit" and self.extra_shape_count == 0:
                 filter_split_gjk_box_pairs = bool(
                     np.any(np.all(shape_types[explicit_pairs_host] == int(GeoType.BOX), axis=1))
