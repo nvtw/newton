@@ -484,13 +484,13 @@ def write_contact_geometric(
     output_index: int,
 ):
     """Store geometric search witnesses without initial-velocity admission."""
-    normal, point_a_world, point_b_world, separation = prepare_speculative_contact(contact_data)
     index = output_index
     if index < 0:
-        if separation > contact_data.gap_sum:
+        if contact_separation(contact_data) > contact_data.gap_sum:
             return
         index = wp.atomic_add(writer_data.contact_count, 0, 1)
-    _write_contact_at_index(contact_data, writer_data, index, point_a_world, point_b_world, normal)
+    normal = wp.normalize(contact_data.contact_normal_a_to_b)
+    _write_contact_at_index(contact_data, writer_data, index, normal)
 
 
 @wp.func
