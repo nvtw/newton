@@ -1531,6 +1531,8 @@ class SolverPhoenX(SolverBase):
         # Placeholder for _contact_impulse_to_force_wrapper_kernel when grouping
         # is off (has_perm=0 makes the kernel ignore it).
         self._sort_perm_placeholder = wp.zeros(1, dtype=wp.int32, device=self.device)
+        # Stands in for the per-step impulse totals of a step that recorded none.
+        self._empty_impulse_sum = wp.empty(0, dtype=wp.vec3f, device=self.device)
 
     def _validate_temporal_model_properties(self) -> None:
         """Reject unsupported temporal properties before refreshing cached rows."""
@@ -2030,10 +2032,13 @@ class SolverPhoenX(SolverBase):
         if penetration_free is not None:
             self.world._penetration_free.check_reference(penetration_free, state_in.body_q, self.world.bodies)
 
+        record_forces = contacts is not None and (contacts.force is not None or contact_f is not None)
         if self.solver_scheme == "tgs":
-            self.world._temporal_contact_state.record_wrenches = int(
-                contacts is not None and (contacts.force is not None or contact_f is not None)
-            )
+            self.world._temporal_contact_state.record_wrenches = int(record_forces)
+        else:
+            # Report each contact's impulse over the whole step, which balances the bodies'
+            # momentum; the last substep's alone does not while the bodies accelerate.
+            self.world._set_record_contact_impulses(record_forces)
         self.world.step(
             dt=float(dt),
             contacts=contacts if self._shape_body is not None else None,
@@ -2048,7 +2053,7 @@ class SolverPhoenX(SolverBase):
             # graph colouring instead of re-colouring an unchanged graph.
             reuse_partition=bool(getattr(self, "reuse_partition", False)),
         )
-        self._last_dt = float(dt) if self.solver_scheme == "tgs" else float(dt) / max(1, self.world.substeps)
+        self._last_dt = float(dt)
 
         self._export_body_state(state_out, dt=float(dt))
         if penetration_free is not None:
@@ -2250,6 +2255,12 @@ class SolverPhoenX(SolverBase):
             sort_perm = self._sort_perm_placeholder
             sorted_shape0 = contacts.rigid_contact_shape0
             has_perm = wp.int32(0)
+        impulse_sum = self.world._contact_impulse_sum
+        if self.world._record_contact_impulses:
+            idt = 1.0 / self._last_dt
+        else:
+            impulse_sum = self._empty_impulse_sum
+            idt = float(self.world.substeps) / self._last_dt
         force.zero_()
         wp.launch(
             _contact_impulse_to_force_wrapper_kernel,
@@ -2258,7 +2269,8 @@ class SolverPhoenX(SolverBase):
                 contacts.rigid_contact_count,
                 self.world._cid_of_contact_cur,
                 cc,
-                wp.float32(1.0 / self._last_dt),
+                impulse_sum,
+                wp.float32(idt),
                 sort_perm,
                 has_perm,
                 contacts.rigid_contact_shape0,

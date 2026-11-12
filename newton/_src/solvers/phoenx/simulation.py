@@ -15,6 +15,7 @@ from newton._src.sim.collide import CollisionPipeline
 from newton._src.sim.contacts import Contacts
 from newton._src.solvers.phoenx import diagnostics
 from newton._src.solvers.phoenx.adapter_kernels import (
+    _accumulate_contact_impulse_kernel,
     _accumulate_substep_velocity_kernel,
 )
 from newton._src.solvers.phoenx.articulations.direct_contact_gs import (
@@ -681,6 +682,9 @@ class PhoenXWorld:
         #: Solve rigid contacts against static bodies per dynamic body on its
         #: full mass after each mass-splitting average instead of coloring them.
         self._separate_static_contacts = False
+        #: Sum each contact's impulse over the step's substeps, for reported contact forces.
+        self._record_contact_impulses = False
+        self._contact_impulse_sum = None
         self.solver_iterations = int(solver_iterations)
         if self.solver_iterations < 1:
             raise ValueError(f"solver_iterations must be >= 1 (got {self.solver_iterations})")
@@ -2810,6 +2814,11 @@ class PhoenXWorld:
         # Substep order: bias-on solve -> integrate -> bias-off relax. Reversing
         # would discard the positional bias's penetration recovery.
         inv_n = 1.0 / float(self.substeps)
+        record_impulses = (
+            self._record_contact_impulses and contacts is not None and self._cid_of_contact_cur is not None
+        )
+        if record_impulses:
+            self._contact_impulse_sum.zero_()
         for k in range(self.substeps):
             self._current_substep_index = k
             if picking is not None:
@@ -2869,6 +2878,8 @@ class PhoenXWorld:
                 and self._reduced_constraints_active_this_step
             ):
                 self._reduced_articulation.finish_relax()
+            if record_impulses:
+                self._accumulate_contact_impulses(contacts)
             # Flip cloth particles' POSITION_LEVEL writes back to
             # VELOCITY_LEVEL. No-op for STATIC particles and rigid-only
             # scenes (num_particles == 0).
@@ -3740,6 +3751,24 @@ class PhoenXWorld:
                 ],
                 device=self.device,
             )
+
+    def _set_record_contact_impulses(self, enabled: bool) -> None:
+        """Sum each rigid contact's impulse over the substeps of every step."""
+        self._record_contact_impulses = bool(enabled) and self.rigid_contact_max > 0
+        if self._record_contact_impulses and self._contact_impulse_sum is None:
+            self._contact_impulse_sum = wp.zeros(self.rigid_contact_max, dtype=wp.vec3f, device=self.device)
+
+    def _accumulate_contact_impulses(self, contacts) -> None:
+        """Add the substep's rigid contact impulses to their step totals."""
+        # Color-ordered rows hold the substep's impulses until they are scattered back.
+        self._scatter_colored_contact_rows()
+        wp.launch(
+            _accumulate_contact_impulse_kernel,
+            dim=self.rigid_contact_max,
+            inputs=[contacts.rigid_contact_count, self._cid_of_contact_cur, self._contact_container],
+            outputs=[self._contact_impulse_sum],
+            device=self.device,
+        )
 
     def _set_separate_static_contacts(self, enabled: bool) -> None:
         """Solve rigid contacts against static bodies per dynamic body instead of by color."""

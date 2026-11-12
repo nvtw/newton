@@ -1,0 +1,1 @@
+Fix PhoenX contact forces reported by the soft scheme: they are now each contact's impulse over the whole step divided by its ``dt``, which balances the bodies' momentum, instead of the last substep's force, which did not while bodies accelerate (a landing box reported up to 900 N wrong).

@@ -35,6 +35,7 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
 from newton._src.solvers.phoenx.helpers.math_helpers import rotate_inertia
 
 __all__ = [
+    "_accumulate_contact_impulse_kernel",
     "_apply_joint_drive_control_kernel",
     "_apply_joint_forces_kernel",
     "_contact_impulse_to_force_wrapper_kernel",
@@ -547,11 +548,42 @@ def _apply_joint_drive_control_kernel(
     write_float(constraints, off_max_force_drive, cid, max_force)
 
 
+@wp.func
+def _active_contact_count(rigid_contact_count: wp.array[wp.int32], capacity: wp.int32) -> wp.int32:
+    # On narrow-phase overflow the raw counter keeps climbing past the
+    # contact buffer, so clamp it to the buffer capacity.
+    return wp.min(rigid_contact_count[0], capacity)
+
+
+@wp.func
+def _contact_impulse(cc: ContactContainer, k: wp.int32) -> wp.vec3f:
+    """World-frame impulse of contact ``k`` on shape1 in the current substep."""
+    n = cc_get_normal(cc, k)
+    t1 = cc_get_tangent1(cc, k)
+    t2 = wp.cross(n, t1)
+    return cc_get_normal_lambda(cc, k) * n + cc_get_tangent1_lambda(cc, k) * t1 + cc_get_tangent2_lambda(cc, k) * t2
+
+
+@wp.kernel(enable_backward=False)
+def _accumulate_contact_impulse_kernel(
+    rigid_contact_count: wp.array[wp.int32],
+    cid_of_contact: wp.array[wp.int32],
+    cc: ContactContainer,
+    impulse_sum: wp.array[wp.vec3f],
+):
+    """Add each contact's substep impulse to its total over the step."""
+    k = wp.tid()
+    if k >= _active_contact_count(rigid_contact_count, impulse_sum.shape[0]) or cid_of_contact[k] < wp.int32(0):
+        return
+    impulse_sum[k] = impulse_sum[k] + _contact_impulse(cc, k)
+
+
 @wp.kernel(enable_backward=False)
 def _contact_impulse_to_force_wrapper_kernel(
     rigid_contact_count: wp.array[wp.int32],
     cid_of_contact: wp.array[wp.int32],
     cc: ContactContainer,
+    impulse_sum: wp.array[wp.vec3f],
     idt: wp.float32,
     sort_perm: wp.array[wp.int32],
     has_perm: wp.int32,
@@ -560,33 +592,26 @@ def _contact_impulse_to_force_wrapper_kernel(
     # out
     force_out: wp.array[wp.spatial_vector],
 ):
-    """Pack ``ContactContainer`` lambdas into ``Contacts.force``.
+    """Pack contact impulses into ``Contacts.force``.
 
-    Re-permutes from sorted_k (compound-body grouping) to newton narrow-phase
-    order via ``sort_perm``. Sign: container lambdas are impulse on shape1;
-    Newton stores force on shape0, so we negate before writing and restore
-    the narrow-phase endpoint orientation when compound grouping reversed it.
+    ``impulse_sum`` holds each contact's impulse summed over the step's
+    substeps when the step recorded it, and ``idt`` is then the inverse
+    step ``dt``; otherwise it is empty and the last substep's lambdas are
+    divided by its ``dt``. Re-permutes from sorted_k (compound-body
+    grouping) to newton narrow-phase order via ``sort_perm``. Sign:
+    container lambdas are impulse on shape1; Newton stores force on
+    shape0, so we negate before writing and restore the narrow-phase
+    endpoint orientation when compound grouping reversed it.
     """
     k = wp.tid()
-    # Clamp the count against the output buffer capacity. On narrow-phase
-    # overflow the raw counter keeps climbing past the actual contact
-    # buffer; without clamping the early-return below never fires for
-    # valid k and we'd index ``force_out[sort_perm[k]]`` past the live
-    # range. ``sort_perm`` may be a size-1 placeholder when
-    # ``has_perm == 0``, so we size against ``force_out`` (which is
-    # always ``rigid_contact_max`` long).
-    n_active = rigid_contact_count[0]
-    if n_active > force_out.shape[0]:
-        n_active = force_out.shape[0]
-    if k >= n_active or cid_of_contact[k] < wp.int32(0):
+    # ``sort_perm`` may be a size-1 placeholder when ``has_perm == 0``, so
+    # size against ``force_out`` (always ``rigid_contact_max`` long).
+    if k >= _active_contact_count(rigid_contact_count, force_out.shape[0]) or cid_of_contact[k] < wp.int32(0):
         return
-    n = cc_get_normal(cc, k)
-    t1 = cc_get_tangent1(cc, k)
-    t2 = wp.cross(n, t1)
-    lam_n = cc_get_normal_lambda(cc, k)
-    lam_t1 = cc_get_tangent1_lambda(cc, k)
-    lam_t2 = cc_get_tangent2_lambda(cc, k)
-    f = -(lam_n * n + lam_t1 * t1 + lam_t2 * t2) * idt
+    if impulse_sum.shape[0] > 0:
+        f = -impulse_sum[k] * idt
+    else:
+        f = -_contact_impulse(cc, k) * idt
     if has_perm != 0:
         out_k = sort_perm[k]
         if sorted_shape0[k] != shape0[out_k]:
