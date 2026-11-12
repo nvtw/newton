@@ -566,8 +566,15 @@ def _link_path_kernel(
 
 @wp.kernel(enable_backward=False)
 def _seed_deferred_rate_kernel(bodies: BodyContainer):
-    """Form each flagged tree's deferred rates from the wrenches its links already hold."""
-    articulation = wp.tid()
+    """Form each flagged tree's deferred rates from the wrenches its links already hold.
+
+    One lane per warp takes a tree: trees hold wrenches on different links, and a warp
+    walks the branches of its lanes one after the other.
+    """
+    tid = wp.tid()
+    if tid % wp.int32(32) != wp.int32(0):
+        return
+    articulation = tid / wp.int32(32)
     data = bodies.reduced
     if data.deferred_pending[articulation] == wp.int32(0):
         return
@@ -4306,7 +4313,13 @@ class ReducedContactBlockSystem:
             inputs=[bodies, dense.data, dense.joint_last_dof, dense.template_joint_start, self.cross_tree],
             device=self.device,
         )
-        wp.launch(_seed_deferred_rate_kernel, dim=self.articulation_count, inputs=[bodies], device=self.device)
+        wp.launch(
+            _seed_deferred_rate_kernel,
+            dim=32 * self.articulation_count,
+            block_dim=32,
+            inputs=[bodies],
+            device=self.device,
+        )
 
     def solve_fallback(
         self,
