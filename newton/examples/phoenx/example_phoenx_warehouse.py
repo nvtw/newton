@@ -15,10 +15,13 @@ With ``--walking-anymals`` the fleet is that many ANYmals which a walking policy
 the aisles instead: forward in one lane, back in the other, turning at both ends. One network
 evaluation per frame serves all of them, inside the same CUDA graph as the step, at the
 policy's rate of 50 Hz.
-With ``--sorting-humanoids`` the warehouse becomes a sorting hall: lines of G1 humanoids stand
-beside conveyor belts, and each sweeps its right hand over its belt every two seconds, pushing
-the packages it catches off the belt's far side. Packages appear at the start of every belt and
-are removed once they drop off its side or its end, all from device code inside the graph.
+With ``--sorting-humanoids`` the warehouse becomes a sorting hall: two lines of G1 humanoids face
+each other across every conveyor belt, and each sweeps its right hand over the belt about every
+two seconds, pushing the packages it catches off the far side. A hand sweeps the same strip of the
+belt as the hand of the humanoid opposite, so the two meet over the belt and push packages back
+and forth; their periods differ slightly, so the pairs that meet change over time. Packages
+appear at the start of every belt and are removed once they drop off its sides or its end, all
+from device code inside the graph.
 
 The scene exercises what one large world mixes: robots that touch free bodies (a package on a
 humanoid's foot, a pod carried by a drive unit, a loaded pallet on a forklift), free bodies
@@ -35,8 +38,9 @@ Success criteria:
 - A meaningful fraction of the free bodies falls asleep.
 - The gates and drawers stay on their joints.
 - Every humanoid that arrives at the dock stands, and no arrival or departure fails.
-- In the sorting hall, the humanoids push packages off their belts, and no package is lost or
-  left over: every package put on a belt is still on it or was removed.
+- In the sorting hall, the humanoids push packages off their belts, facing humanoids touch each
+  other, and no package is lost or left over: every package put on a belt is still on it or was
+  removed.
 - Walking ANYmals stay within 0.4 m of their loop and cover it at 0.7 times the commanded
   1 m/s or more on average, none at less than 0.4 times.
 
@@ -49,7 +53,7 @@ Runs:
 - `python -m newton.examples phoenx_warehouse --walking-anymals 1024`
   - A thousand policy-driven ANYmals walk laps through the aisles.
 - `python -m newton.examples phoenx_warehouse --sorting-humanoids 1024`
-  - A thousand humanoids sort packages off 32 conveyor belts.
+  - A thousand humanoids sort packages off 16 conveyor belts.
 - `python -m newton.examples phoenx_warehouse --viewer null --timing-frames 600`
   - Prints the scene counts and the milliseconds per captured step.
 """
@@ -155,12 +159,15 @@ WALK_TURN_SPEED = 0.6  # commanded while facing across the loop [m/s]
 WALK_YAW_RATE_MAX = 1.0  # [rad/s], the largest turn command the policy was trained with
 LANE_OFFSET = 0.8  # [m] of the two lanes from the middle of their aisle
 
-# Sorting lines: humanoids beside belts push passing packages off them with their right hand.
-SORT_ROBOTS_PER_LINE = 32
+# Sorting lines: two lines of humanoids face each other across a belt and push passing packages
+# off it with their right hands; each hand sweeps the same strip of the belt as the opposite one.
+SORT_ROBOTS_PER_LINE = 32  # on each side of a belt
 SORT_ROBOT_PITCH = 0.9  # [m] between humanoids along a line
-SORT_LINE_PITCH = 2.0  # [m] between lines
+SORT_LINE_PITCH = 2.0  # [m] between belts
 SORT_BELT_NEAR = 0.14  # [m] near edge of the belt in front of a humanoid's root
 SORT_BELT_FAR = 0.32  # [m] far edge, beyond which pushed packages drop to the floor
+SORT_FACING = SORT_BELT_NEAR + SORT_BELT_FAR  # [m] between the roots of two facing humanoids
+SORT_PERIOD_SPREAD = 0.1  # relative spread of the humanoids' periods, so the pairs that meet change
 SORT_BELT_TOP = 0.70  # [m]
 SORT_BELT_SPEED = 0.25  # [m/s]
 SORT_PACKAGE_HALF_EXTENTS = wp.constant(wp.vec3(0.06, 0.08, 0.06))  # [m], across and along the belt, and up
@@ -849,18 +856,28 @@ def _belt_mesh(center, half_extents) -> newton.Mesh:
 
 
 def build_sorting_hall(humanoids: int, robot_meshes: bool = False) -> Scene:
-    """Lines of G1 humanoids beside belts, each line one belt that runs along the humanoids."""
+    """Belts with a line of G1 humanoids on each side, the far line offset by half a pitch.
+
+    A right hand is about 0.2 m beside its root, so with the lines half a pitch (0.45 m) apart
+    along the belt, a humanoid's right hand sweeps about 0.05 m beside the right hand of the
+    humanoid opposite.
+    """
     assembler = _SceneAssembler({"g1": humanoids})
-    lines = math.ceil(humanoids / SORT_ROBOTS_PER_LINE)
-    length = SORT_ROBOTS_PER_LINE * SORT_ROBOT_PITCH
+    per_belt = 2 * SORT_ROBOTS_PER_LINE
+    belts = math.ceil(humanoids / per_belt)
+    length = (SORT_ROBOTS_PER_LINE + 0.5) * SORT_ROBOT_PITCH
     scene = assembler.scene
     scene.sort_end = length
     width = SORT_BELT_FAR - SORT_BELT_NEAR
     xforms = []
-    for line in range(lines):
-        x = line * SORT_LINE_PITCH
-        count = min(SORT_ROBOTS_PER_LINE, humanoids - line * SORT_ROBOTS_PER_LINE)
-        xforms += [_position(x, (k + 0.5) * SORT_ROBOT_PITCH) for k in range(count)]
+    for belt_index in range(belts):
+        x = belt_index * SORT_LINE_PITCH
+        for k in range(min(per_belt, humanoids - belt_index * per_belt)):
+            side, slot = divmod(k, SORT_ROBOTS_PER_LINE)
+            if side == 0:
+                xforms.append(_position(x, (slot + 0.5) * SORT_ROBOT_PITCH))
+            else:
+                xforms.append(_position(x + SORT_FACING, slot * SORT_ROBOT_PITCH, yaw=math.pi))
         start = -1.0
         belt = _belt_mesh(
             (x + 0.5 * (SORT_BELT_NEAR + SORT_BELT_FAR), 0.5 * (start + length), 0.5 * SORT_BELT_TOP),
@@ -868,12 +885,10 @@ def build_sorting_hall(humanoids: int, robot_meshes: bool = False) -> Scene:
         )
         assembler.builder.add_shape_mesh(-1, mesh=belt, cfg=_shape_cfg(), color=COLORS["frame"], label="belt")
         scene.sort_belts.append(belt)
-        # Packages appear at the belt's start, against its near edge, where the hands reach them.
-        scene.sort_spawns.append(
-            (x + SORT_BELT_NEAR + float(SORT_PACKAGE_HALF_EXTENTS[0]) + 0.005, start + 0.3, SORT_BELT_TOP)
-        )
+        # Packages appear at the belt's start, in its middle, where the hands of both sides reach.
+        scene.sort_spawns.append((x + 0.5 * SORT_FACING, start + 0.3, SORT_BELT_TOP))
     assembler.place_robots("g1", build_g1(robot_meshes), xforms)
-    capacity = lines * math.ceil((length + 2.0) / SORT_SPAWN_CLEARANCE)
+    capacity = belts * math.ceil((length + 2.0) / SORT_SPAWN_CLEARANCE)
     assembler.builder.reserve_dynamic_capacity(bodies=capacity, shapes=capacity)
     for shape in range(assembler.builder.shape_count):
         assembler.builder.shape_gap[shape] = CONTACT_GAP
@@ -1193,7 +1208,9 @@ def _sorter_target_kernel(
     """Drive every sorter's right arm through its push, each humanoid at its own phase."""
     sorter = wp.tid()
     time = float(frame[0]) * frame_dt
-    phase = time / SORT_PERIOD + 0.618034 * float(sorter)
+    spread = 0.754878 * float(sorter)
+    period = SORT_PERIOD * (1.0 + SORT_PERIOD_SPREAD * (spread - wp.floor(spread)))
+    phase = time / period + 0.618034 * float(sorter)
     along = _sort_push(phase - wp.floor(phase)) * float(sweep.shape[0] - 1)
     k = wp.min(int(along), sweep.shape[0] - 2)
     target = wp.lerp(sweep[k], sweep[k + 1], along - float(k))
@@ -1409,6 +1426,13 @@ class Example:
         #: Packages removed after the humanoids pushed them off a belt's side, and off its end.
         self.sort_retired = wp.zeros(2, dtype=int)
         self.sort_xforms = wp.zeros(self.sort_capacity, dtype=wp.transform)
+        # Which humanoid each body belongs to, to count the contacts between humanoids.
+        bodies_per_robot = roots[1] - roots[0] if len(roots) > 1 else model.body_count - roots[0]
+        self.body_robot = np.full(model.body_count, -1, dtype=np.int64)
+        for robot, root in enumerate(roots):
+            self.body_robot[root : root + bodies_per_robot] = robot
+        #: Steps in which two humanoids touched, counted by the test.
+        self.robot_touch_steps = 0
 
     def _sort(self):
         """Spawn packages and set the arm targets for this frame."""
@@ -1553,7 +1577,8 @@ class Example:
         if self.sorting:
             sorted_off, passed = self.sort_retired.numpy()
             timing += (
-                f"packages spawned={int(self.sort_spawned.numpy()[0])} sorted={int(sorted_off)} passed={int(passed)} | "
+                f"packages spawned={int(self.sort_spawned.numpy()[0])} sorted={int(sorted_off)} passed={int(passed)} "
+                f"robot_contacts={self.robot_contacts()} | "
             )
         print(
             f"[PhoenX Warehouse] {timing}contacts={contact_count}/{self.contacts.rigid_contact_max} "
@@ -1585,10 +1610,22 @@ class Example:
                 heights["g1"] = np.concatenate([heights.get("g1", np.empty(0, dtype=poses.dtype)), poses[roots, 2]])
         return heights
 
+    def robot_contacts(self) -> int:
+        """Count the contacts between two different humanoids of the sorting hall."""
+        count = int(self.contacts.rigid_contact_count.numpy()[0])
+        shape_body = self.model.shape_body.numpy()
+        robots = []
+        for shapes in (self.contacts.rigid_contact_shape0, self.contacts.rigid_contact_shape1):
+            body = shape_body[shapes.numpy()[:count]]
+            robots.append(np.where(body >= 0, self.body_robot[np.clip(body, 0, None)], -1))
+        return int(np.sum((robots[0] >= 0) & (robots[1] >= 0) & (robots[0] != robots[1])))
+
     def test_post_step(self):
         """Stop at the first frame that loses a robot or contact capacity."""
         count = int(self.contacts.rigid_contact_count.numpy()[0])
         assert count < self.contacts.rigid_contact_max, "contact capacity was exhausted"
+        if self.sorting and self.robot_contacts() > 0:
+            self.robot_touch_steps += 1
         poses = self.state.body_q.numpy()
         assert np.isfinite(poses).all(), f"body poses are non-finite at t={self.sim_time:.2f} s"
         for name, heights in self._robot_heights(poses).items():
@@ -1641,8 +1678,10 @@ class Example:
             )
             assert spawned == sorted_off + passed + live, "a package went missing"
             # The first package reaches the first humanoid after about five seconds.
+            print(f"[PhoenX Warehouse] humanoids touched each other in {self.robot_touch_steps} steps", flush=True)
             if self.sim_time > 10.0:
                 assert sorted_off > 0, "no humanoid pushed a package off its belt"
+                assert self.robot_touch_steps > 0, "no two humanoids touched"
 
         if len(self.settled_bodies):
             moved = np.linalg.norm(poses[self.settled_bodies, :3] - self.initial_poses[self.settled_bodies, :3], axis=1)
