@@ -1265,12 +1265,10 @@ def _check_sticky_rotated_witness(test, device, *, plane_first, threshold, use_c
             pipeline.collide(state, contacts)
         test.assertEqual(count, int(contacts.rigid_contact_count.numpy()[0]))
         match_index = contacts.rigid_contact_match_index.numpy()[:count]
-        # Large rotation moves the transported midpoint outside the matching
-        # radius; small witness drift can still preserve identity and geometry.
-        if expect_replay:
-            test.assertTrue(np.all(match_index[penetrating] >= 0))
-        else:
-            np.testing.assert_array_equal(match_index[penetrating], MATCH_BROKEN)
+        # The cylinder rolls in place: its contacts travel with it and keep their
+        # identity. Small witness drift also preserves their geometry; large
+        # rotation replaces it with the fresh narrow-phase record.
+        test.assertTrue(np.all(match_index[penetrating] >= 0))
         np.testing.assert_array_equal(match_index[separated], MATCH_BROKEN)
         test.assertEqual(int(contacts.rigid_contact_new_count.numpy()[0]), int(np.count_nonzero(match_index < 0)))
         for field in fields:
