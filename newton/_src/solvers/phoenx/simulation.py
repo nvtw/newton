@@ -58,6 +58,7 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     contact_pack_colored_headers,
     contact_scatter_colored_rows,
     contact_views_make,
+    derive_side_witness_kernel,
 )
 from newton._src.solvers.phoenx.constraints.constraint_contact_solve import (
     _get_parallel_contact_prepare_kernel,
@@ -682,6 +683,12 @@ class PhoenXWorld:
         #: Solve rigid contacts against static bodies per dynamic body on its
         #: full mass after each mass-splitting average instead of coloring them.
         self._separate_static_contacts = False
+        #: Cylinder side witnesses moved onto the axis, see :func:`contact_side_witness`; empty
+        #: unless :meth:`_enable_side_witnesses` found a cylinder on a body.
+        self._side_witness0 = None
+        self._side_witness1 = None
+        self._side_shape_transform = None
+        self._side_shape_scale = None
         #: Sum each contact's impulse over the step's substeps, for reported contact forces.
         self._record_contact_impulses = False
         self._contact_impulse_sum = None
@@ -3068,6 +3075,8 @@ class PhoenXWorld:
                 rigid_contact_damping=self._ingest_scratch.sorted_damping,
                 rigid_contact_friction=self._ingest_scratch.sorted_friction,
                 rigid_contact_surface_velocity=self._ingest_scratch.sorted_surface_velocity,
+                side_witness0=self._side_witness0,
+                side_witness1=self._side_witness1,
             )
         else:
             self._contact_views = contact_views_make(
@@ -3086,6 +3095,24 @@ class PhoenXWorld:
                 rigid_contact_damping=contact_damping,
                 rigid_contact_friction=contact_friction,
                 rigid_contact_surface_velocity=contacts.rigid_contact_surface_velocity,
+                side_witness0=self._side_witness0,
+                side_witness1=self._side_witness1,
+            )
+
+        if self._side_witness0 is not None:
+            # Classify the contact sides at the pose the collision pass found them.
+            wp.launch(
+                derive_side_witness_kernel,
+                dim=self.rigid_contact_max,
+                inputs=[
+                    self._contact_views,
+                    self.bodies.orientation,
+                    self._side_shape_transform,
+                    self._side_shape_scale,
+                    self._side_witness0,
+                    self._side_witness1,
+                ],
+                device=self.device,
             )
 
         # match_index is already in prev-sorted-k for compound, Newton-order otherwise.
@@ -3769,6 +3796,15 @@ class PhoenXWorld:
             outputs=[self._contact_impulse_sum],
             device=self.device,
         )
+
+    def _enable_side_witnesses(self, shape_transform: wp.array, shape_scale: wp.array) -> None:
+        """Keep the witnesses of contacts on cylinder sides on their axes, see :func:`contact_side_witness`."""
+        if self.rigid_contact_max <= 0:
+            return
+        self._side_witness0 = wp.zeros(self.rigid_contact_max, dtype=wp.vec4f, device=self.device)
+        self._side_witness1 = wp.zeros(self.rigid_contact_max, dtype=wp.vec4f, device=self.device)
+        self._side_shape_transform = shape_transform
+        self._side_shape_scale = shape_scale
 
     def _set_separate_static_contacts(self, enabled: bool) -> None:
         """Solve rigid contacts against static bodies per dynamic body instead of by color."""

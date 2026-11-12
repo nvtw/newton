@@ -1,0 +1,1 @@
+Fix `SolverPhoenX` cylinders that roll on their curved side gaining spin, lifting off, or sinking: the solver now places those contacts' witnesses on the cylinder axis, offset by the radius, so they stay below the axis while the cylinder turns. The collision pipeline's contact output is unchanged.

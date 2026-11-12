@@ -20,6 +20,7 @@ import warp as wp
 
 import newton
 from newton._src.geometry.broad_phase_implicit_tree import BroadPhaseImplicitTree
+from newton._src.geometry.types import GeoType
 from newton._src.sim import BodyFlags, CollisionPipeline, Contacts, Control, JointType, Model, ModelFlags, State
 from newton._src.sim.collide import _estimate_rigid_contact_max
 from newton._src.solvers.phoenx.adapter_kernels import (
@@ -1450,6 +1451,14 @@ class SolverPhoenX(SolverBase):
                 raise RuntimeError("PhoenX deformable contacts require a CollisionPipeline")
             self.world.setup_official_deformable_contacts(model, pipeline)
         self._collision_pipeline = getattr(model, "_collision_pipeline", None)
+        if model.shape_count > 0:
+            # Rolling cylinders keep their side contacts' witnesses on their axes; runtime
+            # shape rows may become cylinders on bodies later.
+            runtime_shapes = dynamic_capacity is not None and dynamic_capacity.shape_count > 0
+            shape_type_np = model.shape_type.numpy()
+            shape_body_np = model.shape_body.numpy()
+            if runtime_shapes or np.any((shape_type_np == int(GeoType.CYLINDER)) & (shape_body_np >= 0)):
+                self.world._enable_side_witnesses(model.shape_transform, model.shape_scale)
         if tracking_volumes is not None or (dynamic_capacity is not None and dynamic_capacity.shape_count):
             volume_mask = np.zeros(max(1, int(model.shape_count)), dtype=np.int32)
             volume_mask[np.asarray(tracking_volumes if tracking_volumes is not None else [], dtype=np.int64)] = 1

@@ -24,6 +24,7 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     contact_get_contact_first,
     contact_get_friction,
     contact_get_friction_dynamic,
+    contact_side_witness,
 )
 from newton._src.solvers.phoenx.constraints.contact_container import (
     ContactContainer,
@@ -610,17 +611,17 @@ def reduced_contact_prepare(
         normal = cc_get_normal(contacts_state, contact)
         tangent0 = cc_get_tangent1(contacts_state, contact)
         tangent1 = wp.cross(normal, tangent0)
-        local0 = contacts.rigid_contact_point0[contact]
-        local1 = contacts.rigid_contact_point1[contact]
+        local0, extra0 = contact_side_witness(contacts, contact, wp.int32(0))
+        local1, extra1 = contact_side_witness(contacts, contact, wp.int32(1))
         point0 = (
             bodies.position[body0]
             + wp.quat_rotate(bodies.orientation[body0], local0 - bodies.body_com[body0])
-            + contacts.rigid_contact_margin0[contact] * normal
+            + (contacts.rigid_contact_margin0[contact] + extra0) * normal
         )
         point1 = (
             bodies.position[body1]
             + wp.quat_rotate(bodies.orientation[body1], local1 - bodies.body_com[body1])
-            - contacts.rigid_contact_margin1[contact] * normal
+            - (contacts.rigid_contact_margin1[contact] + extra1) * normal
         )
         weight0 = contact_point_weight(bodies, body0, body1)
         contact_point = weight0 * point0 + (wp.float32(1.0) - weight0) * point1
@@ -754,17 +755,17 @@ def reduced_contact_iterate_staged(
         normal = cc_get_normal(contacts_state, contact)
         tangent0 = cc_get_tangent1(contacts_state, contact)
         tangent1 = wp.cross(normal, tangent0)
-        local0 = contacts.rigid_contact_point0[contact]
-        local1 = contacts.rigid_contact_point1[contact]
+        local0, extra0 = contact_side_witness(contacts, contact, wp.int32(0))
+        local1, extra1 = contact_side_witness(contacts, contact, wp.int32(1))
         point0 = (
             bodies.position[body0]
             + wp.quat_rotate(bodies.orientation[body0], local0 - bodies.body_com[body0])
-            + contacts.rigid_contact_margin0[contact] * normal
+            + (contacts.rigid_contact_margin0[contact] + extra0) * normal
         )
         point1 = (
             bodies.position[body1]
             + wp.quat_rotate(bodies.orientation[body1], local1 - bodies.body_com[body1])
-            - contacts.rigid_contact_margin1[contact] * normal
+            - (contacts.rigid_contact_margin1[contact] + extra1) * normal
         )
         weight0 = contact_point_weight(bodies, body0, body1)
         contact_point = weight0 * point0 + (wp.float32(1.0) - weight0) * point1

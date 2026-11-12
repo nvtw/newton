@@ -13,6 +13,8 @@ Friction: two-tangent pyramidal PGS. Normal lambda_n >= 0; tangents clamped to
 
 from __future__ import annotations
 
+import math
+
 import warp as wp
 
 from newton._src.geometry.types import GeoType
@@ -699,6 +701,12 @@ class ContactViews:
     rigid_contact_friction: wp.array[wp.float32]
     #: Surface velocity of shape 1 minus shape 0 [m/s] (conveyor surfaces), or empty.
     rigid_contact_surface_velocity: wp.array[wp.vec3f]
+    #: Per contact and side, the witness of a contact on a cylinder's curved side moved onto
+    #: the cylinder's axis (xyz, body frame) and its distance to the axis [m] (w, zero for
+    #: other contacts), or empty when no body carries a cylinder. See
+    #: :func:`contact_side_witness`.
+    side_witness0: wp.array[wp.vec4f]
+    side_witness1: wp.array[wp.vec4f]
 
 
 def contact_views_make(
@@ -717,6 +725,8 @@ def contact_views_make(
     rigid_contact_damping: wp.array,
     rigid_contact_friction: wp.array,
     rigid_contact_surface_velocity: wp.array | None = None,
+    side_witness0: wp.array | None = None,
+    side_witness1: wp.array | None = None,
 ) -> ContactViews:
     """Build a :class:`ContactViews` from allocated Warp arrays.
 
@@ -743,7 +753,98 @@ def contact_views_make(
         if rigid_contact_surface_velocity is not None
         else wp.empty(0, dtype=wp.vec3f, device=rigid_contact_count.device)
     )
+    empty_witness = None
+    if side_witness0 is None or side_witness1 is None:
+        empty_witness = wp.empty(0, dtype=wp.vec4f, device=rigid_contact_count.device)
+    v.side_witness0 = side_witness0 if side_witness0 is not None else empty_witness
+    v.side_witness1 = side_witness1 if side_witness1 is not None else empty_witness
     return v
+
+
+@wp.func
+def contact_side_witness(contacts: ContactViews, k: wp.int32, side: wp.int32):
+    """Return a contact side's body-frame witness and the margin [m] it adds to the side's margin.
+
+    The collision record places the witness of a contact on a cylinder's curved side on the
+    surface. A solver step moves witnesses with their bodies, and a surface witness turns away
+    from the contact as the cylinder rolls; the side is the Minkowski sum of the axis and the
+    radius, so its witness on the axis, offset by its distance to the axis, describes the same
+    contact and stays below the axis however the cylinder turns. Other witnesses are returned
+    unchanged with no added margin.
+    """
+    point = contacts.rigid_contact_point0[k]
+    if side == wp.int32(1):
+        point = contacts.rigid_contact_point1[k]
+    extra = wp.float32(0.0)
+    if contacts.side_witness0.shape[0] > 0:
+        witness = contacts.side_witness0[k]
+        if side == wp.int32(1):
+            witness = contacts.side_witness1[k]
+        if witness[3] > wp.float32(0.0):
+            point = wp.vec3f(witness[0], witness[1], witness[2])
+            extra = witness[3]
+    return point, extra
+
+
+_SIDE_SINE = wp.constant(math.sin(math.radians(2.0)))
+_SIDE_COSINE = wp.constant(math.cos(math.radians(2.0)))
+
+
+@wp.func
+def _cylinder_side_witness(
+    point: wp.vec3f,
+    outward_local: wp.vec3f,
+    shape_transform: wp.transform,
+    radius: wp.float32,
+) -> wp.vec4f:
+    """Axis witness and its distance to the axis for a witness on a cylinder's side, else zero."""
+    axis = wp.quat_rotate(wp.transform_get_rotation(shape_transform), wp.vec3f(0.0, 0.0, 1.0))
+    if wp.abs(wp.dot(axis, outward_local)) > _SIDE_SINE:
+        return wp.vec4f(0.0)
+    center = wp.transform_get_translation(shape_transform)
+    offset = point - center
+    along = wp.dot(offset, axis)
+    radial = offset - along * axis
+    distance = wp.length(radial)
+    # The normal is radial: it leaves the axis through the witness.
+    if distance < wp.float32(0.5) * radius or wp.dot(radial, outward_local) < _SIDE_COSINE * distance:
+        return wp.vec4f(0.0)
+    on_axis = center + along * axis
+    return wp.vec4f(on_axis[0], on_axis[1], on_axis[2], distance)
+
+
+@wp.kernel(enable_backward=False)
+def derive_side_witness_kernel(
+    contacts: ContactViews,
+    body_orientation: wp.array[wp.quatf],
+    shape_transform: wp.array[wp.transform],
+    shape_scale: wp.array[wp.vec3f],
+    side_witness0: wp.array[wp.vec4f],
+    side_witness1: wp.array[wp.vec4f],
+):
+    """Classify each contact side at the pose the collision pass found it, see :func:`contact_side_witness`."""
+    k = wp.tid()
+    if k >= wp.min(contacts.rigid_contact_count[0], side_witness0.shape[0]):
+        return
+    normal = contacts.rigid_contact_normal[k]
+    for side in range(2):
+        shape = contacts.rigid_contact_shape0[k]
+        point = contacts.rigid_contact_point0[k]
+        outward = normal
+        if side == 1:
+            shape = contacts.rigid_contact_shape1[k]
+            point = contacts.rigid_contact_point1[k]
+            outward = -normal
+        witness = wp.vec4f(0.0)
+        if shape >= 0 and shape < shape_transform.shape[0]:
+            body = contacts.shape_body[shape]
+            if body > 0 and contacts.shape_type[shape] == wp.int32(GeoType.CYLINDER):
+                outward_local = wp.quat_rotate_inv(body_orientation[body], outward)
+                witness = _cylinder_side_witness(point, outward_local, shape_transform[shape], shape_scale[shape][0])
+        if side == 0:
+            side_witness0[k] = witness
+        else:
+            side_witness1[k] = witness
 
 
 @wp.func
@@ -1286,10 +1387,10 @@ def _contact_recompute_r2(
     n: wp.vec3f,
 ) -> wp.vec3f:
     """``r2 = quat_rotate(orient2, local_p1 - body_com2) - margin1 * n``."""
-    local_p1 = contacts.rigid_contact_point1[k]
+    local_p1, extra1 = contact_side_witness(contacts, k, wp.int32(1))
     body_com2 = bodies.body_com[b2]
     orientation2 = bodies.orientation[b2]
-    margin1 = contacts.rigid_contact_margin1[k]
+    margin1 = contacts.rigid_contact_margin1[k] + extra1
     return wp.quat_rotate(orientation2, local_p1 - body_com2) - margin1 * n
 
 
@@ -1458,15 +1559,15 @@ def contact_per_k_error_at(
     n = cc_get_normal(cc, k)
     t1_dir = cc_get_tangent1(cc, k)
     t2_dir = wp.cross(n, t1_dir)
-    local_p0 = contacts.rigid_contact_point0[k]
-    local_p1 = contacts.rigid_contact_point1[k]
+    local_p0, extra0 = contact_side_witness(contacts, k, wp.int32(0))
+    local_p1, extra1 = contact_side_witness(contacts, k, wp.int32(1))
 
     # local_p is in body-origin frame; subtract body_com so r is from COM.
     p1_world = position1 + wp.quat_rotate(orientation1, local_p0 - body_com1)
     p2_world = position2 + wp.quat_rotate(orientation2, local_p1 - body_com2)
     p_diff = p2_world - p1_world
 
-    margin_sum = contacts.rigid_contact_margin0[k] + contacts.rigid_contact_margin1[k]
+    margin_sum = contacts.rigid_contact_margin0[k] + contacts.rigid_contact_margin1[k] + extra0 + extra1
     gap = wp.dot(p_diff, n) - margin_sum
     drift_t1 = wp.dot(p_diff, t1_dir)
     drift_t2 = wp.dot(p_diff, t2_dir)

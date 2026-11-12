@@ -21,6 +21,7 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     contact_get_count2,
     contact_get_friction,
     contact_get_friction_dynamic,
+    contact_side_witness,
 )
 from newton._src.solvers.phoenx.constraints.contact_container import (
     ContactContainer,
@@ -85,10 +86,10 @@ def geometry(
         for offset in range(lane, count, 128):
             k = first + offset
             n = cc_get_normal(cc, k)
-            local_p0 = views.rigid_contact_point0[k]
-            local_p1 = views.rigid_contact_point1[k]
-            margin0 = views.rigid_contact_margin0[k]
-            margin1 = views.rigid_contact_margin1[k]
+            local_p0, extra0 = contact_side_witness(views, k, wp.int32(0))
+            local_p1, extra1 = contact_side_witness(views, k, wp.int32(1))
+            margin0 = views.rigid_contact_margin0[k] + extra0
+            margin1 = views.rigid_contact_margin1[k] + extra1
             p0_world = position1 + wp.quat_rotate(orientation1, local_p0 - body_com1) + margin0 * n
             p1_world = position2 + wp.quat_rotate(orientation2, local_p1 - body_com2) - margin1 * n
             impulse_point = wp.float32(0.5) * (p0_world + p1_world)

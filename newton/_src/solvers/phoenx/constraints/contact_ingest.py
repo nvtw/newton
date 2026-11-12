@@ -44,6 +44,7 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     contact_set_side1_slots_extra,
     contact_set_slot1,
     contact_set_slot2,
+    contact_side_witness,
 )
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     CONSTRAINT_BODY1_OFFSET,
@@ -1235,18 +1236,22 @@ def _contact_warmstart_gather_kernel(
             p2 = bodies.position[b2]
             com1 = bodies.body_com[b1]
             com2 = bodies.body_com[b2]
-            witness0 = p1 + wp.quat_rotate(q1, contacts.rigid_contact_point0[k] - com1)
-            witness1 = p2 + wp.quat_rotate(q2, contacts.rigid_contact_point1[k] - com2)
+            local0, extra0 = contact_side_witness(contacts, k, wp.int32(0))
+            local1, extra1 = contact_side_witness(contacts, k, wp.int32(1))
+            witness0 = p1 + wp.quat_rotate(q1, local0 - com1)
+            witness1 = p2 + wp.quat_rotate(q2, local1 - com2)
             point = wp.float32(0.5) * (
-                witness0 + witness1 + (contacts.rigid_contact_margin0[k] - contacts.rigid_contact_margin1[k]) * n
+                witness0
+                + witness1
+                + (contacts.rigid_contact_margin0[k] + extra0 - contacts.rigid_contact_margin1[k] - extra1) * n
             )
             cc_set_friction_anchor0(cc, k, com1 + wp.quat_rotate_inv(q1, point - p1))
             cc_set_friction_anchor1(cc, k, com2 + wp.quat_rotate_inv(q2, point - p2))
 
     uses_start_gap = _contact_uses_stale_anchor_start_gap(contacts, k)
     if uses_start_gap or reuse:
-        local_p0 = contacts.rigid_contact_point0[k]
-        local_p1 = contacts.rigid_contact_point1[k]
+        local_p0, extra0 = contact_side_witness(contacts, k, wp.int32(0))
+        local_p1, extra1 = contact_side_witness(contacts, k, wp.int32(1))
         sa = contacts.rigid_contact_shape0[k]
         sb = contacts.rigid_contact_shape1[k]
         b1 = contacts.shape_body[sa]
@@ -1254,7 +1259,7 @@ def _contact_warmstart_gather_kernel(
         r1 = wp.quat_rotate(bodies.orientation[b1], local_p0 - bodies.body_com[b1])
         r2 = wp.quat_rotate(bodies.orientation[b2], local_p1 - bodies.body_com[b2])
         gap = wp.dot((bodies.position[b2] + r2) - (bodies.position[b1] + r1), n) - (
-            contacts.rigid_contact_margin0[k] + contacts.rigid_contact_margin1[k]
+            contacts.rigid_contact_margin0[k] + contacts.rigid_contact_margin1[k] + extra0 + extra1
         )
         if uses_start_gap:
             cc_set_start_gap(cc, k, gap)

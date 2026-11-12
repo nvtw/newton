@@ -52,6 +52,7 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     contact_get_slot1,
     contact_get_slot2,
     contact_set_packed_body_properties,
+    contact_side_witness,
 )
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     DEFAULT_HERTZ_CONTACT,
@@ -326,7 +327,8 @@ def _side_world_contact_point(
             anchor = anchor + weight_d * particles.position[p_d]
         return anchor + (sign * margin) * n
     b = nodes[0]
-    local_p = contacts.rigid_contact_point1[source_k] if is_side1 else contacts.rigid_contact_point0[source_k]
+    local_p, extra = contact_side_witness(contacts, source_k, wp.int32(1) if is_side1 else wp.int32(0))
+    margin = margin + extra
     if b < 0:
         # Static-anchor world shape: shape transform is identity.
         return local_p + (sign * margin) * n
@@ -767,10 +769,10 @@ def _make_contact_prepare_for_iteration_at(
                 effective_gap = wp.dot(p1_world - p0_world, n)
                 p_diff = p1_world - p0_world
             else:
-                local_p0 = contacts.rigid_contact_point0[source_k]
-                local_p1 = contacts.rigid_contact_point1[source_k]
-                p0_world = position1 + wp.quat_rotate(orientation1, local_p0 - body_com1) + margin0 * n
-                p1_world = position2 + wp.quat_rotate(orientation2, local_p1 - body_com2) - margin1 * n
+                local_p0, extra0 = contact_side_witness(contacts, source_k, wp.int32(0))
+                local_p1, extra1 = contact_side_witness(contacts, source_k, wp.int32(1))
+                p0_world = position1 + wp.quat_rotate(orientation1, local_p0 - body_com1) + (margin0 + extra0) * n
+                p1_world = position2 + wp.quat_rotate(orientation2, local_p1 - body_com2) - (margin1 + extra1) * n
                 # Apply equal and opposite impulses at a common point so
                 # separated collision witnesses cannot create a friction couple.
                 weight1 = contact_point_weight(bodies, b1, b2)

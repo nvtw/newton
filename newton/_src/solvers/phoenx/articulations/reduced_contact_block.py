@@ -60,6 +60,7 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     contact_get_friction_dynamic,
     contact_get_side0_kind,
     contact_get_side1_kind,
+    contact_side_witness,
 )
 from newton._src.solvers.phoenx.constraints.contact_container import (
     ContactContainer,
@@ -1172,15 +1173,15 @@ def _gather_reduced_contact_blocks_kernel(
             n = cc_get_normal(cc, contact)
             t0 = cc_get_tangent1(cc, contact)
             t1 = wp.cross(n, t0)
-            local0 = contacts.rigid_contact_point0[contact]
-            local1 = contacts.rigid_contact_point1[contact]
+            local0, extra0 = contact_side_witness(contacts, contact, wp.int32(0))
+            local1, extra1 = contact_side_witness(contacts, contact, wp.int32(1))
             offset0 = (
                 wp.quat_rotate(bodies.orientation[body0], local0 - bodies.body_com[body0])
-                + contacts.rigid_contact_margin0[contact] * n
+                + (contacts.rigid_contact_margin0[contact] + extra0) * n
             )
             offset1 = (
                 wp.quat_rotate(bodies.orientation[body1], local1 - bodies.body_com[body1])
-                - contacts.rigid_contact_margin1[contact] * n
+                - (contacts.rigid_contact_margin1[contact] + extra1) * n
             )
             position0 = bodies.position[body0]
             position1 = bodies.position[body1]
@@ -1332,15 +1333,15 @@ def _gather_packed_patch_points(
                 n = cc_get_normal(cc, contact)
                 t0 = cc_get_tangent1(cc, contact)
                 t1 = wp.cross(n, t0)
-                local0 = contacts.rigid_contact_point0[contact]
-                local1 = contacts.rigid_contact_point1[contact]
+                local0, extra0 = contact_side_witness(contacts, contact, wp.int32(0))
+                local1, extra1 = contact_side_witness(contacts, contact, wp.int32(1))
                 offset0 = (
                     wp.quat_rotate(bodies.orientation[body0], local0 - bodies.body_com[body0])
-                    + contacts.rigid_contact_margin0[contact] * n
+                    + (contacts.rigid_contact_margin0[contact] + extra0) * n
                 )
                 offset1 = (
                     wp.quat_rotate(bodies.orientation[body1], local1 - bodies.body_com[body1])
-                    - contacts.rigid_contact_margin1[contact] * n
+                    - (contacts.rigid_contact_margin1[contact] + extra1) * n
                 )
                 position0 = bodies.position[body0]
                 position1 = bodies.position[body1]
@@ -1622,15 +1623,15 @@ def _gather_packed_contact_points(
             n = cc_get_normal(cc, contact)
             t0 = cc_get_tangent1(cc, contact)
             t1 = wp.cross(n, t0)
-            local0 = contacts.rigid_contact_point0[contact]
-            local1 = contacts.rigid_contact_point1[contact]
+            local0, extra0 = contact_side_witness(contacts, contact, wp.int32(0))
+            local1, extra1 = contact_side_witness(contacts, contact, wp.int32(1))
             offset0 = (
                 wp.quat_rotate(bodies.orientation[body0], local0 - bodies.body_com[body0])
-                + contacts.rigid_contact_margin0[contact] * n
+                + (contacts.rigid_contact_margin0[contact] + extra0) * n
             )
             offset1 = (
                 wp.quat_rotate(bodies.orientation[body1], local1 - bodies.body_com[body1])
-                - contacts.rigid_contact_margin1[contact] * n
+                - (contacts.rigid_contact_margin1[contact] + extra1) * n
             )
             position0 = bodies.position[body0]
             position1 = bodies.position[body1]
