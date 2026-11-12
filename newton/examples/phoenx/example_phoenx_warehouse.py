@@ -21,7 +21,8 @@ two seconds, pushing the packages it catches off the far side. A hand sweeps the
 belt as the hand of the humanoid opposite, so the two meet over the belt and push packages back
 and forth; their periods differ slightly, so the pairs that meet change over time. Packages
 appear at the start of every belt and are removed once they drop off its sides or its end, all
-from device code inside the graph.
+from device code inside the graph. Drive units carry totes up and down the aisles between the
+lines, brushing past the humanoids' heels.
 
 The scene exercises what one large world mixes: robots that touch free bodies (a package on a
 humanoid's foot, a pod carried by a drive unit, a loaded pallet on a forklift), free bodies
@@ -35,12 +36,12 @@ Success criteria:
 - Every robot stays upright: humanoids and quadrupeds keep their root height, drive units
   and forklifts stay level on their wheels.
 - Stacked cartons and shelved packages stay within a few centimeters of where they started.
-- A meaningful fraction of the free bodies falls asleep.
+- A meaningful fraction of the free bodies falls asleep (outside the sorting hall).
 - The gates and drawers stay on their joints.
 - Every humanoid that arrives at the dock stands, and no arrival or departure fails.
 - In the sorting hall, the humanoids push packages off their belts, facing humanoids touch each
-  other, and no package is lost or left over: every package put on a belt is still on it or was
-  removed.
+  other, the drive units shuttle their totes along the aisles, and no package is lost or left
+  over: every package put on a belt is still on it or was removed.
 - Walking ANYmals stay within 0.4 m of their loop and cover it at 0.7 times the commanded
   1 m/s or more on average, none at less than 0.4 times.
 
@@ -176,6 +177,13 @@ SORT_SPAWN_CLEARANCE = 0.4  # [m] a package moves along its belt before the next
 SORT_DROP_HEIGHT = 0.4  # [m]; below it a package has left its belt and is removed
 SORT_PERIOD = 2.0  # [s] of one push of a humanoid's arm
 # Right shoulder pitch and elbow [rad] that sweep the hand forward at 0.80 m height, over the belt.
+# A drive unit shuttles a tote up and down every aisle between the sorting lines. The aisles are
+# too narrow for two units to pass, so each has one.
+SORT_KIVAS_PER_AISLE = 1
+SORT_KIVA_SPEED = 0.6  # [m/s], spread by up to 30% between units
+KIVA_WHEEL_RADIUS = 0.08  # [m]
+KIVA_WHEEL_TRACK = 0.31  # [m] from the chassis' middle to each wheel
+KIVA_DRIVE_KD = 40.0  # [N*m*s/rad] of a wheel's velocity drive
 SORT_ARM_SWEEP = ((0.4, 0.15), (0.2, 0.3), (0.0, 0.5), (-0.2, 0.75), (-0.4, 1.05), (-0.6, 1.4))
 
 KIVA_ROOT_HEIGHT = 0.12  # chassis center [m]
@@ -404,8 +412,16 @@ def build_anymal(walking: bool = False) -> newton.ModelBuilder:
     return builder
 
 
-def _add_wheel(builder: newton.ModelBuilder, chassis: int, center, radius: float, half_width: float, label: str):
-    """Add a braked wheel on a revolute joint about the chassis' lateral axis."""
+def _add_wheel(
+    builder: newton.ModelBuilder,
+    chassis: int,
+    center,
+    radius: float,
+    half_width: float,
+    label: str,
+    driven: bool = False,
+):
+    """Add a wheel on a revolute joint about the chassis' lateral axis, braked or ``driven`` at a target rate."""
     chassis_position = wp.transform_get_translation(builder.body_q[chassis])
     wheel = builder.add_link(xform=wp.transform(chassis_position + wp.vec3(*center), wp.quat_identity()), label=label)
     builder.add_shape_cylinder(
@@ -423,16 +439,19 @@ def _add_wheel(builder: newton.ModelBuilder, chassis: int, center, radius: float
         child_xform=wp.transform_identity(),
         axis=newton.Axis.Y,
         target_q=0.0,
-        target_ke=400.0,
-        target_kd=40.0,
+        target_ke=0.0 if driven else 400.0,
+        target_kd=KIVA_DRIVE_KD if driven else 40.0,
         armature=0.01,
-        actuator_mode=newton.JointTargetMode.POSITION,
+        actuator_mode=newton.JointTargetMode.VELOCITY if driven else newton.JointTargetMode.POSITION,
         label=f"{label}_axle",
     )
 
 
-def build_kiva() -> newton.ModelBuilder:
-    """Drive unit: a low chassis on two driven wheels and two passive caster balls."""
+def build_kiva(driven: bool = False) -> newton.ModelBuilder:
+    """Drive unit: a low chassis on two wheels and two passive caster balls.
+
+    The wheels are braked, or ``driven`` by velocity drives that steer the unit.
+    """
     builder = _new_builder()
     chassis = builder.add_link(
         xform=wp.transform(wp.vec3(0.0, 0.0, KIVA_ROOT_HEIGHT), wp.quat_identity()), label="kiva"
@@ -450,17 +469,24 @@ def build_kiva() -> newton.ModelBuilder:
         color=COLORS["steel"],
     )
     caster_radius = 0.035
+    # Driven wheels need the load for traction: like spring-loaded casters, rigid ones stand
+    # clear of the floor, and the unit tips onto one only when it pitches.
+    caster_clearance = 0.004 if driven else 0.0
     for x in (-0.30, 0.30):
         builder.add_shape_sphere(
             chassis,
-            xform=wp.transform(wp.vec3(x, 0.0, caster_radius - KIVA_ROOT_HEIGHT), wp.quat_identity()),
+            xform=wp.transform(
+                wp.vec3(x, 0.0, caster_radius + caster_clearance - KIVA_ROOT_HEIGHT), wp.quat_identity()
+            ),
             radius=caster_radius,
             cfg=_shape_cfg(density=1000.0, mu=0.1),
             color=COLORS["steel"],
         )
-    wheel_radius = 0.08
-    for side, y in (("left", 0.31), ("right", -0.31)):
-        _add_wheel(builder, chassis, (0.0, y, wheel_radius - KIVA_ROOT_HEIGHT), wheel_radius, 0.025, f"{side}_wheel")
+    wheel_radius = KIVA_WHEEL_RADIUS
+    for side, y in (("left", KIVA_WHEEL_TRACK), ("right", -KIVA_WHEEL_TRACK)):
+        _add_wheel(
+            builder, chassis, (0.0, y, wheel_radius - KIVA_ROOT_HEIGHT), wheel_radius, 0.025, f"{side}_wheel", driven
+        )
     builder.add_articulation(list(range(root, builder.joint_count)), label="kiva")
     return builder
 
@@ -677,6 +703,10 @@ class Scene:
     sort_spawns: list[tuple[float, float, float]] = field(default_factory=list)
     sort_belts: list[newton.Mesh] = field(default_factory=list)
     sort_end: float = 0.0
+    #: Middle [m] of the aisle each drive unit shuttles in, in the order of their roots, and the
+    #: ends [m] of its shuttle along the aisle.
+    kiva_aisles: list[float] = field(default_factory=list)
+    kiva_span: tuple[float, float] = (0.0, 0.0)
 
 
 class _SceneAssembler:
@@ -862,9 +892,9 @@ def build_sorting_hall(humanoids: int, robot_meshes: bool = False) -> Scene:
     along the belt, a humanoid's right hand sweeps about 0.05 m beside the right hand of the
     humanoid opposite.
     """
-    assembler = _SceneAssembler({"g1": humanoids})
     per_belt = 2 * SORT_ROBOTS_PER_LINE
     belts = math.ceil(humanoids / per_belt)
+    assembler = _SceneAssembler({"g1": humanoids, "kiva": belts * SORT_KIVAS_PER_AISLE})
     length = (SORT_ROBOTS_PER_LINE + 0.5) * SORT_ROBOT_PITCH
     scene = assembler.scene
     scene.sort_end = length
@@ -888,6 +918,21 @@ def build_sorting_hall(humanoids: int, robot_meshes: bool = False) -> Scene:
         # Packages appear at the belt's start, in its middle, where the hands of both sides reach.
         scene.sort_spawns.append((x + 0.5 * SORT_FACING, start + 0.3, SORT_BELT_TOP))
     assembler.place_robots("g1", build_g1(robot_meshes), xforms)
+    # Drive units in the aisle beyond every belt's far line, alternately heading up and down it.
+    aisle_offset = 0.5 * (SORT_FACING + SORT_LINE_PITCH)
+    scene.kiva_span = (0.8, length - 0.8)
+    kiva_xforms = []
+    tote = _frustum_mesh((0.16, 0.12, 0.08))
+    for belt_index in range(belts):
+        aisle = belt_index * SORT_LINE_PITCH + aisle_offset
+        for unit in range(SORT_KIVAS_PER_AISLE):
+            heading = 1.0 if unit % 2 == 0 else -1.0
+            y = scene.kiva_span[0] + (unit + 0.5) / SORT_KIVAS_PER_AISLE * (scene.kiva_span[1] - scene.kiva_span[0])
+            x = aisle
+            kiva_xforms.append(_position(x, y, yaw=heading * 0.5 * math.pi))
+            scene.kiva_aisles.append(aisle)
+            assembler.add_free_tote((x, y, KIVA_TOP + 0.08 + REST_GAP), tote)
+    assembler.place_robots("kiva", build_kiva(driven=True), kiva_xforms)
     capacity = belts * math.ceil((length + 2.0) / SORT_SPAWN_CLEARANCE)
     assembler.builder.reserve_dynamic_capacity(bodies=capacity, shapes=capacity)
     for shape in range(assembler.builder.shape_count):
@@ -1219,6 +1264,39 @@ def _sorter_target_kernel(
 
 
 @wp.kernel(enable_backward=False)
+def _kiva_drive_kernel(
+    body_q: wp.array[wp.transform],
+    roots: wp.array[int],
+    qd_start: wp.array[int],
+    aisle: wp.array[float],
+    span: wp.vec2,
+    heading: wp.array[float],
+    joint_target_qd: wp.array[float],
+):
+    """Steer every drive unit along the middle of its aisle, turning around at the shuttle's ends."""
+    unit = wp.tid()
+    pose = body_q[roots[unit]]
+    p = wp.transform_get_translation(pose)
+    forward = wp.quat_rotate(wp.transform_get_rotation(pose), wp.vec3(1.0, 0.0, 0.0))
+    direction = heading[unit]
+    if direction > 0.0 and p[1] > span[1]:
+        direction = -1.0
+    elif direction < 0.0 and p[1] < span[0]:
+        direction = 1.0
+    heading[unit] = direction
+    # Head along the aisle, steering back to its middle.
+    goal = wp.vec2(wp.clamp(2.0 * (aisle[unit] - p[0]), -0.6, 0.6), direction)
+    error = wp.atan2(forward[0] * goal[1] - forward[1] * goal[0], forward[0] * goal[0] + forward[1] * goal[1])
+    spread = 0.618034 * float(unit)
+    speed = SORT_KIVA_SPEED * (1.0 - 0.3 * (spread - wp.floor(spread)))
+    forward_speed = speed * wp.max(wp.cos(error), 0.0) ** 2.0
+    turn_rate = wp.clamp(2.5 * error, -1.5, 1.5)
+    start = qd_start[unit]
+    joint_target_qd[start + 6] = (forward_speed - turn_rate * KIVA_WHEEL_TRACK) / KIVA_WHEEL_RADIUS
+    joint_target_qd[start + 7] = (forward_speed + turn_rate * KIVA_WHEEL_TRACK) / KIVA_WHEEL_RADIUS
+
+
+@wp.kernel(enable_backward=False)
 def _sort_spawn_kernel(
     dyn: phoenx.DynamicsData,
     body_q: wp.array[wp.transform],
@@ -1426,13 +1504,24 @@ class Example:
         #: Packages removed after the humanoids pushed them off a belt's side, and off its end.
         self.sort_retired = wp.zeros(2, dtype=int)
         self.sort_xforms = wp.zeros(self.sort_capacity, dtype=wp.transform)
-        # Which humanoid each body belongs to, to count the contacts between humanoids.
-        bodies_per_robot = roots[1] - roots[0] if len(roots) > 1 else model.body_count - roots[0]
+        # Which robot each body belongs to, to count the contacts between robots.
+        articulation_start = model.articulation_start.numpy()
+        joint_child = model.joint_child.numpy()
         self.body_robot = np.full(model.body_count, -1, dtype=np.int64)
-        for robot, root in enumerate(roots):
-            self.body_robot[root : root + bodies_per_robot] = robot
-        #: Steps in which two humanoids touched, counted by the test.
+        for robot, articulation in enumerate(self.scene.robot_articulations):
+            joints = slice(articulation_start[articulation], articulation_start[articulation + 1])
+            self.body_robot[joint_child[joints]] = robot
+        #: Steps in which two robots touched, counted by the test.
         self.robot_touch_steps = 0
+        kivas = self.scene.robot_roots["kiva"]
+        self.kiva_roots = wp.array(kivas, dtype=int)
+        self.kiva_qd_start = wp.array(model.joint_qd_start.numpy()[joint_of_body[kivas]], dtype=int)
+        self.kiva_aisle = wp.array(self.scene.kiva_aisles, dtype=float)
+        poses = self.state.body_q.numpy()[kivas]
+        # Units start heading along +y (yaw +90 deg) or -y.
+        self.kiva_heading = wp.array(np.sign(poses[:, 5] * poses[:, 6]).astype(np.float32), dtype=float)
+        #: Where every drive unit started, for the test.
+        self.kiva_start = poses[:, :2].copy()
 
     def _sort(self):
         """Spawn packages and set the arm targets for this frame."""
@@ -1441,6 +1530,19 @@ class Example:
             _sort_spawn_kernel,
             dim=self.sort_spawn_body.shape[0],
             inputs=[dyn, self.state.body_q, self.sort_spawns, self.sort_spawn_body, self.sort_spawned],
+        )
+        wp.launch(
+            _kiva_drive_kernel,
+            dim=self.kiva_roots.shape[0],
+            inputs=[
+                self.state.body_q,
+                self.kiva_roots,
+                self.kiva_qd_start,
+                self.kiva_aisle,
+                wp.vec2(*self.scene.kiva_span),
+                self.kiva_heading,
+                self.control.joint_target_qd,
+            ],
         )
         wp.launch(
             _sorter_target_kernel,
@@ -1611,7 +1713,7 @@ class Example:
         return heights
 
     def robot_contacts(self) -> int:
-        """Count the contacts between two different humanoids of the sorting hall."""
+        """Count the contacts between two different robots of the sorting hall."""
         count = int(self.contacts.rigid_contact_count.numpy()[0])
         shape_body = self.model.shape_body.numpy()
         robots = []
@@ -1678,10 +1780,14 @@ class Example:
             )
             assert spawned == sorted_off + passed + live, "a package went missing"
             # The first package reaches the first humanoid after about five seconds.
-            print(f"[PhoenX Warehouse] humanoids touched each other in {self.robot_touch_steps} steps", flush=True)
+            print(f"[PhoenX Warehouse] robots touched each other in {self.robot_touch_steps} steps", flush=True)
+            kivas = np.asarray(self.scene.robot_roots["kiva"], dtype=np.int64)
+            travelled = np.linalg.norm(poses[kivas, :2] - self.kiva_start, axis=1)
+            print(f"[PhoenX Warehouse] drive units moved {travelled.min():.2f}..{travelled.max():.2f} m", flush=True)
             if self.sim_time > 10.0:
                 assert sorted_off > 0, "no humanoid pushed a package off its belt"
-                assert self.robot_touch_steps > 0, "no two humanoids touched"
+                assert self.robot_touch_steps > 0, "no two robots touched"
+                assert float(travelled.min()) > 1.0, f"a drive unit moved only {travelled.min():.2f} m"
 
         if len(self.settled_bodies):
             moved = np.linalg.norm(poses[self.settled_bodies, :3] - self.initial_poses[self.settled_bodies, :3], axis=1)
@@ -1689,8 +1795,9 @@ class Example:
             assert float(moved.max()) < 0.05, f"a stored package or carton moved {float(moved.max()):.3f} m"
         if len(self.free_bodies):
             assert float(poses[self.free_bodies, 2].min()) > -0.05, "a free body fell through the floor"
-            asleep = float(self.asleep_mask()[self.free_bodies].mean())
-            assert asleep > 0.3, f"only {100.0 * asleep:.0f}% of the free bodies fell asleep"
+            if not self.sorting:  # the sorting hall's totes ride on moving drive units
+                asleep = float(self.asleep_mask()[self.free_bodies].mean())
+                assert asleep > 0.3, f"only {100.0 * asleep:.0f}% of the free bodies fell asleep"
 
         # Mechanisms hang on the world: their joint anchors must coincide, and a drawer must
         # not have turned in its slide.
