@@ -21,9 +21,15 @@ import newton.viewer
 from newton.examples.phoenx import example_phoenx_warehouse as warehouse
 
 
-def _run(frames: int, runtime_robots: int = 0) -> warehouse.Example:
+def _run(frames: int, runtime_robots: int = 0, walking_anymals: int = 0) -> warehouse.Example:
     args = argparse.Namespace(
-        robots=64, storage_scale=1.0, seed=0, substeps=4, iterations=4, runtime_robots=runtime_robots
+        robots=64,
+        storage_scale=1.0,
+        seed=0,
+        substeps=4,
+        iterations=4,
+        runtime_robots=runtime_robots,
+        walking_anymals=walking_anymals,
     )
     example = warehouse.Example(newton.viewer.ViewerNull(), args)
     for _ in range(frames):
@@ -59,6 +65,24 @@ class TestWarehouseScene(unittest.TestCase):
         second = _run(frames, runtime_robots=3)
         for name in ("body_q", "body_qd", "joint_q", "joint_qd"):
             np.testing.assert_array_equal(getattr(first.state, name).numpy(), getattr(second.state, name).numpy())
+
+    def test_policy_walks_anymals_around_the_aisles(self):
+        """One batched policy evaluation per frame walks a fleet of ANYmals, deterministically."""
+        frames = 6 * warehouse.WALK_FPS
+        first = _run(frames, walking_anymals=24)
+        self.assertIsNotNone(first.solver._reduced_articulation.fused_substep)
+        self.assertEqual(first.walk_observation.shape, (24, 48))
+        first.test_final()
+        # Six seconds take the leaders of both lanes through the turns at the ends of their aisle.
+        roots = first.scene.robot_roots["anymal"]
+        started_back = first.initial_poses[roots, 1] > first.scene.walker_aisles
+        walks_back = first.state.body_q.numpy()[roots, 1] > first.scene.walker_aisles
+        self.assertTrue(np.any(walks_back & ~started_back))
+        self.assertTrue(np.any(~walks_back & started_back))
+        second = _run(frames, walking_anymals=24)
+        for name in ("body_q", "body_qd", "joint_q", "joint_qd"):
+            np.testing.assert_array_equal(getattr(first.state, name).numpy(), getattr(second.state, name).numpy())
+        np.testing.assert_array_equal(first.walk_progress.numpy(), second.walk_progress.numpy())
 
     def test_a_robot_leaves_and_rejoins_the_running_warehouse(self):
         """A robot of the pool is parked far away between steps and placed back later."""

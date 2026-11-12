@@ -11,6 +11,10 @@ with signed distance fields, hinged gates, and drawers. The gates and drawers ar
 reduced coordinates too, next to the robots; ``--mechanism-solver regular`` leaves them to
 the solver's regular joint rows. With ``--runtime-robots`` further humanoids arrive at a dock
 beside the aisles and leave again while the simulation runs, created and removed on the device.
+With ``--walking-anymals`` the fleet is that many ANYmals which a walking policy steers around
+the aisles instead: forward in one lane, back in the other, turning at both ends. One network
+evaluation per frame serves all of them, inside the same CUDA graph as the step, at the
+policy's rate of 50 Hz.
 
 The scene exercises what one large world mixes: robots that touch free bodies (a package on a
 humanoid's foot, a pod carried by a drive unit, a loaded pallet on a forklift), free bodies
@@ -27,6 +31,8 @@ Success criteria:
 - A meaningful fraction of the free bodies falls asleep.
 - The gates and drawers stay on their joints.
 - Every humanoid that arrives at the dock stands, and no arrival or departure fails.
+- Walking ANYmals stay within 0.4 m of their loop and cover it at 0.7 times the commanded
+  1 m/s or more on average, none at less than 0.4 times.
 
 Runs:
 - `python -m newton.examples phoenx_warehouse`
@@ -34,6 +40,8 @@ Runs:
   - The same warehouse with eight times the fleet and storage.
 - `python -m newton.examples phoenx_warehouse --runtime-robots 8`
   - Eight more humanoids come and go at the dock, one every half second.
+- `python -m newton.examples phoenx_warehouse --walking-anymals 1024`
+  - A thousand policy-driven ANYmals walk laps through the aisles.
 - `python -m newton.examples phoenx_warehouse --viewer null --timing-frames 600`
   - Prints the scene counts and the milliseconds per captured step.
 """
@@ -128,6 +136,16 @@ ANYMAL_JOINT_POS = {
 }
 ANYMAL_KP = 600.0  # four times the training gain, so the legs barely sag
 ANYMAL_KD = 20.0
+
+# Walking ANYmals: the gains and rate their policy was trained with, and the loop they walk.
+WALK_KP = 150.0
+WALK_KD = 5.0
+WALK_FPS = 50  # policy rate [Hz]
+WALK_ACTION_SCALE = 0.5  # [rad] per unit of policy output
+WALK_SPEED = 1.0  # commanded on the straights [m/s]
+WALK_TURN_SPEED = 0.6  # commanded while facing across the loop [m/s]
+WALK_YAW_RATE_MAX = 1.0  # [rad/s], the largest turn command the policy was trained with
+LANE_OFFSET = 0.8  # [m] of the two lanes from the middle of their aisle
 
 KIVA_ROOT_HEIGHT = 0.12  # chassis center [m]
 KIVA_TOP = 0.25  # top of the lift plate [m]
@@ -335,8 +353,8 @@ def build_h1(visual_meshes: bool = False) -> newton.ModelBuilder:
     return builder
 
 
-def build_anymal() -> newton.ModelBuilder:
-    """ANYmal C standing on its position-controlled legs."""
+def build_anymal(walking: bool = False) -> newton.ModelBuilder:
+    """ANYmal C standing on its position-controlled legs, or with the gains of its walking policy."""
     builder = _new_builder()
     builder.default_joint_cfg = newton.ModelBuilder.JointDofConfig(armature=0.06, limit_ke=1.0e3, limit_kd=1.0e1)
     asset = newton.utils.download_asset("anybotics_anymal_c")
@@ -350,7 +368,8 @@ def build_anymal() -> newton.ModelBuilder:
     )
     names = [label.rsplit("/", 1)[-1] for label in builder.joint_label[1:]]
     positions = [ANYMAL_JOINT_POS[name] for name in names]
-    _set_position_drives(builder, positions, [ANYMAL_KP] * len(names), [ANYMAL_KD] * len(names))
+    stiffness, damping = (WALK_KP, WALK_KD) if walking else (ANYMAL_KP, ANYMAL_KD)
+    _set_position_drives(builder, positions, [stiffness] * len(names), [damping] * len(names))
     return builder
 
 
@@ -618,6 +637,10 @@ class Scene:
     mechanism_articulations: list[int] = field(default_factory=list)
     #: Root poses at which humanoids arrive at runtime.
     docks: list[wp.transform] = field(default_factory=list)
+    #: Middle [m] of the aisle each walking ANYmal loops in, in the order of their roots.
+    walker_aisles: list[float] = field(default_factory=list)
+    #: Ends [m] of the straight part of the walkers' loops along the aisles.
+    walk_span: tuple[float, float] = (0.0, 0.0)
 
 
 class _SceneAssembler:
@@ -784,19 +807,25 @@ class _SceneAssembler:
 
 
 def build_scene(
-    robots: int = 128, storage_scale: float = 1.0, seed: int = 0, robot_meshes: bool = False, runtime_robots: int = 0
+    robots: int = 128,
+    storage_scale: float = 1.0,
+    seed: int = 0,
+    robot_meshes: bool = False,
+    runtime_robots: int = 0,
+    walking_anymals: int = 0,
 ) -> Scene:
     """Build the warehouse: robots in aisles between rows of pods and pallets.
 
     ``robot_meshes`` shows the humanoids' visual meshes; they never collide. ``runtime_robots``
     reserves that many G1 humanoids, which arrive at a dock beside the aisles at runtime.
+    ``walking_anymals`` replaces the standing fleet by that many ANYmals in two lanes per aisle.
     """
     if robots < 1:
         raise ValueError("The warehouse needs at least one robot")
     if storage_scale < 0.0:
         raise ValueError("storage_scale must not be negative")
     rng = np.random.default_rng(seed)
-    counts = _fleet_counts(robots)
+    counts = {"anymal": walking_anymals} if walking_anymals > 0 else _fleet_counts(robots)
     assembler = _SceneAssembler(counts)
 
     g1, h1 = build_g1(robot_meshes), build_h1(robot_meshes)
@@ -829,9 +858,11 @@ def build_scene(
 
     depth = max(1, math.ceil(storage_scale))
     aisle_pitch = AISLE_WIDTH + depth * STORAGE_DEPTH
-    columns = max(1, math.ceil(math.sqrt(len(units) * aisle_pitch / SLOT_PITCH)))
-    aisles = math.ceil(len(units) / columns)
+    lanes = 2 if walking_anymals > 0 else 1  # per aisle
+    columns = max(1, math.ceil(math.sqrt(len(units) * aisle_pitch / (lanes * SLOT_PITCH))))
+    aisles = math.ceil(len(units) / (lanes * columns))
     length = columns * SLOT_PITCH
+    assembler.scene.walk_span = (0.5 * SLOT_PITCH, length - 0.5 * SLOT_PITCH)
 
     # Lateral reach of a humanoid's hand collider, for pairs standing hand to hand.
     g1_hand = g1_pose[_body_named(g1, "left_wrist_yaw_link"), 1] + 0.045
@@ -846,7 +877,18 @@ def build_scene(
     for slot, (name, kind) in enumerate(units):
         x = (slot % columns + 0.5) * SLOT_PITCH
         y = (slot // columns) * aisle_pitch
-        if name in ("g1", "h1"):
+        if walking_anymals > 0:
+            # The lane right of the aisle's middle runs along +x, the left one back.
+            aisle, back = divmod(slot // columns, 2)
+            y = aisle * aisle_pitch
+            xforms[name].append(_position(x, y + (2.0 * back - 1.0) * LANE_OFFSET, yaw=back * math.pi))
+            assembler.scene.walker_aisles.append(y)
+            if back:  # loose stock between the lanes
+                if slot % 2:
+                    assembler.add_free_tote((x, y, 0.08 + REST_GAP), tote)
+                else:
+                    assembler.add_free_box((x, y, 0.06 + REST_GAP), (0.15, 0.12, 0.06), COLORS["package"])
+        elif name in ("g1", "h1"):
             foot, hand = (g1_foot, g1_hand) if name == "g1" else (h1_foot, h1_hand)
             foot_half = G1_FOOT_HALF_EXTENTS if name == "g1" else H1_FOOT_HALF_EXTENTS
             foot_top = foot[2] + foot_half[2]
@@ -898,7 +940,7 @@ def build_scene(
     assembler.place_robots("g1", g1, xforms["g1"])
     assembler.place_robots("h1", h1, xforms["h1"])
     if xforms["anymal"]:
-        assembler.place_robots("anymal", build_anymal(), xforms["anymal"])
+        assembler.place_robots("anymal", build_anymal(walking=walking_anymals > 0), xforms["anymal"])
     assembler.place_robots("kiva", build_kiva(), xforms["kiva"])
     assembler.place_robots("forklift", build_forklift(FORK_EMPTY_HEIGHT), xforms["forklift_empty"])
     assembler.place_robots("forklift", build_forklift(FORK_LOADED_HEIGHT), xforms["forklift_loaded"])
@@ -985,17 +1027,90 @@ def _cycle_dock_kernel(
         occupant[dock] = phoenx.add_articulation(dyn, 0, docks[dock], wp.spatial_vector(), 0)
 
 
+@wp.kernel(enable_backward=False)
+def _walker_observation_kernel(
+    joint_q: wp.array[float],
+    joint_qd: wp.array[float],
+    q_start: wp.array[int],
+    qd_start: wp.array[int],
+    aisle: wp.array[float],
+    span: wp.vec2,
+    default_q: wp.array[float],
+    policy_joint: wp.array[int],
+    dt: float,
+    previous_action: wp.array2d[float],
+    observation: wp.array2d[float],
+    progress: wp.array[float],
+):
+    """Steer every walker around its aisle's loop and write its policy observation."""
+    walker = wp.tid()
+    a = q_start[walker]
+    b = qd_start[walker]
+    q = wp.quat(joint_q[a + 3], joint_q[a + 4], joint_q[a + 5], joint_q[a + 6])
+    velocity = wp.vec3(joint_qd[b], joint_qd[b + 1], joint_qd[b + 2])
+
+    # The loop is a stadium, walked counterclockwise: all points at the lane offset from the
+    # segment between the span's ends in the aisle's middle.
+    x = joint_q[a]
+    outward = wp.vec2(x - wp.clamp(x, span[0], span[1]), joint_q[a + 1] - aisle[walker])
+    distance = wp.length(outward)
+    outward = wp.where(distance > 1.0e-3, outward / distance, wp.vec2(0.0, -1.0))
+    along = wp.vec2(-outward[1], outward[0])
+    inside = LANE_OFFSET - distance  # [m] by which the walker is inside the loop
+    goal = along + inside * outward  # heads back to the loop over about a meter
+    forward = wp.quat_rotate(q, wp.vec3(1.0, 0.0, 0.0))
+    heading_error = wp.atan2(forward[0] * goal[1] - forward[1] * goal[0], forward[0] * goal[0] + forward[1] * goal[1])
+    command = wp.vec3(
+        wp.lerp(WALK_SPEED, WALK_TURN_SPEED, wp.min(wp.abs(heading_error), 1.0)),
+        wp.clamp(inside * (forward[0] * outward[1] - forward[1] * outward[0]), -0.3, 0.3),
+        wp.clamp(2.0 * heading_error, -WALK_YAW_RATE_MAX, WALK_YAW_RATE_MAX),
+    )
+    progress[walker] += dt * (velocity[0] * along[0] + velocity[1] * along[1])
+
+    linear = wp.quat_rotate_inv(q, velocity)
+    angular = wp.quat_rotate_inv(q, wp.vec3(joint_qd[b + 3], joint_qd[b + 4], joint_qd[b + 5]))
+    gravity = wp.quat_rotate_inv(q, wp.vec3(0.0, 0.0, -1.0))
+    for k in range(3):
+        observation[walker, k] = linear[k]
+        observation[walker, 3 + k] = angular[k]
+        observation[walker, 6 + k] = gravity[k]
+        observation[walker, 9 + k] = command[k]
+    for k in range(12):
+        joint = policy_joint[k]
+        observation[walker, 12 + k] = joint_q[a + 7 + joint] - default_q[joint]
+        observation[walker, 24 + k] = joint_qd[b + 6 + joint]
+        observation[walker, 36 + k] = previous_action[walker, k]
+
+
+@wp.kernel(enable_backward=False)
+def _walker_target_kernel(
+    action: wp.array2d[float],
+    q_start: wp.array[int],
+    default_q: wp.array[float],
+    policy_index: wp.array[int],
+    joint_target_q: wp.array[float],
+    previous_action: wp.array2d[float],
+):
+    """Turn the policy's actions into the joint position targets of the walkers' drives."""
+    walker, joint = wp.tid()
+    joint_target_q[q_start[walker] + 7 + joint] = (
+        default_q[joint] + WALK_ACTION_SCALE * action[walker, policy_index[joint]]
+    )
+    previous_action[walker, joint] = action[walker, joint]
+
+
 class Example:
     """One warehouse world with reduced-coordinate robots among sleeping free bodies."""
 
     def __init__(self, viewer, args):
         self.viewer = viewer
-        self.frame_dt = 1.0 / 60.0
+        walkers = int(getattr(args, "walking_anymals", 0))
+        self.frame_dt = 1.0 / WALK_FPS if walkers > 0 else 1.0 / 60.0
         self.sim_time = 0.0
         self.timing_frames = int(getattr(args, "timing_frames", 0))
         self.timing_warmup = int(getattr(args, "timing_warmup", 120))
         robots = int(getattr(args, "robots", 128))
-        print(f"[PhoenX Warehouse] building {robots} robots...", flush=True)
+        print(f"[PhoenX Warehouse] building {walkers or robots} robots...", flush=True)
         robot_meshes = getattr(args, "robot_meshes", None)
         if robot_meshes is None:
             # Meshes are for looking at: they only add shapes to a headless run.
@@ -1006,6 +1121,7 @@ class Example:
             seed=int(getattr(args, "seed", 0)),
             robot_meshes=bool(robot_meshes),
             runtime_robots=int(getattr(args, "runtime_robots", 0)),
+            walking_anymals=walkers,
         )
         self.model = self.scene.builder.finalize()
         self.state = self.model.state()
@@ -1039,6 +1155,9 @@ class Example:
         self.initial_poses = self.state.body_q.numpy().copy()
         self.free_bodies = np.asarray(self.scene.free_bodies, dtype=np.int64)
         self.settled_bodies = np.asarray(self.scene.settled_bodies, dtype=np.int64)
+        self.policy = None
+        if walkers > 0:
+            self._init_walkers()
 
         viewer.set_model(self.model)
         # Look down the first aisles from behind their gates.
@@ -1051,9 +1170,73 @@ class Example:
             self.graph = capture.graph
         print(f"[PhoenX Warehouse] {self.describe()}", flush=True)
 
+    def _init_walkers(self):
+        """Load the walking policy and the buffers one evaluation for all walkers needs."""
+        from warp_nn.runtime import OnnxRuntime  # noqa: PLC0415
+
+        from newton.examples.robot.example_robot_anymal_c_walk import lab_to_mujoco, mujoco_to_lab  # noqa: PLC0415
+
+        model = self.model
+        roots = self.scene.robot_roots["anymal"]
+        joint_of_body = np.zeros(model.body_count, dtype=np.int64)
+        joint_of_body[model.joint_child.numpy()] = np.arange(model.joint_count)
+        q_start = model.joint_q_start.numpy()[joint_of_body[roots]]
+        self.walk_q_start = wp.array(q_start, dtype=int)
+        self.walk_qd_start = wp.array(model.joint_qd_start.numpy()[joint_of_body[roots]], dtype=int)
+        self.walk_aisle = wp.array(self.scene.walker_aisles, dtype=float)
+        self.walk_default_q = wp.array(model.joint_q.numpy()[q_start[0] + 7 : q_start[0] + 19], dtype=float)
+        self.walk_policy_joint = wp.array(lab_to_mujoco, dtype=int)
+        self.walk_policy_index = wp.array(mujoco_to_lab, dtype=int)
+        self.walk_observation = wp.zeros((len(roots), 48), dtype=float)
+        self.walk_action = wp.zeros((len(roots), 12), dtype=float)
+        #: Distance [m] every walker has covered along its loop.
+        self.walk_progress = wp.zeros(len(roots), dtype=float)
+        asset = newton.utils.download_asset("anybotics_anymal_c")
+        self.policy = OnnxRuntime(str(asset / "rl_policies" / "anymal_walking_policy_physx.onnx"), device=model.device)
+        self.policy_input = self.policy.inputs[0].name
+        self.policy_output = self.policy.outputs[0].name
+        # The runtime allocates its buffers on the first call, which must not be a captured one.
+        self.policy({self.policy_input: self.walk_observation})
+
+    def _steer_walkers(self):
+        """Evaluate the policy once for all walkers and set their joint targets."""
+        wp.launch(
+            _walker_observation_kernel,
+            dim=self.walk_progress.shape[0],
+            inputs=[
+                self.state.joint_q,
+                self.state.joint_qd,
+                self.walk_q_start,
+                self.walk_qd_start,
+                self.walk_aisle,
+                wp.vec2(*self.scene.walk_span),
+                self.walk_default_q,
+                self.walk_policy_joint,
+                self.frame_dt,
+                self.walk_action,
+                self.walk_observation,
+                self.walk_progress,
+            ],
+        )
+        action = self.policy({self.policy_input: self.walk_observation})[self.policy_output]
+        wp.launch(
+            _walker_target_kernel,
+            dim=self.walk_action.shape,
+            inputs=[
+                action,
+                self.walk_q_start,
+                self.walk_default_q,
+                self.walk_policy_index,
+                self.control.joint_target_q,
+                self.walk_action,
+            ],
+        )
+
     def simulate(self):
         self.state.clear_forces()
         self.viewer.apply_forces(self.state)
+        if self.policy is not None:
+            self._steer_walkers()
         if self.docks is not None:
             wp.launch(
                 _cycle_dock_kernel,
@@ -1128,7 +1311,8 @@ class Example:
             assert int(data.error_count.numpy()[0]) == 0, "a humanoid could not arrive at or leave the dock"
             occupants = self.dock_occupant.numpy()
             roots = data.instance_body_start.numpy()[occupants[occupants >= 0]]
-            heights["g1"] = np.concatenate([heights.get("g1", np.empty(0, dtype=poses.dtype)), poses[roots, 2]])
+            if len(roots):
+                heights["g1"] = np.concatenate([heights.get("g1", np.empty(0, dtype=poses.dtype)), poses[roots, 2]])
         return heights
 
     def test_post_step(self):
@@ -1153,11 +1337,27 @@ class Example:
             assert lowest > ROOT_HEIGHT_MIN[name], f"a {name} fell: root height {lowest:.3f} m"
         # Wheeled robots must also still stand on their wheels.
         for name in ("kiva", "forklift"):
-            roots = self.scene.robot_roots[name]
+            roots = self.scene.robot_roots.get(name)
             if roots:
                 q = poses[roots, 3:7]
                 up_z = 1.0 - 2.0 * (q[:, 0] ** 2 + q[:, 1] ** 2)
                 assert float(up_z.min()) > 0.98, f"a {name} tipped: up axis z {float(up_z.min()):.3f}"
+        if self.policy is not None:
+            # Walkers keep to their loop and cover it at close to the commanded speed, less
+            # the second they take to get going.
+            roots = self.scene.robot_roots["anymal"]
+            x, y = poses[roots, 0], poses[roots, 1] - np.asarray(self.scene.walker_aisles)
+            off_loop = np.abs(np.hypot(x - np.clip(x, *self.scene.walk_span), y) - LANE_OFFSET)
+            progress = self.walk_progress.numpy()
+            expected = WALK_SPEED * max(0.0, self.sim_time - 1.0)
+            print(
+                f"[PhoenX Warehouse] walkers covered {float(progress.min()):.2f}..{float(progress.max()):.2f} m "
+                f"in {self.sim_time:.1f} s, at most {float(off_loop.max()):.2f} m off their loop",
+                flush=True,
+            )
+            assert float(off_loop.max()) < 0.4, f"a walker left its loop by {float(off_loop.max()):.2f} m"
+            assert float(progress.mean()) >= 0.7 * expected, f"the walkers covered {float(progress.mean()):.2f} m"
+            assert float(progress.min()) >= 0.4 * expected, f"a walker covered only {float(progress.min()):.2f} m"
 
         if len(self.settled_bodies):
             moved = np.linalg.norm(poses[self.settled_bodies, :3] - self.initial_poses[self.settled_bodies, :3], axis=1)
@@ -1196,6 +1396,12 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=0, help="Seed of the storage layout.")
     parser.add_argument(
         "--runtime-robots", type=int, default=0, help="Humanoids that arrive at the dock and leave again at runtime."
+    )
+    parser.add_argument(
+        "--walking-anymals",
+        type=int,
+        default=0,
+        help="Replace the standing fleet by this many ANYmals that a policy walks around the aisles.",
     )
     parser.add_argument(
         "--robot-meshes",
