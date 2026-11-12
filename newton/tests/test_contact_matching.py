@@ -1183,18 +1183,18 @@ def test_sticky_position_threshold_uses_body_witnesses(test, device):
         test.assertEqual(match(sticky=True, body_x=1.0e6, point1=(0.0006, 0.0, 0.0)), MATCH_BROKEN)
 
 
-def _build_rolling_spheroid_scene(device, *, plane_first):
-    """Build a penetrating spheroid-plane contact with either shape ordering.
-
-    The spheroid lies on its side with its symmetry axis along x, so turning it about x keeps
-    its geometry while its surface witnesses turn with it. (A cylinder keeps its side witnesses
-    on its axis, which turning leaves in place.)
-    """
+def _build_rolling_cylinder_scene(device, *, plane_first):
+    """Build a penetrating cylinder-plane contact with either shape ordering."""
     builder = newton.ModelBuilder()
     if plane_first:
         builder.add_ground_plane()
     body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.099), wp.quat_identity()))
-    builder.add_shape_ellipsoid(body=body, rx=0.2, ry=0.1, rz=0.1)
+    builder.add_shape_cylinder(
+        body=body,
+        radius=0.1,
+        half_height=0.1,
+        xform=wp.transform(wp.vec3(0.0), wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), wp.pi / 2.0)),
+    )
     if not plane_first:
         builder.add_ground_plane()
     model = builder.finalize(device=device)
@@ -1204,7 +1204,7 @@ def _build_rolling_spheroid_scene(device, *, plane_first):
 def _check_sticky_rotated_witness(test, device, *, plane_first, threshold, use_capture, expect_replay):
     """Check rotated witnesses, matching identity, reports, and next-frame history."""
     with wp.ScopedDevice(device):
-        model, state = _build_rolling_spheroid_scene(device, plane_first=plane_first)
+        model, state = _build_rolling_cylinder_scene(device, plane_first=plane_first)
         pipeline = newton.CollisionPipeline(
             model,
             broad_phase="nxn",
@@ -1219,7 +1219,7 @@ def _check_sticky_rotated_witness(test, device, *, plane_first, threshold, use_c
         fields = ("point0", "point1", "offset0", "offset1", "normal")
         previous = {field: getattr(contacts, f"rigid_contact_{field}").numpy()[:count].copy() for field in fields}
 
-        # The spheroid's geometry stays put while its material witnesses rotate.
+        # The cylinder's geometry stays put while its material witnesses rotate.
         pose = state.body_q.numpy()
         pose[0, 3:] = np.asarray(wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), 0.1))
         state.body_q.assign(pose)
@@ -1265,7 +1265,7 @@ def _check_sticky_rotated_witness(test, device, *, plane_first, threshold, use_c
             pipeline.collide(state, contacts)
         test.assertEqual(count, int(contacts.rigid_contact_count.numpy()[0]))
         match_index = contacts.rigid_contact_match_index.numpy()[:count]
-        # The spheroid rolls in place: its contacts travel with it and keep their
+        # The cylinder rolls in place: its contacts travel with it and keep their
         # identity. Small witness drift also preserves their geometry; large
         # rotation replaces it with the fresh narrow-phase record.
         test.assertTrue(np.all(match_index[penetrating] >= 0))
