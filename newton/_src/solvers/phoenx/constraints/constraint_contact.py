@@ -56,7 +56,6 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_set_start_gap,
     cc_soft_coefficients,
 )
-from newton._src.solvers.phoenx.constraints.contact_kinematics import body_anchor_world
 from newton._src.solvers.phoenx.constraints.contact_patch_friction import (
     ContactPatchFriction,
     contact_patch_friction_zeros,
@@ -1286,9 +1285,12 @@ def _contact_recompute_r2(
     k: wp.int32,
     n: wp.vec3f,
 ) -> wp.vec3f:
-    """Lever of witness 1 from body 2's COM, moved like the solver moves it (see :mod:`contact_kinematics`)."""
-    witness = body_anchor_world(bodies, b2, contacts.rigid_contact_point1[k])
-    return witness - bodies.position[b2] - contacts.rigid_contact_margin1[k] * n
+    """``r2 = quat_rotate(orient2, local_p1 - body_com2) - margin1 * n``."""
+    local_p1 = contacts.rigid_contact_point1[k]
+    body_com2 = bodies.body_com[b2]
+    orientation2 = bodies.orientation[b2]
+    margin1 = contacts.rigid_contact_margin1[k]
+    return wp.quat_rotate(orientation2, local_p1 - body_com2) - margin1 * n
 
 
 @wp.func
@@ -1446,14 +1448,23 @@ def contact_per_k_error_at(
     """
     b1 = body_pair.b1
     b2 = body_pair.b2
+    position1 = bodies.position[b1]
+    position2 = bodies.position[b2]
+    orientation1 = bodies.orientation[b1]
+    orientation2 = bodies.orientation[b2]
+    body_com1 = bodies.body_com[b1]
+    body_com2 = bodies.body_com[b2]
 
     n = cc_get_normal(cc, k)
     t1_dir = cc_get_tangent1(cc, k)
     t2_dir = wp.cross(n, t1_dir)
-    # The witnesses as the solver moves them within the step (see :mod:`contact_kinematics`).
-    p_diff = body_anchor_world(bodies, b2, contacts.rigid_contact_point1[k]) - body_anchor_world(
-        bodies, b1, contacts.rigid_contact_point0[k]
-    )
+    local_p0 = contacts.rigid_contact_point0[k]
+    local_p1 = contacts.rigid_contact_point1[k]
+
+    # local_p is in body-origin frame; subtract body_com so r is from COM.
+    p1_world = position1 + wp.quat_rotate(orientation1, local_p0 - body_com1)
+    p2_world = position2 + wp.quat_rotate(orientation2, local_p1 - body_com2)
+    p_diff = p2_world - p1_world
 
     margin_sum = contacts.rigid_contact_margin0[k] + contacts.rigid_contact_margin1[k]
     gap = wp.dot(p_diff, n) - margin_sum

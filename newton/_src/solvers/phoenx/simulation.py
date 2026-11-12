@@ -110,7 +110,6 @@ from newton._src.solvers.phoenx.constraints.contact_ingest import (
     ingest_contacts,
     stamp_forward_contact_map,
 )
-from newton._src.solvers.phoenx.constraints.contact_kinematics import snapshot_step_pose_kernel
 from newton._src.solvers.phoenx.constraints.contact_patch_friction import (
     copy_contact_patch_impulses,
     gather_contact_patch_warmstart,
@@ -2701,11 +2700,6 @@ class PhoenXWorld:
             or (has_contact_input and (self._reduced_articulation is None or self._free_rigid_contacts_classic))
         )
         self._partition_active_this_step = self._regular_pgs_active_this_step
-
-        if has_contact_input and self.num_bodies > 0:
-            # The collision pass found this step's contacts at this pose; contact rows move
-            # their witnesses from it to first order in the bodies' motion.
-            wp.launch(snapshot_step_pose_kernel, dim=self.num_bodies, inputs=[self.bodies], device=self.device)
 
         # Contact ingest + element rebuild + graph colouring all depend only
         # on the (unchanged) contact graph when ``reuse_partition`` is set, so

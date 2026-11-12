@@ -301,10 +301,6 @@ class BodyContainer:
     #: not read in the rigid PGS hot path.
     position_prev_substep: wp.array[wp.vec3f]
     orientation_prev_substep: wp.array[wp.quatf]
-    #: Pose at the start of the step, where the collision pass found the step's contacts.
-    #: Contact rows move their witnesses from there to first order in the bodies' motion.
-    position_step: wp.array[wp.vec3f]
-    orientation_step: wp.array[wp.quatf]
     #: Per-body access-mode tag (see
     #: :mod:`newton._src.solvers.phoenx.access_mode`). Set at substep
     #: entry to ``VELOCITY_LEVEL`` for dynamic bodies and ``STATIC`` for
@@ -424,8 +420,6 @@ def body_container_zeros(num_bodies: int, device: wp.DeviceLike = None) -> BodyC
     c.kinematic_target_valid = wp.zeros(num_bodies, dtype=wp.int32, device=device)
     c.position_prev_substep = wp.zeros(num_bodies, dtype=wp.vec3f, device=device)
     c.orientation_prev_substep = wp.zeros(num_bodies, dtype=wp.quatf, device=device)
-    c.position_step = wp.zeros(num_bodies, dtype=wp.vec3f, device=device)
-    c.orientation_step = wp.zeros(num_bodies, dtype=wp.quatf, device=device)
     c.access_mode = wp.full(num_bodies, value=int(ACCESS_MODE_VELOCITY_LEVEL), dtype=wp.int32, device=device)
     c.has_position_level_writers = wp.zeros(1, dtype=wp.int32, device=device)
     c.island_root = wp.full(num_bodies, value=-1, dtype=wp.int32, device=device)

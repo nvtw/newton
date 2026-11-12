@@ -118,12 +118,6 @@ from newton._src.solvers.phoenx.constraints.contact_endpoint import (
 from newton._src.solvers.phoenx.constraints.contact_endpoint import (
     contact_endpoint_velocity_at_point_cached as contact_endpoint_velocity_at_point,
 )
-from newton._src.solvers.phoenx.constraints.contact_kinematics import (
-    body_anchor_local,
-    body_anchor_world,
-    contact_point_weight,
-    rigid_contact_kinematics,
-)
 from newton._src.solvers.phoenx.constraints.contact_patch_friction import (
     contact_patch_effective_mass,
     contact_patch_project_velocity_update,
@@ -335,7 +329,10 @@ def _side_world_contact_point(
     if b < 0:
         # Static-anchor world shape: shape transform is identity.
         return local_p + (sign * margin) * n
-    return body_anchor_world(bodies, b, local_p) + (sign * margin) * n
+    body_com = bodies.body_com[b]
+    orient = bodies.orientation[b]
+    pos = bodies.position[b]
+    return pos + wp.quat_rotate(orient, local_p - body_com) + (sign * margin) * n
 
 
 # ---------------------------------------------------------------------------
@@ -344,18 +341,6 @@ def _side_world_contact_point(
 # state + register-cached v/w accumulators; the cloth-aware path routes per
 # side through the endpoint helpers (barycentric for cloth tris).
 # ---------------------------------------------------------------------------
-
-
-@wp.func
-def _rotation_vector(rotation: wp.quatf) -> wp.vec3f:
-    """Rotation vector [rad] of ``rotation``, along the shorter way round."""
-    axis = wp.vec3f(rotation[0], rotation[1], rotation[2])
-    if rotation[3] < wp.float32(0.0):
-        axis = -axis
-    sine = wp.length(axis)
-    if sine < wp.float32(1.0e-12):
-        return wp.vec3f(0.0)
-    return axis * (wp.float32(2.0) * wp.atan2(sine, wp.abs(rotation[3])) / sine)
 
 
 @wp.kernel(enable_backward=False)
@@ -376,14 +361,11 @@ def rebase_ordinary_contact_relax_kernel(
 ):
     """Update prepared rows for the substep's integrated rigid motion.
 
-    ``rebase_levers`` moves each prepared impulse point with the two bodies'
-    translation weighted by inverse mass, as :func:`rigid_contact_kinematics`
-    places it; both bodies keep taking their impulses at one point. ``advance_gap``
-    moves each row's gap by the first-order normal displacement of the bodies at
-    the impulse point and refreshes its normal bias, so a following substep that
-    reuses the prepared rows neither admits an approach that was already spent nor
-    keeps pushing out a resolved penetration. A body turning about its own axis
-    moves its contact tangentially only.
+    ``rebase_levers`` retains each prepared world impulse point as body COMs
+    advance. ``advance_gap`` moves each row's gap by the normal displacement of
+    the material points at the impulse point and refreshes its normal bias, so a
+    following substep that reuses the prepared rows neither admits an approach
+    that was already spent nor keeps pushing out a resolved penetration.
     """
     cid, lane = wp.tid()
     if cid >= column_count[0]:
@@ -402,19 +384,15 @@ def rebase_ordinary_contact_relax_kernel(
     first = contact_get_contact_first(columns, cid)
     count = contact_get_contact_count(columns, cid)
     if advance_gap and cc.gap.shape[0] > 0:
-        # Substep rotation vector of each body; its translation is ``-shift``.
-        rotation1 = _rotation_vector(
-            body_load_orientation(bodies, b1) * wp.quat_inverse(bodies.orientation_prev_substep[b1])
-        )
-        rotation2 = _rotation_vector(
-            body_load_orientation(bodies, b2) * wp.quat_inverse(bodies.orientation_prev_substep[b2])
-        )
+        # Substep rotation of each body; its translation is ``-shift``.
+        rotation1 = body_load_orientation(bodies, b1) * wp.quat_inverse(bodies.orientation_prev_substep[b1])
+        rotation2 = body_load_orientation(bodies, b2) * wp.quat_inverse(bodies.orientation_prev_substep[b2])
         bias_rate, _mass_coeff, _impulse_coeff = cc_soft_coefficients(cc, idt)
         for k in range(first + lane, first + count, rows_per_column):
             r1 = cc_get_r0(cc, k)
             r2 = cc_get_r1(cc, k)
-            moved1 = wp.cross(rotation1, r1) - shift1
-            moved2 = wp.cross(rotation2, r2) - shift2
+            moved1 = wp.quat_rotate(rotation1, r1) - r1 - shift1
+            moved2 = wp.quat_rotate(rotation2, r2) - r2 - shift2
             gap = cc.gap[k] + wp.dot(moved2 - moved1, cc_get_normal(cc, k))
             cc.gap[k] = gap
             cc_set_bias(cc, k, contact_normal_bias(gap, idt, bias_rate))
@@ -429,13 +407,10 @@ def rebase_ordinary_contact_relax_kernel(
     inverse_mass2 = bodies.inverse_mass[b2] * factor2
     inverse_inertia1 = mat33_from_sym6(bodies.inverse_inertia_world[b1]) * factor1
     inverse_inertia2 = mat33_from_sym6(bodies.inverse_inertia_world[b2]) * factor2
-    # The common impulse point follows the bodies' translation weighted by inverse mass.
-    weight1 = contact_point_weight(bodies, b1, b2)
-    point_shift = -(weight1 * shift1 + (wp.float32(1.0) - weight1) * shift2)
     # Rebase rows independently; no impulse or body velocity is modified.
     for k in range(first + lane, first + count, rows_per_column):
-        r1 = cc_get_r0(cc, k) + shift1 + point_shift
-        r2 = cc_get_r1(cc, k) + shift2 + point_shift
+        r1 = cc_get_r0(cc, k) + shift1
+        r2 = cc_get_r1(cc, k) + shift2
         cc_set_r0(cc, k, r1)
         cc_set_r1(cc, k, r2)
         normal = cc_get_normal(cc, k)
@@ -578,8 +553,12 @@ def _make_contact_prepare_for_iteration_at(
             # get_state_index inlining + inv_factor multiplies entirely.
             # Sets ``slot1 = slot2 = -1`` so the warm-start scatter at the end
             # takes the matching fast-path writeback.
+            orientation1 = body_load_orientation(bodies, b1)
+            orientation2 = body_load_orientation(bodies, b2)
             position1 = bodies.position[b1]
             position2 = bodies.position[b2]
+            body_com1 = bodies.body_com[b1]
+            body_com2 = bodies.body_com[b2]
             if wp.static(not has_mass_splitting):
                 # Compile-time lean path: slot lookup dead-code-eliminated.
                 slot1 = wp.int32(-1)
@@ -783,20 +762,13 @@ def _make_contact_prepare_for_iteration_at(
                 effective_gap = wp.dot(p1_world - p0_world, n)
                 p_diff = p1_world - p0_world
             else:
+                local_p0 = contacts.rigid_contact_point0[source_k]
+                local_p1 = contacts.rigid_contact_point1[source_k]
+                p0_world = position1 + wp.quat_rotate(orientation1, local_p0 - body_com1) + margin0 * n
+                p1_world = position2 + wp.quat_rotate(orientation2, local_p1 - body_com2) - margin1 * n
                 # Apply equal and opposite impulses at a common point so
                 # separated collision witnesses cannot create a friction couple.
-                impulse_point, p_diff = rigid_contact_kinematics(
-                    bodies,
-                    b1,
-                    b2,
-                    contacts.rigid_contact_point0[source_k],
-                    contacts.rigid_contact_point1[source_k],
-                    margin0,
-                    margin1,
-                    n,
-                )
-                p0_world = impulse_point - wp.float32(0.5) * p_diff
-                p1_world = impulse_point + wp.float32(0.5) * p_diff
+                impulse_point = wp.float32(0.5) * (p0_world + p1_world)
                 r1 = impulse_point - position1
                 r2 = impulse_point - position2
                 # Only ``eff_n`` is consumed before the sticky-break anchor
@@ -805,7 +777,8 @@ def _make_contact_prepare_for_iteration_at(
                 # from the final ``r1`` / ``r2`` instead of twice when the
                 # break re-projects fresh anchors. Bit-identical either way.
                 eff_n = effective_mass_scalar(n, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
-                effective_gap = wp.dot(p_diff, n)
+                effective_gap = wp.dot(p1_world - p0_world, n)
+                p_diff = p1_world - p0_world
 
             # Recompute remaining separation from the current transformed
             # witnesses. A positive generation-time gap must not prevent a
@@ -818,8 +791,8 @@ def _make_contact_prepare_for_iteration_at(
                 cc.gap[k] = effective_gap
 
             if wp.static(not cloth_support):
-                friction_p0 = body_anchor_world(bodies, b1, cc_get_friction_anchor0(cc, k))
-                friction_p1 = body_anchor_world(bodies, b2, cc_get_friction_anchor1(cc, k))
+                friction_p0 = position1 + wp.quat_rotate(orientation1, cc_get_friction_anchor0(cc, k) - body_com1)
+                friction_p1 = position2 + wp.quat_rotate(orientation2, cc_get_friction_anchor1(cc, k) - body_com2)
                 p_diff = friction_p1 - friction_p0
 
             drift_t1_raw = wp.dot(p_diff, t1_dir)
@@ -836,8 +809,10 @@ def _make_contact_prepare_for_iteration_at(
                     # within a step. Keep their reference while friction remains
                     # eligible, including the stricter stale-witness gap rule.
                     point = wp.float32(0.5) * (p0_world + p1_world)
-                    cc_set_friction_anchor0(cc, k, body_anchor_local(bodies, b1, point))
-                    cc_set_friction_anchor1(cc, k, body_anchor_local(bodies, b2, point))
+                    anchor0 = body_com1 + wp.quat_rotate_inv(orientation1, point - position1)
+                    anchor1 = body_com2 + wp.quat_rotate_inv(orientation2, point - position2)
+                    cc_set_friction_anchor0(cc, k, anchor0)
+                    cc_set_friction_anchor1(cc, k, anchor1)
                     drift_t1_raw = wp.float32(0.0)
                     drift_t2_raw = wp.float32(0.0)
                 if cc.surface_target.shape[0] > 0:
@@ -848,8 +823,8 @@ def _make_contact_prepare_for_iteration_at(
                     )
                     if wp.length_sq(target) > wp.float32(0.0):
                         point = wp.float32(0.5) * (p0_world + p1_world)
-                        cc_set_friction_anchor0(cc, k, body_anchor_local(bodies, b1, point))
-                        cc_set_friction_anchor1(cc, k, body_anchor_local(bodies, b2, point))
+                        cc_set_friction_anchor0(cc, k, body_com1 + wp.quat_rotate_inv(orientation1, point - position1))
+                        cc_set_friction_anchor1(cc, k, body_com2 + wp.quat_rotate_inv(orientation2, point - position2))
                         drift_t1_raw = wp.float32(0.0)
                         drift_t2_raw = wp.float32(0.0)
 
