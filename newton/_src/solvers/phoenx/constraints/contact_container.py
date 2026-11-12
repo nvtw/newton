@@ -58,9 +58,11 @@ __all__ = [
     "cc_get_side0_bary",
     "cc_get_side1_bary",
     "cc_get_start_gap",
+    "cc_get_surface_target",
     "cc_get_tangent1",
     "cc_get_tangent1_lambda",
     "cc_get_tangent2_lambda",
+    "cc_prepare_surface_target",
     "cc_set_bias",
     "cc_set_bias_t1",
     "cc_set_bias_t2",
@@ -169,9 +171,9 @@ class ContactContainer:
     lambdas: wp.array2d[wp.float32]
     prev_lambdas: wp.array2d[wp.float32]
     derived: wp.array2d[wp.float32]
-    #: Tangential target slip of conveyor-surface contacts along (t1, t2) [m/s]; empty when the
-    #: container cannot carry it. Written by prepare and read by iterate only when the contacts
-    #: have surface velocities, so other scenes never touch it.
+    #: Tangential target slip of conveyor-surface contacts along (t1, t2) [m/s]; empty unless
+    #: the collision pipeline generates surface velocities, so other scenes never touch it.
+    #: See :func:`cc_prepare_surface_target` and :func:`cc_get_surface_target`.
     surface_target: wp.array[wp.vec2f]
     #: Signed normal gap [m] of each prepared row, advanced by the rigid motion
     #: of every substep that reuses the prepared rows; empty when every
@@ -623,6 +625,41 @@ def cc_set_pd_eff_soft(cc: ContactContainer, k: wp.int32, v: wp.float32):
 
 
 @wp.func
+def cc_prepare_surface_target(
+    cc: ContactContainer,
+    k: wp.int32,
+    surface_velocity: wp.array[wp.vec3f],
+    source_k: wp.int32,
+    tangent1: wp.vec3f,
+    tangent2: wp.vec3f,
+) -> wp.vec2f:
+    """Store and return the target slip of a conveyor contact along ``(tangent1, tangent2)`` [m/s].
+
+    ``surface_velocity`` holds the surface velocity of shape 1 minus that of shape 0 per
+    contact. Returns zero and stores nothing unless the container carries targets and the
+    contacts have surface velocities.
+    """
+    target = wp.vec2f(0.0)
+    if cc.surface_target.shape[0] > 0 and surface_velocity.shape[0] > 0:
+        velocity = surface_velocity[source_k]
+        target = wp.vec2f(wp.dot(velocity, tangent1), wp.dot(velocity, tangent2))
+        cc.surface_target[k] = target
+    return target
+
+
+@wp.func
+def cc_get_surface_target(cc: ContactContainer, k: wp.int32) -> wp.vec2f:
+    """Return the prepared target slip of contact ``k``, zero without conveyor surfaces.
+
+    Friction drives the tangential relative velocity of side 1 minus side 0 plus this target
+    to zero, in the biased and relax sweeps alike: it is a velocity target, not a bias.
+    """
+    if cc.surface_target.shape[0] > 0:
+        return cc.surface_target[k]
+    return wp.vec2f(0.0)
+
+
+@wp.func
 def cc_get_r0(cc: ContactContainer, k: wp.int32) -> wp.vec3f:
     return wp.vec3f(
         read2d_f32(cc.derived, _CC_OFF_R0_X, k),
@@ -664,12 +701,14 @@ def contact_container_zeros(
     device: wp.DeviceLike = None,
     *,
     track_gap: bool = False,
+    surface_velocity: bool = False,
     solver_iterations: int = 8,
     velocity_iterations: int = 1,
 ) -> ContactContainer:
     """Allocate a zero-initialised :class:`ContactContainer`. ``rigid_contact_max``
     must match Newton's Contacts buffer. ``track_gap`` allocates the row gaps
-    needed when substeps reuse prepared rows. The sweep counts set the contact
+    needed when substeps reuse prepared rows and ``surface_velocity`` the
+    target slips of conveyor contacts. The sweep counts set the contact
     spring (:func:`contact_container_set_sweeps`)."""
     n = max(1, int(rigid_contact_max))
     cc = ContactContainer()
@@ -678,7 +717,7 @@ def contact_container_zeros(
     cc.lambdas = wp.zeros((CC_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
     cc.prev_lambdas = wp.zeros((CC_RIGID_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
     cc.derived = wp.zeros((CC_DERIVED_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
-    cc.surface_target = wp.zeros(n, dtype=wp.vec2f, device=device)
+    cc.surface_target = wp.zeros(n if surface_velocity else 0, dtype=wp.vec2f, device=device)
     cc.gap = wp.zeros(n if track_gap else 0, dtype=wp.float32, device=device)
     contact_container_set_sweeps(cc, solver_iterations, velocity_iterations)
     return cc

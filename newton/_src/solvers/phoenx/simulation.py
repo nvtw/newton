@@ -1676,6 +1676,8 @@ class PhoenXWorld:
         )
         collision_pipeline.set_broad_phase_filter_data(filter_data)
         self._sleeping_filter_data = filter_data
+        if collision_pipeline._rigid_contact_surface_velocity:
+            self._enable_contact_surface_velocity()
 
         if self._sleeping_enabled:
             nphase = collision_pipeline.narrow_phase
@@ -3749,6 +3751,16 @@ class PhoenXWorld:
         self._static_contact_links = wp.full(columns, -1, dtype=int, device=self.device)
         self._static_contact_keys = wp.empty(2 * columns, dtype=wp.int64, device=self.device)
         self._static_contact_values = wp.empty(2 * columns, dtype=int, device=self.device)
+
+    def _enable_contact_surface_velocity(self) -> None:
+        """Carry the target slips of conveyor contacts in the contact container.
+
+        Call before the first step. Without them, every contact solve skips the
+        surface-velocity terms.
+        """
+        cc = self._contact_container
+        if self.max_contact_columns > 0 and cc.surface_target.shape[0] == 0:
+            cc.surface_target = wp.zeros(max(1, int(self.rigid_contact_max)), dtype=wp.vec2f, device=self.device)
 
     def _mass_splitting_average_overflow_into_bodies(self) -> None:
         """Finish a rigid overflow pass without writing unused copy slots."""

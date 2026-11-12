@@ -45,6 +45,7 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_get_pd_gamma,
     cc_get_r0,
     cc_get_r1,
+    cc_get_surface_target,
     cc_get_tangent1,
     cc_get_tangent1_lambda,
     cc_get_tangent2_lambda,
@@ -262,8 +263,13 @@ def _relax_direct_contact_point(
         cc_set_normal_lambda(contacts, contact, wp.float32(0.0))
     normal_delta = wp.dot(normal_impulse, normal)
     normal_load = cc_get_normal_lambda(contacts, contact)
-    rhs0 = wp.dot(relative_velocity, tangent0) + split * response.mobility[3, contact] * normal_delta
-    rhs1 = wp.dot(relative_velocity, tangent1) + split * response.mobility[4, contact] * normal_delta
+    surface_target = cc_get_surface_target(contacts, contact)
+    rhs0 = (
+        wp.dot(relative_velocity, tangent0) + surface_target[0] + split * response.mobility[3, contact] * normal_delta
+    )
+    rhs1 = (
+        wp.dot(relative_velocity, tangent1) + surface_target[1] + split * response.mobility[4, contact] * normal_delta
+    )
     if use_bias:
         rhs0 += cc_get_bias_t1(contacts, contact)
         rhs1 += cc_get_bias_t2(contacts, contact)

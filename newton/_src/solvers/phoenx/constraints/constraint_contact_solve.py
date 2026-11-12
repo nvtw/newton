@@ -80,9 +80,11 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_get_r1,
     cc_get_side0_bary,
     cc_get_side1_bary,
+    cc_get_surface_target,
     cc_get_tangent1,
     cc_get_tangent1_lambda,
     cc_get_tangent2_lambda,
+    cc_prepare_surface_target,
     cc_set_bias,
     cc_set_bias_t1,
     cc_set_bias_t2,
@@ -813,12 +815,12 @@ def _make_contact_prepare_for_iteration_at(
                     cc_set_friction_anchor1(cc, k, anchor1)
                     drift_t1_raw = wp.float32(0.0)
                     drift_t2_raw = wp.float32(0.0)
-                if cc.surface_target.shape[0] > 0 and contacts.rigid_contact_surface_velocity.shape[0] > 0:
+                if cc.surface_target.shape[0] > 0:
                     # Conveyor surfaces: friction drives the slip to the surface velocity. The
                     # anchors would hold the bodies together, so they follow the contact instead.
-                    surface_velocity = contacts.rigid_contact_surface_velocity[source_k]
-                    target = wp.vec2f(wp.dot(surface_velocity, t1_dir), wp.dot(surface_velocity, t2_dir))
-                    cc.surface_target[k] = target
+                    target = cc_prepare_surface_target(
+                        cc, k, contacts.rigid_contact_surface_velocity, source_k, t1_dir, t2_dir
+                    )
                     if wp.length_sq(target) > wp.float32(0.0):
                         point = wp.float32(0.5) * (p0_world + p1_world)
                         cc_set_friction_anchor0(cc, k, body_com1 + wp.quat_rotate_inv(orientation1, point - position1))
@@ -1650,12 +1652,8 @@ def _make_contact_iterate_at(
                     # Moving meshes are nonconvex and use point rows even in
                     # patch mode. Preserve their per-contact velocity field.
                     if wp.static(has_soft_contact_pd):
-                        if (
-                            not use_patch
-                            and cc.surface_target.shape[0] > 0
-                            and contacts.rigid_contact_surface_velocity.shape[0] > 0
-                        ):
-                            target = cc.surface_target[k]
+                        if not use_patch and cc.surface_target.shape[0] > 0:
+                            target = cc_get_surface_target(cc, k)
                             jv_t1 += target[0]
                             jv_t2 += target[1]
 

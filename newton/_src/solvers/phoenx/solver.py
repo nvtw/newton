@@ -1164,6 +1164,8 @@ class SolverPhoenX(SolverBase):
             contact_chunk_size=contact_chunk_size,
             device=self.device,
         )
+        if getattr(getattr(model, "_collision_pipeline", None), "_rigid_contact_surface_velocity", False):
+            self.world._enable_contact_surface_velocity()
         if dynamic_capacity is not None:
             if self.world._fused_multiworld_mass_splitting:
                 raise ValueError("Runtime body creation does not support fused multi-world mass splitting")
@@ -1455,16 +1457,19 @@ class SolverPhoenX(SolverBase):
         if self._collision_pipeline is not None and self._collision_pipeline._rigid_contact_surface_velocity:
             # Mesh contacts use point rows, including patch mode's nonconvex
             # fallback. Grouped contacts preserve the sampled velocity field.
+            # Reduced trees average friction over a patch, which loses the field.
             if (
-                step_layout != "single_world"
-                or solver_scheme != "soft"
-                or articulation_mode != "maximal"
+                solver_scheme != "soft"
+                or articulation_mode not in ("maximal", "maximal_projected", "hybrid", "reduced")
+                or (articulation_mode == "reduced" and contact_friction_model != "point")
+                or reduced_articulation_path != "reference"
                 or colored_contact_rows
                 or colored_contact_headers
             ):
                 raise ValueError(
-                    "Surface-velocity contacts require the soft single-world maximal solve "
-                    "without colored contact rows or headers"
+                    "Surface-velocity contacts require the soft solve with maximal, projected, hybrid or "
+                    "reduced joints, the reference reduced path, point friction for reduced trees, and "
+                    "no colored contact rows or headers"
                 )
 
         if model.shape_material_mu is not None and model.shape_count > 0:

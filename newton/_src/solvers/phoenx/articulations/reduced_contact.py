@@ -34,10 +34,12 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_get_eff_t2,
     cc_get_normal,
     cc_get_normal_lambda,
+    cc_get_surface_target,
     cc_get_tangent1,
     cc_get_tangent1_lambda,
     cc_get_tangent2_lambda,
     cc_lagged_soft_coefficients,
+    cc_prepare_surface_target,
     cc_reduced_soft_coefficients,
     cc_set_bias,
     cc_set_bias_t1,
@@ -544,6 +546,15 @@ def _prepare_contact_bias_geometry(
     if gap <= wp.float32(0.0):
         bias_t0 = wp.float32(0.08) * wp.clamp(wp.dot(separation, tangent0), -0.001, 0.001) * idt
         bias_t1 = wp.float32(0.08) * wp.clamp(wp.dot(separation, tangent1), -0.001, 0.001) * idt
+    if contacts_state.surface_target.shape[0] > 0:
+        # A conveyor drives the slip to its surface velocity; the witnesses part along it, and
+        # pulling them back together would brake the ride.
+        target = cc_prepare_surface_target(
+            contacts_state, contact, contacts.rigid_contact_surface_velocity, contact, tangent0, tangent1
+        )
+        if wp.length_sq(target) > wp.float32(0.0):
+            bias_t0 = wp.float32(0.0)
+            bias_t1 = wp.float32(0.0)
 
     if project_bias and bias < wp.float32(0.0):
         point = bodies.position[body0] + r0
@@ -795,6 +806,7 @@ def reduced_contact_iterate_staged(
                 mu_dynamic = wp.float32(0.0)
 
         cross_response = cross_mobility[contact]
+        surface_target = cc_get_surface_target(contacts_state, contact)
         impulse = contact_project_coupled_velocity_update_no_soft_pd(
             contacts_state,
             contact,
@@ -802,8 +814,8 @@ def reduced_contact_iterate_staged(
             tangent0,
             tangent1,
             wp.dot(relative_velocity, normal),
-            wp.dot(relative_velocity, tangent0),
-            wp.dot(relative_velocity, tangent1),
+            wp.dot(relative_velocity, tangent0) + surface_target[0],
+            wp.dot(relative_velocity, tangent1) + surface_target[1],
             cc_get_eff_n(contacts_state, contact),
             cc_get_eff_t1(contacts_state, contact),
             cc_get_eff_t2(contacts_state, contact),

@@ -70,6 +70,7 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_get_eff_t2,
     cc_get_normal,
     cc_get_normal_lambda,
+    cc_get_surface_target,
     cc_get_tangent1,
     cc_get_tangent1_lambda,
     cc_get_tangent2_lambda,
@@ -2769,6 +2770,7 @@ def _solve_reduced_contact_point(
         if bias > idt * wp.float32(0.002):
             mu_static = wp.float32(0.0)
             mu_dynamic = wp.float32(0.0)
+    surface_target = cc_get_surface_target(cc, contact)
     impulse = contact_project_coupled_velocity_update_no_soft_pd(
         cc,
         contact,
@@ -2776,8 +2778,8 @@ def _solve_reduced_contact_point(
         t0,
         t1,
         velocity[0],
-        velocity[1],
-        velocity[2],
+        velocity[1] + surface_target[0],
+        velocity[2] + surface_target[1],
         cc_get_eff_n(cc, contact),
         cc_get_eff_t1(cc, contact),
         cc_get_eff_t2(cc, contact),

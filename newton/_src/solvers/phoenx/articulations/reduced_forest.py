@@ -35,6 +35,7 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_get_eff_t2,
     cc_get_normal,
     cc_get_normal_lambda,
+    cc_get_surface_target,
     cc_get_tangent1,
     cc_get_tangent1_lambda,
     cc_get_tangent2_lambda,
@@ -511,6 +512,7 @@ def _make_forest_contact_solve(width):
                         t1 = cc_get_tangent1(cc, contact)
                         t2 = wp.cross(n, t1)
                         cross = cross_mobility[contact]
+                        surface_target = cc_get_surface_target(cc, contact)
                         impulse = contact_project_coupled_velocity_update_no_soft_pd(
                             cc,
                             contact,
@@ -518,8 +520,8 @@ def _make_forest_contact_solve(width):
                             t1,
                             t2,
                             v0,
-                            v1,
-                            v2,
+                            v1 + surface_target[0],
+                            v2 + surface_target[1],
                             cc_get_eff_n(cc, contact),
                             cc_get_eff_t1(cc, contact),
                             cc_get_eff_t2(cc, contact),

@@ -49,6 +49,7 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_get_r0,
     cc_get_r1,
     cc_get_start_gap,
+    cc_get_surface_target,
     cc_get_tangent1,
     cc_get_tangent1_lambda,
     cc_get_tangent2_lambda,
@@ -1074,6 +1075,12 @@ def _make_contact_iterate_at_multi(has_soft_contact_pd: bool):
                     bias_val = wp.float32(0.0)
                     bias_t1_val = wp.float32(0.0)
                     bias_t2_val = wp.float32(0.0)
+                if wp.static(has_soft_contact_pd):
+                    # The tangent rows solve slip plus bias; a conveyor's target slip is a
+                    # velocity target, so it stays in the relax sweeps too.
+                    target = cc_get_surface_target(cc, k)
+                    bias_t1_val += target[0]
+                    bias_t2_val += target[1]
 
                 pd_eff_soft_n = wp.float32(0.0)
                 pd_gamma_n = wp.float32(0.0)
