@@ -176,7 +176,9 @@ def _contact_separation(
 class Example(ColibriChecks):
     """Simulate the source assembly using ordinary rigid joint/contact blocks."""
 
-    color_group_size = 2
+    # Two colors per mass-copy partition run 15% faster, but the crank then averages 8% below
+    # its commanded speed, outside this example's own tracking check.
+    color_group_size = 3
 
     def __init__(self, viewer, args):
         if args.num_worlds < 1:
