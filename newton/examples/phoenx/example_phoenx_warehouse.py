@@ -15,6 +15,10 @@ With ``--walking-anymals`` the fleet is that many ANYmals which a walking policy
 the aisles instead: forward in one lane, back in the other, turning at both ends. One network
 evaluation per frame serves all of them, inside the same CUDA graph as the step, at the
 policy's rate of 50 Hz.
+With ``--sorting-humanoids`` the warehouse becomes a sorting hall: lines of G1 humanoids stand
+beside conveyor belts, and each sweeps its right hand over its belt every two seconds, pushing
+the packages it catches off the belt's far side. Packages appear at the start of every belt and
+are removed once they drop off its side or its end, all from device code inside the graph.
 
 The scene exercises what one large world mixes: robots that touch free bodies (a package on a
 humanoid's foot, a pod carried by a drive unit, a loaded pallet on a forklift), free bodies
@@ -31,6 +35,8 @@ Success criteria:
 - A meaningful fraction of the free bodies falls asleep.
 - The gates and drawers stay on their joints.
 - Every humanoid that arrives at the dock stands, and no arrival or departure fails.
+- In the sorting hall, the humanoids push packages off their belts, and no package is lost or
+  left over: every package put on a belt is still on it or was removed.
 - Walking ANYmals stay within 0.4 m of their loop and cover it at 0.7 times the commanded
   1 m/s or more on average, none at less than 0.4 times.
 
@@ -42,6 +48,8 @@ Runs:
   - Eight more humanoids come and go at the dock, one every half second.
 - `python -m newton.examples phoenx_warehouse --walking-anymals 1024`
   - A thousand policy-driven ANYmals walk laps through the aisles.
+- `python -m newton.examples phoenx_warehouse --sorting-humanoids 1024`
+  - A thousand humanoids sort packages off 32 conveyor belts.
 - `python -m newton.examples phoenx_warehouse --viewer null --timing-frames 600`
   - Prints the scene counts and the milliseconds per captured step.
 """
@@ -146,6 +154,22 @@ WALK_SPEED = 1.0  # commanded on the straights [m/s]
 WALK_TURN_SPEED = 0.6  # commanded while facing across the loop [m/s]
 WALK_YAW_RATE_MAX = 1.0  # [rad/s], the largest turn command the policy was trained with
 LANE_OFFSET = 0.8  # [m] of the two lanes from the middle of their aisle
+
+# Sorting lines: humanoids beside belts push passing packages off them with their right hand.
+SORT_ROBOTS_PER_LINE = 32
+SORT_ROBOT_PITCH = 0.9  # [m] between humanoids along a line
+SORT_LINE_PITCH = 2.0  # [m] between lines
+SORT_BELT_NEAR = 0.14  # [m] near edge of the belt in front of a humanoid's root
+SORT_BELT_FAR = 0.32  # [m] far edge, beyond which pushed packages drop to the floor
+SORT_BELT_TOP = 0.70  # [m]
+SORT_BELT_SPEED = 0.25  # [m/s]
+SORT_PACKAGE_HALF_EXTENTS = wp.constant(wp.vec3(0.06, 0.08, 0.06))  # [m], across and along the belt, and up
+SORT_PACKAGE_DENSITY = 200.0  # [kg/m^3]
+SORT_SPAWN_CLEARANCE = 0.4  # [m] a package moves along its belt before the next one appears
+SORT_DROP_HEIGHT = 0.4  # [m]; below it a package has left its belt and is removed
+SORT_PERIOD = 2.0  # [s] of one push of a humanoid's arm
+# Right shoulder pitch and elbow [rad] that sweep the hand forward at 0.80 m height, over the belt.
+SORT_ARM_SWEEP = ((0.4, 0.15), (0.2, 0.3), (0.0, 0.5), (-0.2, 0.75), (-0.4, 1.05), (-0.6, 1.4))
 
 KIVA_ROOT_HEIGHT = 0.12  # chassis center [m]
 KIVA_TOP = 0.25  # top of the lift plate [m]
@@ -641,6 +665,11 @@ class Scene:
     walker_aisles: list[float] = field(default_factory=list)
     #: Ends [m] of the straight part of the walkers' loops along the aisles.
     walk_span: tuple[float, float] = (0.0, 0.0)
+    #: Sorting lines: where packages appear on every belt, the static belt meshes, and the
+    #: ``y`` [m] at which all belts end.
+    sort_spawns: list[tuple[float, float, float]] = field(default_factory=list)
+    sort_belts: list[newton.Mesh] = field(default_factory=list)
+    sort_end: float = 0.0
 
 
 class _SceneAssembler:
@@ -804,6 +833,51 @@ class _SceneAssembler:
                 self.add_free_tote(center, tote, rotation=tilt)
             else:
                 self.add_free_box(center, (0.12, 0.16, height), COLORS["package"], rotation=tilt)
+
+
+def _belt_mesh(center, half_extents) -> newton.Mesh:
+    """Static box mesh whose surface can move, as a conveyor belt."""
+    box = newton.Mesh.create_box(
+        *half_extents, duplicate_vertices=False, compute_normals=False, compute_uvs=False, compute_inertia=False
+    )
+    return newton.Mesh(
+        np.asarray(box.vertices) + np.asarray(center, dtype=np.float32),
+        np.asarray(box.indices),
+        compute_inertia=False,
+        enable_surface_velocity=True,
+    )
+
+
+def build_sorting_hall(humanoids: int, robot_meshes: bool = False) -> Scene:
+    """Lines of G1 humanoids beside belts, each line one belt that runs along the humanoids."""
+    assembler = _SceneAssembler({"g1": humanoids})
+    lines = math.ceil(humanoids / SORT_ROBOTS_PER_LINE)
+    length = SORT_ROBOTS_PER_LINE * SORT_ROBOT_PITCH
+    scene = assembler.scene
+    scene.sort_end = length
+    width = SORT_BELT_FAR - SORT_BELT_NEAR
+    xforms = []
+    for line in range(lines):
+        x = line * SORT_LINE_PITCH
+        count = min(SORT_ROBOTS_PER_LINE, humanoids - line * SORT_ROBOTS_PER_LINE)
+        xforms += [_position(x, (k + 0.5) * SORT_ROBOT_PITCH) for k in range(count)]
+        start = -1.0
+        belt = _belt_mesh(
+            (x + 0.5 * (SORT_BELT_NEAR + SORT_BELT_FAR), 0.5 * (start + length), 0.5 * SORT_BELT_TOP),
+            (0.5 * width, 0.5 * (length - start), 0.5 * SORT_BELT_TOP),
+        )
+        assembler.builder.add_shape_mesh(-1, mesh=belt, cfg=_shape_cfg(), color=COLORS["frame"], label="belt")
+        scene.sort_belts.append(belt)
+        # Packages appear at the belt's start, against its near edge, where the hands reach them.
+        scene.sort_spawns.append(
+            (x + SORT_BELT_NEAR + float(SORT_PACKAGE_HALF_EXTENTS[0]) + 0.005, start + 0.3, SORT_BELT_TOP)
+        )
+    assembler.place_robots("g1", build_g1(robot_meshes), xforms)
+    capacity = lines * math.ceil((length + 2.0) / SORT_SPAWN_CLEARANCE)
+    assembler.builder.reserve_dynamic_capacity(bodies=capacity, shapes=capacity)
+    for shape in range(assembler.builder.shape_count):
+        assembler.builder.shape_gap[shape] = CONTACT_GAP
+    return scene
 
 
 def build_scene(
@@ -1099,31 +1173,137 @@ def _walker_target_kernel(
     previous_action[walker, joint] = action[walker, joint]
 
 
+@wp.func
+def _sort_push(phase: float) -> float:
+    """Progress [0, 1] of a hand's forward push over one period: out, back, and a pause."""
+    s = wp.where(phase < 0.3, phase / 0.3, wp.where(phase < 0.6, (0.6 - phase) / 0.3, 0.0))
+    return s * s * (3.0 - 2.0 * s)
+
+
+@wp.kernel(enable_backward=False)
+def _sorter_target_kernel(
+    q_start: wp.array[int],
+    shoulder: int,
+    elbow: int,
+    sweep: wp.array[wp.vec2],
+    frame: wp.array[int],
+    frame_dt: float,
+    joint_target_q: wp.array[float],
+):
+    """Drive every sorter's right arm through its push, each humanoid at its own phase."""
+    sorter = wp.tid()
+    time = float(frame[0]) * frame_dt
+    phase = time / SORT_PERIOD + 0.618034 * float(sorter)
+    along = _sort_push(phase - wp.floor(phase)) * float(sweep.shape[0] - 1)
+    k = wp.min(int(along), sweep.shape[0] - 2)
+    target = wp.lerp(sweep[k], sweep[k + 1], along - float(k))
+    joint_target_q[q_start[sorter] + shoulder] = target[0]
+    joint_target_q[q_start[sorter] + elbow] = target[1]
+
+
+@wp.kernel(enable_backward=False)
+def _sort_spawn_kernel(
+    dyn: phoenx.DynamicsData,
+    body_q: wp.array[wp.transform],
+    spawns: wp.array[wp.vec3],
+    spawn_body: wp.array[int],
+    spawned: wp.array[int],
+):
+    """Put a package on every belt whose previous package has moved clear of the start."""
+    line = wp.tid()
+    origin = spawns[line]
+    last = spawn_body[line]
+    if last >= 0 and phoenx.is_body_active(dyn, last):
+        if wp.length(wp.transform_get_translation(body_q[last]) - origin) < SORT_SPAWN_CLEARANCE:
+            return
+    h = SORT_PACKAGE_HALF_EXTENTS
+    mass = SORT_PACKAGE_DENSITY * 8.0 * h[0] * h[1] * h[2]
+    desc = phoenx.body_desc(
+        wp.transform(origin + wp.vec3(0.0, 0.0, h[2] + REST_GAP), wp.quat_identity()),
+        mass,
+        wp.diag(mass / 3.0 * wp.vec3(h[1] * h[1] + h[2] * h[2], h[0] * h[0] + h[2] * h[2], h[0] * h[0] + h[1] * h[1])),
+    )
+    desc.velocity = wp.spatial_vector(wp.vec3(0.0, SORT_BELT_SPEED, 0.0), wp.vec3(0.0))
+    body = phoenx.add_body(dyn, desc)
+    if body < 0:
+        return
+    shape = phoenx.shape_desc(int(newton.GeoType.BOX), h)
+    shape.gap = CONTACT_GAP
+    shape.mu = FRICTION
+    phoenx.add_shape(dyn, body, shape)
+    spawn_body[line] = body
+    wp.atomic_add(spawned, 0, 1)
+
+
+@wp.kernel(enable_backward=False)
+def _sort_retire_kernel(
+    dyn: phoenx.DynamicsData,
+    body_q: wp.array[wp.transform],
+    body_start: int,
+    belt_end: float,
+    frame: wp.array[int],
+    retired: wp.array[int],
+):
+    """Remove packages that left their belt: pushed off its side (sorted) or off its end."""
+    slot = wp.tid()
+    if slot == 0:
+        frame[0] = frame[0] + 1
+    body = body_start + slot
+    if not phoenx.is_body_active(dyn, body):
+        return
+    p = wp.transform_get_translation(body_q[body])
+    if p[2] > SORT_DROP_HEIGHT:
+        return
+    if phoenx.remove_body(dyn, body):
+        wp.atomic_add(retired, wp.where(p[1] < belt_end, 0, 1), 1)
+
+
+@wp.kernel(enable_backward=False)
+def _sort_instances_kernel(
+    dyn: phoenx.DynamicsData,
+    body_q: wp.array[wp.transform],
+    body_start: int,
+    xforms: wp.array[wp.transform],
+):
+    """Poses of the live packages; free rows are parked out of view."""
+    slot = wp.tid()
+    body = body_start + slot
+    xforms[slot] = wp.transform(wp.vec3(0.0, 0.0, -1000.0), wp.quat_identity())
+    if phoenx.is_body_active(dyn, body):
+        xforms[slot] = body_q[body]
+
+
 class Example:
     """One warehouse world with reduced-coordinate robots among sleeping free bodies."""
 
     def __init__(self, viewer, args):
         self.viewer = viewer
         walkers = int(getattr(args, "walking_anymals", 0))
+        sorters = int(getattr(args, "sorting_humanoids", 0))
         self.frame_dt = 1.0 / WALK_FPS if walkers > 0 else 1.0 / 60.0
         self.sim_time = 0.0
         self.timing_frames = int(getattr(args, "timing_frames", 0))
         self.timing_warmup = int(getattr(args, "timing_warmup", 120))
         robots = int(getattr(args, "robots", 128))
-        print(f"[PhoenX Warehouse] building {walkers or robots} robots...", flush=True)
+        print(f"[PhoenX Warehouse] building {walkers or sorters or robots} robots...", flush=True)
         robot_meshes = getattr(args, "robot_meshes", None)
         if robot_meshes is None:
             # Meshes are for looking at: they only add shapes to a headless run.
             robot_meshes = not isinstance(viewer, newton.viewer.ViewerNull)
-        self.scene = build_scene(
-            robots=robots,
-            storage_scale=float(getattr(args, "storage_scale", 1.0)),
-            seed=int(getattr(args, "seed", 0)),
-            robot_meshes=bool(robot_meshes),
-            runtime_robots=int(getattr(args, "runtime_robots", 0)),
-            walking_anymals=walkers,
-        )
+        if sorters > 0:
+            self.scene = build_sorting_hall(sorters, robot_meshes=bool(robot_meshes))
+        else:
+            self.scene = build_scene(
+                robots=robots,
+                storage_scale=float(getattr(args, "storage_scale", 1.0)),
+                seed=int(getattr(args, "seed", 0)),
+                robot_meshes=bool(robot_meshes),
+                runtime_robots=int(getattr(args, "runtime_robots", 0)),
+                walking_anymals=walkers,
+            )
         self.model = self.scene.builder.finalize()
+        for belt in self.scene.sort_belts:
+            belt.mesh.velocities.fill_(wp.vec3(0.0, SORT_BELT_SPEED, 0.0))
         self.state = self.model.state()
         newton.eval_fk(self.model, self.model.joint_q, self.model.joint_qd, self.state)
         self.control = self.model.control()
@@ -1158,6 +1338,9 @@ class Example:
         self.policy = None
         if walkers > 0:
             self._init_walkers()
+        self.sorting = sorters > 0
+        if self.sorting:
+            self._init_sorters()
 
         viewer.set_model(self.model)
         # Look down the first aisles from behind their gates.
@@ -1197,6 +1380,71 @@ class Example:
         self.policy_output = self.policy.outputs[0].name
         # The runtime allocates its buffers on the first call, which must not be a captured one.
         self.policy({self.policy_input: self.walk_observation})
+
+    def _init_sorters(self):
+        """Index the sorters' arm drives and allocate the package bookkeeping."""
+        model = self.model
+        roots = self.scene.robot_roots["g1"]
+        joint_of_body = np.zeros(model.body_count, dtype=np.int64)
+        joint_of_body[model.joint_child.numpy()] = np.arange(model.joint_count)
+        q_start = model.joint_q_start.numpy()
+        root_joint = int(joint_of_body[roots[0]])
+        labels = [label.rsplit("/", 1)[-1] for label in model.joint_label]
+
+        def offset(name: str) -> int:
+            joint = next(j for j in range(root_joint, model.joint_count) if labels[j] == name)
+            return int(q_start[joint] - q_start[root_joint])
+
+        self.sort_shoulder = offset("right_shoulder_pitch_joint")
+        self.sort_elbow = offset("right_elbow_joint")
+        self.sort_q_start = wp.array(q_start[joint_of_body[roots]], dtype=int)
+        self.sort_sweep = wp.array(SORT_ARM_SWEEP, dtype=wp.vec2)
+        self.sort_spawns = wp.array(self.scene.sort_spawns, dtype=wp.vec3)
+        self.sort_spawn_body = wp.full(len(self.scene.sort_spawns), -1, dtype=int)
+        self.sort_body_start = int(model._dynamic_capacity.body_start)
+        self.sort_capacity = model.body_count - self.sort_body_start
+        self.sort_frame = wp.zeros(1, dtype=int)
+        #: Packages put on the belts.
+        self.sort_spawned = wp.zeros(1, dtype=int)
+        #: Packages removed after the humanoids pushed them off a belt's side, and off its end.
+        self.sort_retired = wp.zeros(2, dtype=int)
+        self.sort_xforms = wp.zeros(self.sort_capacity, dtype=wp.transform)
+
+    def _sort(self):
+        """Spawn packages and set the arm targets for this frame."""
+        dyn = self.solver.dynamics.data
+        wp.launch(
+            _sort_spawn_kernel,
+            dim=self.sort_spawn_body.shape[0],
+            inputs=[dyn, self.state.body_q, self.sort_spawns, self.sort_spawn_body, self.sort_spawned],
+        )
+        wp.launch(
+            _sorter_target_kernel,
+            dim=self.sort_q_start.shape[0],
+            inputs=[
+                self.sort_q_start,
+                self.sort_shoulder,
+                self.sort_elbow,
+                self.sort_sweep,
+                self.sort_frame,
+                self.frame_dt,
+                self.control.joint_target_q,
+            ],
+        )
+
+    def _retire_packages(self):
+        wp.launch(
+            _sort_retire_kernel,
+            dim=self.sort_capacity,
+            inputs=[
+                self.solver.dynamics.data,
+                self.state.body_q,
+                self.sort_body_start,
+                float(self.scene.sort_end),
+                self.sort_frame,
+                self.sort_retired,
+            ],
+        )
 
     def _steer_walkers(self):
         """Evaluate the policy once for all walkers and set their joint targets."""
@@ -1243,8 +1491,12 @@ class Example:
                 dim=1,
                 inputs=[self.solver.dynamics.data, self.docks, DOCK_PERIOD, self.dock_frame, self.dock_occupant],
             )
+        if self.sorting:
+            self._sort()
         self.solver.collide(self.state, self.contacts)
         self.solver.step(self.state, self.state, self.control, self.contacts, self.frame_dt)
+        if self.sorting:
+            self._retire_packages()
 
     def step(self):
         if self.graph is None:
@@ -1256,6 +1508,19 @@ class Example:
     def render(self):
         self.viewer.begin_frame(self.sim_time)
         self.viewer.log_state(self.state)
+        if self.sorting:
+            wp.launch(
+                _sort_instances_kernel,
+                dim=self.sort_capacity,
+                inputs=[self.solver.dynamics.data, self.state.body_q, self.sort_body_start, self.sort_xforms],
+            )
+            self.viewer.log_shapes(
+                "/packages",
+                newton.GeoType.BOX,
+                tuple(float(h) for h in SORT_PACKAGE_HALF_EXTENTS),
+                self.sort_xforms,
+                wp.full(self.sort_capacity, wp.vec3(*COLORS["package"]), dtype=wp.vec3),
+            )
         self.viewer.end_frame()
 
     def asleep_mask(self) -> np.ndarray:
@@ -1285,6 +1550,11 @@ class Example:
         if block_system is not None and getattr(block_system, "cross_column_count", None) is not None:
             cross = str(int(block_system.cross_column_count.numpy()[0]))
         timing = "" if step_ms is None else f"step={step_ms:.3f} ms ({1000.0 / step_ms:.1f} steps/s) | "
+        if self.sorting:
+            sorted_off, passed = self.sort_retired.numpy()
+            timing += (
+                f"packages spawned={int(self.sort_spawned.numpy()[0])} sorted={int(sorted_off)} passed={int(passed)} | "
+            )
         print(
             f"[PhoenX Warehouse] {timing}contacts={contact_count}/{self.contacts.rigid_contact_max} "
             f"asleep={int(asleep.sum())}/{self.model.body_count} "
@@ -1359,6 +1629,21 @@ class Example:
             assert float(progress.mean()) >= 0.7 * expected, f"the walkers covered {float(progress.mean()):.2f} m"
             assert float(progress.min()) >= 0.4 * expected, f"a walker covered only {float(progress.min()):.2f} m"
 
+        if self.sorting:
+            assert int(self.solver.dynamics.error_count.numpy()[0]) == 0, "a package could not be added or removed"
+            spawned = int(self.sort_spawned.numpy()[0])
+            sorted_off, passed = (int(v) for v in self.sort_retired.numpy())
+            # Runtime rows in use: added this step (1) or active (2).
+            live = int(np.isin(self.solver.dynamics.bodies.data.state.numpy()[: self.sort_capacity], (1, 2)).sum())
+            print(
+                f"[PhoenX Warehouse] packages: {spawned} spawned, {sorted_off} sorted, {passed} passed, {live} on belts",
+                flush=True,
+            )
+            assert spawned == sorted_off + passed + live, "a package went missing"
+            # The first package reaches the first humanoid after about five seconds.
+            if self.sim_time > 10.0:
+                assert sorted_off > 0, "no humanoid pushed a package off its belt"
+
         if len(self.settled_bodies):
             moved = np.linalg.norm(poses[self.settled_bodies, :3] - self.initial_poses[self.settled_bodies, :3], axis=1)
             print(f"[PhoenX Warehouse] stored goods moved at most {float(moved.max()):.4f} m", flush=True)
@@ -1414,6 +1699,12 @@ if __name__ == "__main__":
         choices=("reduced", "regular"),
         default="reduced",
         help="Solve the gates and drawers in reduced coordinates with the robots, or as regular joints.",
+    )
+    parser.add_argument(
+        "--sorting-humanoids",
+        type=int,
+        default=0,
+        help="Replace the warehouse by lines of this many G1 humanoids that push packages off belts.",
     )
     parser.add_argument("--substeps", type=int, default=4)
     parser.add_argument("--iterations", type=int, default=4)

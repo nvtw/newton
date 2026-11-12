@@ -1,0 +1,1 @@
+Add a sorting hall to the PhoenX warehouse example (``--sorting-humanoids N``): lines of G1 humanoids beside conveyor belts push passing packages off the belts, while packages are created and removed on the device inside the captured step.
