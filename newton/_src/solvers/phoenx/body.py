@@ -379,6 +379,23 @@ def body_store_vw(bodies: BodyContainer, b: wp.int32, v: wp.vec3f, w: wp.vec3f):
 
 
 @wp.func
+def contact_point_weight(bodies: BodyContainer, b0: wp.int32, b1: wp.int32) -> wp.float32:
+    """Weight of body ``b0``'s witness in the common impulse point of a contact with ``b1``.
+
+    A contact's two witnesses part as its bodies move within a step. Both bodies take their
+    impulses at one point between them, which keeps the contact's angular momentum, and that
+    point follows the more mobile body, weighted by inverse mass: a body on a static one keeps
+    its own witness, and so its lever arm, while it rolls or slides; equal bodies share the
+    midpoint.
+    """
+    inverse0 = bodies.inverse_mass[b0]
+    inverse1 = bodies.inverse_mass[b1]
+    if inverse0 + inverse1 <= wp.float32(0.0):
+        return wp.float32(0.5)
+    return inverse0 / (inverse0 + inverse1)
+
+
+@wp.func
 def body_load_orientation(bodies: BodyContainer, b: wp.int32) -> wp.quatf:
     """Load body ``b``'s orientation."""
     return bodies.orientation[b]

@@ -12,6 +12,7 @@ from newton._src.solvers.phoenx.body import (
     MOTION_ARTICULATED,
     MOTION_KINEMATIC,
     BodyContainer,
+    contact_point_weight,
     mat33_from_sym6,
 )
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
@@ -621,7 +622,8 @@ def reduced_contact_prepare(
             + wp.quat_rotate(bodies.orientation[body1], local1 - bodies.body_com[body1])
             - contacts.rigid_contact_margin1[contact] * normal
         )
-        contact_point = wp.float32(0.5) * (point0 + point1)
+        weight0 = contact_point_weight(bodies, body0, body1)
+        contact_point = weight0 * point0 + (wp.float32(1.0) - weight0) * point1
 
         effective_mass = wp.vec3f(0.0)
         if compute_effective_mass:
@@ -764,7 +766,8 @@ def reduced_contact_iterate_staged(
             + wp.quat_rotate(bodies.orientation[body1], local1 - bodies.body_com[body1])
             - contacts.rigid_contact_margin1[contact] * normal
         )
-        contact_point = wp.float32(0.5) * (point0 + point1)
+        weight0 = contact_point_weight(bodies, body0, body1)
+        contact_point = weight0 * point0 + (wp.float32(1.0) - weight0) * point1
         lever0 = wp.vec3f(0.0)
         lever1 = wp.vec3f(0.0)
         if staged:

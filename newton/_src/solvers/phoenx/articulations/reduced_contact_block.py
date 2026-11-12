@@ -40,6 +40,7 @@ from newton._src.solvers.phoenx.body import (
     MOTION_KINEMATIC,
     BodyContainer,
     ReducedArticulationData,
+    contact_point_weight,
     mat33_from_sym6,
 )
 from newton._src.solvers.phoenx.constraints.constraint_block import (
@@ -1186,9 +1187,10 @@ def _gather_reduced_contact_blocks_kernel(
             p0 = position0 + offset0
             p1 = position1 + offset1
             separation = p1 - p0
-            contact_point = p0 + wp.float32(0.5) * separation
+            weight0 = contact_point_weight(bodies, body0, body1)
+            contact_point = weight0 * p0 + (wp.float32(1.0) - weight0) * p1
             if prepare:
-                bias_contact_point = wp.float32(0.5) * (p0 + p1)
+                bias_contact_point = contact_point
                 _prepare_contact_bias_geometry(
                     bodies,
                     body0,
@@ -1345,9 +1347,10 @@ def _gather_packed_patch_points(
                 p0 = position0 + offset0
                 p1 = position1 + offset1
                 separation = p1 - p0
-                contact_point = p0 + wp.float32(0.5) * separation
+                weight0 = contact_point_weight(bodies, body0, body1)
+                contact_point = weight0 * p0 + (wp.float32(1.0) - weight0) * p1
                 if prepare:
-                    bias_contact_point = wp.float32(0.5) * (p0 + p1)
+                    bias_contact_point = contact_point
                     _prepare_contact_bias_geometry(
                         bodies,
                         body0,
@@ -1634,9 +1637,10 @@ def _gather_packed_contact_points(
             p0 = position0 + offset0
             p1 = position1 + offset1
             separation = p1 - p0
-            contact_point = p0 + wp.float32(0.5) * separation
+            weight0 = contact_point_weight(bodies, body0, body1)
+            contact_point = weight0 * p0 + (wp.float32(1.0) - weight0) * p1
             if prepare:
-                bias_contact_point = wp.float32(0.5) * (p0 + p1)
+                bias_contact_point = contact_point
                 _prepare_contact_bias_geometry(
                     bodies,
                     body0,

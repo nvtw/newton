@@ -9,7 +9,7 @@ import warp as wp
 
 from newton._src.sim.enums import BodyFlags
 from newton._src.solvers.phoenx.articulations.reduced_contact_block import _broadcast_contact_scalar
-from newton._src.solvers.phoenx.body import BodyContainer
+from newton._src.solvers.phoenx.body import BodyContainer, contact_point_weight
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
     ContactColumnContainer,
     ContactViews,
@@ -249,7 +249,8 @@ def _build_forest_contact_rows(
         + wp.quat_rotate(bodies.orientation[body1], contacts.rigid_contact_point1[contact] - bodies.body_com[body1])
         - contacts.rigid_contact_margin1[contact] * normal
     )
-    point = wp.float32(0.5) * (point0 + point1)
+    weight0 = contact_point_weight(bodies, body0, body1)
+    point = weight0 * point0 + (wp.float32(1.0) - weight0) * point1
     dof = compact_dofs[compact]
     for axis in range(3):
         direction = normal

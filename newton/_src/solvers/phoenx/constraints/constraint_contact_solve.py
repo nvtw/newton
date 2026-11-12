@@ -21,6 +21,7 @@ from newton._src.solvers.phoenx.body import (
     body_load_orientation,
     body_load_vw,
     body_store_vw,
+    contact_point_weight,
     mat33_from_sym6,
 )
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
@@ -361,8 +362,8 @@ def rebase_ordinary_contact_relax_kernel(
 ):
     """Update prepared rows for the substep's integrated rigid motion.
 
-    ``rebase_levers`` retains each prepared world impulse point as body COMs
-    advance. ``advance_gap`` moves each row's gap by the normal displacement of
+    ``rebase_levers`` moves each prepared impulse point with the bodies' translation,
+    weighted like :func:`contact_point_weight`. ``advance_gap`` moves each row's gap by the normal displacement of
     the material points at the impulse point and refreshes its normal bias, so a
     following substep that reuses the prepared rows neither admits an approach
     that was already spent nor keeps pushing out a resolved penetration.
@@ -407,10 +408,14 @@ def rebase_ordinary_contact_relax_kernel(
     inverse_mass2 = bodies.inverse_mass[b2] * factor2
     inverse_inertia1 = mat33_from_sym6(bodies.inverse_inertia_world[b1]) * factor1
     inverse_inertia2 = mat33_from_sym6(bodies.inverse_inertia_world[b2]) * factor2
+    # The common impulse point follows the bodies' translation weighted like their witnesses,
+    # see :func:`contact_point_weight`.
+    weight1 = contact_point_weight(bodies, b1, b2)
+    point_shift = -(weight1 * shift1 + (wp.float32(1.0) - weight1) * shift2)
     # Rebase rows independently; no impulse or body velocity is modified.
     for k in range(first + lane, first + count, rows_per_column):
-        r1 = cc_get_r0(cc, k) + shift1
-        r2 = cc_get_r1(cc, k) + shift2
+        r1 = cc_get_r0(cc, k) + shift1 + point_shift
+        r2 = cc_get_r1(cc, k) + shift2 + point_shift
         cc_set_r0(cc, k, r1)
         cc_set_r1(cc, k, r2)
         normal = cc_get_normal(cc, k)
@@ -768,7 +773,8 @@ def _make_contact_prepare_for_iteration_at(
                 p1_world = position2 + wp.quat_rotate(orientation2, local_p1 - body_com2) - margin1 * n
                 # Apply equal and opposite impulses at a common point so
                 # separated collision witnesses cannot create a friction couple.
-                impulse_point = wp.float32(0.5) * (p0_world + p1_world)
+                weight1 = contact_point_weight(bodies, b1, b2)
+                impulse_point = weight1 * p0_world + (wp.float32(1.0) - weight1) * p1_world
                 r1 = impulse_point - position1
                 r2 = impulse_point - position2
                 # Only ``eff_n`` is consumed before the sticky-break anchor

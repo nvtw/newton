@@ -1,0 +1,1 @@
+Fix rolling bodies braking in PhoenX: a contact's common impulse point now follows the more mobile of its two bodies, weighted by inverse mass, instead of their midpoint, so a body rolling over a static one keeps its lever arm (a ball rolling at 3 m/s used to slow to 0.8 m/s in 2 s).
