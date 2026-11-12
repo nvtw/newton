@@ -33,6 +33,7 @@ import unittest
 import numpy as np
 import warp as wp
 
+import newton
 from newton._src.solvers.phoenx.tests.test_stacking import _PhoenXScene
 
 _G = 9.81
@@ -194,6 +195,46 @@ class TestPhoenXFiveCubeStackScaleSweep(unittest.TestCase):
         max_speed, max_drift = self._run_at_scale(2.0)
         self.assertLess(max_speed, self._VEL_TOL, f"scale=2.0: |v|={max_speed:.3f} m/s")
         self.assertLess(max_drift, self._DRIFT_TOL_UNIT * 2.0, f"scale=2.0: drift={max_drift:.3f} m")
+
+
+@unittest.skipUnless(wp.is_cuda_available(), "PhoenX stack tests require CUDA")
+class TestPhoenXDroppedStacksComeToRest(unittest.TestCase):
+    """Stacks whose boxes drop a few centimeters onto each other must stop swaying.
+
+    The friction anchors' position correction used to leave impulses that one relax sweep
+    did not take back; they pumped the rocking of a stack, which then swayed at several
+    centimeters per second for as long as the simulation ran.
+    """
+
+    def test_dropped_stacks_stop_swaying(self) -> None:
+        half, drop, levels = 0.1, 0.03, 5
+        builder = newton.ModelBuilder()
+        builder.default_shape_cfg.mu = 0.5
+        builder.add_ground_plane()
+        for stack in range(4):
+            for level in range(levels):
+                z = half + level * (2.0 * half + drop) + drop
+                body = builder.add_body(xform=wp.transform(wp.vec3(float(stack), 0.0, z), wp.quat_identity()))
+                builder.add_shape_box(body, hx=half, hy=half, hz=half)
+        model = builder.finalize()
+        solver = newton.solvers.SolverPhoenX(model, substeps=6, solver_iterations=8)
+        state_0, state_1, control = model.state(), model.state(), model.control()
+        contacts = model._collision_pipeline.contacts()
+        with wp.ScopedCapture() as capture:
+            solver.collide(state_0, contacts)
+            solver.step(state_0, state_1, control, contacts, 1.0 / 120.0)
+            wp.copy(state_0.body_q, state_1.body_q)
+            wp.copy(state_0.body_qd, state_1.body_qd)
+        for _ in range(720):  # six seconds
+            wp.capture_launch(capture.graph)
+        velocity = state_0.body_qd.numpy()
+        poses = state_0.body_q.numpy()
+        self.assertTrue(np.isfinite(poses).all())
+        # Every box still sits on the one below it.
+        heights = poses[:, 2].reshape(4, levels)
+        np.testing.assert_allclose(heights, np.tile(half + 2.0 * half * np.arange(levels), (4, 1)), atol=5.0e-3)
+        self.assertLess(float(np.abs(velocity[:, :2]).max()), 1.0e-3, "the stacks still sway")
+        self.assertLess(float(np.abs(velocity[:, 3:]).max()), 1.0e-2, "the stacks still rock")
 
 
 if __name__ == "__main__":

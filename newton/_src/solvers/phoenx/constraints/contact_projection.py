@@ -146,8 +146,9 @@ def _make_contact_project_velocity_update(has_soft_contact_pd: bool):
         )
         lambda_n_friction = normal_update.lambda_new
 
-        d_lambda_t1 = -(eff_t1 * (jv_t1 + bias_t1))
-        d_lambda_t2 = -(eff_t2 * (jv_t2 + bias_t2))
+        # Soft like the normal row, see :func:`_make_contact_frame_velocity_update`.
+        d_lambda_t1 = -(eff_t1 * mass_coeff_n * (jv_t1 + bias_t1)) - impulse_coeff_n * lam_t1_old
+        d_lambda_t2 = -(eff_t2 * mass_coeff_n * (jv_t2 + bias_t2)) - impulse_coeff_n * lam_t2_old
         tangents = block_project_friction_delta_sor_2(
             lam_t1_old,
             lam_t2_old,
@@ -551,8 +552,12 @@ def _make_contact_frame_velocity_update(has_soft_contact_pd: bool):
         )
         lambda_n_friction = normal_update.lambda_new
 
-        d_lambda_t1 = -(eff_t1 * (jv_t1 + bias_t1))
-        d_lambda_t2 = -(eff_t2 * (jv_t2 + bias_t2))
+        # The tangent bias pulls the friction anchors back together. As a plain velocity
+        # target it leaves impulses that one relax sweep does not take back, and those pump
+        # the rocking of a stack. With the soft coefficients of the normal row it is an
+        # implicit spring and damper instead; the relax sweeps pass rigid coefficients.
+        d_lambda_t1 = -(eff_t1 * mass_coeff_n * (jv_t1 + bias_t1)) - impulse_coeff_n * lam_t1_old
+        d_lambda_t2 = -(eff_t2 * mass_coeff_n * (jv_t2 + bias_t2)) - impulse_coeff_n * lam_t2_old
         tangents = block_project_friction_delta_sor_2(
             lam_t1_old,
             lam_t2_old,
