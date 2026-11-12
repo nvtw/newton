@@ -1,0 +1,1 @@
+Add `--runtime-robots` to the `phoenx_warehouse` example's sorting hall: humanoids arrive at working places spread along the belts, sort beside the others, and leave again. The hall's humanoids now balance with a hip strategy and keep the G1's own compliant arm gains, so none of them topples when two hands squeeze a package.

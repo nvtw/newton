@@ -22,7 +22,11 @@ belt as the hand of the humanoid opposite, so the two meet over the belt and pus
 and forth; their periods differ slightly, so the pairs that meet change over time. Packages
 appear at the start of every belt and are removed once they drop off its sides or its end, all
 from device code inside the graph. Drive units carry totes up and down the aisles between the
-lines, brushing past the humanoids' heels.
+lines, brushing past the humanoids' heels. With ``--runtime-robots`` as well, that many working
+places, spread among the others, are docks: humanoids arrive there, sort beside the others, and
+leave again. The humanoids' legs hold their pose with stiff drives, but their arms keep the G1's
+own gains and effort limits, so two hands that squeeze a package between them yield instead of
+pushing each other over.
 
 The scene exercises what one large world mixes: robots that touch free bodies (a package on a
 humanoid's foot, a pod carried by a drive unit, a loaded pallet on a forklift), free bodies
@@ -55,6 +59,8 @@ Runs:
   - A thousand policy-driven ANYmals walk laps through the aisles.
 - `python -m newton.examples phoenx_warehouse --sorting-humanoids 1024`
   - A thousand humanoids sort packages off 16 conveyor belts.
+- `python -m newton.examples phoenx_warehouse --sorting-humanoids 1024 --runtime-robots 32`
+  - 32 more humanoids come and go at working places spread along the belts.
 - `python -m newton.examples phoenx_warehouse --viewer null --timing-frames 600`
   - Prints the scene counts and the milliseconds per captured step.
 """
@@ -111,9 +117,11 @@ G1_KD = (
     *(4.0, 4.0, 4.0, 4.0, 0.4, 0.4, 0.4),
     *(4.0, 4.0, 4.0, 4.0, 0.4, 0.4, 0.4),
 )
-G1_GAIN_SCALE = 8.0  # holds the pose without a balance policy
+G1_GAIN_SCALE = 8.0  # legs and waist hold the pose without a balance policy
+G1_ARM_DOFS = 14  # the last DOFs: both arms, which keep the robot's own compliant gains
 G1_ROOT_HEIGHT = 0.785  # [m]
 G1_FOOT_CENTER = (0.04, 0.0, -0.029)  # [m], in the ankle roll link
+G1_FOOT_CENTER_POINT = wp.constant(wp.vec3(*G1_FOOT_CENTER))
 G1_FOOT_HALF_EXTENTS = (0.09, 0.03, 0.008)  # [m]
 G1_FOOT_FRICTION = 0.6
 
@@ -184,6 +192,11 @@ SORT_KIVA_SPEED = 0.6  # [m/s], spread by up to 30% between units
 KIVA_WHEEL_RADIUS = 0.08  # [m]
 KIVA_WHEEL_TRACK = 0.31  # [m] from the chassis' middle to each wheel
 KIVA_DRIVE_KD = 40.0  # [N*m*s/rad] of a wheel's velocity drive
+# Hip strategy of the standing sorters: hip pitch offset [rad] per meter the pelvis is ahead of
+# the middle of its feet, and per m/s it moves forward; negative offsets lean the torso forward.
+BALANCE_HIP_GAIN = wp.constant(1.0)  # [rad/m]
+BALANCE_HIP_DAMPING = wp.constant(0.3)  # [rad*s/m]
+BALANCE_HIP_RANGE = wp.constant(0.35)  # [rad]
 SORT_ARM_SWEEP = ((0.4, 0.15), (0.2, 0.3), (0.0, 0.5), (-0.2, 0.75), (-0.4, 1.05), (-0.6, 1.4))
 
 KIVA_ROOT_HEIGHT = 0.12  # chassis center [m]
@@ -337,11 +350,14 @@ def build_g1(visual_meshes: bool = False) -> newton.ModelBuilder:
             builder, _body_named(builder, f"{side}_wrist_yaw_link"), (0.0, 0.0, 0.0), radius=0.045, visible=visible
         )
     builder.joint_q[:3] = [0.0, 0.0, G1_ROOT_HEIGHT]
+    # Stiff arms would press with their full effort limit on whatever blocks them; two
+    # humanoids squeezing a package between their hands then push each other over.
+    scale = [G1_GAIN_SCALE] * (len(G1_KP) - G1_ARM_DOFS) + [1.0] * G1_ARM_DOFS
     _set_position_drives(
         builder,
         G1_JOINT_POS,
-        [G1_GAIN_SCALE * gain for gain in G1_KP],
-        [G1_GAIN_SCALE * gain for gain in G1_KD],
+        [s * gain for s, gain in zip(scale, G1_KP, strict=True)],
+        [s * gain for s, gain in zip(scale, G1_KD, strict=True)],
     )
     return builder
 
@@ -885,15 +901,17 @@ def _belt_mesh(center, half_extents) -> newton.Mesh:
     )
 
 
-def build_sorting_hall(humanoids: int, robot_meshes: bool = False) -> Scene:
+def build_sorting_hall(humanoids: int, robot_meshes: bool = False, runtime_robots: int = 0) -> Scene:
     """Belts with a line of G1 humanoids on each side, the far line offset by half a pitch.
 
     A right hand is about 0.2 m beside its root, so with the lines half a pitch (0.45 m) apart
     along the belt, a humanoid's right hand sweeps about 0.05 m beside the right hand of the
-    humanoid opposite.
+    humanoid opposite. ``runtime_robots`` more working places, spread evenly among the others,
+    are docks where humanoids arrive at runtime, sort beside the others, and leave again.
     """
     per_belt = 2 * SORT_ROBOTS_PER_LINE
-    belts = math.ceil(humanoids / per_belt)
+    places = humanoids + runtime_robots
+    belts = math.ceil(places / per_belt)
     assembler = _SceneAssembler({"g1": humanoids, "kiva": belts * SORT_KIVAS_PER_AISLE})
     length = (SORT_ROBOTS_PER_LINE + 0.5) * SORT_ROBOT_PITCH
     scene = assembler.scene
@@ -902,7 +920,7 @@ def build_sorting_hall(humanoids: int, robot_meshes: bool = False) -> Scene:
     xforms = []
     for belt_index in range(belts):
         x = belt_index * SORT_LINE_PITCH
-        for k in range(min(per_belt, humanoids - belt_index * per_belt)):
+        for k in range(min(per_belt, places - belt_index * per_belt)):
             side, slot = divmod(k, SORT_ROBOTS_PER_LINE)
             if side == 0:
                 xforms.append(_position(x, (slot + 0.5) * SORT_ROBOT_PITCH))
@@ -917,7 +935,8 @@ def build_sorting_hall(humanoids: int, robot_meshes: bool = False) -> Scene:
         scene.sort_belts.append(belt)
         # Packages appear at the belt's start, in its middle, where the hands of both sides reach.
         scene.sort_spawns.append((x + 0.5 * SORT_FACING, start + 0.3, SORT_BELT_TOP))
-    assembler.place_robots("g1", build_g1(robot_meshes), xforms)
+    docks = {(2 * dock + 1) * places // (2 * runtime_robots) for dock in range(runtime_robots)}
+    assembler.place_robots("g1", build_g1(robot_meshes), [x for k, x in enumerate(xforms) if k not in docks])
     # Drive units in the aisle beyond every belt's far line, alternately heading up and down it.
     aisle_offset = 0.5 * (SORT_FACING + SORT_LINE_PITCH)
     scene.kiva_span = (0.8, length - 0.8)
@@ -934,7 +953,27 @@ def build_sorting_hall(humanoids: int, robot_meshes: bool = False) -> Scene:
             assembler.add_free_tote((x, y, KIVA_TOP + 0.08 + REST_GAP), tote)
     assembler.place_robots("kiva", build_kiva(driven=True), kiva_xforms)
     capacity = belts * math.ceil((length + 2.0) / SORT_SPAWN_CLEARANCE)
-    assembler.builder.reserve_dynamic_capacity(bodies=capacity, shapes=capacity)
+    if runtime_robots > 0:
+        g1 = build_g1(robot_meshes)
+        # Instances take their poses from the template's bodies: put them where its joints do.
+        g1.body_q[:] = [wp.transform(*pose) for pose in _standing_poses(g1)]
+        g1.shape_gap[:] = [CONTACT_GAP] * g1.shape_count
+        assembler.builder.reserve_dynamic_capacity(
+            bodies=capacity,
+            shapes=capacity + runtime_robots * g1.shape_count,
+            articulations=[runtime_robots],
+            articulation_templates=[g1],
+            articulation_coordinates="reduced",
+        )
+        scene.docks = [
+            wp.transform(
+                wp.transform_get_translation(xform) + wp.vec3(0.0, 0.0, G1_ROOT_HEIGHT),
+                wp.transform_get_rotation(xform),
+            )
+            for xform in (xforms[k] for k in sorted(docks))
+        ]
+    else:
+        assembler.builder.reserve_dynamic_capacity(bodies=capacity, shapes=capacity)
     for shape in range(assembler.builder.shape_count):
         assembler.builder.shape_gap[shape] = CONTACT_GAP
     return scene
@@ -1234,10 +1273,162 @@ def _walker_target_kernel(
 
 
 @wp.func
+def _hip_balance(
+    body_q: wp.array[wp.transform],
+    body_qd: wp.array[wp.spatial_vector],
+    body_com: wp.array[wp.vec3],
+    body_mass: wp.array[float],
+    com_x: wp.vec3,
+    com_v: wp.vec3,
+    pelvis: int,
+    left_foot: int,
+    right_foot: int,
+    rest_offset: float,
+) -> float:
+    """Hip pitch offset [rad] that swings the torso against the center of mass's drift over the feet.
+
+    ``com_x`` and ``com_v`` are the mass-weighted sums of the bodies' center positions and
+    velocities; their ratio to the total mass is the humanoid's center of mass and its velocity.
+    """
+    forward = wp.quat_rotate(wp.transform_get_rotation(body_q[pelvis]), wp.vec3(1.0, 0.0, 0.0))
+    forward = wp.normalize(wp.vec3(forward[0], forward[1], 0.0))
+    support = 0.5 * (
+        wp.transform_point(body_q[left_foot], G1_FOOT_CENTER_POINT)
+        + wp.transform_point(body_q[right_foot], G1_FOOT_CENTER_POINT)
+    )
+    ahead = wp.dot(com_x - support, forward) - rest_offset
+    speed = wp.dot(com_v, forward)
+    offset = BALANCE_HIP_GAIN * ahead + BALANCE_HIP_DAMPING * speed
+    return wp.clamp(offset, -BALANCE_HIP_RANGE, BALANCE_HIP_RANGE)
+
+
+@wp.func
+def _add_body_momentum(
+    body_q: wp.array[wp.transform],
+    body_qd: wp.array[wp.spatial_vector],
+    body_com: wp.array[wp.vec3],
+    body_mass: wp.array[float],
+    body: int,
+):
+    """A body's mass, mass-weighted center position, and momentum."""
+    mass = body_mass[body]
+    center = wp.transform_point(body_q[body], body_com[body])
+    return mass, mass * center, mass * wp.spatial_top(body_qd[body])
+
+
+@wp.kernel(enable_backward=False)
+def _balance_kernel(
+    body_q: wp.array[wp.transform],
+    body_qd: wp.array[wp.spatial_vector],
+    body_com: wp.array[wp.vec3],
+    body_mass: wp.array[float],
+    roots: wp.array[int],
+    q_start: wp.array[int],
+    body_count: int,
+    left_foot: int,
+    right_foot: int,
+    left_hip: int,
+    right_hip: int,
+    hip_rest: float,
+    rest_offset: float,
+    joint_target_q: wp.array[float],
+):
+    """Hip strategy of every standing sorter: the hips bend against the center of mass's drift."""
+    sorter = wp.tid()
+    root = roots[sorter]
+    total = float(0.0)
+    com_x = wp.vec3(0.0)
+    com_v = wp.vec3(0.0)
+    for i in range(body_count):
+        mass, moment, momentum = _add_body_momentum(body_q, body_qd, body_com, body_mass, root + i)
+        total += mass
+        com_x += moment
+        com_v += momentum
+    offset = _hip_balance(
+        body_q,
+        body_qd,
+        body_com,
+        body_mass,
+        com_x / total,
+        com_v / total,
+        root,
+        root + left_foot,
+        root + right_foot,
+        rest_offset,
+    )
+    joint_target_q[q_start[sorter] + left_hip] = hip_rest + offset
+    joint_target_q[q_start[sorter] + right_hip] = hip_rest + offset
+
+
+@wp.kernel(enable_backward=False)
+def _dock_balance_kernel(
+    dyn: phoenx.DynamicsData,
+    occupant: wp.array[int],
+    body_q: wp.array[wp.transform],
+    body_qd: wp.array[wp.spatial_vector],
+    body_com: wp.array[wp.vec3],
+    body_mass: wp.array[float],
+    joint_q_start: wp.array[int],
+    body_count: int,
+    left_foot: int,
+    right_foot: int,
+    left_hip_joint: int,
+    right_hip_joint: int,
+    hip_rest: float,
+    rest_offset: float,
+    joint_target_q: wp.array[float],
+):
+    """The hip strategy of :func:`_balance_kernel` for the humanoid at every occupied dock."""
+    instance = occupant[wp.tid()]
+    if instance < 0:
+        return
+    left_hip = phoenx.articulation_joint(dyn, instance, left_hip_joint)
+    right_hip = phoenx.articulation_joint(dyn, instance, right_hip_joint)
+    if left_hip < 0 or right_hip < 0:
+        return
+    total = float(0.0)
+    com_x = wp.vec3(0.0)
+    com_v = wp.vec3(0.0)
+    for i in range(body_count):
+        body = dyn.articulation_bodies[instance, i]
+        if body < 0:
+            return
+        mass, moment, momentum = _add_body_momentum(body_q, body_qd, body_com, body_mass, body)
+        total += mass
+        com_x += moment
+        com_v += momentum
+    offset = _hip_balance(
+        body_q,
+        body_qd,
+        body_com,
+        body_mass,
+        com_x / total,
+        com_v / total,
+        dyn.articulation_bodies[instance, 0],
+        dyn.articulation_bodies[instance, left_foot],
+        dyn.articulation_bodies[instance, right_foot],
+        rest_offset,
+    )
+    joint_target_q[joint_q_start[left_hip]] = hip_rest + offset
+    joint_target_q[joint_q_start[right_hip]] = hip_rest + offset
+
+
+@wp.func
 def _sort_push(phase: float) -> float:
     """Progress [0, 1] of a hand's forward push over one period: out, back, and a pause."""
     s = wp.where(phase < 0.3, phase / 0.3, wp.where(phase < 0.6, (0.6 - phase) / 0.3, 0.0))
     return s * s * (3.0 - 2.0 * s)
+
+
+@wp.func
+def _sorter_arm_target(sweep: wp.array[wp.vec2], time: float, sorter: int) -> wp.vec2:
+    """Shoulder pitch and elbow targets [rad] of a sorter's push, each humanoid at its own phase."""
+    spread = 0.754878 * float(sorter)
+    period = SORT_PERIOD * (1.0 + SORT_PERIOD_SPREAD * (spread - wp.floor(spread)))
+    phase = time / period + 0.618034 * float(sorter)
+    along = _sort_push(phase - wp.floor(phase)) * float(sweep.shape[0] - 1)
+    k = wp.min(int(along), sweep.shape[0] - 2)
+    return wp.lerp(sweep[k], sweep[k + 1], along - float(k))
 
 
 @wp.kernel(enable_backward=False)
@@ -1252,15 +1443,36 @@ def _sorter_target_kernel(
 ):
     """Drive every sorter's right arm through its push, each humanoid at its own phase."""
     sorter = wp.tid()
-    time = float(frame[0]) * frame_dt
-    spread = 0.754878 * float(sorter)
-    period = SORT_PERIOD * (1.0 + SORT_PERIOD_SPREAD * (spread - wp.floor(spread)))
-    phase = time / period + 0.618034 * float(sorter)
-    along = _sort_push(phase - wp.floor(phase)) * float(sweep.shape[0] - 1)
-    k = wp.min(int(along), sweep.shape[0] - 2)
-    target = wp.lerp(sweep[k], sweep[k + 1], along - float(k))
+    target = _sorter_arm_target(sweep, float(frame[0]) * frame_dt, sorter)
     joint_target_q[q_start[sorter] + shoulder] = target[0]
     joint_target_q[q_start[sorter] + elbow] = target[1]
+
+
+@wp.kernel(enable_backward=False)
+def _dock_sorter_target_kernel(
+    dyn: phoenx.DynamicsData,
+    occupant: wp.array[int],
+    joint_q_start: wp.array[int],
+    first_sorter: int,
+    shoulder_joint: int,
+    elbow_joint: int,
+    sweep: wp.array[wp.vec2],
+    frame: wp.array[int],
+    frame_dt: float,
+    joint_target_q: wp.array[float],
+):
+    """Drive the right arm of the humanoid at every occupied dock like the other sorters."""
+    dock = wp.tid()
+    instance = occupant[dock]
+    if instance < 0:
+        return
+    shoulder = phoenx.articulation_joint(dyn, instance, shoulder_joint)
+    elbow = phoenx.articulation_joint(dyn, instance, elbow_joint)
+    if shoulder < 0 or elbow < 0:
+        return
+    target = _sorter_arm_target(sweep, float(frame[0]) * frame_dt, first_sorter + dock)
+    joint_target_q[joint_q_start[shoulder]] = target[0]
+    joint_target_q[joint_q_start[elbow]] = target[1]
 
 
 @wp.kernel(enable_backward=False)
@@ -1386,7 +1598,11 @@ class Example:
             # Meshes are for looking at: they only add shapes to a headless run.
             robot_meshes = not isinstance(viewer, newton.viewer.ViewerNull)
         if sorters > 0:
-            self.scene = build_sorting_hall(sorters, robot_meshes=bool(robot_meshes))
+            self.scene = build_sorting_hall(
+                sorters,
+                robot_meshes=bool(robot_meshes),
+                runtime_robots=int(getattr(args, "runtime_robots", 0)),
+            )
         else:
             self.scene = build_scene(
                 robots=robots,
@@ -1492,12 +1708,45 @@ class Example:
 
         self.sort_shoulder = offset("right_shoulder_pitch_joint")
         self.sort_elbow = offset("right_elbow_joint")
+        # Template joint indices of runtime humanoids, which do not count the free root.
+        self.sort_shoulder_joint = labels.index("right_shoulder_pitch_joint", root_joint) - root_joint - 1
+        self.sort_elbow_joint = labels.index("right_elbow_joint", root_joint) - root_joint - 1
         self.sort_q_start = wp.array(q_start[joint_of_body[roots]], dtype=int)
+        self.sort_roots = wp.array(roots, dtype=int)
+        # Hip strategy: bodies and hip joints relative to a humanoid's root, and its rest offset.
+        body_labels = [label.rsplit("/", 1)[-1] for label in model.body_label]
+        self.balance_feet = tuple(
+            body_labels.index(f"{side}_ankle_roll_link", roots[0]) - roots[0] for side in ("left", "right")
+        )
+        self.balance_hips = (offset("left_hip_pitch_joint"), offset("right_hip_pitch_joint"))
+        self.balance_hip_joints = tuple(
+            labels.index(f"{side}_hip_pitch_joint", root_joint) - root_joint - 1 for side in ("left", "right")
+        )
+        self.balance_hip_rest = float(G1_JOINT_POS[0])
+        self.balance_body_count = int(roots[1] - roots[0]) if len(roots) > 1 else model.body_count - int(roots[0])
+        rest = self.state.body_q.numpy()
+        masses = model.body_mass.numpy()
+        centers = model.body_com.numpy()
+        bodies = range(int(roots[0]), int(roots[0]) + self.balance_body_count)
+        com = sum(
+            masses[b] * np.array(wp.transform_point(wp.transform(*rest[b]), wp.vec3(*centers[b]))) for b in bodies
+        ) / sum(masses[b] for b in bodies)
+        forward = np.array(wp.quat_rotate(wp.quat(*rest[roots[0], 3:]), wp.vec3(1.0, 0.0, 0.0)))[:2]
+        forward /= np.linalg.norm(forward)
+        support = np.mean(
+            [
+                np.array(wp.transform_point(wp.transform(*rest[roots[0] + foot]), wp.vec3(*G1_FOOT_CENTER)))
+                for foot in self.balance_feet
+            ],
+            axis=0,
+        )
+        self.balance_rest_offset = float(np.dot(com[:2] - support[:2], forward))
         self.sort_sweep = wp.array(SORT_ARM_SWEEP, dtype=wp.vec2)
         self.sort_spawns = wp.array(self.scene.sort_spawns, dtype=wp.vec3)
         self.sort_spawn_body = wp.full(len(self.scene.sort_spawns), -1, dtype=int)
         self.sort_body_start = int(model._dynamic_capacity.body_start)
-        self.sort_capacity = model.body_count - self.sort_body_start
+        # Package rows; runtime humanoids have their own rows after them.
+        self.sort_capacity = int(model._dynamic_capacity.body_count)
         self.sort_frame = wp.zeros(1, dtype=int)
         #: Packages put on the belts.
         self.sort_spawned = wp.zeros(1, dtype=int)
@@ -1511,6 +1760,13 @@ class Example:
         for robot, articulation in enumerate(self.scene.robot_articulations):
             joints = slice(articulation_start[articulation], articulation_start[articulation + 1])
             self.body_robot[joint_child[joints]] = robot
+        if self.docks is not None:
+            # Runtime humanoids own fixed instance rows: number them after the static robots.
+            instance_start = self.solver.dynamics.data.instance_body_start.numpy()
+            per_instance = int(instance_start[1] - instance_start[0]) if len(instance_start) > 1 else 0
+            robots = len(self.scene.robot_articulations)
+            for instance, start in enumerate(instance_start[: len(self.scene.docks)]):
+                self.body_robot[start : start + per_instance] = robots + instance
         #: Steps in which two robots touched, counted by the test.
         self.robot_touch_steps = 0
         kivas = self.scene.robot_roots["kiva"]
@@ -1524,8 +1780,50 @@ class Example:
         self.kiva_start = poses[:, :2].copy()
 
     def _sort(self):
-        """Spawn packages and set the arm targets for this frame."""
+        """Spawn packages and set the arm and balance targets for this frame."""
         dyn = self.solver.dynamics.data
+        wp.launch(
+            _balance_kernel,
+            dim=self.sort_q_start.shape[0],
+            inputs=[
+                self.state.body_q,
+                self.state.body_qd,
+                self.model.body_com,
+                self.model.body_mass,
+                self.sort_roots,
+                self.sort_q_start,
+                self.balance_body_count,
+                self.balance_feet[0],
+                self.balance_feet[1],
+                self.balance_hips[0],
+                self.balance_hips[1],
+                self.balance_hip_rest,
+                self.balance_rest_offset,
+                self.control.joint_target_q,
+            ],
+        )
+        if self.docks is not None:
+            wp.launch(
+                _dock_balance_kernel,
+                dim=self.docks.shape[0],
+                inputs=[
+                    dyn,
+                    self.dock_occupant,
+                    self.state.body_q,
+                    self.state.body_qd,
+                    self.model.body_com,
+                    self.model.body_mass,
+                    self.model.joint_q_start,
+                    self.balance_body_count,
+                    self.balance_feet[0],
+                    self.balance_feet[1],
+                    self.balance_hip_joints[0],
+                    self.balance_hip_joints[1],
+                    self.balance_hip_rest,
+                    self.balance_rest_offset,
+                    self.control.joint_target_q,
+                ],
+            )
         wp.launch(
             _sort_spawn_kernel,
             dim=self.sort_spawn_body.shape[0],
@@ -1557,6 +1855,23 @@ class Example:
                 self.control.joint_target_q,
             ],
         )
+        if self.docks is not None:
+            wp.launch(
+                _dock_sorter_target_kernel,
+                dim=self.docks.shape[0],
+                inputs=[
+                    dyn,
+                    self.dock_occupant,
+                    self.model.joint_q_start,
+                    self.sort_q_start.shape[0],
+                    self.sort_shoulder_joint,
+                    self.sort_elbow_joint,
+                    self.sort_sweep,
+                    self.sort_frame,
+                    self.frame_dt,
+                    self.control.joint_target_q,
+                ],
+            )
 
     def _retire_packages(self):
         wp.launch(
@@ -1826,7 +2141,10 @@ if __name__ == "__main__":
     parser.add_argument("--storage-scale", type=float, default=1.0, help="Scale of the number of pods and pallets.")
     parser.add_argument("--seed", type=int, default=0, help="Seed of the storage layout.")
     parser.add_argument(
-        "--runtime-robots", type=int, default=0, help="Humanoids that arrive at the dock and leave again at runtime."
+        "--runtime-robots",
+        type=int,
+        default=0,
+        help="Humanoids that arrive at a dock (a working place in the sorting hall) and leave again at runtime.",
     )
     parser.add_argument(
         "--walking-anymals",
