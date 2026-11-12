@@ -122,8 +122,12 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_set_tangent2_lambda,
 )
 
-PAGE_ROWS = 24
-"""Contact rows one chunk solves at once; chunks hold ``PAGE_ROWS // 3`` points."""
+PAGE_ROWS = 30
+"""Contact rows one chunk solves at once; chunks hold ``PAGE_ROWS // 3`` points.
+
+One lane forms each row, so a chunk holds at most ten points. Two flat feet and a carried
+object's edge make ten: with eight, most robots that hold something needed a second chunk.
+"""
 
 _CHUNK_POINTS = PAGE_ROWS // 3
 _FULL_MASK = wp.constant(wp.uint32(0xFFFFFFFF))
