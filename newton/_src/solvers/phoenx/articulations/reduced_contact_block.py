@@ -433,7 +433,6 @@ def _classify_contact_ownership_kernel(
     bodies: BodyContainer,
     free_rigid_classic: wp.bool,
     num_columns: wp.array[wp.int32],
-    key_stride: wp.int64,
     keys: wp.array[wp.int64],
     values: wp.array[wp.int32],
     classic_count: wp.array[wp.int32],
@@ -460,7 +459,8 @@ def _classify_contact_ownership_kernel(
             0
         ) or bodies.reduced.body_articulation[contact_get_body2(columns, column)] >= wp.int32(0)
     ownership = wp.int32(1) if is_rigid else wp.int32(0)
-    keys[column] = wp.int64(ownership) * key_stride + wp.int64(column)
+    # The sorts are stable: columns of one owner keep their order.
+    keys[column] = wp.int64(ownership)
     if is_rigid:
         wp.atomic_add(reduced_count, 0, wp.int32(1))
     else:
@@ -643,7 +643,6 @@ def _classify_reduced_contact_columns_kernel(
     num_columns: wp.array[wp.int32],
     classic_column_count: wp.array[wp.int32],
     articulation_count: wp.int32,
-    key_stride: wp.int64,
     allow_internal: wp.bool,
     keys: wp.array[wp.int64],
     values: wp.array[wp.int32],
@@ -670,7 +669,8 @@ def _classify_reduced_contact_columns_kernel(
         body0 = contact_get_body1(columns, column)
         body1 = contact_get_body2(columns, column)
         group = articulation_count + wp.max(bodies.world_id[body0], bodies.world_id[body1])
-    keys[column] = wp.int64(group) * key_stride + wp.int64(column)
+    # The sorts are stable: columns of one run keep their order.
+    keys[column] = wp.int64(group)
     wp.atomic_add(section_end, group, wp.int32(1))
 
 
@@ -4063,7 +4063,6 @@ class ReducedContactBlockSystem:
                         bodies,
                         wp.bool(free_rigid_classic),
                         num_columns,
-                        wp.int64(self.schedule_capacity + 1),
                     ],
                     outputs=[
                         self.schedule_keys,
@@ -4077,14 +4076,8 @@ class ReducedContactBlockSystem:
                     device=self.device,
                 )
                 # The classify kernel wrote the sentinel to every inactive key. Keys are an
-                # ownership bit above a column index: sort only the bits they use.
-                sort(
-                    self.schedule_keys,
-                    self.schedule_columns,
-                    num_columns,
-                    dim,
-                    (2 * (self.schedule_capacity + 1)).bit_length() + 1,
-                )
+                # ownership bit: one radix pass sorts it and keeps the sentinel last.
+                sort(self.schedule_keys, self.schedule_columns, num_columns, dim, 2)
                 wp.launch(
                     _reorder_contact_columns_kernel,
                     dim=dim,
@@ -4138,22 +4131,15 @@ class ReducedContactBlockSystem:
                         num_columns,
                         self.classic_column_count,
                         wp.int32(self.articulation_count),
-                        wp.int64(self.schedule_capacity + 1),
                         wp.bool(self.packed_internal_contacts),
                     ],
                     outputs=[self.schedule_keys, self.schedule_columns, self.schedule_section_end],
                     device=self.device,
                 )
                 # The classify kernel wrote the sentinel to every inactive key. Keys are a
-                # section index above a column index: sort only the bits they use.
+                # section index: sort only the bits they use, and one more for the sentinel.
                 sections = self.articulation_count + self.schedule_world_count
-                sort(
-                    self.schedule_keys,
-                    self.schedule_columns,
-                    num_columns,
-                    dim,
-                    (sections * (self.schedule_capacity + 1)).bit_length() + 1,
-                )
+                sort(self.schedule_keys, self.schedule_columns, num_columns, dim, sections.bit_length() + 1)
 
         over_active(num_columns, assign)
         wp.utils.array_scan(self.schedule_section_end, self.schedule_section_end, inclusive=True)

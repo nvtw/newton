@@ -455,6 +455,8 @@ class UnionFindIslandBuilder:
             keys=self.min_index_per_set_compact,
             values=self.min_index_per_set,
             active_length=self.num_sets,
+            # Body indices: sort only the bits they use, and one more for the sentinel.
+            end_bit=cap.bit_length() + 1,
         )
 
         wp.launch(
@@ -493,6 +495,7 @@ class UnionFindIslandBuilder:
             keys=self.old_to_new,
             values=self.set_sizes,
             active_length=num_bodies,
+            end_bit=cap.bit_length() + 1,
         )
 
     # Host-side helpers (all trigger device->host copies).
