@@ -157,7 +157,6 @@ class Example:
             contact_matching="latest",
             rigid_contact_max=32768,
             speculative_contact_gap_max=0.002,
-            speculative_contact_velocity_filter=False,
             sdf_contact_method=getattr(args, "sdf_contact_method", "edge"),
         )
         self.contacts = self.pipeline.contacts()
