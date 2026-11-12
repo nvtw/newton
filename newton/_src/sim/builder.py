@@ -6055,7 +6055,7 @@ class ModelBuilder:
                     target_kd=joint["target_kd"][k],
                     damping=joint["damping"][k],
                     armature=joint["armature"][k],
-                    effort_limit=MAXVAL,
+                    effort_limit=joint["effort_limit"][k],
                     velocity_limit=joint["velocity_limit"][k],
                     friction=joint["friction"][k],
                     actuator_mode=JointTargetMode(joint["target_mode"][k]),
@@ -6074,8 +6074,10 @@ class ModelBuilder:
                 collision_filter_parent=False,
                 label=f"{label}_{lane}",
             )
+            # Coordinates and their drive targets share one layout.
             start = self.joint_q_start[index]
             self.joint_q[start : start + len(joint["q"])] = joint["q"]
+            self.joint_target_q[start : start + len(joint["q"])] = joint["target_q"]
         self.add_articulation(list(range(first, self.joint_count)), label=label)
 
     def _articulation_template(self, template: ModelBuilder) -> tuple[dict[str, list], list[int]]:
@@ -6169,6 +6171,8 @@ class ModelBuilder:
                 {
                     "type": joint_type,
                     "q": [float(v) for v in template.joint_q[q_start:q_end]],
+                    "target_q": [float(v) for v in template.joint_target_q[q_start:q_end]],
+                    "effort_limit": [float(template.joint_effort_limit[d]) for d in dofs],
                     "limit_ke": [float(template.joint_limit_ke[d]) for d in dofs],
                     "limit_kd": [float(template.joint_limit_kd[d]) for d in dofs],
                     "parent": int(template.joint_parent[j]),

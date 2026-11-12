@@ -505,6 +505,26 @@ class TestBuiltRuntimeArticulations(unittest.TestCase):
         np.testing.assert_allclose(np.asarray(anchor), pivot, atol=1.0e-4)
         self.assertLess(float(q[2]), pivot[2] - 0.3)  # swung down
 
+    def test_instances_keep_their_template_drives(self):
+        template = newton.ModelBuilder()
+        base = template.add_link()
+        arm = template.add_link(xform=wp.transform(wp.vec3(0.2, 0.0, 0.0), wp.quat_identity()))
+        for body in (base, arm):
+            template.add_shape_box(body, hx=0.05, hy=0.05, hz=0.05)
+        template.add_joint_revolute(base, arm, axis=newton.Axis.Y, target_pos=0.3, target_ke=50.0, effort_limit=7.0)
+        builder = newton.ModelBuilder()
+        builder.reserve_dynamic_capacity(
+            shapes=4, articulations=[2], articulation_templates=[template], articulation_coordinates="reduced"
+        )
+        model = builder.finalize(device="cpu")
+        capacity = model._dynamic_capacity
+        q_start, qd_start = model.joint_q_start.numpy(), model.joint_qd_start.numpy()
+        for instance in range(2):
+            hinge = capacity.instance_joint_start + 2 * instance + 1
+            self.assertAlmostEqual(float(model.joint_target_q.numpy()[q_start[hinge]]), 0.3, places=6)
+            self.assertAlmostEqual(float(model.joint_target_ke.numpy()[qd_start[hinge]]), 50.0, places=4)
+            self.assertAlmostEqual(float(model.joint_effort_limit.numpy()[qd_start[hinge]]), 7.0, places=5)
+
     def test_counts_per_template_are_validated(self):
         for coordinates, counts in (("maximal", [1]), ("reduced", [1, 1]), ("reduced", [-1])):
             builder = newton.ModelBuilder()
