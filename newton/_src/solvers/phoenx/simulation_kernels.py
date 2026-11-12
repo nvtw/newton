@@ -52,6 +52,7 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     contact_get_side1_nodes_extra,
     contact_iterate_multi,
     contact_iterate_multi_no_soft_pd,
+    contact_owned_elsewhere,
     contact_world_error,
     contact_world_wrench,
 )
@@ -2866,7 +2867,11 @@ def _constraints_to_elements_kernel(
     side1_kind = contact_get_side1_kind(contact_cols, local_cid)
     side0_extra = contact_get_side0_nodes_extra(contact_cols, local_cid)
     side1_extra = contact_get_side1_nodes_extra(contact_cols, local_cid)
-    if separate_static_contacts != 0 and static_owner(contact_cols, local_cid, bodies) >= 0:
+    owner = wp.int32(-1)
+    if separate_static_contacts != 0:
+        owner = static_owner(contact_cols, local_cid, bodies)
+        contact_cols.static_owner[local_cid] = owner
+    if owner >= wp.int32(0):
         elements[tid] = _element_data_compact2(wp.int32(-1), wp.int32(-1))
         if track_rigid_topology != 0:
             _record_rigid_topology(tid, wp.int32(-1), wp.int32(-1), previous_topology, topology_rebuild)
@@ -3395,6 +3400,9 @@ def _make_singleworld_rigid_contact_dispatch_func(
             colored_slot: wp.int32,
             parallel_id: wp.int32,
         ):
+            # Static-owned contacts are prepared by their body's sweep.
+            if contact_cols.static_owner[local_cid] >= wp.int32(0):
+                return
             solve_cid = local_cid
             if wp.static(packed_contact_headers):
                 solve_cid = colored_slot
@@ -3429,6 +3437,9 @@ def _make_singleworld_rigid_contact_dispatch_func(
             colored_slot: wp.int32,
             parallel_id: wp.int32,
         ):
+            # Static-owned contacts are prepared by their body's sweep.
+            if contact_cols.static_owner[local_cid] >= wp.int32(0):
+                return
             solve_cid = local_cid
             if wp.static(packed_contact_headers):
                 solve_cid = colored_slot
@@ -3503,7 +3514,7 @@ def _make_singleworld_rigid_contact_dispatch_func(
             solve_cid = local_cid
             if wp.static(packed_contact_headers):
                 solve_cid = colored_slot
-            if contact_cols.articulation_owner[local_cid] >= wp.int32(0):
+            if contact_owned_elsewhere(contact_cols, local_cid):
                 return
             iterate_func(
                 contact_cols,
@@ -3672,6 +3683,9 @@ def _make_singleworld_dispatch_func(
         dispatched = False
         if cid >= contact_start:
             local_cid = cid - contact_start
+            # Static-owned contacts are prepared and solved by their body's sweep.
+            if contact_cols.static_owner[local_cid] >= wp.int32(0):
+                return
             if wp.static(not is_prepare and not is_cached_prepare):
                 # Schur-owned contacts are solved through the constrained mobility.
                 # Ordinary PGS must not update the same rows a second time.
@@ -4147,7 +4161,7 @@ def _make_singleworld_rigid_direct_color_func(
                         point_lane = multi_lane % wp.int32(4)
                     while contact_slot < span_end:
                         cid = read1d_i32(element_ids_by_color, contact_slot)
-                        if contact_cols.articulation_owner[cid - num_joints] < wp.int32(0):
+                        if not contact_owned_elsewhere(contact_cols, cid - num_joints):
                             contact_iterate_lean_no_sleep_no_soft_pd_cooperative(
                                 contact_cols,
                                 contact_slot,
@@ -4181,7 +4195,7 @@ def _make_singleworld_rigid_direct_color_func(
                     base = base / wp.int32(4)
                     while base < count_contacts:
                         cid = read1d_i32(element_ids_by_color, contact_start + base)
-                        if contact_cols.articulation_owner[cid - num_joints] < wp.int32(0):
+                        if not contact_owned_elsewhere(contact_cols, cid - num_joints):
                             contact_iterate_lean_no_sleep_no_soft_pd_cooperative(
                                 contact_cols,
                                 contact_start + base,

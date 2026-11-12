@@ -120,7 +120,11 @@ from newton._src.solvers.phoenx.constraints.contact_tgs_prepare import (
     partition_groups,
     patches,
 )
-from newton._src.solvers.phoenx.constraints.contact_tgs_static import build_lists, get_sweep
+from newton._src.solvers.phoenx.constraints.contact_tgs_static import (
+    build_static_contact_lists,
+    get_average_and_soft_sweep,
+    get_sweep,
+)
 from newton._src.solvers.phoenx.constraints.contact_warm_start import ContactBodyEntries
 from newton._src.solvers.phoenx.contact_endpoints import (
     pack_contact_barycentric_kernel,
@@ -669,9 +673,14 @@ class PhoenXWorld:
         self._temporal_force_step = False
         self._temporal_contact_state = None
         self._temporal_shared_partition = True
-        self._temporal_static_heads = None
-        self._temporal_static_links = None
-        self._temporal_static_phase = "prepare"
+        self._static_contact_heads = None
+        self._static_contact_links = None
+        self._static_contact_keys = None
+        self._static_contact_values = None
+        self._static_contact_phase = "prepare"
+        #: Solve rigid contacts against static bodies per dynamic body on its
+        #: full mass after each mass-splitting average instead of coloring them.
+        self._separate_static_contacts = False
         self.solver_iterations = int(solver_iterations)
         if self.solver_iterations < 1:
             raise ValueError(f"solver_iterations must be >= 1 (got {self.solver_iterations})")
@@ -1211,6 +1220,7 @@ class PhoenXWorld:
             )
             # Packed headers use the same dynamic solver-ownership metadata.
             self._contact_cols_packed.articulation_owner = self._contact_cols.articulation_owner
+            self._contact_cols_packed.static_owner = self._contact_cols.static_owner
             self._contact_container_solve = (
                 contact_solve_container_zeros(
                     self.rigid_contact_max,
@@ -1243,6 +1253,19 @@ class PhoenXWorld:
             # the current->prev copy only needs to touch this many slots, not
             # the full ``rigid_contact_max`` capacity. Starts at 0 (cc zeroed).
             self._cc_valid_count = wp.zeros(1, dtype=wp.int32, device=self.device)
+            # Mass splitting divides each split body's mass among its copies,
+            # which would also dilute its support on static bodies. Those rows
+            # need no copy: the rigid copy average solves them per body on its
+            # full mass. Color-ordered contact rows keep the colored solve.
+            self._set_separate_static_contacts(
+                self.mass_splitting_enabled
+                and step_layout == "single_world"
+                and not self._colored_contact_rows
+                and not self._colored_contact_headers
+                and not self.mass_splitting_unrolled
+                and self._mass_splitting_velocity_only_average
+                and self.device.is_cuda
+            )
         else:
             self._contact_container = contact_container_zeros(1, device=self.device)
             self._contact_container_solve = self._contact_container
@@ -3298,7 +3321,7 @@ class PhoenXWorld:
                 pair_shape_b,
                 self._partitioner._random_values,
                 wp.int32(1 if self._reuse_rigid_coloring else 0),
-                wp.int32(self._temporal_contact_state is not None),
+                wp.int32(self._separate_static_contacts),
                 self._elements,
                 self._element_family,
                 self._partitioner._packed_priorities,
@@ -3307,18 +3330,15 @@ class PhoenXWorld:
             ],
             device=self.device,
         )
-        if self._temporal_contact_state is not None and self._ingest_scratch is not None:
-            wp.launch(
-                build_lists,
-                self.num_bodies,
-                [
-                    self._contact_cols,
-                    self.bodies,
-                    self._ingest_scratch.num_contact_columns,
-                    self._temporal_static_heads,
-                    self._temporal_static_links,
-                ],
-                device=self.device,
+        if self._separate_static_contacts and self._ingest_scratch is not None:
+            build_static_contact_lists(
+                self._contact_cols,
+                self._ingest_scratch.num_contact_columns,
+                self._static_contact_heads,
+                self._static_contact_links,
+                self._static_contact_keys,
+                self._static_contact_values,
+                self.device,
             )
 
     def wake_on_external_input(self) -> None:
@@ -3643,7 +3663,40 @@ class PhoenXWorld:
         """Merge divergent mass-splitting slots after one PGS sweep."""
         if inv_dt is None:
             inv_dt = 1.0 / self.substep_dt
-        if self._mass_splitting_velocity_only_average:
+        if (
+            self._separate_static_contacts
+            and self._temporal_contact_state is None
+            and self._static_contact_phase != "none"
+        ):
+            flags = self._dispatch_specialization_flags()
+            phase = self._static_contact_phase
+            if phase == "prepare" and self.parallel_contact_prepare:
+                phase = "cached_prepare"
+            wp.launch(
+                get_average_and_soft_sweep(
+                    phase,
+                    soft_pd=bool(flags["has_soft_contact_pd"]),
+                    sleeping=bool(self._sleeping_enabled),
+                    patch=bool(self._contact_patch_enabled),
+                ),
+                self.num_bodies * 8,
+                [
+                    self._contact_cols,
+                    self.bodies,
+                    self._particles_or_sentinel(),
+                    wp.int32(self.num_bodies),
+                    self._contact_container,
+                    self._active_contact_views(),
+                    self._copy_state,
+                    self._static_contact_heads,
+                    self._static_contact_links,
+                    wp.float32(1.0 / self.substep_dt),
+                    wp.float32(self.sor_boost),
+                ],
+                block_dim=128,
+                device=self.device,
+            )
+        elif self._mass_splitting_velocity_only_average:
             launch_average_and_broadcast_rigid_velocity(
                 self._copy_state,
                 self.bodies,
@@ -3670,7 +3723,7 @@ class PhoenXWorld:
         if self._temporal_contact_state is not None:
             wp.launch(
                 get_sweep(
-                    self._temporal_static_phase, record_wrenches=bool(self._temporal_contact_state.record_wrenches)
+                    self._static_contact_phase, record_wrenches=bool(self._temporal_contact_state.record_wrenches)
                 ),
                 self.num_bodies,
                 [
@@ -3679,12 +3732,23 @@ class PhoenXWorld:
                     self.bodies,
                     self._contact_container_solve,
                     self._copy_state,
-                    self._temporal_static_heads,
-                    self._temporal_static_links,
+                    self._static_contact_heads,
+                    self._static_contact_links,
                     1.0 / self.substep_dt,
                 ],
                 device=self.device,
             )
+
+    def _set_separate_static_contacts(self, enabled: bool) -> None:
+        """Solve rigid contacts against static bodies per dynamic body instead of by color."""
+        self._separate_static_contacts = bool(enabled)
+        if not enabled or self._static_contact_heads is not None:
+            return
+        columns = self._contact_cols.data.shape[1]
+        self._static_contact_heads = wp.full(self.num_bodies, -1, dtype=int, device=self.device)
+        self._static_contact_links = wp.full(columns, -1, dtype=int, device=self.device)
+        self._static_contact_keys = wp.empty(2 * columns, dtype=wp.int64, device=self.device)
+        self._static_contact_values = wp.empty(2 * columns, dtype=int, device=self.device)
 
     def _mass_splitting_average_overflow_into_bodies(self) -> None:
         """Finish a rigid overflow pass without writing unused copy slots."""
@@ -4827,7 +4891,9 @@ class PhoenXWorld:
         """Sweep independent mass copies, keeping colors within each copy ordered."""
         heads = self._singleworld_kernels()[::2]
         phase = ("prepare", "iterate", "relax")[heads.index(head_kernel)]
-        self._temporal_static_phase = phase
+        self._static_contact_phase = phase
+        if joint_only and self._temporal_contact_state is None:
+            self._static_contact_phase = "none"
         cc = self._contact_container if contact_container is None else contact_container
         soft_pd = bool(self._dispatch_specialization_flags()["has_soft_contact_pd"])
         if phase == "prepare" and self._temporal_contact_state is not None:
@@ -4960,6 +5026,9 @@ class PhoenXWorld:
         Repeating this pair preserves colour order in both sweep directions
         while avoiding idle head launches when every colour fits the tail.
         """
+        heads = self._singleworld_kernels()[::2]
+        if head_kernel in heads:
+            self._static_contact_phase = ("prepare", "iterate", "relax")[heads.index(head_kernel)]
 
         if self._color_group_data is not None:
             self._color_group_sweep(head_kernel, idt, contact_container, reverse_colors=reverse_colors)

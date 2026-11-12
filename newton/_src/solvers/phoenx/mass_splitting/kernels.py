@@ -326,6 +326,15 @@ def _average_and_broadcast_rigid_velocity_subgroup_kernel(copy_state: CopyStateC
         start = copy_state.section_end[node_id - wp.int32(1)]
     end = start + count
 
+    avg_v, avg_w = subgroup_average8_velocity(copy_state, start, end, lane, tid)
+    subgroup_broadcast8_velocity(copy_state, start, end, lane, avg_v, avg_w)
+
+
+@wp.func
+def subgroup_average8_velocity(
+    copy_state: CopyStateContainer, start: wp.int32, end: wp.int32, lane: wp.int32, tid: wp.int32
+):
+    """Average the velocity copies ``[start, end)`` with eight lanes; every lane gets the mean."""
     mask = wp.uint32(255) << wp.uint32(tid & wp.int32(24))
     sum_v = wp.vec3f(0.0)
     sum_w = wp.vec3f(0.0)
@@ -342,13 +351,24 @@ def _average_and_broadcast_rigid_velocity_subgroup_kernel(copy_state: CopyStateC
         sum_w = subgroup_accumulate8_vec3(sum_w, value_w, mask)
         chunk += wp.int32(8)
 
-    inv_count = wp.float32(1.0) / wp.float32(count)
-    avg_v = sum_v * inv_count
-    avg_w = sum_w * inv_count
+    inv_count = wp.float32(1.0) / wp.float32(end - start)
+    return sum_v * inv_count, sum_w * inv_count
+
+
+@wp.func
+def subgroup_broadcast8_velocity(
+    copy_state: CopyStateContainer,
+    start: wp.int32,
+    end: wp.int32,
+    lane: wp.int32,
+    v: wp.vec3f,
+    w: wp.vec3f,
+):
+    """Write one velocity into the copies ``[start, end)`` with eight lanes."""
     slot = start + lane
     while slot < end:
-        copy_state.velocity[slot] = avg_v
-        copy_state.angular_velocity[slot] = avg_w
+        copy_state.velocity[slot] = v
+        copy_state.angular_velocity[slot] = w
         slot += wp.int32(8)
 
 

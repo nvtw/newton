@@ -1518,10 +1518,7 @@ class SolverPhoenX(SolverBase):
             world._temporal_contact_state = allocate_contact_tgs(
                 world.rigid_contact_max, world.bodies.position.shape[0], world.substeps, world.device
             )
-            world._temporal_static_heads = wp.full(world.num_bodies, -1, dtype=int, device=world.device)
-            world._temporal_static_links = wp.full(
-                world._contact_cols.data.shape[1], -1, dtype=int, device=world.device
-            )
+            world._set_separate_static_contacts(True)
             world._temporal_contact_state.prepared_friction = 1
             world._temporal_joint_springs = True
             world._temporal_force_step = True

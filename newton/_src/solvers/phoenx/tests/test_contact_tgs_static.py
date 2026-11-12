@@ -23,7 +23,7 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     contact_container_zeros,
 )
 from newton._src.solvers.phoenx.constraints.contact_tgs import ContactTGS, NormalRow, allocate_contact_tgs
-from newton._src.solvers.phoenx.constraints.contact_tgs_static import build_lists, get_sweep
+from newton._src.solvers.phoenx.constraints.contact_tgs_static import build_static_contact_lists, get_sweep
 from newton._src.solvers.phoenx.mass_splitting.copy_state import copy_state_container_zeros
 
 
@@ -70,7 +70,11 @@ class TestContactTGSStatic(unittest.TestCase):
         active = wp.array([5], dtype=int, device=device)
         heads = wp.full(4, -1, dtype=int, device=device)
         links = wp.full(5, -1, dtype=int, device=device)
-        wp.launch(build_lists, 4, [columns, bodies, active, heads, links], device=device)
+        keys = wp.empty(10, dtype=wp.int64, device=device)
+        values = wp.empty(10, dtype=int, device=device)
+        # The coloring pass stamps the dynamic owner of each static contact.
+        columns.static_owner.assign([0, -1, 1, 0, 2])
+        build_static_contact_lists(columns, active, heads, links, keys, values, device)
         np.testing.assert_array_equal(heads.numpy(), [0, 2, 4, -1])
         np.testing.assert_array_equal(links.numpy(), [3, -1, -1, -1, -1])
         copies = copy_state_container_zeros(3, 4, device)
@@ -91,7 +95,7 @@ class TestContactTGSStatic(unittest.TestCase):
             np.testing.assert_array_equal(cc.impulses.numpy()[0], [1, 0, 4, 0, 1.5])
         # Rebuild after contacts disappear: no stale static work may survive.
         active.assign([0])
-        wp.launch(build_lists, 4, [columns, bodies, active, heads, links], device=device)
+        build_static_contact_lists(columns, active, heads, links, keys, values, device)
         np.testing.assert_array_equal(heads.numpy(), -1)
 
 

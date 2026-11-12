@@ -1,0 +1,1 @@
+Fix PhoenX mass splitting diluting a split body's support on static bodies: rigid single-world scenes now solve contacts against static bodies on the body's full mass when its copies are averaged, so a plate carrying many bodies on the ground holds their full weight without rocking.

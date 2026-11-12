@@ -106,6 +106,7 @@ __all__ = [
     "contact_iterate_at_multi_no_soft_pd",
     "contact_iterate_multi",
     "contact_iterate_multi_no_soft_pd",
+    "contact_owned_elsewhere",
     "contact_pack_colored_headers",
     "contact_pair_wrench_kernel",
     "contact_per_contact_error_kernel",
@@ -260,6 +261,9 @@ class ContactColumnContainer:
     data: wp.array2d[wp.float32]
     patch: ContactPatchFriction
     articulation_owner: wp.array[wp.int32]
+    #: Dynamic body that solves this rigid contact against a static body on
+    #: its full mass after each mass-splitting average, or ``-1``.
+    static_owner: wp.array[wp.int32]
 
 
 def contact_column_container_zeros(
@@ -273,9 +277,16 @@ def contact_column_container_zeros(
     c = ContactColumnContainer()
     c.data = wp.zeros((int(data_dwords), int(num_columns)), dtype=wp.float32, device=device)
     c.articulation_owner = wp.full(int(num_columns), -1, dtype=wp.int32, device=device)
+    c.static_owner = wp.full(int(num_columns), -1, dtype=wp.int32, device=device)
     patch_capacity = num_columns if enable_patch_friction else 1
     c.patch = contact_patch_friction_zeros(patch_capacity, device=device)
     return c
+
+
+@wp.func
+def contact_owned_elsewhere(c: ContactColumnContainer, cid: wp.int32) -> wp.bool:
+    """Whether another solver than the colored sweeps solves column ``cid``."""
+    return c.articulation_owner[cid] >= wp.int32(0) or c.static_owner[cid] >= wp.int32(0)
 
 
 # Column-local int/float read+write helpers, keyed by ``local_cid``.
@@ -1182,7 +1193,7 @@ def contact_iterate_multi(
     parallel_id: wp.int32,
     sor_boost: wp.float32,
 ):
-    if constraints.articulation_owner[cid] >= wp.int32(0):
+    if contact_owned_elsewhere(constraints, cid):
         return
     b1 = contact_get_body1(constraints, cid)
     b2 = contact_get_body2(constraints, cid)
@@ -1230,7 +1241,7 @@ def contact_iterate_multi_no_soft_pd(
     parallel_id: wp.int32,
     sor_boost: wp.float32,
 ):
-    if constraints.articulation_owner[cid] >= wp.int32(0):
+    if contact_owned_elsewhere(constraints, cid):
         return
     b1 = contact_get_body1(constraints, cid)
     b2 = contact_get_body2(constraints, cid)
