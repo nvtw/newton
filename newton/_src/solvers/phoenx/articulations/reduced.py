@@ -14,7 +14,6 @@ import warp as wp
 from newton._src.sim import BodyFlags, Control, JointTargetMode, JointType, Model, State
 from newton._src.sim.articulation import eval_fk
 from newton._src.solvers.featherstone.kernels import (
-    compute_com_transforms,
     integrate_body_pose_from_com_twist,
     jcalc_integrate,
     jcalc_motion,
@@ -943,7 +942,17 @@ def _midpoint_momentum_step(
     _sync_reduced_group(tree.mask)
 
 
-@wp.kernel(enable_backward=False)
+@wp.kernel(enable_backward=False, module="unique")
+def _compute_com_transforms_kernel(body_com: wp.array[wp.vec3], body_X_com: wp.array[wp.transform]):
+    """Each body's center of mass as a transform in its frame.
+
+    Featherstone's kernel of the same name would compile that whole solver's kernels on first launch.
+    """
+    tid = wp.tid()
+    body_X_com[tid] = wp.transform(body_com[tid], wp.quat_identity())
+
+
+@wp.kernel(enable_backward=False, module="unique")
 def _mark_articulated_bodies_kernel(
     body_is_reduced: wp.array[wp.int32],
     bodies: BodyContainer,
@@ -953,7 +962,7 @@ def _mark_articulated_bodies_kernel(
         bodies.motion_type[body + wp.int32(1)] = MOTION_ARTICULATED
 
 
-@wp.kernel(enable_backward=False)
+@wp.kernel(enable_backward=False, module="unique")
 def _sync_reduced_bodies_kernel(
     body_is_reduced: wp.array[wp.int32],
     body_q: wp.array[wp.transform],
@@ -1089,7 +1098,7 @@ def configure_implicit_joint_dynamics(
             )
 
 
-@wp.kernel(enable_backward=False)
+@wp.kernel(enable_backward=False, module="unique")
 def _configure_implicit_joint_dynamics_kernel(
     joint_type: wp.array[wp.int32],
     joint_q_start: wp.array[wp.int32],
@@ -1139,7 +1148,7 @@ def _configure_implicit_joint_dynamics_kernel(
     )
 
 
-@wp.kernel(enable_backward=False)
+@wp.kernel(enable_backward=False, module="unique")
 def _compute_forward_dynamics_rhs_kernel(
     articulation_start: wp.array[wp.int32],
     articulation_end: wp.array[wp.int32],
@@ -1268,7 +1277,7 @@ def _compute_forward_dynamics_rhs_kernel(
             body_bias[parent] = body_bias[parent] + subtree_bias
 
 
-@wp.kernel(enable_backward=False)
+@wp.kernel(enable_backward=False, module="unique")
 def _compute_reduced_local_kinematics_kernel(
     articulation_start: wp.array[wp.int32],
     articulation_end: wp.array[wp.int32],
@@ -1417,7 +1426,7 @@ def initialize_reduced_joint(
     )
 
 
-@wp.kernel(enable_backward=False)
+@wp.kernel(enable_backward=False, module="unique")
 def _initialize_reduced_factor_kernel(
     factor_joint: wp.array[wp.int32],
     joint_type: wp.array[wp.int32],
@@ -1457,7 +1466,7 @@ def _initialize_reduced_factor_kernel(
     )
 
 
-@wp.kernel(enable_backward=False)
+@wp.kernel(enable_backward=False, module="unique")
 def _factor_reduced_depth_kernel(
     depth_joint: wp.array[wp.int32],
     depth_offset: wp.int32,
@@ -1597,7 +1606,7 @@ def _compute_reduced_impulse_response_basis(
     data.impulse_response[child, basis] = child_response
 
 
-@wp.kernel(enable_backward=False)
+@wp.kernel(enable_backward=False, module="unique")
 def _compute_reduced_impulse_response_kernel(
     bodies: BodyContainer,
 ):
@@ -2099,7 +2108,7 @@ def _articulation_linear_momentum(
     return wp.vec4(momentum[0], momentum[1], momentum[2], total_mass)
 
 
-@wp.kernel(enable_backward=False)
+@wp.kernel(enable_backward=False, module="unique")
 def _capture_reduced_linear_momentum_kernel(
     articulation_start: wp.array[wp.int32],
     articulation_end: wp.array[wp.int32],
@@ -2115,7 +2124,7 @@ def _capture_reduced_linear_momentum_kernel(
     target_momentum[articulation] = wp.vec3(momentum[0], momentum[1], momentum[2])
 
 
-@wp.kernel(enable_backward=False)
+@wp.kernel(enable_backward=False, module="unique")
 def _boost_reduced_linear_momentum_kernel(
     articulation_start: wp.array[wp.int32],
     articulation_end: wp.array[wp.int32],
@@ -2188,7 +2197,7 @@ def _pose_from_coordinates(
     return parent_anchor * joint_transform * wp.transform_inverse(joint_x_c[joint])
 
 
-@wp.kernel(enable_backward=False)
+@wp.kernel(enable_backward=False, module="unique")
 def _finish_reduced_articulations_kernel(
     articulation_start: wp.array[wp.int32],
     articulation_end: wp.array[wp.int32],
@@ -2358,7 +2367,7 @@ def _finish_reduced_articulations_kernel(
         bodies.orientation[slot] = rotation
 
 
-@wp.kernel(enable_backward=False)
+@wp.kernel(enable_backward=False, module="unique")
 def _publish_reduced_local_velocities_kernel(
     articulation_start: wp.array[wp.int32],
     articulation_end: wp.array[wp.int32],
@@ -2834,7 +2843,7 @@ def _finish_and_publish_reduced_warp_kernel(
     )
 
 
-@wp.kernel(enable_backward=False)
+@wp.kernel(enable_backward=False, module="unique")
 def _solve_articulated_system_kernel(
     articulation_start: wp.array[wp.int32],
     articulation_end: wp.array[wp.int32],
@@ -2920,7 +2929,7 @@ def _solve_articulated_system_kernel(
         body_acceleration[child] = child_acceleration
 
 
-@wp.kernel(enable_backward=False)
+@wp.kernel(enable_backward=False, module="unique")
 def _advance_reduced_articulations_kernel(
     articulation_start: wp.array[wp.int32],
     articulation_end: wp.array[wp.int32],
@@ -4164,7 +4173,7 @@ def _make_relax_and_publish_reduced_contacts_kernel(max_dofs: int):
     return _relax_and_publish_reduced_contacts_kernel
 
 
-@wp.kernel(enable_backward=False)
+@wp.kernel(enable_backward=False, module="unique")
 def _solve_reduced_deferred_contacts_kernel(
     schedule_section_end: wp.array[wp.int32],
     scheduled_column: wp.array[wp.int32],
@@ -4456,7 +4465,7 @@ class ReducedArticulationSystem:
     def refresh_inertial_properties(self) -> None:
         """Refresh cached COM transforms; factorization reads body inertia directly."""
         wp.launch(
-            compute_com_transforms,
+            _compute_com_transforms_kernel,
             dim=int(self.model.body_count),
             inputs=[self.model.body_com],
             outputs=[self.body_x_com],
@@ -5028,12 +5037,12 @@ def _get_reduced_model(model: Model, merge_trees: bool = False, selected: np.nda
     return reduced_model
 
 
-@wp.kernel(enable_backward=False)
+@wp.kernel(enable_backward=False, module="unique")
 def _copy_indexed_kernel(index: wp.array[wp.int32], source: wp.array[wp.float32], destination: wp.array[wp.float32]):
     destination[index[wp.tid()]] = source[index[wp.tid()]]
 
 
-@wp.kernel(enable_backward=False)
+@wp.kernel(enable_backward=False, module="unique")
 def _phoenx_body_poses_kernel(bodies: BodyContainer, body_com: wp.array[wp.vec3], body_q: wp.array[wp.transform]):
     """Body origin poses from the PhoenX body centers of mass."""
     body = wp.tid()

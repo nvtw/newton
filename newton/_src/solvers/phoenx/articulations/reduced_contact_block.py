@@ -739,12 +739,12 @@ def _solve_fallback_contact_column(
         )
 
 
-@wp.kernel(enable_backward=False, module="reduced_contact_fallback")
+@wp.kernel(enable_backward=False, module="unique")
 def _flush_fallback_contacts_kernel(bodies: BodyContainer):
     flush_deferred_articulation(bodies, wp.tid())
 
 
-@wp.kernel(enable_backward=False, module="reduced_contact_fallback")
+@wp.kernel(enable_backward=False, module="unique")
 def _solve_fallback_single_color_kernel(
     columns: ContactColumnContainer,
     bodies: BodyContainer,
@@ -781,7 +781,22 @@ def _solve_fallback_single_color_kernel(
         run = element_ids_by_color[index]
         first = fallback_run_start[run]
         last = fallback_run_start[run + wp.int32(1)]
-        if prepare:
+        column = fallback_column[first]
+        # The only column between these two trees: their links' deferred state stays in
+        # registers over all sweeps instead of being read from each root path again.
+        staged = last == first + wp.int32(1) and reduced_contact_can_stage(columns, column, bodies)
+        # Pass -1 prepares; passes below ``sweeps`` sweep with bias; pass ``sweeps`` records the
+        # biased wrenches when ``relax_sweeps`` is nonnegative; later passes relax without bias.
+        # One call site per solve keeps the inlined code, and with it the compile, small.
+        passes = sweeps + wp.max(relax_sweeps, wp.int32(0)) + wp.int32(1)
+        for solve_pass in range(wp.where(prepare, wp.int32(-1), wp.int32(0)), wp.where(staged, wp.int32(0), passes)):
+            if solve_pass == sweeps:
+                if relax_sweeps >= wp.int32(0):
+                    for fallback in range(first, last):
+                        reduced_contact_keep_biased(
+                            columns, fallback_column[fallback], bodies, wp.spatial_vector(), wp.spatial_vector()
+                        )
+                continue
             for fallback in range(first, last):
                 _solve_fallback_contact_column(
                     columns,
@@ -792,17 +807,18 @@ def _solve_fallback_single_color_kernel(
                     contacts,
                     cross_mobility,
                     fallback_column[fallback],
-                    0,
-                    use_bias,
+                    wp.where(solve_pass < wp.int32(0), wp.int32(0), wp.int32(1)),
+                    use_bias and solve_pass < sweeps,
                 )
-        column = fallback_column[first]
-        if last == first + wp.int32(1) and reduced_contact_can_stage(columns, column, bodies):
-            # The only column between these two trees: their links' deferred state stays in
-            # registers over all sweeps instead of being read from each root path again.
+        if staged:
             twist0, twist1 = reduced_contact_stage(columns, column, bodies)
             wrench0 = wp.spatial_vector()
             wrench1 = wp.spatial_vector()
-            for _sweep in range(sweeps):
+            for solve_pass in range(passes):
+                if solve_pass == sweeps:
+                    if relax_sweeps >= wp.int32(0):
+                        reduced_contact_keep_biased(columns, column, bodies, wrench0, wrench1)
+                    continue
                 twist0, twist1, wrench0, wrench1 = reduced_contact_iterate_staged(
                     columns,
                     column,
@@ -811,7 +827,7 @@ def _solve_fallback_single_color_kernel(
                     sor_boost,
                     cc,
                     contacts,
-                    use_bias,
+                    use_bias and solve_pass < sweeps,
                     wp.bool(True),
                     cross_mobility,
                     wp.bool(True),
@@ -820,54 +836,7 @@ def _solve_fallback_single_color_kernel(
                     wrench0,
                     wrench1,
                 )
-            if relax_sweeps >= wp.int32(0):
-                reduced_contact_keep_biased(columns, column, bodies, wrench0, wrench1)
-                for _sweep in range(relax_sweeps):
-                    twist0, twist1, wrench0, wrench1 = reduced_contact_iterate_staged(
-                        columns,
-                        column,
-                        bodies,
-                        idt,
-                        sor_boost,
-                        cc,
-                        contacts,
-                        wp.bool(False),
-                        wp.bool(True),
-                        cross_mobility,
-                        wp.bool(True),
-                        twist0,
-                        twist1,
-                        wrench0,
-                        wrench1,
-                    )
             reduced_contact_commit(columns, column, bodies, wrench0, wrench1)
-        else:
-            # The sweeps, then with ``relax_sweeps`` the relax sweeps on the wrenches they left.
-            phase_count = wp.where(relax_sweeps >= wp.int32(0), 2, 1)
-            for phase in range(phase_count):
-                biased = use_bias
-                count = sweeps
-                if phase == 1:
-                    for fallback in range(first, last):
-                        reduced_contact_keep_biased(
-                            columns, fallback_column[fallback], bodies, wp.spatial_vector(), wp.spatial_vector()
-                        )
-                    biased = wp.bool(False)
-                    count = relax_sweeps
-                for _sweep in range(count):
-                    for fallback in range(first, last):
-                        _solve_fallback_contact_column(
-                            columns,
-                            bodies,
-                            idt,
-                            sor_boost,
-                            cc,
-                            contacts,
-                            cross_mobility,
-                            fallback_column[fallback],
-                            1,
-                            biased,
-                        )
         index += stride
 
 
@@ -876,7 +845,7 @@ def _single_color_kernel(num_colors: wp.array[wp.int32], single: wp.array[wp.int
     single[0] = wp.where(num_colors[0] == 1, 1, 0)
 
 
-@wp.kernel(enable_backward=False, module="reduced_contact_fallback")
+@wp.kernel(enable_backward=False, module="unique")
 def _solve_fallback_contact_color_kernel(
     columns: ContactColumnContainer,
     bodies: BodyContainer,
@@ -913,46 +882,35 @@ def _solve_fallback_contact_color_kernel(
             color = regular_count - wp.int32(1) - step
     start = color_starts[color]
     end = color_starts[color + wp.int32(1)]
-    if has_overflow and color == max_colored_partitions:
-        if tid == wp.int32(0):
-            for index in range(start, end):
-                run = element_ids_by_color[index]
-                for fallback in range(fallback_run_start[run], fallback_run_start[run + wp.int32(1)]):
-                    _solve_fallback_contact_column(
-                        columns,
-                        bodies,
-                        idt,
-                        sor_boost,
-                        cc,
-                        contacts,
-                        cross_mobility,
-                        fallback_column[fallback],
-                        phase,
-                        use_bias,
-                    )
-    else:
-        index = start + tid
-        while index < end:
-            run = element_ids_by_color[index]
-            for fallback in range(fallback_run_start[run], fallback_run_start[run + wp.int32(1)]):
-                _solve_fallback_contact_column(
-                    columns,
-                    bodies,
-                    idt,
-                    sor_boost,
-                    cc,
-                    contacts,
-                    cross_mobility,
-                    fallback_column[fallback],
-                    phase,
-                    use_bias,
-                )
-            index += worker_count
+    # The overflow color's runs may share bodies, so thread 0 takes them one after the
+    # other; a regular color spreads its runs over the threads. One loop serves both, so the
+    # contact solve is inlined once.
+    serial = has_overflow and color == max_colored_partitions
+    index = start + wp.where(serial, wp.int32(0), tid)
+    stride = wp.where(serial, wp.int32(1), worker_count)
+    if serial and tid != wp.int32(0):
+        index = end
+    while index < end:
+        run = element_ids_by_color[index]
+        for fallback in range(fallback_run_start[run], fallback_run_start[run + wp.int32(1)]):
+            _solve_fallback_contact_column(
+                columns,
+                bodies,
+                idt,
+                sor_boost,
+                cc,
+                contacts,
+                cross_mobility,
+                fallback_column[fallback],
+                phase,
+                use_bias,
+            )
+        index += stride
     if tid == wp.int32(0):
         color_cursor[0] = cursor - wp.int32(1)
 
 
-@wp.kernel(enable_backward=False, module="reduced_contact_fallback")
+@wp.kernel(enable_backward=False, module="unique")
 def _solve_fallback_contact_world_kernel(
     columns: ContactColumnContainer,
     bodies: BodyContainer,
@@ -972,17 +930,13 @@ def _solve_fallback_contact_world_kernel(
     section = articulation_count + world
     start = schedule_section_end[section - wp.int32(1)]
     end = schedule_section_end[section]
-    if sweep_direction[0] == wp.int32(0):
-        for index in range(start, end):
-            _solve_fallback_contact_column(
-                columns, bodies, idt, sor_boost, cc, contacts, cross_mobility, scheduled_column[index], phase, use_bias
-            )
-    else:
-        for reverse in range(end - start):
-            index = end - wp.int32(1) - reverse
-            _solve_fallback_contact_column(
-                columns, bodies, idt, sor_boost, cc, contacts, cross_mobility, scheduled_column[index], phase, use_bias
-            )
+    forward = sweep_direction[0] == wp.int32(0)
+    for offset in range(end - start):
+        # One loop for both directions inlines the contact solve once.
+        index = wp.where(forward, start + offset, end - wp.int32(1) - offset)
+        _solve_fallback_contact_column(
+            columns, bodies, idt, sor_boost, cc, contacts, cross_mobility, scheduled_column[index], phase, use_bias
+        )
 
 
 @wp.kernel(enable_backward=False)
