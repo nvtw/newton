@@ -38,6 +38,11 @@ COS_TILT_ANGLE = wp.static(math.cos(TILT_ANGLE_RAD))
 
 COS_DEEPEST_CONTACT_THRESHOLD_ANGLE = wp.static(math.cos(0.1 * math.pi / 180.0))
 
+# Tilt of the search directions that look for the neighbors of a vertex which meets a face.
+WIDE_TILT_ANGLE_RAD = wp.static(70.0 * math.pi / 180.0)
+SIN_WIDE_TILT_ANGLE = wp.static(math.sin(WIDE_TILT_ANGLE_RAD))
+COS_WIDE_TILT_ANGLE = wp.static(math.cos(WIDE_TILT_ANGLE_RAD))
+
 # Sampled support points of one shape (one row per sample) and their contact distances.
 _SamplePoints = wp.types.matrix(shape=(5, 3), dtype=wp.float32)
 _SampleDistances = wp.types.vector(length=5, dtype=wp.float32)
@@ -1222,8 +1227,41 @@ def create_build_manifold(support_func: Any, writer_func: Any, post_process_cont
             # A tessellated feature that is not flat to EPS can still rest on a
             # verified face. Its sampled support points then give exact
             # vertex-face contacts instead of a single deepest contact.
-            if planar_a and planar_b and feature_a_flat != feature_b_flat:
+            # A shape that meets a face with one vertex turns about it, and its next vertices
+            # reach the face before the search directions, tilted by two degrees, find them:
+            # the vertex in contact would then lose its contact to a deeper one. Look for the
+            # neighbors with widely tilted directions; the writer keeps those within the gap.
+            lone_vertex_a = a_count == 1 and b_count >= 3 and planar_b and feature_b_flat
+            lone_vertex_b = b_count == 1 and a_count >= 3 and planar_a and feature_a_flat
+            if lone_vertex_a or lone_vertex_b:
+                for e in range(4):
+                    c_sin = wp.where(e == 0, SIN_WIDE_TILT_ANGLE, wp.where(e == 2, -SIN_WIDE_TILT_ANGLE, 0.0))
+                    s_sin = wp.where(e == 1, SIN_WIDE_TILT_ANGLE, wp.where(e == 3, -SIN_WIDE_TILT_ANGLE, 0.0))
+                    if lone_vertex_a:
+                        dir_a = normal * COS_WIDE_TILT_ANGLE + c_sin * tangent_a + s_sin * tangent_b
+                        pt_a_3d = support_func(geom_a, dir_a, data_provider)
+                        projected_a = pt_a_3d - center
+                        pt_a_2d = wp.vec2(wp.dot(tangent_a, projected_a), wp.dot(tangent_b, projected_a))
+                        a_count, was_added_a = add_contact_feature_point(
+                            a_buffer, points_a, a_count, pt_a_2d, pt_a_3d, EPS
+                        )
+                        if was_added_a:
+                            points_a[a_count - 1] = pt_a_3d
+                    else:
+                        local_dir_b = local_normal_b * COS_WIDE_TILT_ANGLE + c_sin * local_ta_b + s_sin * local_tb_b
+                        pt_b_local = support_func(geom_b, local_dir_b, data_provider)
+                        pt_b_3d = wp.quat_rotate(relative_orientation_b, pt_b_local) + relative_position_b
+                        projected_b = pt_b_3d - center
+                        pt_b_2d = wp.vec2(wp.dot(tangent_a, projected_b), wp.dot(tangent_b, projected_b))
+                        b_count, was_added_b = add_contact_feature_point(
+                            b_buffer, points_b, b_count, pt_b_2d, pt_b_3d, EPS
+                        )
+                        if was_added_b:
+                            points_b[b_count - 1] = pt_b_3d
+            if (planar_a and planar_b and feature_a_flat != feature_b_flat) or lone_vertex_a or lone_vertex_b:
                 face_on_b = feature_b_flat
+                if lone_vertex_a or lone_vertex_b:
+                    face_on_b = lone_vertex_a
                 vertex_points = points_a
                 vertex_polygon = a_buffer
                 vertex_count = a_count

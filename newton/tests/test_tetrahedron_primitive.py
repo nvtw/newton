@@ -377,6 +377,57 @@ class TestTetrahedronNarrowPhase(unittest.TestCase):
         )
         np.testing.assert_allclose(np.abs(contacts.rigid_contact_normal.numpy()[:count, 2]), 1.0, atol=1.0e-6)
 
+    def _contacts_of_vertex_first_shape(self, hull: bool, plane: bool) -> np.ndarray:
+        """World contact points on a tetrahedral shape that meets a floor with one vertex in it.
+
+        Vertex A is 2 cm inside the floor, B and C are within the gap above it, D is far above.
+        """
+        builder = newton.ModelBuilder()
+        builder.default_shape_cfg.margin = 0.0
+        builder.default_shape_cfg.gap = 0.02
+        if plane:
+            builder.add_ground_plane()
+        else:
+            builder.add_shape_box(
+                -1, xform=wp.transform(wp.vec3(0.0, 0.0, -0.5), wp.quat_identity()), hx=3.0, hy=3.0, hz=0.5
+            )
+        body = builder.add_body(xform=wp.transform_identity())
+        vertices = np.array(((0.0, 0.0, -0.02), (0.5, 0.0, 0.01), (0.0, 0.5, 0.03), (0.2, 0.2, 0.6)), dtype=np.float32)
+        if hull:
+            faces = np.array([0, 2, 1, 0, 1, 3, 1, 2, 3, 2, 0, 3], dtype=np.int32)
+            builder.add_shape_convex_hull(body, mesh=newton.Mesh(vertices, faces))
+        else:
+            builder.add_shape_tetrahedron(
+                body=body, **{f"point_{n}": wp.vec3(*v) for n, v in zip("abcd", vertices, strict=True)}
+            )
+        model = builder.finalize()
+        pipeline = newton.CollisionPipeline(model, broad_phase="explicit")
+        state = model.state()
+        newton.eval_fk(model, state.joint_q, state.joint_qd, state)
+        contacts = pipeline.contacts()
+        pipeline.collide(state, contacts)
+        count = int(contacts.rigid_contact_count.numpy()[0])
+        on_body = model.shape_body.numpy()[contacts.rigid_contact_shape0.numpy()[:count]] >= 0
+        return np.where(
+            on_body[:, None],
+            contacts.rigid_contact_point0.numpy()[:count],
+            contacts.rigid_contact_point1.numpy()[:count],
+        )
+
+    def test_vertex_first_shapes_contact_their_next_vertices_too(self):
+        """A shape that meets a face with one vertex also gets contacts at its vertices within the gap.
+
+        With one contact at the deepest vertex a tumbling shape turns about it and sinks
+        the vertices that arrive next: 15 cm for a tetrahedron that lands at 5 m/s.
+        """
+        expected = np.array(((0.0, 0.0, -0.02), (0.5, 0.0, 0.01), (0.0, 0.5, 0.03)))
+        for hull, plane in ((False, False), (True, False), (True, True)):
+            with self.subTest(hull=hull, plane=plane):
+                points = self._contacts_of_vertex_first_shape(hull, plane)
+                for vertex in expected:
+                    distance = np.linalg.norm(points - vertex, axis=1).min(initial=np.inf)
+                    self.assertLess(distance, 1.0e-4, f"no contact at vertex {vertex}")
+
     def test_tumbling_tetrahedron_stays_above_the_ground(self):
         """A tetrahedron that lands spinning must not turn its vertices into the ground."""
         builder = newton.ModelBuilder()
