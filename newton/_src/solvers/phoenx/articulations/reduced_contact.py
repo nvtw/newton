@@ -919,7 +919,9 @@ def reduced_contact_commit(
         articulation = bodies.reduced.body_articulation[body]
         if articulation >= wp.int32(0):
             bodies.reduced.deferred_pending[articulation] = wp.int32(1)
-            _defer_link_wrench(bodies, body - wp.int32(1), wrench)
+            # No column asks this tree's deferred rates again before they are seeded anew.
+            link = body - wp.int32(1)
+            bodies.reduced.deferred_wrench[link] = bodies.reduced.deferred_wrench[link] + wrench
 
 
 @wp.func
