@@ -3933,6 +3933,8 @@ class ReducedContactBlockSystem:
         self.row_body_pair = wp.full_like(self.row_body, value=-1)
         self.patch_lambda = wp.zeros((packed_articulation_count, _POINTS_PER_PAGE), dtype=wp.vec2, device=self.device)
         self.normal_load = wp.zeros((packed_articulation_count, _POINTS_PER_PAGE), dtype=wp.float32, device=self.device)
+        #: Products between the rows of each point, kept from a chunk's first visit in a solve.
+        self.point_coupling = wp.zeros_like(self.point0)
         self.row_wrench = wp.zeros((packed_articulation_count, _MAX_ROWS), dtype=wp.spatial_vector, device=self.device)
         self.row_wrench_pair = wp.zeros_like(self.row_wrench)
         self.row_velocity = wp.zeros((packed_articulation_count, _MAX_ROWS), dtype=wp.float32, device=self.device)

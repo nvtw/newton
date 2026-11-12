@@ -860,6 +860,8 @@ def make_dense_substep_kernel(
         patch_lambda: wp.array2d[wp.vec2],
         normal_load: wp.array2d[wp.float32],
         joint_qd: wp.array[wp.float32],
+        point_coupling: wp.array2d[wp.vec3],
+        first_visit: wp.bool,
     ):
         """Sweep one chunk of gathered contact rows and add its velocity change to the shared and global rates.
 
@@ -1132,23 +1134,28 @@ def make_dense_substep_kernel(
         # The products between a point's rows, or a column's tangent rows, hold for every sweep;
         # the lane that projects them keeps them.
         coupling = wp.vec3(0.0)
-        if sweeps > wp.int32(0):
-            if wp.static(patch):
+        if wp.static(patch):
+            if sweeps > wp.int32(0):
                 for column_offset in range(chunk[3] - chunk[2]):
                     row = chunk_points + wp.int32(2) * wp.int32(column_offset)
                     product = row_product(shared, lane, row, row + wp.int32(1))
                     if lane == row:
                         coupling[0] = product
-            else:
-                for point_offset in range(chunk_points):
-                    row = wp.int32(3) * wp.int32(point_offset)
-                    products = wp.vec3(
-                        row_product(shared, lane, row, row + wp.int32(1)),
-                        row_product(shared, lane, row, row + wp.int32(2)),
-                        row_product(shared, lane, row + wp.int32(1), row + wp.int32(2)),
-                    )
-                    if lane == wp.int32(point_offset):
-                        coupling = products
+        elif first_visit:
+            # A chunk's first visit may only apply its impulses; its later visits read these.
+            for point_offset in range(chunk_points):
+                row = wp.int32(3) * wp.int32(point_offset)
+                products = wp.vec3(
+                    row_product(shared, lane, row, row + wp.int32(1)),
+                    row_product(shared, lane, row, row + wp.int32(2)),
+                    row_product(shared, lane, row + wp.int32(1), row + wp.int32(2)),
+                )
+                if lane == wp.int32(point_offset):
+                    coupling = products
+                    point_coupling[packed_articulation, chunk[0] + lane] = products
+        elif lane < chunk_points:
+            # The rows are those of the chunk's first visit: so are their products.
+            coupling = point_coupling[packed_articulation, chunk[0] + lane]
         for sweep in range(sweeps):
             iteration = first_sweep + sweep
             for point_offset in range(chunk_points):
@@ -1484,6 +1491,7 @@ def make_dense_substep_kernel(
         row_velocity: wp.array2d[wp.float32],
         patch_lambda: wp.array2d[wp.vec2],
         normal_load: wp.array2d[wp.float32],
+        point_coupling: wp.array2d[wp.vec3],
         dof_parameters: wp.array2d[wp.float32],
         bodies: BodyContainer,
     ):
@@ -1846,6 +1854,8 @@ def make_dense_substep_kernel(
                             patch_lambda,
                             normal_load,
                             joint_qd,
+                            point_coupling,
+                            round_offset == wp.int32(0),
                         )
 
         if wp.static(relax):
@@ -2361,6 +2371,7 @@ class DenseSubstep:
                     contact.row_velocity,
                     contact.patch_lambda,
                     contact.normal_load,
+                    contact.point_coupling,
                     self._dof_parameters,
                     articulation.bodies,
                 ],
