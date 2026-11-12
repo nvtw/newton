@@ -1,0 +1,1 @@
+The `phoenx_warehouse` example's sorting humanoids now lead their arms through each push by a bounded angle and wait while an arm is held, so a package squeezed between two hands no longer topples a humanoid in long runs.

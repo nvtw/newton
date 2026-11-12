@@ -24,8 +24,9 @@ appear at the start of every belt and are removed once they drop off its sides o
 from device code inside the graph. Drive units carry totes up and down the aisles between the
 lines, brushing past the humanoids' heels. With ``--runtime-robots`` as well, that many working
 places, spread among the others, are docks: humanoids arrive there, sort beside the others, and
-leave again. The humanoids' legs hold their pose with stiff drives, but their arms keep the G1's
-own gains and effort limits, so two hands that squeeze a package between them yield instead of
+leave again. The humanoids' legs hold their pose with stiff drives and a hip strategy keeps their
+balance; their arms keep the G1's own gains, and each push leads its arm by a bounded angle and
+waits while the arm is held, so two hands that squeeze a package between them yield instead of
 pushing each other over.
 
 The scene exercises what one large world mixes: robots that touch free bodies (a package on a
@@ -197,6 +198,8 @@ KIVA_DRIVE_KD = 40.0  # [N*m*s/rad] of a wheel's velocity drive
 BALANCE_HIP_GAIN = wp.constant(1.0)  # [rad/m]
 BALANCE_HIP_DAMPING = wp.constant(0.3)  # [rad*s/m]
 BALANCE_HIP_RANGE = wp.constant(0.35)  # [rad]
+SORT_ARM_LEAD = wp.constant(0.15)  # [rad] most a sorter's arm targets lead the arm
+SORT_ARM_YIELD = wp.constant(0.25)  # [rad] the push waits while the arm is farther behind it
 SORT_ARM_SWEEP = ((0.4, 0.15), (0.2, 0.3), (0.0, 0.5), (-0.2, 0.75), (-0.4, 1.05), (-0.6, 1.4))
 
 KIVA_ROOT_HEIGHT = 0.12  # chassis center [m]
@@ -1421,14 +1424,49 @@ def _sort_push(phase: float) -> float:
 
 
 @wp.func
-def _sorter_arm_target(sweep: wp.array[wp.vec2], time: float, sorter: int) -> wp.vec2:
-    """Shoulder pitch and elbow targets [rad] of a sorter's push, each humanoid at its own phase."""
+def _sorter_period(sorter: int) -> float:
+    """Period [s] of a sorter's push; the spread lets the pairs whose hands meet change over time."""
     spread = 0.754878 * float(sorter)
-    period = SORT_PERIOD * (1.0 + SORT_PERIOD_SPREAD * (spread - wp.floor(spread)))
-    phase = time / period + 0.618034 * float(sorter)
+    return SORT_PERIOD * (1.0 + SORT_PERIOD_SPREAD * (spread - wp.floor(spread)))
+
+
+@wp.func
+def _sorter_arm_target(sweep: wp.array[wp.vec2], phase: float) -> wp.vec2:
+    """Shoulder pitch and elbow targets [rad] at a phase of the push."""
     along = _sort_push(phase - wp.floor(phase)) * float(sweep.shape[0] - 1)
     k = wp.min(int(along), sweep.shape[0] - 2)
     return wp.lerp(sweep[k], sweep[k + 1], along - float(k))
+
+
+@wp.func
+def _yielding_arm(
+    sweep: wp.array[wp.vec2],
+    phase: wp.array[float],
+    sorter: int,
+    frame_dt: float,
+    joint_q: wp.array[float],
+    joint_target_q: wp.array[float],
+    shoulder: int,
+    elbow: int,
+):
+    """Lead a sorter's arm through its push by at most ``SORT_ARM_LEAD``; a blocked arm waits.
+
+    The drive targets stay within ``SORT_ARM_LEAD`` of the arm, which bounds how hard a drive
+    presses on anything that holds the hand, such as a package squeezed against the hand
+    opposite. The push advances only while the arm is within ``SORT_ARM_YIELD`` of it.
+    """
+    current = phase[sorter]
+    desired = _sorter_arm_target(sweep, current)
+    q = wp.vec2(joint_q[shoulder], joint_q[elbow])
+    behind = desired - q
+    if wp.max(wp.abs(behind[0]), wp.abs(behind[1])) < SORT_ARM_YIELD:
+        current += frame_dt / _sorter_period(sorter)
+        phase[sorter] = current - wp.floor(current)
+    lead = wp.vec2(
+        wp.clamp(behind[0], -SORT_ARM_LEAD, SORT_ARM_LEAD), wp.clamp(behind[1], -SORT_ARM_LEAD, SORT_ARM_LEAD)
+    )
+    joint_target_q[shoulder] = q[0] + lead[0]
+    joint_target_q[elbow] = q[1] + lead[1]
 
 
 @wp.kernel(enable_backward=False)
@@ -1437,15 +1475,15 @@ def _sorter_target_kernel(
     shoulder: int,
     elbow: int,
     sweep: wp.array[wp.vec2],
-    frame: wp.array[int],
+    phase: wp.array[float],
     frame_dt: float,
+    joint_q: wp.array[float],
     joint_target_q: wp.array[float],
 ):
     """Drive every sorter's right arm through its push, each humanoid at its own phase."""
     sorter = wp.tid()
-    target = _sorter_arm_target(sweep, float(frame[0]) * frame_dt, sorter)
-    joint_target_q[q_start[sorter] + shoulder] = target[0]
-    joint_target_q[q_start[sorter] + elbow] = target[1]
+    start = q_start[sorter]
+    _yielding_arm(sweep, phase, sorter, frame_dt, joint_q, joint_target_q, start + shoulder, start + elbow)
 
 
 @wp.kernel(enable_backward=False)
@@ -1457,8 +1495,9 @@ def _dock_sorter_target_kernel(
     shoulder_joint: int,
     elbow_joint: int,
     sweep: wp.array[wp.vec2],
-    frame: wp.array[int],
+    phase: wp.array[float],
     frame_dt: float,
+    joint_q: wp.array[float],
     joint_target_q: wp.array[float],
 ):
     """Drive the right arm of the humanoid at every occupied dock like the other sorters."""
@@ -1470,9 +1509,16 @@ def _dock_sorter_target_kernel(
     elbow = phoenx.articulation_joint(dyn, instance, elbow_joint)
     if shoulder < 0 or elbow < 0:
         return
-    target = _sorter_arm_target(sweep, float(frame[0]) * frame_dt, first_sorter + dock)
-    joint_target_q[joint_q_start[shoulder]] = target[0]
-    joint_target_q[joint_q_start[elbow]] = target[1]
+    _yielding_arm(
+        sweep,
+        phase,
+        first_sorter + dock,
+        frame_dt,
+        joint_q,
+        joint_target_q,
+        joint_q_start[shoulder],
+        joint_q_start[elbow],
+    )
 
 
 @wp.kernel(enable_backward=False)
@@ -1748,6 +1794,9 @@ class Example:
         # Package rows; runtime humanoids have their own rows after them.
         self.sort_capacity = int(model._dynamic_capacity.body_count)
         self.sort_frame = wp.zeros(1, dtype=int)
+        # Push phase of every sorter, the docks' after the static ones, each starting at its own offset.
+        sorters = len(roots) + (len(self.scene.docks) if self.docks is not None else 0)
+        self.sort_phase = wp.array(np.modf(0.618034 * np.arange(sorters))[0], dtype=float)
         #: Packages put on the belts.
         self.sort_spawned = wp.zeros(1, dtype=int)
         #: Packages removed after the humanoids pushed them off a belt's side, and off its end.
@@ -1850,8 +1899,9 @@ class Example:
                 self.sort_shoulder,
                 self.sort_elbow,
                 self.sort_sweep,
-                self.sort_frame,
+                self.sort_phase,
                 self.frame_dt,
+                self.state.joint_q,
                 self.control.joint_target_q,
             ],
         )
@@ -1867,8 +1917,9 @@ class Example:
                     self.sort_shoulder_joint,
                     self.sort_elbow_joint,
                     self.sort_sweep,
-                    self.sort_frame,
+                    self.sort_phase,
                     self.frame_dt,
+                    self.state.joint_q,
                     self.control.joint_target_q,
                 ],
             )
