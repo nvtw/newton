@@ -1785,9 +1785,18 @@ def make_dense_substep_kernel(
                     sweeps = wp.int32(1)
                     if wp.static(not relax):
                         warm_rounds = wp.int32(1)
+                # Rounds alternate their direction, so the chunk that ends a round starts the
+                # next one: it stays for that sweep too instead of being formed again.
                 for round_offset in range(rounds + warm_rounds):
                     round_index = round_offset - warm_rounds
                     for chunk_offset in range(chunks):
+                        if chunks > wp.int32(1) and round_offset > wp.int32(0) and chunk_offset == wp.int32(0):
+                            continue
+                        stays = (
+                            chunks > wp.int32(1)
+                            and chunk_offset == chunks - wp.int32(1)
+                            and round_offset < rounds + warm_rounds - wp.int32(1)
+                        )
                         chunk_index = wp.int32(chunk_offset)
                         if (round_index & wp.int32(1)) != wp.int32(0):
                             chunk_index = chunks - wp.int32(1) - wp.int32(chunk_offset)
@@ -1814,7 +1823,7 @@ def make_dense_substep_kernel(
                             idt,
                             sor_boost,
                             wp.max(round_index, wp.int32(0)),
-                            wp.where(round_index < wp.int32(0), wp.int32(0), sweeps),
+                            wp.where(round_index < wp.int32(0), wp.int32(0), sweeps) + wp.where(stays, 1, 0),
                             wp.bool(not relax),
                             wp.bool(not relax) and round_offset == wp.int32(0),
                             # Reused rows keep the biases the relax step already projected.
