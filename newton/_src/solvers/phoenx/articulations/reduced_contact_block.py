@@ -858,7 +858,13 @@ def _solve_fallback_single_color_kernel(
     result of one launch per sweep. A nonnegative ``relax_sweeps`` records the links'
     wrenches after the sweeps and adds that many sweeps without bias.
     """
-    index = color_starts[0] + wp.tid()
+    # One run per warp: runs differ in their points, paths and branches, and a warp walks
+    # the branches of its lanes one after the other.
+    tid = wp.tid()
+    if tid % wp.int32(32) != wp.int32(0):
+        return
+    stride = wp.max(worker_count / wp.int32(32), wp.int32(1))
+    index = color_starts[0] + tid / wp.int32(32)
     end = color_starts[1]
     while index < end:
         run = element_ids_by_color[index]
@@ -951,7 +957,7 @@ def _solve_fallback_single_color_kernel(
                             1,
                             biased,
                         )
-        index += worker_count
+        index += stride
 
 
 @wp.kernel(enable_backward=False)
@@ -4437,7 +4443,7 @@ class ReducedContactBlockSystem:
             wp.launch(
                 _solve_fallback_single_color_kernel,
                 dim=self.fallback_worker_count,
-                block_dim=_FALLBACK_BLOCK_DIM,
+                block_dim=32,
                 inputs=[
                     columns,
                     bodies,
