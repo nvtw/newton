@@ -1,0 +1,1 @@
+Fix sticky contact matching losing the contacts of rolling and spinning bodies: a contact that travels with one body's translation, like a rolling wheel's, now matches its predecessor and keeps its warm start, while its stale witnesses are still replaced by fresh ones.

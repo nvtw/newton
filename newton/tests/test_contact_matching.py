@@ -1057,6 +1057,7 @@ def test_sticky_matched_rows_preserved(test, device):
 
         # Once tangential drift exceeds the threshold, stale sticky geometry
         # must be replaced by the current deterministic narrow-phase record.
+        # The contacts slide with their bodies, so they keep their identity.
         q = state.body_q.numpy()
         for i in range(len(q)):
             q[i][0] += 0.002
@@ -1070,7 +1071,7 @@ def test_sticky_matched_rows_preserved(test, device):
         count3 = _collide_once(pipeline, state, contacts_next)
         test.assertEqual(count3, count_fresh)
         match_idx = contacts_next.rigid_contact_match_index.numpy()[:count3]
-        test.assertTrue(np.all(match_idx == MATCH_BROKEN))
+        test.assertTrue(np.all(match_idx >= 0))
         for field, expected in fresh.items():
             actual = getattr(contacts_next, f"rigid_contact_{field}").numpy()[:count3]
             np.testing.assert_array_equal(

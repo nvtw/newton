@@ -30,6 +30,10 @@ def fixture(old_x, new_x, new_keys=None, permutation=None, device="cpu"):
     m._prev_pos_world.assign(positions)
     m._prev_point0.assign(positions)
     m._prev_point1.assign(positions)
+    # Both shapes are static: their world-oriented witness offsets are the points.
+    m._prev_offset_world0.assign(positions)
+    m._prev_offset_world1.assign(positions)
+    m._prev_separation.zero_()
     m._prev_normal.assign(normals)
     m._prev_count.assign(np.array([len(old_x)], dtype=np.int32))
     positions = np.zeros((n, 3), dtype=np.float32)

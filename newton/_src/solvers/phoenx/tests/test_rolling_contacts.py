@@ -3,7 +3,8 @@
 """Rolling and spinning bodies keep their support and their motion.
 
 A step finds its contacts once, at its starting pose. A wheel or ball turns within the step,
-so its contact must not ride up the body with the material point it started at.
+so its contact must neither ride up the body with the material point it started at nor lose
+its warm start from one step to the next.
 """
 
 import unittest
@@ -94,6 +95,66 @@ class TestRollingContacts(unittest.TestCase):
         )
         self.assertGreater(float(samples[:, 0].min()), radius - 0.5e-3, f"dipped to {samples[:, 0].min():.5f} m")
         self.assertAlmostEqual(float(samples[-1, 1]), speed, delta=0.01 * speed)
+
+    def test_driven_wheel_carries_its_load(self):
+        """A driven wheel of a reduced articulation holds up its load while it turns.
+
+        With one substep per step the turning wheel's contact moves around the wheel by more
+        than the match threshold each step; it must still be matched to keep its warm start.
+        """
+        for substeps in (1, 4):
+            with self.subTest(substeps=substeps):
+                self._check_driven_wheel(substeps)
+
+    def _check_driven_wheel(self, substeps: int):
+        builder = _ground_builder(mu=1.0)
+        chassis = builder.add_link(xform=wp.transform(wp.vec3(0.0, 0.0, _RADIUS), wp.quat_identity()))
+        builder.add_shape_box(
+            chassis,
+            xform=wp.transform(wp.vec3(0.0, 0.0, 0.2), wp.quat_identity()),
+            hx=0.05,
+            hy=0.05,
+            hz=0.05,
+            cfg=newton.ModelBuilder.ShapeConfig(density=20000.0),
+        )
+        slider = builder.add_joint_prismatic(
+            -1, chassis, axis=newton.Axis.Z, parent_xform=wp.transform(wp.vec3(0.0, 0.0, _RADIUS), wp.quat_identity())
+        )
+        wheel = builder.add_link(xform=wp.transform(wp.vec3(0.0, 0.0, _RADIUS), wp.quat_identity()))
+        builder.add_shape_cylinder(
+            wheel,
+            xform=_wheel_cylinder_xform(),
+            radius=_RADIUS,
+            half_height=0.025,
+            cfg=newton.ModelBuilder.ShapeConfig(density=1000.0, mu=1.0),
+        )
+        axle = builder.add_joint_revolute(
+            chassis, wheel, axis=newton.Axis.Y, target_kd=40.0, actuator_mode=newton.JointTargetMode.VELOCITY
+        )
+        builder.add_articulation([slider, axle])
+        model = builder.finalize(device="cuda:0")
+        state, control = model.state(), model.control()
+        newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+        heights = {}
+        for rate in (0.0, 7.5):
+            state = model.state()
+            newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+            target = control.joint_target_qd.numpy()
+            target[model.joint_qd_start.numpy()[axle]] = rate
+            control.joint_target_qd.assign(target)
+            pipeline = newton.CollisionPipeline(model, contact_matching="sticky")
+            solver = newton.solvers.SolverPhoenX(
+                model,
+                collision_pipeline=pipeline,
+                joint_mode="reduced",
+                reduced_articulations=[0],
+                substeps=substeps,
+                solver_iterations=4,
+            )
+            samples = _run(model, solver, pipeline, state, control, 120, lambda s: s.body_q.numpy()[wheel, 2])
+            heights[rate] = float(samples[60:].mean())
+        # Turning the wheel must not sink it into the ground.
+        self.assertAlmostEqual(heights[7.5], heights[0.0], delta=0.2e-3, msg=str(heights))
 
 
 if __name__ == "__main__":

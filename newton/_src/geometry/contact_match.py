@@ -133,6 +133,11 @@ class _MatchData:
     prev_pos_world: wp.array[wp.vec3]
     prev_point0: wp.array[wp.vec3]
     prev_point1: wp.array[wp.vec3]
+    # Sticky mode: each witness's world-oriented offset from its body's origin, and the
+    # world-space separation of the two witnesses.
+    prev_offset_world0: wp.array[wp.vec3]
+    prev_offset_world1: wp.array[wp.vec3]
+    prev_separation: wp.array[wp.vec3]
     prev_normal: wp.array[wp.vec3]
     prev_count: wp.array[wp.int32]
     # ``[buffer id, contact generation]`` of the previous frame.
@@ -181,22 +186,54 @@ class _MatchData:
 
 
 @wp.func
-def _match_distance_sq(data: _MatchData, old: int, p0w: wp.vec3, p1w: wp.vec3, p0: wp.vec3, p1: wp.vec3):
+def _witness_offset_world(data: _MatchData, shape: int, point: wp.vec3) -> wp.vec3:
+    """World-oriented offset of body-frame witness ``point`` from its body's origin."""
+    body = data.shape_body[shape]
+    if body == -1:
+        return point
+    return wp.quat_rotate(wp.transform_get_rotation(data.body_q[body]), point)
+
+
+@wp.func
+def _match_distance_sq(
+    data: _MatchData,
+    old: int,
+    p0w: wp.vec3,
+    p1w: wp.vec3,
+    p0: wp.vec3,
+    p1: wp.vec3,
+    offset0: wp.vec3,
+    offset1: wp.vec3,
+):
     """Squared drift [m^2] of a current contact from previous contact ``old``.
 
-    Sticky matching transports the previous body-local witnesses with their
-    bodies and takes the larger drift of the two. Compression moves the
-    witnesses apart along the normal but keeps each on its own surface, so it
-    does not age a match; a witness that jumps to another feature of its body,
-    such as the opposite face of a thin plate, does. Rigid transforms preserve
-    distance, so each witness is compared in its body's frame, ``p0`` and
-    ``p1``, free of world-space rounding far from the origin. Other modes
-    compare world-space midpoints.
+    Sticky matching accepts either of two motions of a contact that stays the
+    same. The contact stays put on both bodies: the previous body-local
+    witnesses move with their bodies, and the larger drift of the two counts.
+    Compression moves the witnesses apart along the normal but keeps each on
+    its own surface, so it does not age a match; a witness that jumps to
+    another feature of its body, such as the opposite face of a thin plate,
+    does. Rigid transforms preserve distance, so each witness is compared in
+    its body's frame, ``p0`` and ``p1``, free of world-space rounding far from
+    the origin. Or the whole contact travels with one body's translation, like
+    the contact of a rolling wheel, which stays below the axle while it moves
+    around the wheel: that body's world-oriented witness offset, ``offset0`` or
+    ``offset1``, and the world separation of the two witnesses both stay, and
+    the smaller drift of the two bodies counts. Other modes compare world-space
+    midpoints.
     """
     if data.sticky == 0:
         diff = wp.float32(0.5) * (p0w + p1w) - data.prev_pos_world[old]
         return wp.dot(diff, diff)
-    return wp.max(wp.length_sq(p0 - data.prev_point0[old]), wp.length_sq(p1 - data.prev_point1[old]))
+    on_bodies = wp.max(wp.length_sq(p0 - data.prev_point0[old]), wp.length_sq(p1 - data.prev_point1[old]))
+    separation = wp.length_sq(p1w - p0w - data.prev_separation[old])
+    travelling = wp.max(
+        separation,
+        wp.min(
+            wp.length_sq(offset0 - data.prev_offset_world0[old]), wp.length_sq(offset1 - data.prev_offset_world1[old])
+        ),
+    )
+    return wp.min(on_bodies, travelling)
 
 
 @wp.kernel(enable_backward=False)
@@ -281,8 +318,13 @@ def _match_contacts_kernel(data: _MatchData):
     # Closest-point match within the pair range, gated by normal dot.
     best_idx = int(-1)
     best_dist_sq = float(data.pos_threshold_sq)
+    offset0 = p0w
+    offset1 = p1w
+    if data.sticky != 0:
+        offset0 = _witness_offset_world(data, data.new_shape0[source], p0)
+        offset1 = _witness_offset_world(data, data.new_shape1[source], p1)
     for old_idx in range(range_lo, range_hi):
-        dist_sq = _match_distance_sq(data, old_idx, p0w, p1w, p0, p1)
+        dist_sq = _match_distance_sq(data, old_idx, p0w, p1w, p0, p1, offset0, offset1)
         if dist_sq <= best_dist_sq:
             old_n = data.prev_normal[old_idx]
             ndot = wp.dot(new_n, old_n)
@@ -400,14 +442,18 @@ def _contact_claim_priority(data: _MatchData, k: int, old: int):
     p1 = data.new_point1[source]
     p0w = p0
     p1w = p1
-    if data.sticky == 0:
-        b0 = data.shape_body[data.new_shape0[source]]
-        b1 = data.shape_body[data.new_shape1[source]]
-        if b0 >= 0:
-            p0w = wp.transform_point(data.body_q[b0], p0)
-        if b1 >= 0:
-            p1w = wp.transform_point(data.body_q[b1], p1)
-    return _pack_claim(_match_distance_sq(data, old, p0w, p1w, p0, p1), data.new_keys[source])
+    offset0 = p0
+    offset1 = p1
+    b0 = data.shape_body[data.new_shape0[source]]
+    b1 = data.shape_body[data.new_shape1[source]]
+    if b0 >= 0:
+        p0w = wp.transform_point(data.body_q[b0], p0)
+    if b1 >= 0:
+        p1w = wp.transform_point(data.body_q[b1], p1)
+    if data.sticky != 0:
+        offset0 = _witness_offset_world(data, data.new_shape0[source], p0)
+        offset1 = _witness_offset_world(data, data.new_shape1[source], p1)
+    return _pack_claim(_match_distance_sq(data, old, p0w, p1w, p0, p1, offset0, offset1), data.new_keys[source])
 
 
 @wp.func
@@ -502,6 +548,9 @@ class _SaveStateData:
     dst_normal: wp.array[wp.vec3]
     dst_point0: wp.array[wp.vec3]
     dst_point1: wp.array[wp.vec3]
+    dst_offset_world0: wp.array[wp.vec3]
+    dst_offset_world1: wp.array[wp.vec3]
+    dst_separation: wp.array[wp.vec3]
     dst_offset0: wp.array[wp.vec2]
     dst_offset1: wp.array[wp.vec2]
     save_sticky: int
@@ -566,6 +615,14 @@ def _save_sorted_state_kernel(data: _SaveStateData, reset_world_mask: wp.array[w
         if data.save_sticky != 0:
             data.dst_point0[i] = p0
             data.dst_point1[i] = p1
+            # World-oriented witness offsets from the bodies' origins; see _match_distance_sq.
+            data.dst_offset_world0[i] = p0
+            if bid0 != -1:
+                data.dst_offset_world0[i] = p0w - wp.transform_get_translation(data.body_q[bid0])
+            data.dst_offset_world1[i] = p1
+            if bid1 != -1:
+                data.dst_offset_world1[i] = p1w - wp.transform_get_translation(data.body_q[bid1])
+            data.dst_separation[i] = p1w - p0w
             data.dst_offset0[i] = encode_oct(data.src_offset0[i])
             data.dst_offset1[i] = encode_oct(data.src_offset1[i])
 
@@ -724,11 +781,17 @@ class ContactMatcher:
             if sticky:
                 self._prev_point0 = wp.zeros(capacity, dtype=wp.vec3)
                 self._prev_point1 = wp.zeros(capacity, dtype=wp.vec3)
+                self._prev_offset_world0 = wp.zeros(capacity, dtype=wp.vec3)
+                self._prev_offset_world1 = wp.zeros(capacity, dtype=wp.vec3)
+                self._prev_separation = wp.zeros(capacity, dtype=wp.vec3)
                 self._prev_offset0 = wp.zeros(capacity, dtype=wp.vec2)
                 self._prev_offset1 = wp.zeros(capacity, dtype=wp.vec2)
             else:
                 self._prev_point0 = None
                 self._prev_point1 = None
+                self._prev_offset_world0 = None
+                self._prev_offset_world1 = None
+                self._prev_separation = None
                 self._prev_offset0 = None
                 self._prev_offset1 = None
 
@@ -856,6 +919,9 @@ class ContactMatcher:
         data.prev_pos_world = self._prev_pos_world
         data.prev_point0 = self._prev_point0 if self._sticky else self._prev_pos_world
         data.prev_point1 = self._prev_point1 if self._sticky else self._prev_pos_world
+        data.prev_offset_world0 = self._prev_offset_world0 if self._sticky else self._prev_pos_world
+        data.prev_offset_world1 = self._prev_offset_world1 if self._sticky else self._prev_pos_world
+        data.prev_separation = self._prev_separation if self._sticky else self._prev_pos_world
         data.prev_normal = self._prev_normal
         data.prev_count = self._prev_count
         data.prev_frame = self._prev_frame
@@ -1001,6 +1067,9 @@ class ContactMatcher:
         data.dst_normal = self._prev_normal
         data.dst_point0 = self._prev_point0 if self._sticky else sorted_point0
         data.dst_point1 = self._prev_point1 if self._sticky else sorted_point1
+        data.dst_offset_world0 = self._prev_offset_world0 if self._sticky else sorted_point0
+        data.dst_offset_world1 = self._prev_offset_world1 if self._sticky else sorted_point1
+        data.dst_separation = self._prev_separation if self._sticky else sorted_point0
         data.dst_offset0 = self._prev_offset0 if self._sticky else self._oct_offset_dummy
         data.dst_offset1 = self._prev_offset1 if self._sticky else self._oct_offset_dummy
         data.save_sticky = 1 if self._sticky else 0
