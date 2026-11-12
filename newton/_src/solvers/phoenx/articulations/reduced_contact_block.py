@@ -12,7 +12,12 @@ import os
 import numpy as np
 import warp as wp
 
-from newton._src.geometry.active_prefix_sort import active_prefix_sort_levels
+from newton._src.geometry.active_prefix_sort import (
+    ACTIVE_DISPATCH_MIN_ITEMS,
+    active_prefix_sort_levels,
+    dispatch_active_prefix,
+    radix_sort_active_prefix,
+)
 from newton._src.geometry.flags import ShapeFlags
 from newton._src.sim import Model
 from newton._src.solvers.phoenx.articulations.reduced_contact import (
@@ -732,6 +737,8 @@ def _key_fallback_contact_columns_kernel(
     if fallback == wp.int32(0):
         fallback_count[0] = count
     if fallback >= count:
+        # The sort wants the sentinel behind the keys in use.
+        fallback_key[fallback] = wp.int64(_INT64_MAX)
         return
     column = scheduled_column[start + fallback]
     nodes = _fallback_contact_nodes(columns, bodies, column)
@@ -3846,6 +3853,7 @@ class ReducedContactBlockSystem:
         self.fallback_count: wp.array[wp.int32] | None = None
         self.fallback_column: wp.array[wp.int32] | None = None
         self.fallback_key: wp.array[wp.int64] | None = None
+        self.fallback_run_head: wp.array[wp.int32] | None = None
         self.fallback_run_index: wp.array[wp.int32] | None = None
         self.fallback_run_count: wp.array[wp.int32] | None = None
         self.fallback_run_start: wp.array[wp.int32] | None = None
@@ -3940,6 +3948,7 @@ class ReducedContactBlockSystem:
         # Radix-sort buffers need twice the capacity.
         self.fallback_key = wp.empty(2 * capacity, dtype=wp.int64, device=self.device)
         self.fallback_column = wp.empty(2 * capacity, dtype=wp.int32, device=self.device)
+        self.fallback_run_head = wp.zeros(capacity, dtype=wp.int32, device=self.device)
         self.fallback_run_index = wp.empty(capacity, dtype=wp.int32, device=self.device)
         self.fallback_run_count = wp.zeros(1, dtype=wp.int32, device=self.device)
         self.fallback_run_start = wp.zeros(capacity + 1, dtype=wp.int32, device=self.device)
@@ -3982,145 +3991,171 @@ class ReducedContactBlockSystem:
         assert self.reorder_data is not None
         assert self.reorder_pair_source is not None
 
-        if self.dynamic_external_owner:
-            lowest = bodies.reduced.external_lowest
-            highest = bodies.reduced.external_highest
-            wp.launch(_reset_external_owner_kernel, dim=lowest.shape[0], outputs=[lowest, highest], device=self.device)
-            wp.launch(
-                _mark_external_owner_kernel,
-                dim=self.schedule_capacity,
-                inputs=[columns, bodies, num_columns],
-                outputs=[lowest, highest],
-                device=self.device,
-            )
-            wp.launch(
-                _mark_third_external_owner_kernel,
-                dim=self.schedule_capacity,
-                inputs=[columns, bodies, num_columns, lowest, highest],
-                outputs=[self._external_owner_crowded],
-                device=self.device,
-            )
-            wp.launch(
-                _resolve_external_owner_kernel,
-                dim=lowest.shape[0],
-                inputs=[lowest, highest, self._external_owner_crowded],
-                outputs=[bodies.reduced.external_owner],
-                device=self.device,
-            )
-        if partition_ownership:
-            wp.launch(
-                _clear_contact_ownership_counts_kernel,
-                dim=1,
-                outputs=[self.classic_column_count, self.reduced_column_count],
-                device=self.device,
-            )
-            wp.launch(
-                _classify_contact_ownership_kernel,
-                dim=self.schedule_capacity,
-                inputs=[
-                    columns,
-                    bodies,
-                    wp.bool(free_rigid_classic),
-                    num_columns,
-                    wp.int64(self.schedule_capacity + 1),
-                ],
-                outputs=[
-                    self.schedule_keys,
-                    self.schedule_columns,
-                    self.classic_column_count,
-                    self.reduced_column_count,
-                    pair_source,
-                    self.reorder_data,
-                    self.reorder_pair_source,
-                ],
-                device=self.device,
-            )
-            # The classify kernel wrote the sentinel to every inactive key. Keys are an
-            # ownership bit above a column index: sort only the bits they use.
-            sort_variable_length_int64(
-                self.schedule_keys,
-                self.schedule_columns,
-                num_columns,
-                end_bit=(2 * (self.schedule_capacity + 1)).bit_length() + 1,
-                prefix_flags=self._schedule_sort_flags(),
-                tail_masked=True,
-            )
-            wp.launch(
-                _reorder_contact_columns_kernel,
-                dim=self.schedule_capacity,
-                inputs=[self.reorder_data, self.reorder_pair_source, num_columns, self.schedule_columns],
-                outputs=[columns.data, pair_source],
-                device=self.device,
-            )
-            wp.launch(
-                _set_regular_constraint_count_kernel,
-                dim=1,
-                inputs=[wp.int32(contact_offset), self.classic_column_count],
-                outputs=[num_active_constraints],
-                device=self.device,
-            )
-        else:
-            wp.launch(
-                _set_rigid_only_ownership_kernel,
-                dim=1,
-                inputs=[num_columns, wp.int32(contact_offset)],
-                outputs=[self.classic_column_count, self.reduced_column_count, num_active_constraints],
-                device=self.device,
-            )
-
-        wp.launch(
-            _clear_contact_schedule_counts_kernel,
-            dim=self.schedule_section_end.shape[0],
-            inputs=[self.schedule_section_end],
-            device=self.device,
-        )
         self._skip_fallback_coloring = (
             self._fallback_impossible_partitioned if partition_ownership else self._fallback_impossible_rigid_only
         )
         self._schedule_already_grouped = (
             self._body_schedule_already_grouped if self._body_pair_grouping else self._shape_schedule_already_grouped
         )
-        if self._schedule_already_grouped:
-            wp.launch(
-                _classify_grouped_reduced_contact_columns_kernel,
-                dim=self.schedule_capacity,
-                inputs=[
-                    columns,
-                    bodies,
+        # Every kernel below reads and writes entries below its count, or fills a tail behind
+        # it that only the sort of the same call reads. A captured graph picks the size class
+        # per step; small buffers are not worth the branch.
+        dispatched = (
+            self.device.is_cuda and self.device.is_capturing and self.schedule_capacity >= ACTIVE_DISPATCH_MIN_ITEMS
+        )
+
+        def over_active(count: wp.array[wp.int32], body) -> None:
+            if dispatched:
+                dispatch_active_prefix(count, self.schedule_capacity, self.schedule_prefix_flags, body)
+            else:
+                body(self.schedule_capacity)
+
+        def sort(keys, values, count, dim: int, end_bit: int | None) -> None:
+            if dispatched:
+                # The kernel before wrote the sentinel behind the keys in use.
+                radix_sort_active_prefix(keys, values, count, self.schedule_prefix_flags, end_bit, prefix=dim)
+            else:
+                sort_variable_length_int64(
+                    keys, values, count, end_bit=end_bit, prefix_flags=self._schedule_sort_flags(), tail_masked=True
+                )
+
+        def assign(dim: int) -> None:
+            """Split the columns by solver and give each of the robots' columns its run."""
+            if self.dynamic_external_owner:
+                lowest = bodies.reduced.external_lowest
+                highest = bodies.reduced.external_highest
+                wp.launch(
+                    _reset_external_owner_kernel, dim=lowest.shape[0], outputs=[lowest, highest], device=self.device
+                )
+                wp.launch(
+                    _mark_external_owner_kernel,
+                    dim=dim,
+                    inputs=[columns, bodies, num_columns],
+                    outputs=[lowest, highest],
+                    device=self.device,
+                )
+                wp.launch(
+                    _mark_third_external_owner_kernel,
+                    dim=dim,
+                    inputs=[columns, bodies, num_columns, lowest, highest],
+                    outputs=[self._external_owner_crowded],
+                    device=self.device,
+                )
+                wp.launch(
+                    _resolve_external_owner_kernel,
+                    dim=lowest.shape[0],
+                    inputs=[lowest, highest, self._external_owner_crowded],
+                    outputs=[bodies.reduced.external_owner],
+                    device=self.device,
+                )
+            if partition_ownership:
+                wp.launch(
+                    _clear_contact_ownership_counts_kernel,
+                    dim=1,
+                    outputs=[self.classic_column_count, self.reduced_column_count],
+                    device=self.device,
+                )
+                wp.launch(
+                    _classify_contact_ownership_kernel,
+                    dim=dim,
+                    inputs=[
+                        columns,
+                        bodies,
+                        wp.bool(free_rigid_classic),
+                        num_columns,
+                        wp.int64(self.schedule_capacity + 1),
+                    ],
+                    outputs=[
+                        self.schedule_keys,
+                        self.schedule_columns,
+                        self.classic_column_count,
+                        self.reduced_column_count,
+                        pair_source,
+                        self.reorder_data,
+                        self.reorder_pair_source,
+                    ],
+                    device=self.device,
+                )
+                # The classify kernel wrote the sentinel to every inactive key. Keys are an
+                # ownership bit above a column index: sort only the bits they use.
+                sort(
+                    self.schedule_keys,
+                    self.schedule_columns,
                     num_columns,
-                    self.classic_column_count,
-                    wp.bool(self.packed_internal_contacts),
-                ],
-                outputs=[self.schedule_columns, self.schedule_section_end],
+                    dim,
+                    (2 * (self.schedule_capacity + 1)).bit_length() + 1,
+                )
+                wp.launch(
+                    _reorder_contact_columns_kernel,
+                    dim=dim,
+                    inputs=[self.reorder_data, self.reorder_pair_source, num_columns, self.schedule_columns],
+                    outputs=[columns.data, pair_source],
+                    device=self.device,
+                )
+                wp.launch(
+                    _set_regular_constraint_count_kernel,
+                    dim=1,
+                    inputs=[wp.int32(contact_offset), self.classic_column_count],
+                    outputs=[num_active_constraints],
+                    device=self.device,
+                )
+            else:
+                wp.launch(
+                    _set_rigid_only_ownership_kernel,
+                    dim=1,
+                    inputs=[num_columns, wp.int32(contact_offset)],
+                    outputs=[self.classic_column_count, self.reduced_column_count, num_active_constraints],
+                    device=self.device,
+                )
+
+            wp.launch(
+                _clear_contact_schedule_counts_kernel,
+                dim=self.schedule_section_end.shape[0],
+                inputs=[self.schedule_section_end],
                 device=self.device,
             )
-        else:
-            wp.launch(
-                _classify_reduced_contact_columns_kernel,
-                dim=self.schedule_capacity,
-                inputs=[
-                    columns,
-                    bodies,
+            if self._schedule_already_grouped:
+                wp.launch(
+                    _classify_grouped_reduced_contact_columns_kernel,
+                    dim=dim,
+                    inputs=[
+                        columns,
+                        bodies,
+                        num_columns,
+                        self.classic_column_count,
+                        wp.bool(self.packed_internal_contacts),
+                    ],
+                    outputs=[self.schedule_columns, self.schedule_section_end],
+                    device=self.device,
+                )
+            else:
+                wp.launch(
+                    _classify_reduced_contact_columns_kernel,
+                    dim=dim,
+                    inputs=[
+                        columns,
+                        bodies,
+                        num_columns,
+                        self.classic_column_count,
+                        wp.int32(self.articulation_count),
+                        wp.int64(self.schedule_capacity + 1),
+                        wp.bool(self.packed_internal_contacts),
+                    ],
+                    outputs=[self.schedule_keys, self.schedule_columns, self.schedule_section_end],
+                    device=self.device,
+                )
+                # The classify kernel wrote the sentinel to every inactive key. Keys are a
+                # section index above a column index: sort only the bits they use.
+                sections = self.articulation_count + self.schedule_world_count
+                sort(
+                    self.schedule_keys,
+                    self.schedule_columns,
                     num_columns,
-                    self.classic_column_count,
-                    wp.int32(self.articulation_count),
-                    wp.int64(self.schedule_capacity + 1),
-                    wp.bool(self.packed_internal_contacts),
-                ],
-                outputs=[self.schedule_keys, self.schedule_columns, self.schedule_section_end],
-                device=self.device,
-            )
-            # The classify kernel wrote the sentinel to every inactive key. Keys are a
-            # section index above a column index: sort only the bits they use.
-            sections = self.articulation_count + self.schedule_world_count
-            sort_variable_length_int64(
-                self.schedule_keys,
-                self.schedule_columns,
-                num_columns,
-                end_bit=(sections * (self.schedule_capacity + 1)).bit_length() + 1,
-                prefix_flags=self._schedule_sort_flags(),
-                tail_masked=True,
-            )
+                    dim,
+                    (sections * (self.schedule_capacity + 1)).bit_length() + 1,
+                )
+
+        over_active(num_columns, assign)
         wp.utils.array_scan(self.schedule_section_end, self.schedule_section_end, inclusive=True)
         wp.launch(
             _count_cross_columns_kernel,
@@ -4132,20 +4167,23 @@ class ReducedContactBlockSystem:
         self.cross_tree.zero_()
 
         def mark_cross_trees() -> None:
-            wp.launch(
-                _mark_cross_trees_kernel,
-                dim=(self.schedule_capacity, 2),
-                inputs=[
-                    columns,
-                    bodies,
-                    self.reduced_column_count,
-                    wp.int32(self.articulation_count),
-                    self.schedule_section_end,
-                    self.schedule_columns,
-                ],
-                outputs=[self.cross_tree],
-                device=self.device,
-            )
+            def mark(dim: int) -> None:
+                wp.launch(
+                    _mark_cross_trees_kernel,
+                    dim=(dim, 2),
+                    inputs=[
+                        columns,
+                        bodies,
+                        self.reduced_column_count,
+                        wp.int32(self.articulation_count),
+                        self.schedule_section_end,
+                        self.schedule_columns,
+                    ],
+                    outputs=[self.cross_tree],
+                    device=self.device,
+                )
+
+            over_active(self.cross_column_count, mark)
 
         # Once per step, and only in steps that have such columns.
         wp.capture_if(self.cross_column_count, on_true=mark_cross_trees)
@@ -4156,46 +4194,62 @@ class ReducedContactBlockSystem:
             self.fallback_count.zero_()
             return
         # Color one element per node pair: an articulation is one node, so per-column
-        # elements would need a color for every column it touches.
-        wp.launch(
-            _key_fallback_contact_columns_kernel,
-            dim=self.schedule_capacity,
-            inputs=[
-                columns,
-                bodies,
-                self.reduced_column_count,
-                wp.int32(self.articulation_count),
-                self.schedule_section_end,
-                self.schedule_columns,
-            ],
-            outputs=[self.fallback_count, self.fallback_key, self.fallback_column],
-            device=self.device,
-        )
-        sort_variable_length_int64(
-            self.fallback_key, self.fallback_column, self.fallback_count, prefix_flags=self._schedule_sort_flags()
-        )
-        wp.launch(
-            _mark_fallback_runs_kernel,
-            dim=self.schedule_capacity,
-            inputs=[self.fallback_count, self.fallback_key],
-            outputs=[self.fallback_run_index],
-            device=self.device,
-        )
-        wp.utils.array_scan(self.fallback_run_index, self.fallback_run_index, inclusive=True)
-        wp.launch(
-            _compact_fallback_runs_kernel,
-            dim=self.schedule_capacity,
-            inputs=[
-                columns,
-                bodies,
-                self.fallback_count,
+        # elements would need a color for every column it touches. ``cross_column_count``
+        # counts the columns no articulation owns, unless the schedule came grouped.
+        fallback_columns = num_columns if self._schedule_already_grouped else self.cross_column_count
+
+        def key(dim: int) -> None:
+            wp.launch(
+                _key_fallback_contact_columns_kernel,
+                dim=dim,
+                inputs=[
+                    columns,
+                    bodies,
+                    self.reduced_column_count,
+                    wp.int32(self.articulation_count),
+                    self.schedule_section_end,
+                    self.schedule_columns,
+                ],
+                outputs=[self.fallback_count, self.fallback_key, self.fallback_column],
+                device=self.device,
+            )
+            # Keys are two node indices, the higher one above bit 32.
+            sort(
                 self.fallback_key,
                 self.fallback_column,
-                self.fallback_run_index,
-            ],
-            outputs=[self.fallback_run_count, self.fallback_run_start, self.fallback_element],
-            device=self.device,
-        )
+                self.fallback_count,
+                dim,
+                32 + self.body_count.bit_length() + 1,
+            )
+            wp.launch(
+                _mark_fallback_runs_kernel,
+                dim=dim,
+                inputs=[self.fallback_count, self.fallback_key],
+                outputs=[self.fallback_run_head],
+                device=self.device,
+            )
+
+        over_active(fallback_columns, key)
+        # The heads behind the launched ones are stale; so are their sums, which nothing reads.
+        wp.utils.array_scan(self.fallback_run_head, self.fallback_run_index, inclusive=True)
+
+        def compact(dim: int) -> None:
+            wp.launch(
+                _compact_fallback_runs_kernel,
+                dim=dim,
+                inputs=[
+                    columns,
+                    bodies,
+                    self.fallback_count,
+                    self.fallback_key,
+                    self.fallback_column,
+                    self.fallback_run_index,
+                ],
+                outputs=[self.fallback_run_count, self.fallback_run_start, self.fallback_element],
+                device=self.device,
+            )
+
+        over_active(fallback_columns, compact)
         self._build_fallback_coloring()
 
     def _build_fallback_coloring(self) -> None:

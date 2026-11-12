@@ -222,6 +222,7 @@ def radix_sort_active_prefix(
     active_length: wp.array[int],
     flags: wp.array[wp.int32],
     end_bit: int | None = None,
+    prefix: int | None = None,
 ) -> None:
     """Sort int32 or int64 ``keys[:count]`` whose entries past ``active_length`` hold one sentinel.
 
@@ -230,13 +231,18 @@ def radix_sort_active_prefix(
     every active key. Afterwards all of ``keys[:count]`` is sorted and its
     tail again holds the sentinel; tail values are unspecified. Few active
     entries are ranked against each other instead, in two launches.
+
+    A caller inside :func:`dispatch_active_prefix` passes its ``prefix`` and the flags of
+    that dispatch: only ``keys[:prefix]`` is sorted and needs the sentinel behind the
+    active entries.
     """
     count = keys.shape[0] // 2
 
     def radix() -> None:
-        dispatch_active_prefix(
-            active_length, count, flags, lambda prefix: radix_sort_prefix(keys, values, prefix, end_bit)
-        )
+        if prefix is not None:
+            radix_sort_prefix(keys, values, prefix, end_bit)
+            return
+        dispatch_active_prefix(active_length, count, flags, lambda size: radix_sort_prefix(keys, values, size, end_bit))
 
     if not keys.device.is_cuda or count <= _RANK_SORT_MAX_ITEMS:
         radix()
