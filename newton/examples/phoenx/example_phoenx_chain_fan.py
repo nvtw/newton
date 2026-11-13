@@ -406,7 +406,7 @@ class Example:
         parser.add_argument("--collide-steps", type=int, default=4, help="Collision updates per frame (240 Hz).")
         parser.add_argument("--substeps", type=int, default=16, help="Physics substeps per collision update.")
         parser.add_argument("--gap", type=float, default=0.002, help="Authored contact gap [m].")
-        parser.add_argument("--iterations", type=int, default=8, help="Solver iterations per substep.")
+        parser.add_argument("--iterations", type=int, default=4, help="Solver iterations per substep.")
         parser.add_argument(
             "--speculative-max",
             type=float,
