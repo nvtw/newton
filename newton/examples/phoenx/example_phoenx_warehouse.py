@@ -34,7 +34,10 @@ humanoid's foot, a pod carried by a drive unit, a loaded pallet on a forklift), 
 shared by two robots (a long package across the feet of two humanoids), robots that touch each
 other, sleeping stacks next to awake robots, and jointed mechanisms of the building. All
 robots and bodies share one world, and collision detection and stepping run in one CUDA
-graph.
+graph. Pass ``--no-sleeping`` to keep resting bodies active for sustained-contact
+benchmarks; the same stability checks apply except for the sleeping fraction.
+Use ``--step-layout single_world`` to spread a large contact workload across the GPU.
+The default ``auto`` layout is retained for comparisons and lightly loaded scenes.
 
 Success criteria:
 - All body poses stay finite and nothing falls through the floor.
@@ -1683,11 +1686,13 @@ class Example:
         reduced = list(self.scene.robot_articulations)
         if getattr(args, "mechanism_solver", "reduced") == "reduced":
             reduced += self.scene.mechanism_articulations
+        self.sleeping = bool(getattr(args, "sleeping", True))
         self.solver = SolverPhoenX(
             self.model,
             joint_mode="reduced",
             reduced_articulations=reduced,
-            sleeping_velocity_threshold=0.05,
+            sleeping_velocity_threshold=0.05 if self.sleeping else 0.0,
+            step_layout=getattr(args, "step_layout", "auto"),
             substeps=int(getattr(args, "substeps", 4)),
             solver_iterations=int(getattr(args, "iterations", 4)),
             velocity_iterations=1,
@@ -2031,6 +2036,8 @@ class Example:
 
     def asleep_mask(self) -> np.ndarray:
         """Return which model bodies the solver put to sleep."""
+        if not self.sleeping:
+            return np.zeros(self.model.body_count, dtype=bool)
         return self.solver.world.bodies.island_root.numpy()[: self.model.body_count] >= 0
 
     def describe(self) -> str:
@@ -2042,6 +2049,7 @@ class Example:
             f"robots: {fleet} | bodies={self.model.body_count} free_bodies={len(self.free_bodies)} "
             f"shapes={self.model.shape_count} joints={self.model.joint_count} "
             f"mechanism_joints={len(self.scene.mechanism_joints)} | fused_substep={fused} "
+            f"sleeping={self.sleeping} step_layout={self.solver.world.step_layout} "
             f"broad_phase={type(self.model._collision_pipeline.broad_phase).__name__}"
         )
 
@@ -2175,7 +2183,7 @@ class Example:
             assert float(moved.max()) < 0.05, f"a stored package or carton moved {float(moved.max()):.3f} m"
         if len(self.free_bodies):
             assert float(poses[self.free_bodies, 2].min()) > -0.05, "a free body fell through the floor"
-            if not self.sorting:  # the sorting hall's totes ride on moving drive units
+            if self.sleeping and not self.sorting:  # the sorting hall's totes ride on moving drive units
                 asleep = float(self.asleep_mask()[self.free_bodies].mean())
                 assert asleep > 0.3, f"only {100.0 * asleep:.0f}% of the free bodies fell asleep"
 
@@ -2234,6 +2242,18 @@ if __name__ == "__main__":
         type=int,
         default=0,
         help="Replace the warehouse by lines of this many G1 humanoids that push packages off belts.",
+    )
+    parser.add_argument(
+        "--sleeping",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Allow resting bodies to sleep; disable for sustained-contact benchmarks.",
+    )
+    parser.add_argument(
+        "--step-layout",
+        choices=("auto", "single_world", "multi_world"),
+        default="auto",
+        help="Contact solver layout; single_world spreads large contact workloads across the GPU.",
     )
     parser.add_argument("--substeps", type=int, default=4)
     parser.add_argument("--iterations", type=int, default=4)
