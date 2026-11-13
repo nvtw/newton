@@ -4308,15 +4308,14 @@ class PhoenXWorld:
         if self._contact_input_active_this_step and (rebase_levers or advance_gap) and not fused_rows:
             # Color-packed rigid manifolds are short. A lane per column avoids
             # loading both bodies' state once for every mostly idle row lane.
-            # Unpacked columns launch over their full capacity, so every extra
-            # lane also adds a mostly idle thread per unused column.
             rows_per_column = 1 if self._colored_contact_headers else (8 if self.device.is_cuda else 1)
+            column_stride = self._constraint_capacity if self._colored_contact_headers else self.max_contact_columns
+            if self.device.is_cuda:
+                # A bounded grid strides over live columns rather than visiting unused capacity.
+                column_stride = min(column_stride, self.device.sm_count * 1024 // rows_per_column)
             wp.launch(
                 rebase_ordinary_contact_relax_kernel,
-                dim=(
-                    self._constraint_capacity if self._colored_contact_headers else self.max_contact_columns,
-                    rows_per_column,
-                ),
+                dim=(column_stride, rows_per_column),
                 inputs=[
                     self._contact_cols_packed if self._colored_contact_headers else self._contact_cols,
                     self._contact_container_solve if self._colored_contact_rows else self._contact_container,
@@ -4333,6 +4332,7 @@ class PhoenXWorld:
                     wp.bool(rebase_levers),
                     wp.bool(advance_gap),
                     idt,
+                    wp.int32(column_stride),
                 ],
                 device=self.device,
             )

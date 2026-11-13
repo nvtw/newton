@@ -69,11 +69,11 @@ class TestContactRelaxMomentum(unittest.TestCase):
         world.bodies.position.assign(positions)
         prepared = cc.derived.numpy().copy()
 
-        def rebase(rows_per_column):
+        def rebase(rows_per_column, column_stride):
             cc.derived.assign(prepared)
             wp.launch(
                 rebase_ordinary_contact_relax_kernel,
-                dim=(world.max_contact_columns, rows_per_column),
+                dim=(column_stride, rows_per_column),
                 inputs=[
                     world._contact_cols,
                     cc,
@@ -88,16 +88,17 @@ class TestContactRelaxMomentum(unittest.TestCase):
                     wp.bool(True),
                     wp.bool(False),
                     wp.float32(60.0),
+                    wp.int32(column_stride),
                 ],
                 device=scene.device,
             )
             return cc.derived.numpy().copy()
 
-        reference = rebase(1)
+        reference = rebase(1, world.max_contact_columns)
         self.assertFalse(np.array_equal(reference[:, :8], prepared[:, :8]))
-        for rows_per_column in (3, 8, 32):
-            with self.subTest(rows_per_column=rows_per_column):
-                np.testing.assert_array_equal(rebase(rows_per_column), reference)
+        for rows_per_column, column_stride in ((1, 1), (3, 1), (8, 1), (32, world.max_contact_columns)):
+            with self.subTest(rows_per_column=rows_per_column, column_stride=column_stride):
+                np.testing.assert_array_equal(rebase(rows_per_column, column_stride), reference)
         # The solver's own launch shape produces the same rows.
         cc.derived.assign(prepared)
         world._refresh_owned_relax_geometry(wp.float32(60.0))
