@@ -1,0 +1,1 @@
+Size PhoenX island solver grids to cover the GPU's multiprocessors, retaining the existing minimum group count. This improves parallelism in large awake scenes while preserving sleeping behavior. No configuration changes are required.

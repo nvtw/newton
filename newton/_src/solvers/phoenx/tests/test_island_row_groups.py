@@ -11,16 +11,16 @@ blocks there are.
 from __future__ import annotations
 
 import unittest
-from unittest import mock
 
 import numpy as np
 import warp as wp
 
 import newton
-from newton._src.solvers.phoenx import simulation
 
 
-def _run(groups: int, frames: int = 25) -> tuple[np.ndarray, newton.solvers.SolverPhoenX]:
+def _run(
+    groups: int | None, *, sleeping_threshold: float, frames: int = 25
+) -> tuple[np.ndarray, newton.solvers.SolverPhoenX]:
     builder = newton.ModelBuilder()
     builder.add_ground_plane()
     # A robot keeps the scene on the reduced path; the stacks beside it are free bodies.
@@ -48,10 +48,11 @@ def _run(groups: int, frames: int = 25) -> tuple[np.ndarray, newton.solvers.Solv
             body = builder.add_body(xform=wp.transform(wp.vec3(x + offset, y, 0.11 + 0.21 * level), wp.quat_identity()))
             builder.add_shape_box(body, hx=0.1, hy=0.1, hz=0.1)
     model = builder.finalize()
-    with mock.patch.object(simulation, "_ISLAND_ROW_GROUPS", groups):
-        solver = newton.solvers.SolverPhoenX(
-            model, joint_mode="reduced", substeps=4, solver_iterations=4, sleeping_velocity_threshold=0.05
-        )
+    solver = newton.solvers.SolverPhoenX(
+        model, joint_mode="reduced", substeps=4, solver_iterations=4, sleeping_velocity_threshold=sleeping_threshold
+    )
+    if groups is not None:
+        solver.world._allocate_partition(groups)
     state = model.state()
     newton.eval_fk(model, model.joint_q, model.joint_qd, state)
     control = model.control()
@@ -67,19 +68,22 @@ def _run(groups: int, frames: int = 25) -> tuple[np.ndarray, newton.solvers.Solv
 @unittest.skipUnless(wp.is_cuda_available(), "island row groups run in the captured CUDA step")
 class TestIslandRowGroups(unittest.TestCase):
     def test_islands_in_separate_blocks_move_as_in_one_block(self):
-        grouped, solver = _run(simulation._ISLAND_ROW_GROUPS)
-        world = solver.world
-        self.assertEqual(world._multi_world_scheduler, "block_world")
-        self.assertEqual(world._partition_count, simulation._ISLAND_ROW_GROUPS)
-        # Rows really went to several blocks.
-        self.assertGreater(int(np.count_nonzero(world._per_world_element_count.numpy())), 1)
-        single, _ = _run(1)
-        np.testing.assert_array_equal(grouped, single)
-        # Fewer blocks than islands share blocks; the result still does not change.
-        shared, _ = _run(3)
-        np.testing.assert_array_equal(shared, single)
-        self.assertTrue(np.isfinite(grouped).all())
-        self.assertGreater(float(grouped[2:, 2].min()), 0.05)  # no box sank into the ground
+        """Preserve stack motion across group counts with and without sleeping."""
+        for sleeping_threshold in (0.0, 0.05):
+            with self.subTest(sleeping_threshold=sleeping_threshold):
+                grouped, solver = _run(None, sleeping_threshold=sleeping_threshold)
+                world = solver.world
+                self.assertEqual(world._multi_world_scheduler, "block_world")
+                self.assertGreaterEqual(world._partition_count, world.device.sm_count)
+                # Rows really went to several blocks.
+                self.assertGreater(int(np.count_nonzero(world._per_world_element_count.numpy())), 1)
+                single, _ = _run(1, sleeping_threshold=sleeping_threshold)
+                np.testing.assert_array_equal(grouped, single)
+                # Fewer blocks than islands share blocks; the result still does not change.
+                shared, _ = _run(3, sleeping_threshold=sleeping_threshold)
+                np.testing.assert_array_equal(shared, single)
+                self.assertTrue(np.isfinite(grouped).all())
+                self.assertGreater(float(grouped[2:, 2].min()), 0.05)  # no box sank into the ground
 
 
 if __name__ == "__main__":

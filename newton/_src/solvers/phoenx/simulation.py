@@ -341,7 +341,7 @@ def _build_gravity_array(gravity, num_worlds: int, device) -> wp.array[wp.vec3f]
     return wp.array(arr_np, dtype=wp.vec3f, device=device)
 
 
-#: Solver blocks that the islands of one world are spread over.
+#: Minimum solver blocks that the islands of one world are spread over.
 _ISLAND_ROW_GROUPS = 64
 
 
@@ -4664,7 +4664,9 @@ class PhoenXWorld:
         island, as far as the groups go, sweeps its few rows on its own. Each island keeps
         the colors and the order it had.
         """
-        self._allocate_partition(_ISLAND_ROW_GROUPS)
+        # A fixed small grid leaves multiprocessors idle on larger GPUs.
+        groups = max(_ISLAND_ROW_GROUPS, self.device.sm_count if self.device.is_cuda else 0)
+        self._allocate_partition(groups)
         self._body_group = wp.full(self.num_bodies, -1, dtype=wp.int32, device=self.device)
 
     def _block_world_supported(self) -> bool:
