@@ -226,14 +226,16 @@ def _solve_rank_one_contact(cc: ContactContainer, impulse: wp.array[wp.vec3]):
 
 
 @wp.kernel(enable_backward=False)
-def _solve_sliding_contact(cc: ContactContainer, impulse: wp.array[wp.vec3]):
+def _solve_sliding_contact(
+    cc: ContactContainer, normal_velocity: float, friction_coefficient: float, impulse: wp.array[wp.vec3]
+):
     impulse[0] = contact_project_coupled_velocity_update_no_soft_pd(
         cc,
         0,
         wp.vec3(1.0, 0.0, 0.0),
         wp.vec3(0.0, 1.0, 0.0),
         wp.vec3(0.0, 0.0, 1.0),
-        0.0,
+        normal_velocity,
         -1.0,
         -0.86,
         1.0,
@@ -242,8 +244,8 @@ def _solve_sliding_contact(cc: ContactContainer, impulse: wp.array[wp.vec3]):
         0.0,
         0.0,
         0.0,
-        1.0,
-        1.0,
+        friction_coefficient,
+        friction_coefficient,
         1.0,
         0.0,
         1.0,
@@ -458,12 +460,13 @@ class TestContactCoupling(unittest.TestCase):
                 self.assertLessEqual(after, before + 1.0e-6 * max(before, 1.0e-12))
 
     def test_anisotropic_sliding_friction_dissipates_energy(self):
+        """Keep sliding friction dissipative as the normal load shrinks."""
         mobility = np.diag([100.0, 1.0])
         velocity = np.array([-1.0, -0.86])
         cc = ContactContainer()
         cc.impulses = wp.array(np.array([[1.0], [0.99], [0.14]], dtype=np.float32), device="cpu")
         impulse = wp.zeros(1, dtype=wp.vec3, device="cpu")
-        wp.launch(_solve_sliding_contact, dim=1, inputs=[cc], outputs=[impulse], device="cpu")
+        wp.launch(_solve_sliding_contact, dim=1, inputs=[cc, 0.0, 1.0], outputs=[impulse], device="cpu")
         after_velocity = velocity + mobility @ impulse.numpy()[0, 1:]
         before = 0.5 * velocity @ np.linalg.solve(mobility, velocity)
         after = 0.5 * after_velocity @ np.linalg.solve(mobility, after_velocity)
@@ -472,6 +475,19 @@ class TestContactCoupling(unittest.TestCase):
         self.assertAlmostEqual(float(np.linalg.norm(friction)), 1.0, places=5)
         self.assertLess(float(friction @ after_velocity), 0.0)
         self.assertAlmostEqual(float(friction[0] * after_velocity[1] - friction[1] * after_velocity[0]), 0.0, places=5)
+
+        # A nearly separating contact retains a small sliding load. Rebuilding
+        # its projected impulse as old + (new - old) loses relative accuracy.
+        cc.impulses.assign(np.array([[1.0], [0.5], [0.0]], dtype=np.float32))
+        wp.launch(_solve_sliding_contact, dim=1, inputs=[cc, 0.9998, 0.6], outputs=[impulse], device="cpu")
+        accumulated = cc.impulses.numpy()[:, 0]
+        radius = 0.6 * float(accumulated[0])
+        self.assertGreater(radius, 0.0)
+        np.testing.assert_allclose(
+            np.linalg.norm(accumulated[1:].astype(np.float64)), radius, rtol=1.0e-5, atol=1.0e-12
+        )
+        after_velocity = velocity + mobility @ impulse.numpy()[0, 1:]
+        self.assertLess(float(accumulated[1:] @ after_velocity), 0.0)
 
     def test_post_integration_contact_response_conserves_momentum(self):
         self._check_self_contact_momentum(steps=1, radius=0.2, at_rest=False)

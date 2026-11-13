@@ -467,6 +467,12 @@ def _make_contact_project_coupled_velocity_update(has_soft_contact_pd: bool, tan
         )
         d_lambda_t1 = friction[0] - lam_t1_old
         d_lambda_t2 = friction[1] - lam_t2_old
+        if sor_boost == wp.float32(1.0):
+            # The metric solve already projects onto the Coulomb disk.
+            cc_set_normal_lambda(cc, k, normal_update.lambda_new)
+            cc_set_tangent1_lambda(cc, k, friction[0])
+            cc_set_tangent2_lambda(cc, k, friction[1])
+            return normal_update.delta * normal + d_lambda_t1 * tangent1 + d_lambda_t2 * tangent2
         tangents = block_project_friction_delta_sor_2(
             lam_t1_old,
             lam_t2_old,
