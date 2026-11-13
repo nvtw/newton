@@ -17,6 +17,52 @@ from newton._src.geometry.sdf_contact import (
 from newton.tests.unittest_utils import add_function_test, get_cuda_test_devices, get_test_devices
 
 
+def test_mesh_mesh_contained_bvh_contacts(test, device):
+    """Retain deep interior edges after bounded closest-point misses."""
+    with wp.ScopedDevice(device):
+        outer = newton.Mesh.create_box(1.0, 1.0, 1.0)
+        inner = newton.Mesh.create_box(0.02, 0.02, 0.02)
+        for scale in (0.01, 1.0, 100.0):
+            builder = newton.ModelBuilder(gravity=wp.vec3(0.0))
+            cfg = newton.ModelBuilder.ShapeConfig(density=0.0, margin=0.0, gap=0.0)
+            # Exercise the scaled shape-local bounds under a world transform.
+            rotation = wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), 0.37)
+            outer_pose = wp.transform(wp.vec3(3.0 * scale, -2.0 * scale, scale), rotation)
+            inner_pose = wp.transform_multiply(outer_pose, wp.transform(wp.vec3(0.2 * scale, 0.0, 0.0)))
+            builder.add_shape_mesh(-1, mesh=outer, scale=(scale, 2.0 * scale, 3.0 * scale), xform=outer_pose, cfg=cfg)
+            body = builder.add_body(xform=inner_pose, mass=1.0, inertia=wp.mat33(np.eye(3)))
+            builder.add_shape_mesh(body, mesh=inner, scale=(scale, scale, scale), cfg=cfg)
+            model = builder.finalize()
+            state = model.state()
+            for reduced in (False, True):
+                with test.subTest(scale=scale, reduced=reduced):
+                    pipeline = newton.CollisionPipeline(model, reduce_contacts=reduced)
+                    contacts = pipeline.contacts()
+                    state.body_q.assign([inner_pose])
+                    pipeline.collide(state, contacts)
+                    count = int(contacts.rigid_contact_count.numpy()[0])
+                    test.assertGreater(count, 0)
+                    # The +x surface is the nearest exit, about 0.8 scaled units away.
+                    normals = contacts.rigid_contact_normal.numpy()[:count]
+                    test.assertTrue(np.all(np.isfinite(normals)))
+                    exit_direction = np.array(wp.quat_rotate(rotation, wp.vec3(1.0, 0.0, 0.0)))
+                    np.testing.assert_allclose(normals @ exit_direction, 1.0, atol=2.0e-5)
+                    points0 = contacts.rigid_contact_point0.numpy()[:count]
+                    points1 = np.array(
+                        [
+                            wp.transform_point(inner_pose, wp.vec3(p))
+                            for p in contacts.rigid_contact_point1.numpy()[:count]
+                        ]
+                    )
+                    depths = -np.sum((points1 - points0) * normals, axis=1) / scale
+                    test.assertTrue(np.all((depths > 0.77) & (depths < 0.83)), depths)
+                    # Reuse the pipeline after moving outside the shape bounds.
+                    exterior = wp.transform_multiply(outer_pose, wp.transform(wp.vec3(4.0 * scale, 0.0, 0.0)))
+                    state.body_q.assign([exterior])
+                    pipeline.collide(state, contacts)
+                    test.assertEqual(int(contacts.rigid_contact_count.numpy()[0]), 0)
+
+
 @wp.kernel(enable_backward=False)
 def _mesh_sdf_contact_search_precision_kernel(out: wp.array[wp.float32]):
     out[0] = mesh_sdf_contact_search_precision(0.0, 1.0, 0.001, True)
@@ -151,6 +197,13 @@ class TestSDFContact(unittest.TestCase):
 
                 np.testing.assert_allclose(result.numpy(), expected, rtol=np.finfo(np.float32).eps, atol=0.0)
 
+
+add_function_test(
+    TestSDFContact,
+    "test_mesh_mesh_contained_bvh_contacts",
+    test_mesh_mesh_contained_bvh_contacts,
+    devices=get_test_devices(),
+)
 
 add_function_test(
     TestSDFContact,

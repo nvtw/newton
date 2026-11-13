@@ -27,10 +27,10 @@ from .utils import scan_with_total
 
 # Upper bound (mesh-local units) on the closest-point search for the mesh sign
 # queries below. It is not a physical contact range: culling uses the tight
-# ``_SDF_QUERY_RADIUS_SLACK * threshold`` bounds, and these queries only run at
-# points the narrow phase already placed near the surface, so the bound is
-# never binding. The queries operate in mesh-local coordinates (per-shape scale
-# is divided out), so there is no global unit to tie it to; 1e11 is effectively
+# ``_SDF_QUERY_RADIUS_SLACK * threshold`` bounds, with a full-query retry for
+# bounded misses inside the mesh bounds. The queries operate in mesh-local
+# coordinates (per-shape scale is divided out), so there is no global unit to
+# tie it to; 1e11 is effectively
 # unbounded for any asset under any unit convention (~8x Earth's diameter in
 # millimeters). Going much larger is unsafe: Warp's mesh queries square
 # ``max_dist`` internally, and the no-hit branches return it as a sentinel that
@@ -401,6 +401,33 @@ def sample_sdf_using_mesh(
         return wp.length(world_pos - closest) * res.sign
 
     return max_dist
+
+
+@wp.func
+def sample_mesh_sdf_for_culling(
+    mesh_id: wp.uint64,
+    point: wp.vec3,
+    max_dist: float,
+    sign_method: int,
+    boundary_flags: wp.array[wp.uint8],
+    boundary_start: int,
+    shape_scale: wp.vec3,
+    aabb_lower: wp.vec3,
+    aabb_upper: wp.vec3,
+) -> float:
+    """Keep a bounded closest-point miss from hiding deep interior edges.
+
+    A failed bounded query establishes unsigned distance only. Inside the
+    shape-local bounds, retry before interpreting that miss as exterior.
+    Outside those bounds the usual bounded cull remains unchanged.
+    """
+    distance = sample_sdf_using_mesh(mesh_id, point, max_dist, sign_method, boundary_flags, boundary_start)
+    local_point = wp.cw_mul(point, shape_scale)
+    if distance == max_dist and wp.min(local_point - aabb_lower) >= 0.0 and wp.min(aabb_upper - local_point) >= 0.0:
+        distance = sample_sdf_using_mesh(
+            mesh_id, point, _MESH_QUERY_MAX_DIST, sign_method, boundary_flags, boundary_start
+        )
+    return distance
 
 
 @wp.func
@@ -1629,13 +1656,16 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                 midpoint_sdf = sample_sdf_heightfield(hfd_sdf, heightfield_elevations, bsphere_center)
                                 add_edge = midpoint_sdf <= threshold
                             elif wp.static(not use_texture_sdf_only) and use_bvh_for_sdf:
-                                midpoint_sdf = sample_sdf_using_mesh(
+                                midpoint_sdf = sample_mesh_sdf_for_culling(
                                     mesh_id_sdf,
                                     bsphere_center,
                                     _SDF_QUERY_RADIUS_SLACK * threshold,
                                     sdf_mesh_query_type,
                                     mesh_boundary_flags,
                                     sdf_boundary_start,
+                                    mesh_scale_sdf,
+                                    _shape_collision_aabb_lower[sdf_shape],
+                                    _shape_collision_aabb_upper[sdf_shape],
                                 )
                                 add_edge = midpoint_sdf <= threshold
                             else:
@@ -2095,13 +2125,16 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                 midpoint_sdf = sample_sdf_heightfield(hfd_sdf, heightfield_elevations, bsphere_center)
                                 add_edge = midpoint_sdf <= threshold
                             elif wp.static(not use_texture_sdf_only) and use_bvh_for_sdf:
-                                midpoint_sdf = sample_sdf_using_mesh(
+                                midpoint_sdf = sample_mesh_sdf_for_culling(
                                     mesh_id_sdf,
                                     bsphere_center,
                                     _SDF_QUERY_RADIUS_SLACK * threshold,
                                     sdf_mesh_query_type,
                                     mesh_boundary_flags,
                                     sdf_boundary_start,
+                                    mesh_scale_sdf,
+                                    shape_collision_aabb_lower[sdf_shape],
+                                    shape_collision_aabb_upper[sdf_shape],
                                 )
                                 add_edge = midpoint_sdf <= threshold
                             else:
