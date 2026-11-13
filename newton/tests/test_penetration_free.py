@@ -64,6 +64,47 @@ class TestPenetrationFreeContract(unittest.TestCase):
         self.assertEqual(int(data.constraint_count.numpy()[0]), 0)
         self.assertEqual(data.status_messages(), [])
 
+    def test_overflowing_work_lists_stop_counting(self):
+        # Dense meshes can push billions of overflowing triangle work items in one
+        # detection. The lists must stop counting once full: an int32 counter that
+        # wraps to a negative index writes out of bounds.
+        half = 0.1
+        corners = np.array(
+            [[x, y, z] for x in (-half, half) for y in (-half, half) for z in (-half, half)], dtype=np.float32
+        )
+        faces = np.array(
+            [
+                [0, 1, 3],
+                [0, 3, 2],
+                [4, 6, 7],
+                [4, 7, 5],
+                [0, 4, 5],
+                [0, 5, 1],
+                [2, 3, 7],
+                [2, 7, 6],
+                [0, 2, 6],
+                [0, 6, 4],
+                [1, 5, 7],
+                [1, 7, 3],
+            ],
+            dtype=np.int32,
+        )
+        builder = newton.ModelBuilder(gravity=wp.vec3(0.0))
+        for x in (0.0, 2.0 * half + 0.005):
+            body = builder.add_body(xform=wp.transform((x, 0.0, 0.0), wp.quat_identity()))
+            builder.add_shape_mesh(body, mesh=newton.Mesh(corners, faces.flatten()))
+        model = builder.finalize(device="cpu")
+        capacity = 4
+        config = PenetrationFreeConfig(max_triangle_work=capacity, max_constraints=capacity)
+        pipeline = newton.CollisionPipeline(model, broad_phase="nxn", penetration_free=config)
+        contacts = pipeline.contacts()
+        pipeline.collide(model.state(), contacts, dt=_DT)
+        data = contacts._penetration_free
+        status = int(data.status.numpy()[0])
+        self.assertTrue(status & (1 << 1), f"expected a triangle work overflow, status {status:#x}")
+        self.assertLessEqual(int(data.work_count.numpy().max()), capacity)
+        self.assertLessEqual(int(data.constraint_count.numpy()[0]), capacity)
+
     def test_invalid_config_is_rejected(self):
         with self.assertRaises(ValueError):
             PenetrationFreeConfig(tolerance=-1.0).validate()

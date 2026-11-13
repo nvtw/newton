@@ -299,7 +299,7 @@ class PenetrationFreeData:
 
     @property
     def constraint_count(self) -> wp.array:
-        """Number of emitted feature pairs, possibly above capacity on overflow."""
+        """Number of emitted feature pairs; on overflow it stops near capacity and :attr:`status` reports it."""
         return self.constraints.count
 
     @property
@@ -905,7 +905,10 @@ def _emit_pair(a: _Feature, b: _Feature, normal: wp.vec3, height: wp.vec2, limit
     if (a.body >= 0 and a.infinite_plane != 0) or (b.body >= 0 and b.infinite_plane != 0):
         wp.atomic_or(out.status, 0, STATUS_UNSUPPORTED_GEOMETRY)
         return
-    idx = wp.atomic_add(out.count, 0, 1)
+    # Once full, the buffer stops counting, so the int32 counter cannot wrap to a negative index.
+    idx = out.body.shape[0]
+    if out.count[0] < out.body.shape[0]:
+        idx = wp.atomic_add(out.count, 0, 1)
     if idx >= out.body.shape[0]:
         wp.atomic_or(out.status, 0, STATUS_CONSTRAINT_OVERFLOW)
         _block_bodies(a.body, b.body, out)
@@ -1037,7 +1040,11 @@ def _push_work(
     item: wp.vec4i,
     out: Constraints,
 ):
-    idx = wp.atomic_add(counts, list_id, 1)
+    # Once full, a list stops counting: dense meshes push billions of overflowing items in
+    # one detection, and an int32 counter that wraps to a negative index writes out of bounds.
+    idx = items.shape[0]
+    if counts[list_id] < items.shape[0]:
+        idx = wp.atomic_add(counts, list_id, 1)
     if idx >= items.shape[0]:
         wp.atomic_or(out.status, 0, STATUS_WORK_OVERFLOW)
         pair = scene.pairs[item[0]]
