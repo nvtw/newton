@@ -191,7 +191,8 @@ class Example:
         # alternate between staggered heights so the ring stays small and the chains still meet.
         arc = self.chains * LINK_SPACING * SCALE / (2.0 * math.pi)  # [m] ring radius on one level
         levels = max(1, math.ceil(arc / RING_RADIUS_MAX))
-        ring = max(0.15, arc / levels)  # [m]
+        # Widen the initial fan without changing interlocked link geometry or height clearance.
+        ring = 1.25 * max(0.15, arc / levels)  # [m]
         self.ring_radius = ring
         upright = wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), 0.5 * math.pi)  # link plane XY -> XZ
 
@@ -401,7 +402,7 @@ class Example:
         # Path-traced rendering, like the Kapla tower.
         parser.set_defaults(viewer="optix", optix_max_instances=65536)
         parser.add_argument("--chains", type=int, default=240, help="Chains around the anchor ring.")
-        parser.add_argument("--spin", type=float, default=0.65, help="Initial rotation about each anchor [rad/s].")
+        parser.add_argument("--spin", type=float, default=0.9, help="Initial rotation about each anchor [rad/s].")
         parser.add_argument("--links", type=int, default=40, help="Links per chain.")
         parser.add_argument("--collide-steps", type=int, default=4, help="Collision updates per frame (240 Hz).")
         parser.add_argument("--substeps", type=int, default=16, help="Physics substeps per collision update.")
