@@ -1288,7 +1288,11 @@ contact accuracy are still being investigated.
       <br><b>Warehouse robot fleet</b>
       <br><code>python -m newton.examples phoenx_warehouse</code>
     </td>
-    <td align="center" width="33%"></td>
+    <td align="center" width="33%">
+      <img width="320" src="docs/images/examples/example_phoenx_chain_fan.jpg" alt="PhoenX fan of interlocked chains">
+      <br><b>240 chains of 40 mesh links</b>
+      <br><code>python -m newton.examples phoenx_chain_fan</code>
+    </td>
     <td align="center" width="33%"></td>
   </tr>
 </table>
