@@ -58,23 +58,26 @@ class TestPhoenXAutoPerformancePolicy(unittest.TestCase):
         """Select scene scheduling without changing global-slot storage or contact grouping."""
         from newton._src.solvers.phoenx.tests.test_reduced_dense import _make_legged_fleet  # noqa: PLC0415
 
-        for worlds in (1, 2):
-            with self.subTest(worlds=worlds):
-                model = _make_legged_fleet("cuda:0", worlds=worlds)
-                self.assertEqual(model.world_count, worlds)
-                self.assertEqual(model.gravity.shape[0], worlds + 1)
-                solver = newton.solvers.SolverPhoenX(model, joint_mode="reduced", sleeping_velocity_threshold=0.05)
-                world = solver.world
-                self.assertFalse(world._enable_body_pair_grouping)
-                # Keep the global slot for addressing; it is not another scene.
-                self.assertEqual(world.num_worlds, worlds + 1)
-                if worlds == 1:
-                    self.assertEqual(world._multi_world_scheduler, "block_world")
-                    self.assertEqual(world._body_group.shape[0], world.num_bodies)
-                    self.assertGreater(world._partition_count, world.num_worlds)
-                else:
-                    self.assertEqual(world._multi_world_scheduler, "fast_tail")
-                    self.assertEqual(world._body_group.shape[0], 0)
+        for sleeping_threshold in (0.0, 0.05):
+            for worlds in (1, 2):
+                with self.subTest(worlds=worlds, sleeping_threshold=sleeping_threshold):
+                    model = _make_legged_fleet("cuda:0", worlds=worlds)
+                    self.assertEqual(model.world_count, worlds)
+                    self.assertEqual(model.gravity.shape[0], worlds + 1)
+                    solver = newton.solvers.SolverPhoenX(
+                        model, joint_mode="reduced", sleeping_velocity_threshold=sleeping_threshold
+                    )
+                    world = solver.world
+                    self.assertFalse(world._enable_body_pair_grouping)
+                    # Keep the global slot for addressing; it is not another scene.
+                    self.assertEqual(world.num_worlds, worlds + 1)
+                    if worlds == 1:
+                        self.assertEqual(world._multi_world_scheduler, "block_world")
+                        self.assertEqual(world._body_group.shape[0], world.num_bodies)
+                        self.assertGreater(world._partition_count, world.num_worlds)
+                    else:
+                        self.assertEqual(world._multi_world_scheduler, "fast_tail")
+                        self.assertEqual(world._body_group.shape[0], 0)
 
     def test_requested_contact_capacity_sizes_the_solver_pipeline(self):
         """``rigid_contact_max`` sizes the pipeline the solver creates and its contact columns."""

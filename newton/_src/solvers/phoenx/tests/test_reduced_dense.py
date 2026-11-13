@@ -210,6 +210,10 @@ class TestReducedDenseBackend(unittest.TestCase):
             with self.subTest(friction=friction):
                 model, box = _make_chain_and_free_box(device, resting=False)
                 solver, start, state = _run_chain_and_free_box(model, friction, frames=60)
+                self.assertFalse(solver.world._sleeping_enabled)
+                if friction == "point":
+                    # The moving tree joins the box's initially separate island.
+                    self.assertEqual(solver.world._body_group.shape[0], solver.world.num_bodies)
                 articulation = solver._reduced_articulation
                 self.assertIsNotNone(articulation.fused_substep)
                 self.assertTrue(articulation.external_rigid_rows)

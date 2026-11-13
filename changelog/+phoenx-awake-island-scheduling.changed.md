@@ -1,0 +1,1 @@
+Distribute independent contact islands across GPU solver blocks in single-scene PhoenX reduced simulations even when sleeping is disabled. Reuse the existing island construction without running sleep scoring or changing contact equations. No configuration changes are required.

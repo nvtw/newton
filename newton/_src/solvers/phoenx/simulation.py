@@ -1382,27 +1382,30 @@ class PhoenXWorld:
         self._body_aabb_lower: wp.array2d[wp.float32] | None = None
         self._body_aabb_upper: wp.array2d[wp.float32] | None = None
         self._body_aabb_diagonal: wp.array[wp.float32] | None = None
-        self._sleeping_num_bodies_device: wp.array[wp.int32] | None = None
-        if self._sleeping_enabled:
+        self._island_num_bodies_device: wp.array[wp.int32] | None = None
+        group_by_island = (
+            self._multi_world_scheduler_policy == "one_world"
+            and self._multi_world_scheduler == "block_world"
+            and self.num_bodies > 0
+        )
+        if self._sleeping_enabled or group_by_island:
             if self.num_bodies <= 0:
                 raise ValueError("sleeping_velocity_threshold > 0 requires num_bodies > 0")
-            self._island_builder = UnionFindIslandBuilder(
-                num_bodies_capacity=self.num_bodies,
-                device=self.device,
-            )
-            # Hold space for the regular per-element rows PLUS up to
-            # ``num_bodies`` chain edges injected by the sleeping pass.
+            self._island_builder = UnionFindIslandBuilder(num_bodies_capacity=self.num_bodies, device=self.device)
+            # Sleeping islands need extra chain edges to preserve their connectivity.
+            capacity = self._constraint_capacity + (self.num_bodies if self._sleeping_enabled else 0)
             self._island_interaction_bodies = wp.full(
-                shape=(self._constraint_capacity + self.num_bodies, int(MAX_BODIES_PER_INTERACTION)),
-                value=-1,
-                dtype=wp.int32,
-                device=self.device,
+                shape=(capacity, int(MAX_BODIES_PER_INTERACTION)), value=-1, dtype=wp.int32, device=self.device
             )
+            self._island_active = wp.zeros(self.num_bodies, dtype=wp.int32, device=self.device)
+            self._island_num_bodies_device = wp.array([self.num_bodies], dtype=wp.int32, device=self.device)
+        if group_by_island:
+            self._group_rows_by_island()
+        if self._sleeping_enabled:
             self._island_max_velocity = wp.zeros(self.num_bodies, dtype=wp.float32, device=self.device)
             self._island_is_sleeping = wp.zeros(self.num_bodies, dtype=wp.int32, device=self.device)
             self._island_has_external_input = wp.zeros(self.num_bodies, dtype=wp.int32, device=self.device)
             self._wake_flag = wp.zeros(self.num_bodies, dtype=wp.int32, device=self.device)
-            self._island_active = wp.zeros(self.num_bodies, dtype=wp.int32, device=self.device)
             self._uf_num_interactions = wp.zeros(1, dtype=wp.int32, device=self.device)
             # Per-compact-island scratch: lowest awake body id per
             # compact id. Reset to num_bodies (a value past any real
@@ -1414,9 +1417,6 @@ class PhoenXWorld:
             self._body_aabb_lower = wp.zeros((self.num_bodies, 3), dtype=wp.float32, device=self.device)
             self._body_aabb_upper = wp.zeros((self.num_bodies, 3), dtype=wp.float32, device=self.device)
             self._body_aabb_diagonal = wp.zeros(self.num_bodies, dtype=wp.float32, device=self.device)
-            self._sleeping_num_bodies_device = wp.array([self.num_bodies], dtype=wp.int32, device=self.device)
-            if self._multi_world_scheduler_policy == "one_world" and self._multi_world_scheduler == "block_world":
-                self._group_rows_by_island()
 
         # Cached references installed by :meth:`attach_collision_pipeline`.
         # When non-None, :meth:`step` falls back to them for the optional
@@ -2761,13 +2761,13 @@ class PhoenXWorld:
                         cid_of_contact=self._cid_of_contact_cur,
                         device=self.device,
                     )
-            needs_island_joint_edges = self._sleeping_enabled and self.num_joints > 0
+            needs_island_joint_edges = self._island_builder is not None and self.num_joints > 0
             if self._partition_active_this_step or needs_island_joint_edges:
                 self._rebuild_elements()
-        elif self._sleeping_enabled and self.num_joints > 0:
-            # The previous sleeping pass collapsed direct-only joint edges after
+        elif self._island_builder is not None and self.num_joints > 0:
+            # The previous island pass collapsed direct-only joint edges after
             # island construction. Restore them even when the PGS partition is
-            # reused so connected mechanisms keep sharing one sleep island.
+            # reused so connected mechanisms keep sharing one island.
             self._rebuild_elements()
         # Kinematic prepare BEFORE the sleeping pass: the per-island
         # score kernel reads ``bodies.velocity`` and must see the
@@ -2793,6 +2793,8 @@ class PhoenXWorld:
                     ],
                     device=self.device,
                 )
+        elif self._island_builder is not None and self._constraint_capacity > 0:
+            self._build_contact_islands()
         if self._constraint_capacity > 0 and self._partition_active_this_step:
             if not reuse_partition:
                 if self._conditional_world_coloring and self._reuse_rigid_coloring:
@@ -3349,7 +3351,7 @@ class PhoenXWorld:
                 self._num_active_constraints,
                 wp.int32(self.num_joints),
                 self._joint_pgs_enabled,
-                wp.int32(1 if self._sleeping_enabled else 0),
+                wp.int32(1 if self._island_builder is not None else 0),
                 wp.int32(self.joint_coloring_priority),
                 wp.int32(self.num_cloth_triangles),
                 wp.int32(self.num_cloth_bending),
@@ -3421,6 +3423,67 @@ class PhoenXWorld:
             ],
             device=self.device,
         )
+
+    def _build_contact_islands(self) -> None:
+        """Build connectivity and distribute independent islands across solver blocks."""
+        # --- Copy elements into the 2D UF input. ---
+        # Chain-edge injection runs *after* this, atomically claiming
+        # whole rows past num_active_constraints.
+        wp.launch(
+            _phoenx_copy_elements_to_int2d_kernel,
+            dim=self._constraint_capacity,
+            inputs=[
+                self._elements,
+                self._num_active_constraints,
+                wp.int32(self.num_bodies),
+                self.bodies,
+                self._island_active,
+            ],
+            outputs=[self._island_interaction_bodies],
+            device=self.device,
+        )
+
+        if self._sleeping_enabled:
+            wp.launch(
+                _phoenx_inject_chain_edges_kernel,
+                dim=self.num_bodies,
+                inputs=[
+                    self.bodies,
+                    self._island_active,
+                    wp.int32(self._island_interaction_bodies.shape[0]),
+                ],
+                outputs=[self._island_interaction_bodies, self._uf_num_interactions],
+                device=self.device,
+            )
+
+        # --- Build islands. Single UF pass over (elements + chain edges). ---
+        self._island_builder.build_islands(
+            self._island_interaction_bodies,
+            self._uf_num_interactions if self._sleeping_enabled else self._num_active_constraints,
+            self._island_num_bodies_device,
+        )
+
+        if self._body_group.shape[0] > 0:
+            wp.launch(
+                _group_bodies_by_island_kernel,
+                dim=self.num_bodies,
+                inputs=[self.bodies, self._island_builder.set_nr, wp.int32(self._partition_count)],
+                outputs=[self._body_group],
+                device=self.device,
+            )
+
+        if self.num_joints > 0:
+            wp.launch(
+                _collapse_direct_equality_elements_kernel,
+                dim=self.num_joints,
+                inputs=[
+                    self._num_active_constraints,
+                    wp.int32(self.num_joints),
+                    self._joint_pgs_enabled,
+                ],
+                outputs=[self._elements],
+                device=self.device,
+            )
 
     def _run_sleeping_pass(
         self,
@@ -3559,41 +3622,7 @@ class PhoenXWorld:
             device=self.device,
         )
 
-        # --- Copy elements into the 2D UF input. ---
-        # Chain-edge injection runs *after* this, atomically claiming
-        # whole rows past num_active_constraints.
-        wp.launch(
-            _phoenx_copy_elements_to_int2d_kernel,
-            dim=self._constraint_capacity,
-            inputs=[
-                self._elements,
-                self._num_active_constraints,
-                wp.int32(self.num_bodies),
-                self.bodies,
-                self._island_active,
-            ],
-            outputs=[self._island_interaction_bodies],
-            device=self.device,
-        )
-
-        wp.launch(
-            _phoenx_inject_chain_edges_kernel,
-            dim=self.num_bodies,
-            inputs=[
-                self.bodies,
-                self._island_active,
-                wp.int32(self._island_interaction_bodies.shape[0]),
-            ],
-            outputs=[self._island_interaction_bodies, self._uf_num_interactions],
-            device=self.device,
-        )
-
-        # --- Build islands. Single UF pass over (elements + chain edges). ---
-        self._island_builder.build_islands(
-            self._island_interaction_bodies,
-            self._uf_num_interactions,
-            self._sleeping_num_bodies_device,
-        )
+        self._build_contact_islands()
 
         # --- Per-compact lowest awake body id (for the stamp). ---
         wp.launch(
@@ -3653,15 +3682,6 @@ class PhoenXWorld:
             device=self.device,
         )
 
-        if self._body_group.shape[0] > 0:
-            wp.launch(
-                _group_bodies_by_island_kernel,
-                dim=self.num_bodies,
-                inputs=[self.bodies, self._island_builder.set_nr, wp.int32(self._partition_count)],
-                outputs=[self._body_group],
-                device=self.device,
-            )
-
         # --- Collapse sleeping body slots in _elements for the partitioner. ---
         wp.launch(
             _phoenx_collapse_sleeping_elements_kernel,
@@ -3674,18 +3694,6 @@ class PhoenXWorld:
             outputs=[self._elements],
             device=self.device,
         )
-        if self.num_joints > 0:
-            wp.launch(
-                _collapse_direct_equality_elements_kernel,
-                dim=self.num_joints,
-                inputs=[
-                    self._num_active_constraints,
-                    wp.int32(self.num_joints),
-                    self._joint_pgs_enabled,
-                ],
-                outputs=[self._elements],
-                device=self.device,
-            )
 
     def _mass_splitting_broadcast(self) -> None:
         """Fan body / particle state into every copy-state slot at substep
