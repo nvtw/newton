@@ -1027,6 +1027,12 @@ class BroadPhaseSAP:
         self.sap_chunk_cumulative_sum = wp.zeros(total_elements, dtype=wp.int64, device=device)
         self.sap_cumulative_sum = wp.zeros(total_elements, dtype=wp.int64, device=device)
         self.sap_sweep_mode = wp.zeros(1, dtype=wp.int32, device=device)
+        # Both scans run serially and can share storage. Older Warp versions
+        # allocate internally and cannot capture SAP inside conditional bodies.
+        self._scan_kwargs = {}
+        if hasattr(wp.utils, "array_scan_temp_storage_size"):
+            scan_bytes = wp.utils.array_scan_temp_storage_size(total_elements, wp.int64, device)
+            self._scan_kwargs["temp_storage"] = wp.empty(scan_bytes, dtype=wp.uint8, device=device)
 
         # Segment indices for the multi-world segmented sort
         # [0, max_shapes_per_world, 2*max_shapes_per_world, ..., world_count*max_shapes_per_world]
@@ -1124,7 +1130,7 @@ class BroadPhaseSAP:
             device=device,
             record_tape=False,
         )
-        wp.utils.array_scan(self.sap_range, self.sap_cumulative_sum, True)
+        wp.utils.array_scan(self.sap_range, self.sap_cumulative_sum, True, **self._scan_kwargs)
         if self._adaptive_sweep:
             wp.launch(
                 kernel=_sap_chunk_count_kernel,
@@ -1133,7 +1139,7 @@ class BroadPhaseSAP:
                 device=device,
                 record_tape=False,
             )
-            wp.utils.array_scan(self.sap_chunk_count, self.sap_chunk_cumulative_sum, True)
+            wp.utils.array_scan(self.sap_chunk_count, self.sap_chunk_cumulative_sum, True, **self._scan_kwargs)
             wp.launch(
                 kernel=_sap_select_sweep_kernel,
                 dim=1,
