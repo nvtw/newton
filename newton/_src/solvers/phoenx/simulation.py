@@ -4664,8 +4664,8 @@ class PhoenXWorld:
         island, as far as the groups go, sweeps its few rows on its own. Each island keeps
         the colors and the order it had.
         """
-        # A fixed small grid leaves multiprocessors idle on larger GPUs.
-        groups = max(_ISLAND_ROW_GROUPS, self.device.sm_count if self.device.is_cuda else 0)
+        # Two blocks per multiprocessor can hide each other's color-barrier stalls.
+        groups = max(_ISLAND_ROW_GROUPS, 2 * self.device.sm_count if self.device.is_cuda else 0)
         self._allocate_partition(groups)
         self._body_group = wp.full(self.num_bodies, -1, dtype=wp.int32, device=self.device)
 

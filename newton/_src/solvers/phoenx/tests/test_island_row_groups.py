@@ -74,7 +74,7 @@ class TestIslandRowGroups(unittest.TestCase):
                 grouped, solver = _run(None, sleeping_threshold=sleeping_threshold)
                 world = solver.world
                 self.assertEqual(world._multi_world_scheduler, "block_world")
-                self.assertGreaterEqual(world._partition_count, world.device.sm_count)
+                self.assertGreaterEqual(world._partition_count, 2 * world.device.sm_count)
                 # Rows really went to several blocks.
                 self.assertGreater(int(np.count_nonzero(world._per_world_element_count.numpy())), 1)
                 single, _ = _run(1, sleeping_threshold=sleeping_threshold)
