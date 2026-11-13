@@ -1,0 +1,1 @@
+Optimize dodecahedral contact-normal bin lookup using scalar constants and fixed search ranges, preserving the existing twelve-bin selection policy and 100-slot spatial depth budget. No API or scene migration is required.
