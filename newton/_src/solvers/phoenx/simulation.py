@@ -4634,9 +4634,9 @@ class PhoenXWorld:
         if kind == "auto":
             kind, block_dim = self._auto_multi_world_scheduler()
         elif kind == "one_world":
-            # One world has nothing to pack into a block with other worlds: give its rows
-            # the 128 threads of a block of their own instead of the 32 of a fast-tail world.
-            wide = self.num_worlds == 1 and self._block_world_supported() and not self._contact_patch_enabled
+            # Give each world a full block. The solver selects this policy for a single
+            # scene, whose storage may also include the global-world slot.
+            wide = self._block_world_supported() and not self._contact_patch_enabled
             kind = "block_world" if wide else "fast_tail"
             if wide and getattr(self, "_island_builder", None) is not None:
                 self._group_rows_by_island()

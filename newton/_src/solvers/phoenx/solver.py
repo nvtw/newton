@@ -682,6 +682,8 @@ class SolverPhoenX(SolverBase):
         gravity_np = self._read_model_gravity_np(model)
 
         num_worlds = max(1, int(gravity_np.shape[0]))
+        # Per-world arrays include an extra slot for global entities.
+        scene_world_count = max(1, int(model.world_count))
         has_deformables = any(
             int(getattr(model, field, 0) or 0) > 0
             for field in ("particle_count", "tri_count", "edge_count", "tet_count")
@@ -700,7 +702,7 @@ class SolverPhoenX(SolverBase):
 
         step_layout = _resolve_auto_step_layout(
             step_layout=step_layout,
-            num_worlds=num_worlds,
+            num_worlds=scene_world_count,
             body_count=int(model.body_count),
             has_joints=has_constraint_joints,
             has_deformables=has_deformables,
@@ -832,9 +834,11 @@ class SolverPhoenX(SolverBase):
             articulation_mode in ("maximal_projected", "maximal_articulated", "hybrid", "reduced")
             and multi_world_scheduler == "auto"
         ):
-            # Fleets pack their worlds; the rigid bodies around the robots of one world get a
-            # block of their own (1024 warehouse robots: 5.97 -> 5.26 ms per step).
-            multi_world_scheduler = "one_world" if articulation_mode == "reduced" and num_worlds == 1 else "fast_tail"
+            # Pack independent scenes together; give one scene's free-body rows
+            # a full block, or one block per island when sleeping is enabled.
+            multi_world_scheduler = (
+                "one_world" if articulation_mode == "reduced" and scene_world_count == 1 else "fast_tail"
+            )
         if reduced_backend not in ("aba", "dense", "auto"):
             raise ValueError(f"reduced_backend must be 'aba', 'dense', or 'auto', got {reduced_backend!r}")
         self.reduced_articulation_path = reduced_articulation_path
@@ -1091,7 +1095,7 @@ class SolverPhoenX(SolverBase):
         # Body-pair grouping pays a sort/gather cost and reduces all shape-pair
         # patches between two bodies into one manifold. Keep an explicit opt-out
         # for disconnected or strongly nonconvex compound geometry.
-        body_pair_grouping_eligible = step_layout == "single_world" or num_worlds == 1
+        body_pair_grouping_eligible = step_layout == "single_world" or scene_world_count == 1
         if enable_body_pair_grouping and not body_pair_grouping_eligible:
             raise ValueError("enable_body_pair_grouping requires a single-scene layout")
         if solver_scheme == "tgs" and enable_body_pair_grouping is False:
@@ -1107,7 +1111,13 @@ class SolverPhoenX(SolverBase):
         use_body_pair_grouping = body_pair_grouping_eligible and (
             solver_scheme == "tgs"
             or enable_body_pair_grouping is True
-            or (enable_body_pair_grouping is None and has_compound_bodies)
+            # Preserve automatic manifold selection while allowing explicit
+            # grouping in a single scene with global-entity storage.
+            or (
+                enable_body_pair_grouping is None
+                and has_compound_bodies
+                and (step_layout == "single_world" or num_worlds == 1)
+            )
         )
 
         self.world = PhoenXWorld(
