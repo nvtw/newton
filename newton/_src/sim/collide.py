@@ -1865,9 +1865,9 @@ def _warn_full_surface_fallbacks(model: Model, capable: np.ndarray) -> None:
 
 
 @wp.kernel(enable_backward=False)
-def _reserve_contact_gap(authored: wp.array[float], reserve: float, gap: wp.array[float]):
+def _reserve_contact_gap(authored: wp.array[float], reserve: wp.array[float], gap: wp.array[float]):
     shape = wp.tid()
-    gap[shape] = wp.max(authored[shape], reserve)
+    gap[shape] = wp.max(authored[shape], 0.5 * reserve[0])
 
 
 class CollisionPipeline:
@@ -2426,6 +2426,7 @@ class CollisionPipeline:
         self.speculative_contact_velocity_filter = speculative_contact_velocity_filter
         self._scheduled_shape_gap = None
         self._scheduled_gap_active = False
+        self._scheduled_contact_reserve = None
         contact_writer = write_contact_speculative if self._speculative_enabled else write_contact
         if self._speculative_enabled and not speculative_contact_velocity_filter:
             contact_writer = write_contact_geometric
@@ -3787,7 +3788,7 @@ class CollisionPipeline:
             wp.launch(
                 _reserve_contact_gap,
                 dim=model.shape_count,
-                inputs=[model.shape_gap, 0.5 * float(self.speculative_contact_gap_max)],
+                inputs=[model.shape_gap, self._scheduled_contact_reserve],
                 outputs=[shape_gap],
                 device=self.device,
                 record_tape=False,
