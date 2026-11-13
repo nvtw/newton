@@ -1864,12 +1864,6 @@ def _warn_full_surface_fallbacks(model: Model, capable: np.ndarray) -> None:
     )
 
 
-@wp.kernel(enable_backward=False)
-def _reserve_contact_gap(authored: wp.array[float], reserve: wp.array[float], gap: wp.array[float]):
-    shape = wp.tid()
-    gap[shape] = wp.max(authored[shape], 0.5 * reserve[0])
-
-
 class CollisionPipeline:
     """
     Full-featured collision pipeline with GJK/MPR narrow phase and pluggable broad phase.
@@ -2424,9 +2418,6 @@ class CollisionPipeline:
         self.speculative_contact_gap_max = speculative_contact_gap_max
         self._speculative_enabled = speculative_contact_gap_max is not None
         self.speculative_contact_velocity_filter = speculative_contact_velocity_filter
-        self._scheduled_shape_gap = None
-        self._scheduled_gap_active = False
-        self._scheduled_contact_reserve = None
         contact_writer = write_contact_speculative if self._speculative_enabled else write_contact
         if self._speculative_enabled and not speculative_contact_velocity_filter:
             contact_writer = write_contact_geometric
@@ -3783,21 +3774,6 @@ class CollisionPipeline:
             search_gap = model.shape_gap
 
         shape_gap = model.shape_gap
-        if self._scheduled_gap_active:
-            shape_gap = self._scheduled_shape_gap
-            wp.launch(
-                _reserve_contact_gap,
-                dim=model.shape_count,
-                inputs=[model.shape_gap, self._scheduled_contact_reserve],
-                outputs=[shape_gap],
-                device=self.device,
-                record_tape=False,
-            )
-            search_gap = shape_gap
-            speculative_active = False
-            # Keep the horizon for predictive manifold reduction: nearby
-            # receding features must not displace approaching mesh/SDF features.
-
         # Rigid contact detection -- broad phase + narrow phase.
         # These kernels hardcode record_tape=False internally so they are
         # never captured on an active wp.Tape.  The differentiable
@@ -3843,9 +3819,7 @@ class CollisionPipeline:
             record_tape=False,
         )
 
-        # Scheduled passes need velocities for reduction, but their AABBs
-        # already include the full distance reserve.
-        if speculative_active or self._scheduled_gap_active:
+        if speculative_active:
             wp.launch(
                 kernel=compute_shape_velocities,
                 dim=model.shape_count,
@@ -3860,7 +3834,7 @@ class CollisionPipeline:
                     model.shape_collision_radius,
                     shape_gap,
                     collision_update_dt,
-                    0.0 if self._scheduled_gap_active else max_speculative_extension,
+                    max_speculative_extension,
                 ],
                 outputs=[
                     self._shape_linear_velocity,
@@ -3923,7 +3897,6 @@ class CollisionPipeline:
             shape_source_ptr=model.shape_source_ptr,
             shape_sdf_index=model._shape_sdf_index,
             shape_gap=search_gap,
-            # The base gap, or the reserved gap of a scheduled pass.
             shape_base_gap=shape_gap,
             shape_collision_radius=model.shape_collision_radius,
             shape_flags=model.shape_flags,
