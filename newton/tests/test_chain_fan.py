@@ -22,11 +22,22 @@ class TestChainFan(unittest.TestCase):
         self.assertTrue(all(len(chain) == 41 for chain in scene.chain_bodies))
         scene._check_pendants()
         self.assertFalse(scene.unlinked_pairs())
+        self.assertGreater(np.linalg.norm(scene.state_0.body_qd.numpy()[:, :3]), 0.1)
         initial_z = scene.state_0.body_q.numpy()[:, 2].copy()
         for _ in range(180):
             scene.step()
             scene.test_post_step()
         scene.test_final()
+        # Start at the beginning of the outward motion, where displacement is
+        # still zero, and verify that graph replay advances the anchor targets.
+        initial_anchors = scene.state_0.body_q.numpy()[scene.anchor_index, :3].copy()
+        scene.sim_time = 6.0
+        for _ in range(60):
+            scene.step()
+            scene.test_post_step()
+        displacement = scene.state_0.body_q.numpy()[scene.anchor_index, :3] - initial_anchors
+        np.testing.assert_allclose(np.linalg.norm(displacement[:, :2], axis=1), 0.0279296875, atol=2.0e-6)
+        scene._check_anchors()
         self.assertTrue(np.isfinite(scene.state_0.body_qd.numpy()).all())
         pendants = [chain[-1] for chain in scene.chain_bodies]
         self.assertTrue(np.all(scene.state_0.body_q.numpy()[pendants, 2] < initial_z[pendants] - 0.25))

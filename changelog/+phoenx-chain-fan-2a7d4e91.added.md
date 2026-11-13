@@ -1,1 +1,1 @@
-Add the PhoenX chain fan example with 240 chains of 40 interlocked mesh links, SDF contacts, and pendant and link integrity checks.
+Add a PhoenX chain fan example with 240 chains of 40 links, mesh SDF contacts, initial spin, outward-moving anchors, and a live contact count.
