@@ -111,7 +111,7 @@ class TestBottlingPlant(unittest.TestCase):
         self.assertEqual(int(solver.dynamics.error_count.numpy()[0]), 0)
 
     def test_scaled_belt_preserves_metres_per_second(self):
-        """Authored shape scaling must not change the inlet's 0.2 m/s speed."""
+        """Preserve a moving belt's authored hull and its scaled 0.2 m/s speed."""
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             path = root / "scenarios/line_sim/line_sim.usda"
@@ -128,7 +128,9 @@ def Xform "Plant" {
        bool physics:kinematicEnabled = true
        custom bool physxSurfaceVelocity:surfaceVelocityEnabled = true
        def Mesh "Collider" (prepend apiSchemas = ["PhysicsCollisionAPI"]) {
-        point3f[] points = [(-0.5,-0.5,0), (0.5,-0.5,0), (0.5,0.5,0), (-0.5,0.5,0)]
+        uniform token physics:approximation = "convexHull"
+        point3f[] points = [(-0.5,-0.5,-0.01), (0.5,-0.5,-0.01), (0.5,0.5,-0.01), (-0.5,0.5,-0.01),
+                           (-0.5,-0.5,0.01), (0.5,-0.5,0.01), (0.5,0.5,0.01), (-0.5,0.5,0.01)]
         int[] faceVertexCounts = [4]
         int[] faceVertexIndices = [0,1,2,3]
         double3 xformOp:scale = (4,0.05,1)
@@ -154,6 +156,18 @@ def Xform "Plant" {
             np.testing.assert_allclose(
                 velocities.mean(axis=0) * scene.builder.shape_scale[shape], (0.2, 0.0, 0.0), atol=1e-7
             )
+            # Convex cooking uses all points, even when source triangles only
+            # describe the bottom. Surface velocity must not bypass cooking.
+            body = scene.builder.add_body(xform=wp.transform(wp.vec3(0, 0, 0.02), wp.quat_identity()))
+            scene.builder.add_shape_box(body, hx=0.01, hy=0.01, hz=0.01)
+            model = scene.builder.finalize()
+            pipeline = newton.CollisionPipeline(model)
+            contacts = pipeline.contacts()
+            pipeline.collide(model.state(), contacts)
+            count = int(contacts.rigid_contact_count.numpy()[0])
+            self.assertGreater(count, 0, "the authored convex belt must have a top support face")
+            self.assertTrue(np.all(contacts.rigid_contact_normal.numpy()[:count, 2] > 0.99))
+            np.testing.assert_allclose(contacts.rigid_contact_point0.numpy()[:count, 2], 0.01, atol=1e-5)
 
     def test_position_drive_after_free_root(self):
         """A case clamp still receives its position command after a free root."""

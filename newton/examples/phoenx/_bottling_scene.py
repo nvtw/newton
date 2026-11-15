@@ -290,6 +290,10 @@ def load_plant(asset_root: Path, *, cutaway=True, visuals=True, motor_off=False)
                 mesh.com = wp.vec3(np.asarray(centered.com) + center)
                 mesh.inertia = centered.inertia
             if velocity is not None:
+                if _value(prim, "physics:approximation", "none") == "convexHull":
+                    # Moving surfaces use triangle contacts for their velocity
+                    # field, but must still represent the authored cooked hull.
+                    mesh = mesh.compute_convex_hull()
                 mesh = newton.Mesh(mesh.vertices, mesh.indices, compute_inertia=False, enable_surface_velocity=True)
                 linear, angular, shape_pose, scale, belt_label = velocity
                 rotation = np.asarray(wp.quat_to_matrix(wp.quat(shape_pose[3:]))).reshape(3, 3)
