@@ -1293,7 +1293,11 @@ contact accuracy are still being investigated.
       <br><b>240 chains of 40 mesh links</b>
       <br><code>python -m newton.examples phoenx_chain_fan</code>
     </td>
-    <td align="center" width="33%"></td>
+    <td align="center" width="33%">
+      <img width="320" src="docs/images/examples/example_phoenx_bottling_plant.jpg" alt="PhoenX bottling plant">
+      <br><b>Full bottling plant</b>
+      <br><code>python -m newton.examples phoenx_bottling_plant</code>
+    </td>
   </tr>
 </table>
 

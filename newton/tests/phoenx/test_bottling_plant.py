@@ -1,0 +1,392 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
+# SPDX-License-Identifier: Apache-2.0
+
+"""Check the example's USD adapter without requiring the private plant assets."""
+
+import tempfile
+import unittest
+from pathlib import Path
+
+import numpy as np
+import warp as wp
+
+import newton
+from newton.examples.phoenx._bottling_control import _seal_cases, _target_coordinates
+from newton.examples.phoenx._bottling_io import _case_drives, _photoeyes
+from newton.examples.phoenx._bottling_scene import load_plant
+from newton.tests.unittest_utils import USD_AVAILABLE
+
+if USD_AVAILABLE:
+    from pxr import Usd, UsdGeom, UsdPhysics
+
+
+@unittest.skipUnless(USD_AVAILABLE, "Requires usd-core")
+class TestBottlingPlant(unittest.TestCase):
+    def test_grasp_ray_respects_physical_reach(self):
+        """Acquisition requires a real surface hit within the authored 6 mm."""
+        mesh = newton.Mesh.create_box(0.03, 0.03, 0.115, compute_inertia=False)
+        mesh_id = mesh.finalize()
+        # Exercise partial warps and products assigned to different ray lanes.
+        product_count, sensor_count = 37, 77
+        origins = np.asarray(
+            [(0.1 * ((i * 7) % product_count), 0.0, 0.2305) for i in range(sensor_count)], dtype=np.float32
+        )
+        origins[1::3, 2] = 0.24
+        origins[2::3, 0] += 0.035
+        hits = wp.zeros((sensor_count // 7, 7), dtype=float)
+        wp.launch(
+            _photoeyes,
+            dim=(sensor_count, 32),
+            block_dim=32,
+            inputs=[
+                wp.array(
+                    [wp.transform(wp.vec3(0.1 * i, 0.0, 0.0), wp.quat_identity()) for i in range(product_count)],
+                    dtype=wp.transform,
+                ),
+                wp.array(np.arange(product_count), dtype=int),
+                wp.array(origins, dtype=wp.vec3),
+                wp.array([(0.0, 0.0, -1.0)] * sensor_count, dtype=wp.vec3),
+                wp.full(sensor_count, 0.006, dtype=float),
+                wp.array([mesh_id], dtype=wp.uint64),
+                wp.array([wp.transform(wp.vec3(0.0, 0.0, 0.115), wp.quat_identity())], dtype=wp.transform),
+                wp.array([(1.0, 1.0, 1.0)], dtype=wp.vec3),
+                7,
+                hits,
+            ],
+        )
+        np.testing.assert_array_equal(hits.numpy().reshape(-1), np.arange(sensor_count) % 3 == 0)
+
+    @unittest.skipUnless(wp.is_cuda_available(), "Runtime sealing requires CUDA")
+    def test_tape_bonds_require_closed_flaps(self):
+        """Open flaps stay free; closed, taped flaps resist hinge torque."""
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        root = builder.add_link(mass=0.2, inertia=wp.mat33(np.eye(3) * 0.01))
+        joints = [builder.add_joint_fixed(-1, root)]
+        for i, point in enumerate(((0.2, 0.0, 0.0), (-0.2, 0.0, 0.0), (0.0, 0.2, 0.0), (0.0, -0.2, 0.0))):
+            rotation = wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), np.pi / 2) if i == 0 else wp.quat_identity()
+            flap = builder.add_link(
+                xform=wp.transform(wp.vec3(point), rotation), mass=0.015, inertia=wp.mat33(np.eye(3) * 0.001)
+            )
+            joint = builder.add_joint_revolute(
+                root, flap, axis=newton.Axis.X, parent_xform=wp.transform(wp.vec3(point), wp.quat_identity())
+            )
+            joints.append(joint)
+            if i == 0:
+                builder.joint_q[builder.joint_q_start[joint]] = np.pi / 2
+        builder.add_articulation(joints)
+        builder.reserve_dynamic_capacity(joints=4)
+        model = builder.finalize()
+        exact = np.zeros(model.joint_count, dtype=bool)
+        exact[joints] = True
+        pipeline = newton.CollisionPipeline(model, contact_matching="sticky")
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            collision_pipeline=pipeline,
+            joint_mode="maximal_pgs",
+            step_layout="single_world",
+            direct_joint_mask=exact,
+            substeps=4,
+            solver_iterations=4,
+        )
+        state = model.state()
+        bodies = wp.array([[0, 1, 2, 3, 4]], dtype=int)
+        requests, sealed = wp.ones(1, dtype=int), wp.zeros(1, dtype=int)
+        attachments = wp.full((1, 4), -1, dtype=int)
+        inputs = [solver.dynamics.data, state.body_q, state.body_qd, bodies, requests, sealed, attachments]
+        wp.launch(_seal_cases, dim=1, inputs=inputs)
+        self.assertEqual(int(sealed.numpy()[0]), 0)
+        np.testing.assert_array_equal(attachments.numpy(), -1)
+        poses = state.body_q.numpy()
+        poses[1, 3:] = (0.0, 0.0, 0.0, 1.0)
+        state.body_q.assign(poses)
+        wp.launch(_seal_cases, dim=1, inputs=inputs)
+        self.assertEqual(int(sealed.numpy()[0]), 1)
+        self.assertTrue((attachments.numpy() >= 0).all())
+        force = np.zeros((model.body_count, 6), dtype=np.float32)
+        force[1, 3] = 0.01
+        for _ in range(20):
+            state.body_f.assign(force)
+            solver.step(state, state, model.control(), None, 1.0 / 60.0)
+        np.testing.assert_allclose(state.body_q.numpy()[1, 3:], (0.0, 0.0, 0.0, 1.0), atol=1e-3)
+        self.assertEqual(int(solver.dynamics.error_count.numpy()[0]), 0)
+
+    def test_scaled_belt_preserves_metres_per_second(self):
+        """Authored shape scaling must not change the inlet's 0.2 m/s speed."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "scenarios/line_sim/line_sim.usda"
+            path.parent.mkdir(parents=True)
+            path.write_text("""#usda 1.0
+(defaultPrim = "Plant"; metersPerUnit = 1; upAxis = "Z")
+def Xform "Plant" {
+ def Xform "Line" {
+  def Scope "Packers" {
+   def Xform "PU1" {
+    def Xform "Inlet" {
+     def Scope "Belts" {
+      def Xform "IN_A" (prepend apiSchemas = ["PhysicsRigidBodyAPI"]) {
+       bool physics:kinematicEnabled = true
+       custom bool physxSurfaceVelocity:surfaceVelocityEnabled = true
+       def Mesh "Collider" (prepend apiSchemas = ["PhysicsCollisionAPI"]) {
+        point3f[] points = [(-0.5,-0.5,0), (0.5,-0.5,0), (0.5,0.5,0), (-0.5,0.5,0)]
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0,1,2,3]
+        double3 xformOp:scale = (4,0.05,1)
+        uniform token[] xformOpOrder = ["xformOp:scale"]
+       }
+      }
+     }
+    }
+   }
+  }
+ }
+}
+""")
+            vendor = root / "sim/exts/bottling_plant.runtime/bottling_plant_runtime/vendor"
+            for module, data in (("ifm_v01", '{"belts":[],"speeds_mps":{}}'), ("ctp_v01", '{"modules":{}}')):
+                folder = vendor / module
+                folder.mkdir(parents=True)
+                (folder / "interface.json").write_text(data)
+            scene = load_plant(root, cutaway=False, visuals=False)
+            self.assertEqual(len(scene.belts), 1)
+            mesh, velocities, _ = scene.belts[0]
+            shape = scene.builder.shape_source.index(mesh)
+            np.testing.assert_allclose(
+                velocities.mean(axis=0) * scene.builder.shape_scale[shape], (0.2, 0.0, 0.0), atol=1e-7
+            )
+
+    def test_position_drive_after_free_root(self):
+        """A case clamp still receives its position command after a free root."""
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        free = builder.add_link(mass=1.0, inertia=wp.mat33(np.eye(3)))
+        builder.add_articulation([builder.add_joint_free(free)])
+        slider = builder.add_link(mass=1.0, inertia=wp.mat33(np.eye(3)))
+        joint = builder.add_joint_prismatic(
+            -1,
+            slider,
+            axis=newton.Axis.X,
+            target_ke=1000.0,
+            target_kd=50.0,
+            actuator_mode=newton.JointTargetMode.POSITION,
+        )
+        builder.add_articulation([joint])
+        model = builder.finalize()
+        dof = int(model.joint_qd_start.numpy()[joint])
+        coordinate = int(_target_coordinates(model)[dof])
+        self.assertNotEqual(dof, coordinate)
+        control, state = model.control(), model.state()
+        wp.launch(
+            _case_drives,
+            dim=1,
+            inputs=[
+                wp.array([dof], dtype=int),
+                wp.array([coordinate], dtype=int),
+                wp.array([0.1], dtype=float),
+                wp.zeros(1, dtype=float),
+                control.joint_target_q,
+                control.joint_target_qd,
+            ],
+        )
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            joint_mode="maximal_pgs",
+            step_layout="single_world",
+            substeps=2,
+            solver_iterations=2,
+        )
+        for _ in range(30):
+            state.clear_forces()
+            solver.step(state, state, control, None, 1.0 / 60.0)
+        self.assertAlmostEqual(float(state.body_q.numpy()[slider, 0]), 0.1, delta=1e-3)
+        np.testing.assert_allclose(state.body_q.numpy()[free], model.body_q.numpy()[free], atol=1e-6)
+
+    def test_composed_geometry_and_physics(self):
+        """Preserve inertial frames, static joint anchors, and point instancing."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "scenarios/line_sim/line_sim.usda"
+            path.parent.mkdir(parents=True)
+            stage = Usd.Stage.CreateNew(str(path))
+            layer = stage.GetRootLayer()
+            layer.ImportFromString("""#usda 1.0
+(
+    defaultPrim = "Plant"
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+def Xform "Plant" {
+    def Xform "Machine" {
+        double3 xformOp:translate = (4, 2, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+        def Xform "Mount" (prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]) {
+            double3 xformOp:translate = (0, 0, 1)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+            float physics:mass = 20
+            float3 physics:diagonalInertia = (1, 2, 3)
+            point3f physics:centerOfMass = (0, 0, 0.1)
+            def Cube "Collider" (prepend apiSchemas = ["PhysicsCollisionAPI"]) {
+                double size = 0.4
+            }
+        }
+        def Xform "Arm" (prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]) {
+            double3 xformOp:translate = (1, 0, 1)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+            float physics:mass = 2
+            float3 physics:diagonalInertia = (0.1, 0.2, 0.3)
+            def Cube "Collider" (prepend apiSchemas = ["PhysicsCollisionAPI"]) {
+                double size = 0.2
+            }
+        }
+        def PhysicsFixedJoint "Anchor" {
+            rel physics:body0 = </Plant/Machine>
+            rel physics:body1 = </Plant/Machine/Mount>
+            point3f physics:localPos0 = (0, 0, 1)
+        }
+        def PhysicsRevoluteJoint "Hinge" (prepend apiSchemas = ["PhysicsDriveAPI:angular"]) {
+            rel physics:body0 = </Plant/Machine/Mount>
+            rel physics:body1 = </Plant/Machine/Arm>
+            point3f physics:localPos0 = (1, 0, 0)
+            uniform token physics:axis = "Z"
+            float physics:lowerLimit = -45
+            float physics:upperLimit = 45
+            float drive:angular:physics:stiffness = 2
+            float drive:angular:physics:targetPosition = 10
+        }
+    }
+    def Xform "Flap" (prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]) {
+        float physics:mass = 0.015
+        def Cube "Collider" (prepend apiSchemas = ["PhysicsCollisionAPI"]) {
+            double size = 1
+            double3 xformOp:scale = (0.2, 0.08, 0.0015)
+            double3 xformOp:translate = (0.1, 0, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:scale"]
+        }
+    }
+    def PointInstancer "Copies" {
+        rel prototypes = </Plant/Copies/Prototype>
+        int[] protoIndices = [0, 0]
+        point3f[] positions = [(10, 0, 0), (20, 0, 0)]
+        def Xform "Prototype" {
+            double3 xformOp:translate = (1, 0, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate"]
+            def Mesh "Triangle" {
+                point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+                int[] faceVertexCounts = [3]
+                int[] faceVertexIndices = [0, 1, 2]
+                uniform token subdivisionScheme = "none"
+                color3f[] primvars:displayColor = [(0.2, 0.4, 0.6)]
+            }
+            def Mesh "Guide" {
+                point3f[] points = [(0, 0, 100), (1, 0, 100), (0, 1, 100)]
+                int[] faceVertexCounts = [3]
+                int[] faceVertexIndices = [0, 1, 2]
+                uniform token purpose = "guide"
+            }
+        }
+    }
+    def Scope "Sim" {
+        def Scope "Product" {
+            def Scope "Bottles" {
+                def Xform "Parked" (prepend apiSchemas = ["PhysicsRigidBodyAPI"]) {
+                    double3 xformOp:translate = (0, 0, -3)
+                    uniform token[] xformOpOrder = ["xformOp:translate"]
+                    def Cube "Collider" (prepend apiSchemas = ["PhysicsCollisionAPI"]) {}
+                }
+            }
+        }
+    }
+}
+""")
+            blade = UsdGeom.Xform.Define(stage, "/Plant/OffsetBlade").GetPrim()
+            UsdPhysics.RigidBodyAPI.Apply(blade)
+            UsdPhysics.MassAPI.Apply(blade).CreateMassAttr(0.35)
+            collider = UsdGeom.Mesh.Define(stage, "/Plant/OffsetBlade/Collider")
+            UsdPhysics.CollisionAPI.Apply(collider.GetPrim())
+            half = np.asarray((0.003, 0.06, 0.008))
+            corners = np.asarray(
+                [(-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1), (-1, -1, 1), (1, -1, 1), (1, 1, 1), (-1, 1, 1)]
+            )
+            collider.CreatePointsAttr((corners * half + (5.0, 0.1, 1.0)).tolist())
+            collider.CreateFaceVertexCountsAttr([3] * 12)
+            collider.CreateFaceVertexIndicesAttr(
+                [
+                    0,
+                    2,
+                    1,
+                    0,
+                    3,
+                    2,
+                    4,
+                    5,
+                    6,
+                    4,
+                    6,
+                    7,
+                    0,
+                    1,
+                    5,
+                    0,
+                    5,
+                    4,
+                    1,
+                    2,
+                    6,
+                    1,
+                    6,
+                    5,
+                    2,
+                    3,
+                    7,
+                    2,
+                    7,
+                    6,
+                    3,
+                    0,
+                    4,
+                    3,
+                    4,
+                    7,
+                ]
+            )
+            layer.Save()
+            scene = load_plant(root, cutaway=False, motor_off=True)
+            builder = scene.builder
+            self.assertEqual(len(scene.bodies), 4)
+            mount = scene.bodies["/Plant/Machine/Mount"]
+            np.testing.assert_allclose(builder.body_q[mount].p, (4, 2, 1))
+            self.assertEqual(builder.body_mass[mount], 20.0)
+            np.testing.assert_allclose(np.asarray(builder.body_inertia[mount]).reshape(3, 3), np.diag((1, 2, 3)))
+            np.testing.assert_allclose(builder.body_com[mount], (0, 0, 0.1), atol=1e-7)
+            anchor = scene.joints["/Plant/Machine/Anchor"]
+            np.testing.assert_allclose(builder.joint_X_p[anchor].p, (4, 2, 1))
+            hinge = scene.joints["/Plant/Machine/Hinge"]
+            dof = builder.joint_qd_start[hinge]
+            self.assertAlmostEqual(builder.joint_limit_lower[dof], -np.pi / 4)
+            self.assertAlmostEqual(builder.joint_target_q[dof], np.pi / 18)
+            flap = scene.bodies["/Plant/Flap"]
+            self.assertAlmostEqual(builder.body_mass[flap], 0.015, places=7)
+            np.testing.assert_allclose(builder.body_com[flap], (0.1, 0, 0), atol=1e-7)
+            dims = np.asarray((0.2, 0.08, 0.0015)) ** 2
+            expected = 0.015 / 12.0 * (dims.sum() - dims)
+            np.testing.assert_allclose(
+                np.diag(np.asarray(builder.body_inertia[flap]).reshape(3, 3)), expected, rtol=1e-6
+            )
+            blade = scene.bodies["/Plant/OffsetBlade"]
+            tensor = np.asarray(builder.body_inertia[blade]).reshape(3, 3)
+            expected = 0.35 / 3.0 * ((half**2).sum() - half**2)
+            np.testing.assert_allclose(np.diag(tensor), expected, rtol=2e-4)
+            self.assertGreater(float(np.linalg.eigvalsh(tensor).min()), 0.0)
+            np.testing.assert_allclose(builder.body_com[blade], (5.0, 0.1, 1.0), atol=1e-6)
+            copies = [i for i, name in enumerate(builder.shape_label) if name == "/Plant/Copies/instance"]
+            self.assertEqual(len(copies), 2)
+            self.assertIs(builder.shape_source[copies[0]], builder.shape_source[copies[1]])
+            positions = []
+            for shape in copies:
+                mesh = builder.shape_source[shape]
+                self.assertEqual(len(mesh.vertices), 3)
+                positions.append(np.min(mesh.vertices[:, 0]) + builder.shape_transform[shape].p[0])
+            np.testing.assert_allclose(positions, (11, 21))
+
+
+if __name__ == "__main__":
+    unittest.main()
