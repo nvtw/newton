@@ -14,6 +14,7 @@ import warp as wp
 from ..core.types import override
 from ..geometry.types import GeoType
 from .camera import Camera
+from .kernels import update_shape_xforms
 from .picking import Picking
 from .viewer import _DEFAULT_LAYER_ID, Layer, ViewerBase
 from .viewer_gui import ViewerGui
@@ -95,6 +96,35 @@ def _apply_optix_color_palette(
     ):
         color = palette[indices[index] % len(palette)]
     output[index] = color
+
+
+@wp.kernel
+def _packed_optix_colors(
+    model_colors: wp.array[wp.vec3],
+    slot_to_shape: wp.array[wp.int32],
+    indices: wp.array[wp.int32],
+    defaults: wp.array[wp.vec3],
+    eligible: wp.array[wp.int32],
+    ground: wp.array[wp.int32],
+    ground_color: wp.vec3,
+    palette: wp.array[wp.vec3],
+    raw_colors: wp.array[wp.vec3],
+    output: wp.array[wp.vec3],
+):
+    slot = wp.tid()
+    color = model_colors[slot_to_shape[slot]]
+    raw_colors[slot] = color
+    default = defaults[slot]
+    if ground[slot] != 0:
+        color = ground_color
+    elif (
+        eligible[slot] != 0
+        and wp.abs(color[0] - default[0]) <= 1.0e-6
+        and wp.abs(color[1] - default[1]) <= 1.0e-6
+        and wp.abs(color[2] - default[2]) <= 1.0e-6
+    ):
+        color = palette[indices[slot] % len(palette)]
+    output[slot] = color
 
 
 @wp.kernel
@@ -270,6 +300,7 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
         self._optix_palette_color_arrays: dict[str, wp.array[wp.vec3]] = {}
         self._optix_palette_array: wp.array[wp.vec3] | None = None
         self._shape_update_graphs = {}
+        self._packed_shape_updates = {}
         self._shape_update_graph_signature = None
         self._default_color_palette = self._validate_color_palette(
             self._DEFAULT_COLOR_PALETTE if default_color_palette is None else default_color_palette
@@ -423,6 +454,104 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
             len(self._shape_instances),
         )
 
+    def _log_shapes_packed(self, state) -> bool:
+        """Update packed model instances with a constant number of CUDA launches."""
+        packed = self._shape_instance_arrays
+        if not self.device.is_cuda or not packed or not len(packed["xforms"]):
+            return False
+        signature = (
+            self._shape_update_signature(),
+            id(packed),
+            self._default_roughness,
+            self._ground_roughness,
+            id(self._optix_palette_array),
+        )
+        cached = self._packed_shape_updates.get(self._active_layer_id)
+        changed = any(b.colors_changed or b.opacities_changed for b in self._shape_instances.values())
+        if self._scene_dirty or self.model_changed or changed or cached is None or cached[0] != signature:
+            ViewerBase._log_shapes(self, state)
+            self._packed_shape_updates.pop(self._active_layer_id, None)
+            if not self._scene_dirty:
+                self._cache_packed_shape_updates(packed, signature)
+            return True
+
+        _, ids, material_ids, indices, defaults, eligible, ground, colors, properties = cached
+        wp.launch(
+            update_shape_xforms,
+            dim=len(ids),
+            inputs=[
+                packed["xforms"],
+                packed["parents"],
+                state.body_q,
+                packed["worlds"],
+                self.world_offsets,
+                self.layer.xform,
+            ],
+            outputs=[packed["world_xforms"]],
+            device=self.device,
+        )
+        wp.launch(
+            _packed_optix_colors,
+            dim=len(ids),
+            inputs=[
+                self.model.shape_color,
+                self._slot_to_shape_wp,
+                indices,
+                defaults,
+                eligible,
+                ground,
+                wp.vec3(*self._ground_color),
+                self._optix_palette_array,
+                packed["colors"],
+                colors,
+            ],
+            device=self.device,
+        )
+        self._api.set_instance_transform_arrays(ids, packed["world_xforms"], packed["scales"], self._global_transform)
+        self._api.set_instance_material_arrays(material_ids, colors, properties)
+        self._transforms_dirty = True
+        return True
+
+    def _cache_packed_shape_updates(self, packed, signature) -> None:
+        """Map packed Newton rows to the backend's stable instance/material IDs."""
+        ids, material_ids, indices, defaults, eligible, ground = [], [], [], [], [], []
+        properties = wp.empty(len(packed["xforms"]), dtype=wp.vec4, device=self.device)
+        offset = 0
+        for shapes in self._shape_instances.values():
+            count = len(shapes.model_shapes)
+            if not count:
+                continue
+            name = self._qualify_name(shapes.name)
+            batch = self._batches[name]
+            ids.extend(batch.instance_ids[:count])
+            material_ids.extend(batch.device_material_ids[:count])
+            is_ground = shapes.mesh in self._optix_ground_meshes
+            metadata = self._optix_palette_metadata.get(shapes.name)
+            if metadata is None:
+                metadata = (
+                    np.zeros(count, dtype=np.int32),
+                    np.zeros((count, 3), dtype=np.float32),
+                    np.zeros(count, bool),
+                )
+            indices.append(metadata[0])
+            defaults.append(metadata[1])
+            eligible.append(metadata[2])
+            ground.extend([int(is_ground)] * count)
+            source = self._device_material_batches[name][2]
+            wp.copy(properties, source, dest_offset=offset, count=count)
+            offset += count
+        self._packed_shape_updates[self._active_layer_id] = (
+            signature,
+            wp.array(ids, dtype=wp.int32, device=self.device),
+            wp.array(material_ids, dtype=wp.int32, device=self.device),
+            wp.array(np.concatenate(indices), dtype=wp.int32, device=self.device),
+            wp.array(np.concatenate(defaults), dtype=wp.vec3, device=self.device),
+            wp.array(np.concatenate(eligible).astype(np.int32), dtype=wp.int32, device=self.device),
+            wp.array(ground, dtype=wp.int32, device=self.device),
+            wp.empty(len(ids), dtype=wp.vec3, device=self.device),
+            properties,
+        )
+
     def _log_shapes_graphed(self, state) -> None:
         """Replay stable CUDA shape updates with one host launch."""
         signature = self._shape_update_signature()
@@ -460,7 +589,8 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
         self._last_state = state
         if self.model is None:
             return
-        self._log_shapes_graphed(state)
+        if not self._log_shapes_packed(state):
+            self._log_shapes_graphed(state)
         self._log_gaussian_shapes(state)
         self._log_non_shape_state(state)
         self.model_changed = False
@@ -780,6 +910,7 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
         if hasattr(self, "_optix_ground_subdivisions"):
             self._optix_ground_subdivisions.clear()
             self._optix_default_material_meshes.clear()
+            self._packed_shape_updates.clear()
             self._optix_model_shape_batches.clear()
             self._optix_palette_metadata.clear()
             self._optix_palette_device_metadata.clear()
@@ -830,6 +961,7 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
             for shapes in self._shape_instances.values()
             if int(shapes.geo_type) != int(GeoType.PLANE) and not self._has_authored_mesh_material(model, shapes)
         }
+        self._packed_shape_updates.pop(self._active_layer_id, None)
         self._optix_model_shape_batches = {shapes.name: shapes for shapes in self._shape_instances.values()}
         self._optix_palette_metadata.clear()
         self._optix_palette_device_metadata.clear()

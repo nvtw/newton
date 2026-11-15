@@ -164,6 +164,69 @@ class TestViewerOptix(unittest.TestCase):
                         viewer, "shape", "mesh", xforms, None, None, None, hidden=False
                     )
 
+    @unittest.skipIf(warp_optix is None or not wp.is_cuda_available(), "Requires warp-optix and CUDA")
+    def test_packed_model_updates_preserve_live_state(self):
+        """Batch different meshes while retaining world offsets and live colors."""
+        world = newton.ModelBuilder()
+        for i in range(3):
+            body = world.add_body(xform=wp.transform(wp.vec3(float(i), 0.0, 1.0), wp.quat_identity()))
+            world.add_shape_box(body, hx=0.1 + 0.01 * i, hy=0.1, hz=0.1)
+        builder = newton.ModelBuilder()
+        builder.replicate(world, 2)
+        builder.add_ground_plane()
+        model = builder.finalize(device="cuda:0")
+        viewer = ViewerOptix(
+            width=64, height=48, device="cuda:0", headless=True, enable_imgui=False, enable_dlss_rr=False
+        )
+        try:
+            viewer.set_model(model)
+            viewer.set_world_offsets((4.0, 0.0, 0.0))
+            state = model.state()
+            for _ in range(4):
+                viewer.begin_frame(0.0)
+                viewer.log_state(state)
+                viewer.end_frame()
+            poses = state.body_q.numpy()
+            poses[:, 2] += 0.25
+            state.body_q.assign(poses)
+            colors = np.tile((0.2, 0.7, 0.4), (model.shape_count, 1)).astype(np.float32)
+            model.shape_color.assign(colors)
+            with (
+                mock.patch.object(
+                    viewer._api, "set_instance_transform_arrays", wraps=viewer._api.set_instance_transform_arrays
+                ) as transforms,
+                mock.patch.object(
+                    viewer._api, "set_instance_material_arrays", wraps=viewer._api.set_instance_material_arrays
+                ) as materials,
+            ):
+                viewer.begin_frame(1.0 / 60.0)
+                viewer.log_state(state)
+                viewer.end_frame()
+                self.assertEqual(transforms.call_count, 1)
+                self.assertEqual(materials.call_count, 1)
+            packed = viewer._shape_instance_arrays
+            expected = model.shape_transform.numpy()[viewer._slot_to_shape].copy()
+            parents = model.shape_body.numpy()[viewer._slot_to_shape]
+            movable = parents >= 0
+            expected[movable, :3] += poses[parents[movable], :3]
+            worlds = model.shape_world.numpy()[viewer._slot_to_shape]
+            local = worlds >= 0
+            expected[local, :3] += viewer.world_offsets.numpy()[worlds[local]]
+            np.testing.assert_allclose(packed["world_xforms"].numpy(), expected, atol=1e-6)
+            cached = viewer._packed_shape_updates[viewer._active_layer_id]
+            expected_colors = colors[viewer._slot_to_shape].copy()
+            expected_colors[cached[-3].numpy() != 0] = viewer._ground_color
+            np.testing.assert_allclose(cached[-2].numpy(), expected_colors, atol=1e-6)
+            np.testing.assert_allclose(viewer.model_shape_color.numpy(), colors[viewer._slot_to_shape], atol=1e-6)
+            for visible in (False, True):
+                viewer.set_layer_visible(viewer._active_layer_id, visible)
+                viewer.begin_frame(0.0)
+                viewer.log_state(state)
+                viewer.end_frame()
+                self.assertTrue(all(b.hidden != visible for b in viewer._batches.values()))
+        finally:
+            viewer.close()
+
     def test_simulation_render_overlap_capability(self):
         """Advertise overlap only when CUDA nonblocking streams are available."""
         viewer = ViewerOptix.__new__(ViewerOptix)

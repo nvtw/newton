@@ -807,6 +807,7 @@ class ViewerBase(ABC):
         layer._shape_to_slot: np.ndarray | None = None
         layer._slot_to_shape: np.ndarray | None = None
         layer._slot_to_shape_wp: wp.array | None = None
+        layer._shape_instance_arrays: dict[str, wp.array] = {}
         layer._shape_to_batch: list[ViewerBase.ShapeInstances | None] | None = None
         # Render geometry of each variant shape and the variant rows, cached for variant selections.
         layer._variant_shape_render: dict[int, tuple[int, str, int, wp.vec4, bool]] | None = None
@@ -998,6 +999,7 @@ class ViewerBase(ABC):
     def _rebuild_shapes(self) -> None:
         """Regroup the model shapes into instance batches, preserving the geometry cache."""
         self._shape_instances = {}
+        self._shape_instance_arrays = {}
         self._gaussian_instances = []
         self._sdf_isomesh_instances = {}
         self._sdf_isomesh_populated = False
@@ -3397,6 +3399,7 @@ class ViewerBase(ABC):
                 # Created for variant rows after population.
                 batch._freeze_populated()
         if not batches:
+            self._shape_instance_arrays = {}
             self.model_shape_color = None
             self.model_shape_opacity = None
             self._shape_to_slot = np.full(len(self._shape_to_batch), -1, dtype=np.int32)
@@ -3435,6 +3438,7 @@ class ViewerBase(ABC):
             "worlds": (upload("worlds", int), "int"),
             "world_xforms": (wp.zeros(total_instances, dtype=wp.transform, device=self.device), "transform"),
         }
+        self._shape_instance_arrays = {name: values for name, (values, _) in packed.items()}
         self.model_shape_color = packed["colors"][0] if total_instances else None
         self.model_shape_opacity = packed["opacities"][0] if total_instances else None
 
