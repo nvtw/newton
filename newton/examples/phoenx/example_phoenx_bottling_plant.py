@@ -11,7 +11,7 @@ access; see ``newton/examples/assets/bottling_plant/README.md``.
 
 Success criteria:
 - Body poses and velocities remain finite.
-- The factory's bottles remain above the floor.
+- Bottles stay off the factory floor, and sealed cases retain all 12 bottles.
 - Joint attachments remain within their physical travel.
 - Inlet, case-line, sealer, and palletizer controllers remain free of faults.
 - Runs of at least 22 simulated seconds fill a case at each of the eight packers.
@@ -264,6 +264,33 @@ class Example:
         assert maximum < 0.025, f"source joint anchor drifted {maximum:.4f} m"
         return maximum
 
+    def _check_products(self, poses):
+        bottles = poses[self.bottle_bodies]
+        # Even floor-level pallets support the case contents above 0.1 m.
+        assert float(bottles[:, 2].min()) > 0.1, "a bottle escaped the line or its case"
+        if self.controller is None:
+            return
+
+        def rotate(rotation, vectors):
+            cross = 2.0 * np.cross(rotation[..., :3], vectors)
+            return vectors + rotation[..., 3, None] * cross + np.cross(rotation[..., :3], cross)
+
+        centers = bottles[:, :3] + rotate(bottles[:, 3:], self.model.body_com.numpy()[self.bottle_bodies])
+        design = self.controller.case_modules.design.CASE
+        half_width = np.array([design["L"], design["W"]]) * 0.5
+        expected = int(np.prod(design["cells"]))
+        sealed = self.controller.sealed.numpy()
+        for index, bodies in enumerate(self.controller.case_body_groups.values()):
+            if not sealed[index]:
+                continue
+            case = poses[bodies[0]]
+            inverse = case[3:] * np.array([-1.0, -1.0, -1.0, 1.0])
+            local = rotate(inverse, centers - case[:3])
+            inside = np.all(np.abs(local[:, :2]) < half_width, axis=1) & (local[:, 2] > 0.0)
+            count = np.count_nonzero(inside & (local[:, 2] < design["H"]))
+            label = self.model.body_label[bodies[0]]
+            assert count == expected, f"sealed case {label} contains {count} bottles, expected {expected}"
+
     def test_post_step(self):
         """Check the complete body state once per simulated second."""
         if round(self.sim_time / self.frame_dt) % 60:
@@ -271,7 +298,7 @@ class Example:
         poses = self.state_0.body_q.numpy()
         assert np.isfinite(poses).all(), "nonfinite body pose"
         assert np.isfinite(self.state_0.body_qd.numpy()).all(), "nonfinite body velocity"
-        assert float(poses[self.bottle_bodies, 2].min()) > -0.05, "a bottle fell through the factory floor"
+        self._check_products(poses)
 
     def test_final(self):
         """Check finite states and report bottle motion and contact workload."""
@@ -280,7 +307,7 @@ class Example:
         assert np.isfinite(self.state_0.body_qd.numpy()).all(), "nonfinite body velocity"
         drift = self._check_attachments(poses)
         bottles = poses[self.bottle_bodies]
-        assert float(bottles[:, 2].min()) > -0.05, "a bottle fell through the factory floor"
+        self._check_products(poses)
         travel = np.linalg.norm(bottles[:, :2] - self.initial_poses[self.bottle_bodies, :2], axis=1)
         print(
             f"PhoenX bottling plant: {len(bottles)} bottles, max travel {travel.max():.3f} m, "
