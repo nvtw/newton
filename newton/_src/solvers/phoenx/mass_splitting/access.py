@@ -29,7 +29,7 @@ from newton._src.solvers.phoenx.access_mode import (
     synchronize_pose_velocity,
     synchronize_position_velocity,
 )
-from newton._src.solvers.phoenx.body import BodyContainer, body_set_access_mode
+from newton._src.solvers.phoenx.body import MOTION_KINEMATIC, BodyContainer, body_set_access_mode
 from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
 from newton._src.solvers.phoenx.particle import ParticleContainer, particle_set_access_mode
 
@@ -421,6 +421,8 @@ def write_velocity_unified(
     value: wp.vec3f,
 ):
     """Write linear velocity back to the slot or direct storage."""
+    if node_id < num_bodies and bodies.motion_type[node_id] == MOTION_KINEMATIC:
+        return
     if slot < wp.int32(0):
         if node_id < num_bodies:
             bodies.velocity[node_id] = value
@@ -439,6 +441,8 @@ def write_angular_velocity_unified(
     value: wp.vec3f,
 ):
     """Write angular velocity back to the slot or direct storage (body-only)."""
+    if bodies.motion_type[node_id] == MOTION_KINEMATIC:
+        return
     if slot < wp.int32(0):
         bodies.angular_velocity[node_id] = value
         return

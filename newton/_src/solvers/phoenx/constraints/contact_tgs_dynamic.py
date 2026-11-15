@@ -152,14 +152,12 @@ def make_iterate(
             body_store_vw(bodies, b, v1, w1)
         else:
             if slot0 < 0:
-                bodies.velocity[a] = v0
-                bodies.angular_velocity[a] = w0
+                body_store_vw(bodies, a, v0, w0)
             else:
                 copies.velocity[slot0] = v0
                 copies.angular_velocity[slot0] = w0
             if slot1 < 0:
-                bodies.velocity[b] = v1
-                bodies.angular_velocity[b] = w1
+                body_store_vw(bodies, b, v1, w1)
             else:
                 copies.velocity[slot1] = v1
                 copies.angular_velocity[slot1] = w1

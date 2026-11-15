@@ -13,8 +13,53 @@ import warp as wp
 import newton
 
 
+@wp.kernel
+def _advance_platform(poses: wp.array[wp.transform], platform: int, speed: wp.array[float]):
+    pose = poses[platform]
+    poses[platform] = wp.transform(pose.p + wp.vec3(speed[0] / 60.0, 0.0, 0.0), pose.q)
+
+
 @unittest.skipUnless(wp.is_cuda_available(), "conveyor tests use CUDA graph capture")
 class TestConveyorSurface(unittest.TestCase):
+    def test_shared_kinematic_platform_contacts(self):
+        """Carry independent boxes without serializing their read-only belt."""
+        builder = newton.ModelBuilder()
+        cfg = newton.ModelBuilder.ShapeConfig(mu=0.8)
+        platform = builder.add_body(is_kinematic=True)
+        belt = newton.Mesh(
+            np.array([[-4, -4, 0.1], [4, -4, 0.1], [4, 4, 0.1], [-4, 4, 0.1]], dtype=np.float32),
+            np.array([0, 1, 2, 0, 2, 3], dtype=np.int32),
+            compute_inertia=False,
+            enable_surface_velocity=True,
+        )
+        builder.add_shape_mesh(platform, mesh=belt, cfg=cfg)
+        boxes = []
+        for y in np.linspace(-3.0, 3.0, 8):
+            body = builder.add_body(xform=wp.transform((0.0, float(y), 0.2), wp.quat_identity()))
+            builder.add_shape_box(body, hx=0.1, hy=0.1, hz=0.1, cfg=cfg)
+            boxes.append(body)
+        model = builder.finalize()
+        solver = newton.solvers.SolverPhoenX(model, step_layout="single_world", substeps=4)
+        state, next_state = model.state(), model.state()
+        belt.mesh.velocities.fill_(wp.vec3(1.0, 0.0, 0.0))
+        speed = wp.zeros(1, dtype=float)
+        contacts = model._collision_pipeline.contacts()
+        with wp.ScopedCapture() as capture:
+            wp.launch(_advance_platform, dim=1, inputs=[state.body_q, platform, speed])
+            solver.collide(state, contacts)
+            solver.step(state, next_state, None, contacts, 1.0 / 60.0)
+            wp.copy(state.body_q, next_state.body_q)
+            wp.copy(state.body_qd, next_state.body_qd)
+        for platform_speed in (0.0, 0.5):
+            speed.fill_(platform_speed)
+            for _ in range(60):
+                wp.capture_launch(capture.graph)
+            velocities = state.body_qd.numpy()
+            np.testing.assert_allclose(velocities[boxes, 0], 1.0 + platform_speed, atol=0.02)
+            np.testing.assert_allclose(velocities[platform], (platform_speed, 0, 0, 0, 0, 0), atol=2.0e-6)
+            np.testing.assert_allclose(state.body_q.numpy()[boxes, 2], 0.2, atol=0.004)
+            self.assertEqual(int(solver.world._partitioner._num_colors.numpy()[0]), 1)
+
     def test_box_follows_belt_and_stops_with_it(self):
         vertices = np.array([[-3.0, -3.0, 0.0], [3.0, -3.0, 0.0], [3.0, 3.0, 0.0], [-3.0, 3.0, 0.0]], dtype=np.float32)
         belt = newton.Mesh(

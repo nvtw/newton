@@ -2484,9 +2484,9 @@ def _contact_primary_graph_node(
         if side_kind == wp.int32(SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON) and not use_node:
             node = -1
         elif side_kind == wp.int32(SHAPE_ENDPOINT_KIND_RIGID):
-            if bodies.inverse_mass[node] == 0.0 and bodies.motion_type[node] != MOTION_KINEMATIC:
+            if bodies.inverse_mass[node] == 0.0:
                 node = -1
-            elif bodies.motion_type[node] != MOTION_KINEMATIC:
+            else:
                 node = bodies.constraint_node[node]
         else:
             if particles.inverse_mass[node - num_bodies] == 0.0:

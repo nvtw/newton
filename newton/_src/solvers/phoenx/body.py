@@ -374,6 +374,9 @@ def body_load_vw(bodies: BodyContainer, b: wp.int32):
 @wp.func
 def body_store_vw(bodies: BodyContainer, b: wp.int32, v: wp.vec3f, w: wp.vec3f):
     """Store ``(velocity, angular_velocity)`` for body ``b``; pairs :func:`body_load_vw`."""
+    # Independent contacts can share a read-only kinematic endpoint.
+    if bodies.motion_type[b] == MOTION_KINEMATIC:
+        return
     bodies.velocity[b] = v
     bodies.angular_velocity[b] = w
 
@@ -464,6 +467,8 @@ def body_set_access_mode(
     (``MassSplitting/TinyRigidState.cs:62-65``).
     """
     if bodies.has_position_level_writers[0] == 0:
+        return
+    if bodies.motion_type[b] == MOTION_KINEMATIC:
         return
     current = bodies.access_mode[b]
     # Early-out paths -- match the no-op short-circuits in
