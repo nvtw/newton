@@ -93,9 +93,12 @@ def load_plant(asset_root: Path, *, cutaway=True, visuals=True, motor_off=False)
     builder = scene.builder
     for prim in prims:
         if _value(prim, "physxArticulation:enabledSelfCollisions", None) is False:
-            root = prim.GetParent() if prim.IsA(UsdPhysics.Joint) else prim
-            if root.GetName() == "Physics":
-                root = root.GetParent()
+            root = prim
+            if prim.IsA(UsdPhysics.Joint):
+                # A fixed-root articulation may put its joint in a separate
+                # folder. Its root body identifies the enclosing mechanism.
+                targets = UsdPhysics.Joint(prim).GetBody1Rel().GetTargets()
+                root = stage.GetPrimAtPath(targets[0]).GetParent() if targets else prim.GetParent()
             scene.self_collision_scopes.append(str(root.GetPath()))
     scene.metadata = dict(stage.GetRootLayer().customLayerData)
     for path in ("/Plant/Line/Packers", "/Plant/Line/Palletizers", "/Plant/Line"):
@@ -291,8 +294,7 @@ def load_plant(asset_root: Path, *, cutaway=True, visuals=True, motor_off=False)
                 mesh.inertia = centered.inertia
             if velocity is not None:
                 if _value(prim, "physics:approximation", "none") == "convexHull":
-                    # Moving surfaces use triangle contacts for their velocity
-                    # field, but must still represent the authored cooked hull.
+                    # Cook the authored hull before assigning its velocity field.
                     mesh = mesh.compute_convex_hull()
                 mesh = newton.Mesh(mesh.vertices, mesh.indices, compute_inertia=False, enable_surface_velocity=True)
                 linear, angular, shape_pose, scale, belt_label = velocity
@@ -355,9 +357,7 @@ def load_plant(asset_root: Path, *, cutaway=True, visuals=True, motor_off=False)
                     builder.add_shape_box(body, hx=h[0], hy=h[1], hz=h[2], **kw)
                     return
             add = (
-                builder.add_shape_convex_hull
-                if collision and approximation == "convexHull" and velocity is None
-                else builder.add_shape_mesh
+                builder.add_shape_convex_hull if collision and approximation == "convexHull" else builder.add_shape_mesh
             )
             add(body, mesh=mesh, scale=scale, **kw)
         elif kind == "Cube":

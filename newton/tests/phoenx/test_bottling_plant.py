@@ -161,13 +161,24 @@ def Xform "Plant" {
             body = scene.builder.add_body(xform=wp.transform(wp.vec3(0, 0, 0.02), wp.quat_identity()))
             scene.builder.add_shape_box(body, hx=0.01, hy=0.01, hz=0.01)
             model = scene.builder.finalize()
+            mesh.mesh.velocities.assign(velocities)
             pipeline = newton.CollisionPipeline(model)
             contacts = pipeline.contacts()
             pipeline.collide(model.state(), contacts)
             count = int(contacts.rigid_contact_count.numpy()[0])
             self.assertGreater(count, 0, "the authored convex belt must have a top support face")
-            self.assertTrue(np.all(contacts.rigid_contact_normal.numpy()[:count, 2] > 0.99))
-            np.testing.assert_allclose(contacts.rigid_contact_point0.numpy()[:count, 2], 0.01, atol=1e-5)
+            belt_first = contacts.rigid_contact_shape0.numpy()[:count] == shape
+            signs = np.where(belt_first, 1.0, -1.0)
+            self.assertTrue(np.all(signs * contacts.rigid_contact_normal.numpy()[:count, 2] > 0.99))
+            belt_points = np.where(
+                belt_first[:, None],
+                contacts.rigid_contact_point0.numpy()[:count],
+                contacts.rigid_contact_point1.numpy()[:count],
+            )
+            np.testing.assert_allclose(belt_points[:, 2], 0.01, atol=1e-5)
+            np.testing.assert_allclose(
+                signs * contacts.rigid_contact_surface_velocity.numpy()[:count, 0], -0.2, atol=1e-6
+            )
 
     def test_position_drive_after_free_root(self):
         """A case clamp still receives its position command after a free root."""
@@ -251,10 +262,13 @@ def Xform "Plant" {
                 double size = 0.2
             }
         }
-        def PhysicsFixedJoint "Anchor" {
+        def Scope "Joints" {
+        def PhysicsFixedJoint "Anchor" (prepend apiSchemas = ["PhysicsArticulationRootAPI"]) {
+            custom bool physxArticulation:enabledSelfCollisions = false
             rel physics:body0 = </Plant/Machine>
             rel physics:body1 = </Plant/Machine/Mount>
             point3f physics:localPos0 = (0, 0, 1)
+        }
         }
         def PhysicsRevoluteJoint "Hinge" (prepend apiSchemas = ["PhysicsDriveAPI:angular"]) {
             rel physics:body0 = </Plant/Machine/Mount>
@@ -371,7 +385,8 @@ def Xform "Plant" {
             self.assertEqual(builder.body_mass[mount], 20.0)
             np.testing.assert_allclose(np.asarray(builder.body_inertia[mount]).reshape(3, 3), np.diag((1, 2, 3)))
             np.testing.assert_allclose(builder.body_com[mount], (0, 0, 0.1), atol=1e-7)
-            anchor = scene.joints["/Plant/Machine/Anchor"]
+            self.assertIn("/Plant/Machine", scene.self_collision_scopes)
+            anchor = scene.joints["/Plant/Machine/Joints/Anchor"]
             np.testing.assert_allclose(builder.joint_X_p[anchor].p, (4, 2, 1))
             hinge = scene.joints["/Plant/Machine/Hinge"]
             dof = builder.joint_qd_start[hinge]
