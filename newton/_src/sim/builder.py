@@ -267,6 +267,10 @@ not show up in builder-state comparisons or survive past either builder's lifeti
 
 def _deduplicate_convex_collision_mesh(source: Mesh) -> Mesh:
     """Build a collision-only mesh containing each exact vertex position once."""
+    # Surface velocities are mutable per-vertex data owned by the source mesh.
+    # Preserve its topology and identity so updates reach the collision mesh.
+    if source.enable_surface_velocity:
+        return source
     vertices = source.vertices
     _, first_indices, inverse = np.unique(vertices, axis=0, return_index=True, return_inverse=True)
     if len(first_indices) == len(vertices):
@@ -16368,7 +16372,7 @@ class ModelBuilder:
                     if mesh_properties is None:
                         mesh_properties = MeshProperties.WATERTIGHT if geo.is_watertight else 0
                         mesh_properties_by_geo_hash[hash(geo)] = mesh_properties
-                    if shape_type == GeoType.MESH and geo.enable_surface_velocity:
+                    if geo.enable_surface_velocity:
                         mesh_properties |= MeshProperties.SURFACE_VELOCITY
                 shape_mesh_properties.append(mesh_properties)
 
