@@ -15,6 +15,7 @@ Success criteria:
 - Joint attachments remain within their physical travel.
 - Inlet, case-line, sealer, and palletizer controllers remain free of faults.
 - Runs of at least 22 simulated seconds fill a case at each of the eight packers.
+- Runs of at least 130 simulated seconds deliver a case through every palletizer.
 
 Runs:
 - `python -m newton.examples phoenx_bottling_plant`
@@ -70,6 +71,8 @@ class Example:
     def __init__(self, viewer, args):
         self.viewer = viewer
         self.args = args
+        if args.substeps < 1:
+            raise ValueError("--substeps must be positive")
         if args.controllers and not args.motor_off and args.joint_mode != "maximal_pgs":
             raise ValueError("Physical runtime grasp joints require --joint-mode maximal_pgs")
         self.frame_dt = 1.0 / 60.0
@@ -140,7 +143,7 @@ class Example:
             self.solver = SolverPhoenX(
                 self.model,
                 collision_pipeline=self.pipeline,
-                substeps=args.substeps,
+                substeps=1,
                 solver_iterations=args.iterations,
                 contact_chunk_size=64,
                 step_layout="single_world",
@@ -162,7 +165,7 @@ class Example:
                 self.model,
                 collision_pipeline=self.pipeline,
                 step_layout="single_world",
-                substeps=args.substeps,
+                substeps=1,
                 solver_iterations=args.iterations,
                 joint_mode=args.joint_mode,
                 reduced_articulations=self.scene.articulations if args.joint_mode == "reduced" else None,
@@ -222,8 +225,12 @@ class Example:
         if self.controller is not None:
             self.controller.simulate()
         self.viewer.apply_forces(self.state_0)
-        self.pipeline.collide(self.state_0, self.contacts, dt=self.frame_dt)
-        self.solver.step(self.state_0, self.state_0, self.control, self.contacts, self.frame_dt)
+        dt = self.frame_dt / self.args.substeps
+        for _ in range(self.args.substeps):
+            # Refresh contacts at the physics rate: sealed cases have thin
+            # floors that must keep supporting bottles while being lifted.
+            self.pipeline.collide(self.state_0, self.contacts, dt=dt)
+            self.solver.step(self.state_0, self.state_0, self.control, self.contacts, dt)
 
     def step(self):
         if self.controller is not None:
@@ -322,6 +329,9 @@ class Example:
             assert all(p.fault is None for p in self.controller.transport.palletizers.values()), "a palletizer faulted"
             if self.sim_time >= 22.0:
                 assert (self.controller.placed.numpy() >= 12).all(), "each packer must fill at least one case"
+            if self.sim_time + 0.5 * self.frame_dt >= 130.0:
+                for name, palletizer in self.controller.transport.palletizers.items():
+                    assert palletizer.placed, f"{name} must place at least one case within 130 seconds"
             assert int(self.solver.dynamics.error_count.numpy()[0]) == 0, "a grasp constraint could not be created"
 
     def run_timing(self):
@@ -368,8 +378,8 @@ class Example:
         parser.add_argument(
             "--correct-inertia", action="store_true", help="Balance source actuator inertia approximations."
         )
-        parser.add_argument("--substeps", type=int, default=4)
-        parser.add_argument("--iterations", type=int, default=2)
+        parser.add_argument("--substeps", type=int, default=4, help="Collision and solver steps per 60 Hz frame.")
+        parser.add_argument("--iterations", type=int, default=4)
         parser.add_argument("--joint-mode", choices=("reduced", "maximal_pgs", "maximal_direct"), default="maximal_pgs")
         parser.add_argument("--timing-frames", type=int, default=0)
         parser.add_argument("--timing-warmup", type=int, default=120)

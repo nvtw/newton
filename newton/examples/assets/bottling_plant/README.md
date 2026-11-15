@@ -18,6 +18,7 @@ set `NEWTON_LOCAL_ASSETS` to its parent, or pass `--asset-root`:
 uv run -m newton.examples phoenx_bottling_plant
 uv run -m newton.examples phoenx_bottling_plant --asset-root /path/to/bottling_plant
 uv run -m newton.examples phoenx_bottling_plant --viewer null --test --num-frames 1320
+uv run -m newton.examples phoenx_bottling_plant --viewer null --test --num-frames 7800
 uv run -m newton.examples phoenx_bottling_plant --viewer null --timing-frames 600
 ```
 
@@ -61,24 +62,21 @@ roughness/metallic fallbacks where texture channels are unsupported.
 
 The default solver uses exact maximal-coordinate solves for the authored
 scalar-joint mechanisms. General D6 joints and runtime grasp/tape constraints
-remain colored blocks. A full-factory comparison measured 25.8 ms/physics frame
-with this choice versus 31.8 ms with local blocks for the auxiliary mechanisms;
-both passed the 22-second packing checks.
+remain colored blocks. Each 60 Hz frame runs four collision-and-solver steps
+at 240 Hz, with four solver iterations per step. Control runs once per frame.
+`--substeps` sets this collision-and-solver step count. Refreshing contacts only
+at 60 Hz allowed bottles to penetrate thin case floors during lifting, even
+with four internal solver substeps. Sealed cases must retain all twelve bottles;
+the 130-second test additionally requires a delivery from every palletizer.
 
-On an RTX PRO 6000 Blackwell, the complete factory measured **35.9 rendered FPS
-at 1920×1080 output**, using default OptiX settings (DLSS quality
-`performance`), over 900 frames following 120 warmup frames. Earlier measurements
-were 8.7 FPS with per-mesh renderer updates and 28.8 FPS after batching those
-updates, before switching the auxiliary mechanisms to exact solves. All use four
-substeps, two solver iterations, the full geometry, and the same physical grip
-reach. Setup and image capture are outside the timing window. Performance varies
-with hardware and line state; this measures early packing, not unlimited steady
-production. Lower substep/iteration settings failed actuator and packing checks.
+Moving conveyors retain triangle contacts on their cooked collision hulls.
+Using convex contacts on the same geometry caused loaded cases to catch at
+descending-ramp transitions. A small physical replay reproduced the failure;
+restoring triangle contacts restored case transport.
 
-A 130-second natural-flow validation sealed 27 cases and reached all four
-palletizers, which placed 2, 1, 1, and 1 cases. Poses and velocities remained
-finite, source joint-anchor error was approximately 0.2 mm, and palletizer,
-merge, and transport-station controllers remained fault-free. Two inlet
-holdbacks faulted late in the run, so strict long-run validation still fails:
-continuous production needs the source profile's operator recovery and supply
-replenishment described above. The documented 22-second test passes.
+The 130-second test with the defaults above retained twelve bottles in each of
+48 sealed cases. The four palletizers placed 3, 2, 2, and 1 cases, respectively,
+with no PLC faults. Maximum joint-anchor error was approximately 0.3 mm.
+This verifies a finite production run, not unlimited operation. Autonomous
+logistics and continuous replenishment remain incomplete as described above.
+No 60 rendered FPS result has been validated for sustained end-to-end production.

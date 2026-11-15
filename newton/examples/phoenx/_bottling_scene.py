@@ -357,7 +357,9 @@ def load_plant(asset_root: Path, *, cutaway=True, visuals=True, motor_off=False)
                     builder.add_shape_box(body, hx=h[0], hy=h[1], hz=h[2], **kw)
                     return
             add = (
-                builder.add_shape_convex_hull if collision and approximation == "convexHull" else builder.add_shape_mesh
+                builder.add_shape_convex_hull
+                if collision and approximation == "convexHull" and velocity is None
+                else builder.add_shape_mesh
             )
             add(body, mesh=mesh, scale=scale, **kw)
         elif kind == "Cube":

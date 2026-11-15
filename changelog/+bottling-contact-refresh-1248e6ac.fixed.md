@@ -1,0 +1,1 @@
+Refresh bottling-plant contacts at every physics step and require sealed-case inventory and palletizer deliveries in long-run validation. Keep moving conveyors on the triangle contact path to avoid loaded cases catching at ramp transitions.
