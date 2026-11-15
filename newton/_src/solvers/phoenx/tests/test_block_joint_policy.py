@@ -40,6 +40,48 @@ def make_solver(model, **options):
 
 @unittest.skipUnless(_cuda_with_graph_capture(), "Block policy tests require CUDA")
 class TestBlockJointPolicy(unittest.TestCase):
+    def test_bounded_valve_retracts_from_upper_stop(self):
+        """A finite velocity drive must release its old bound after reversing."""
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        body = builder.add_link(
+            mass=0.35,
+            com=(4.853, 0.1, 1.0155),
+            inertia=wp.mat33(np.diag((0.00045, 0.00004, 0.00045))),
+        )
+        frame = wp.transform(wp.vec3(4.853, 0.1625, 1.0155), wp.quat(0.0, 0.0, 1.0, 0.0))
+        joint = builder.add_joint_prismatic(
+            -1,
+            body,
+            axis=newton.Axis.Y,
+            parent_xform=frame,
+            child_xform=frame,
+            limit_lower=0.0,
+            limit_upper=0.065,
+            target_kd=6666.6665,
+            effort_limit=150.0,
+            actuator_mode=newton.JointTargetMode.VELOCITY,
+        )
+        builder.add_articulation([joint])
+        model = builder.finalize()
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            joint_mode="maximal_pgs",
+            step_layout="single_world",
+            substeps=4,
+            solver_iterations=4,
+            velocity_iterations=1,
+        )
+        state, control = model.state(), model.control()
+        for velocity, expected in ((0.45, 0.065), (-0.45, 0.0)):
+            control.joint_target_qd.fill_(velocity)
+            with wp.ScopedCapture() as capture:
+                state.clear_forces()
+                solver.step(state, state, control, None, 1.0 / 60.0)
+            for _ in range(30):
+                wp.capture_launch(capture.graph)
+            self.assertAlmostEqual(float(state.joint_q.numpy()[0]), expected, delta=5e-4)
+            self.assertTrue(np.isfinite(state.body_qd.numpy()).all())
+
     def test_bounded_internal_motor_preserves_momentum(self):
         model = make_model(100.0)
         limit = 0.2
@@ -66,6 +108,47 @@ class TestBlockJointPolicy(unittest.TestCase):
                 err_msg=f"Internal drive changed momentum at step {frame}",
             )
             previous = velocity
+
+    def test_independent_bounded_motors_match_isolated_runs(self):
+        """Shared world anchors must not serialize independent correction chains."""
+
+        def run(count):
+            builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+            for _ in range(count):
+                links = [
+                    builder.add_link(mass=1.0, inertia=wp.mat33(0.8, 0.0, 0.0, 0.0, 0.8, 0.0, 0.0, 0.0, 0.8))
+                    for _ in range(2)
+                ]
+                joints = [
+                    builder.add_joint_revolute(
+                        parent=-1 if i == 0 else links[0],
+                        child=links[i],
+                        axis=(0.0, 0.0, 1.0),
+                        target_ke=100.0,
+                        target_kd=1.0,
+                        actuator_mode=newton.JointTargetMode.POSITION_VELOCITY,
+                        effort_limit=0.2,
+                    )
+                    for i in range(2)
+                ]
+                builder.add_articulation(joints)
+            model = builder.finalize()
+            solver = make_solver(model, mass_splitting=False)
+            state, control = model.state(), model.control()
+            control.joint_target_q.fill_(1.0)
+            for _ in range(8):
+                state.clear_forces()
+                solver.step(state, state, control, None, 0.01)
+            system = solver.world._direct_equality_system
+            starts = system._correction_component_start.numpy()
+            self.assertEqual(len(starts) - 1, count)
+            np.testing.assert_array_equal(np.diff(starts), 2)
+            return state.body_q.numpy().reshape(count, 2, 7), state.body_qd.numpy().reshape(count, 2, 6)
+
+        isolated = run(1)
+        replicated = run(4)
+        for actual, expected in zip(replicated, isolated, strict=True):
+            np.testing.assert_allclose(actual, np.repeat(expected, 4, axis=0), rtol=0, atol=2.0e-6)
 
     def test_overflow_only_joint_preserves_momentum_and_replays(self):
         """A D6 hinge forced into overflow must initialize its own copies."""

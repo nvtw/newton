@@ -1679,7 +1679,7 @@ def _activate_bounded_direct_drives_kernel(
     active_set_flag: wp.array[wp.int32],
 ):
     row = wp.tid()
-    if not row_bounded_drive[row] or drive_saturated[row]:
+    if not row_bounded_drive[row]:
         return
 
     joint = row_joint[row]
@@ -1709,6 +1709,26 @@ def _activate_bounded_direct_drives_kernel(
     )
     gear = joint_gear[dof]
     effort_limit = wp.abs(gear * joint_effort_limit[dof])
+    if drive_saturated[row]:
+        armature = joint_armature[dof] * gear * gear
+        bound_impulse = dynamic_mass[row] * velocity_reference[row] - armature * dynamic_old_velocity[row]
+        if effort * bound_impulse > wp.float32(0.0) and wp.abs(effort) >= effort_limit:
+            return
+        # A limit or contact correction can make a previously saturated bound
+        # inconsistent with the motor law. Restore the implicit spring before
+        # testing another bound; flipping directly between force caps chatters.
+        mass = wp.max(
+            armature + dt * (joint_damping[dof] + drive_damping) + dt * dt * stiffness,
+            wp.float32(1.0e-10),
+        )
+        momentum = armature * dynamic_old_velocity[row] + dt * (
+            stiffness * (target_position - dynamic_coordinate[row]) + drive_damping * target_velocity
+        )
+        dynamic_mass[row] = mass
+        velocity_reference[row] = momentum / mass
+        drive_saturated[row] = False
+        wp.atomic_max(active_set_flag, wp.int32(0), wp.int32(1))
+        return
     if wp.abs(effort) <= effort_limit:
         return
 

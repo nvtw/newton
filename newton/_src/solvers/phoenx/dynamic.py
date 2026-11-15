@@ -1872,7 +1872,7 @@ class Dynamics:
         if capacity.joint_count:
             _bind(
                 block_rows,
-                solver._direct_equality_system,
+                getattr(solver._direct_equality_system, "blocks", solver._direct_equality_system),
                 (
                     "generic_linear_axes",
                     "generic_angular_axes",

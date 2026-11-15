@@ -5110,8 +5110,11 @@ class ReducedPhoenXArticulation:
         body_articulation_np = np.full(int(model.body_count) + 1, -1, dtype=np.int32)
         articulation_constraint_node_np = np.empty(int(model.articulation_count), dtype=np.int32)
         body_joint_np = np.full(int(model.body_count), -1, dtype=np.int32)
-        for joint, child in enumerate(joint_child):
-            body_joint_np[int(child)] = joint
+        # Loop-closing constraints may name the same child after its tree
+        # joint. Following them as ancestors can replace the path or cycle.
+        for articulation in range(int(model.articulation_count)):
+            for joint in range(int(articulation_start[articulation]), int(articulation_end[articulation])):
+                body_joint_np[int(joint_child[joint])] = joint
         body_path_start_np = np.zeros(int(model.body_count) + 1, dtype=np.int32)
         body_path_joint_list: list[int] = []
         joint_parent_np = model.joint_parent.numpy()

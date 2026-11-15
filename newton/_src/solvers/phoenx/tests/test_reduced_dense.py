@@ -203,6 +203,39 @@ def _run_chain_and_free_box(model: newton.Model, friction: str, frames: int):
 
 
 class TestReducedDenseBackend(unittest.TestCase):
+    def test_external_joint_preserves_tree_ancestry(self):
+        """Keep a loop-closing constraint out of a reduced link's root path."""
+        device = _require_cuda(self)
+        builder = newton.ModelBuilder()
+        cfg = newton.ModelBuilder.ShapeConfig(has_shape_collision=False)
+        base = builder.add_link()
+        builder.add_shape_box(base, hx=0.1, hy=0.1, hz=0.1, cfg=cfg)
+        tip = builder.add_link()
+        builder.add_shape_box(tip, hx=0.1, hy=0.1, hz=0.1, cfg=cfg)
+        root = builder.add_joint_fixed(-1, base)
+        hinge = builder.add_joint_revolute(base, tip, axis=newton.Axis.Z)
+        builder.add_articulation([root, hinge])
+        builder.add_joint_fixed(-1, tip, label="external_loop")
+        model = builder.finalize(device=device)
+        pipeline = newton.CollisionPipeline(model, contact_matching="sticky")
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            collision_pipeline=pipeline,
+            joint_mode="reduced",
+            reduced_articulations=[0],
+            reduced_backend="dense",
+            substeps=1,
+        )
+        reduced = solver.world.bodies.reduced
+        start = reduced.body_path_start.numpy()
+        path = reduced.body_path_joint.numpy()
+        np.testing.assert_array_equal(path[start[tip] : start[tip + 1]], [root, hinge])
+        state0, state1 = model.state(), model.state()
+        newton.eval_fk(model, model.joint_q, model.joint_qd, state0)
+        contacts = pipeline.contacts()
+        solver.step(state0, state1, None, contacts, 1.0 / 240.0)
+        np.testing.assert_allclose(state1.body_q.numpy()[:, :3], 0.0, atol=1.0e-6)
+
     def test_fused_substep_exchanges_momentum_with_a_free_body_under_graph_capture(self):
         """A tree hitting a free rigid body trades momentum with it inside the fused substep."""
         device = _require_cuda(self)

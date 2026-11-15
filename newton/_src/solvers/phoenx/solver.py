@@ -597,7 +597,9 @@ class SolverPhoenX(SolverBase):
                 mechanisms, as in ``"maximal_direct"``, between the color sweeps;
                 the remaining joints stay local blocks inside the sweeps. Use it
                 for long chains, closed linkages and trees with large link mass
-                ratios, which converge poorly as independent blocks.
+                ratios, which converge poorly as independent blocks. Runtime
+                joints may connect these mechanisms to block-owned products;
+                reserved runtime joint entries must be unmasked.
             tracking_volumes: Shapes that detect overlaps without a contact response, such as
                 trigger or scanner volumes. The collision pipeline generates their contacts as
                 usual, which is exact for every shape type, but PhoenX builds no constraints from
@@ -906,8 +908,12 @@ class SolverPhoenX(SolverBase):
         if dynamic_capacity is not None:
             if has_deformables:
                 raise ValueError("Runtime body creation does not support deformables")
-            if dynamic_capacity.joint_count and (joint_solver != "block_pgs" or direct_joint_mask is not None):
-                raise ValueError("Runtime joint creation requires joint_mode='maximal_pgs' without direct_joint_mask")
+            if dynamic_capacity.joint_count and joint_solver != "block_pgs":
+                raise ValueError("Runtime joint creation requires joint_mode='maximal_pgs'")
+            if dynamic_capacity.joint_count and direct_joint_mask is not None:
+                start = dynamic_capacity.joint_start
+                if np.any(direct_joint_mask[start : start + dynamic_capacity.joint_count]):
+                    raise ValueError("Reserved runtime joints must remain block-owned")
             if (dynamic_capacity.slot_size or dynamic_capacity.instance_counts) and articulation_mode != "reduced":
                 raise ValueError("Reduced articulation slots require joint_mode='reduced'")
         self._body_fresh = wp.zeros(

@@ -85,6 +85,12 @@ def _pendulum_kernel(dyn: phoenx.DynamicsData, drive_angle: float, out: wp.array
 
 
 @wp.kernel
+def _attach_existing_kernel(dyn: phoenx.DynamicsData, joints: wp.array[int]):
+    desc = phoenx.joint_desc(0, 1, wp.transform(wp.vec3(0.5, 0.0, 0.0), wp.quat_identity()), wp.transform_identity())
+    joints[0] = phoenx.add_joint(dyn, desc)
+
+
+@wp.kernel
 def _spawn_hull_kernel(dyn: phoenx.DynamicsData, prototype: int, scale: float, out: wp.array[int]):
     body_desc = phoenx.BodyDesc()
     body_desc.pose = wp.transform(wp.vec3(0.0, 0.0, 0.5), wp.quat_identity())
@@ -342,6 +348,59 @@ class TestDynamicBodies(unittest.TestCase):
         self.assertEqual(int(bodies.numpy()[0]), int(ids.numpy()[0]))
         scene.run(90)
         self.assertAlmostEqual(float(scene.body_q(bodies.numpy())[0, 2]), _HALF, delta=3.0e-3)
+
+    def test_runtime_grasp_couples_to_exact_mechanism(self):
+        """A block-owned grasp holds a payload against gravity, then releases it."""
+        builder = newton.ModelBuilder()
+        anchor = builder.add_link(
+            xform=wp.transform(wp.vec3(0.0, 0.0, 2.0), wp.quat_identity()),
+            mass=1.0,
+            inertia=wp.mat33(np.eye(3) * 0.1),
+        )
+        builder.add_link(
+            xform=wp.transform(wp.vec3(0.5, 0.0, 2.0), wp.quat_identity()),
+            mass=1.0,
+            inertia=wp.mat33(np.eye(3) * 0.1),
+        )
+        joint = builder.add_joint_fixed(
+            -1, anchor, parent_xform=wp.transform(wp.vec3(0.0, 0.0, 2.0), wp.quat_identity())
+        )
+        builder.add_articulation([joint])
+        builder.reserve_dynamic_capacity(joints=1)
+        model = builder.finalize()
+        exact = np.zeros(model.joint_count, dtype=bool)
+        exact[joint] = True
+        pipeline = newton.CollisionPipeline(model)
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            collision_pipeline=pipeline,
+            joint_mode="maximal_pgs",
+            direct_joint_mask=exact,
+            step_layout="single_world",
+            substeps=4,
+            solver_iterations=8,
+            velocity_iterations=1,
+        )
+        state, control = model.state(), model.control()
+        ids = wp.full(1, -1, dtype=int)
+        wp.launch(_attach_existing_kernel, dim=1, inputs=[solver.dynamics.data, ids])
+        with wp.ScopedCapture() as capture:
+            state.clear_forces()
+            solver.step(state, state, control, None, _DT)
+        for _ in range(30):
+            wp.capture_launch(capture.graph)
+        np.testing.assert_allclose(state.body_q.numpy()[:, :3], ((0.0, 0.0, 2.0), (0.5, 0.0, 2.0)), atol=1e-3)
+        wp.launch(_remove_joint_kernel, dim=1, inputs=[solver.dynamics.data, ids])
+        for _ in range(30):
+            wp.capture_launch(capture.graph)
+        self.assertLess(float(state.body_q.numpy()[1, 2]), 1.0)
+        self.assertAlmostEqual(float(state.body_q.numpy()[0, 2]), 2.0, delta=1e-4)
+        self.assertEqual(int(solver.dynamics.error_count.numpy()[0]), 0)
+        exact[-1] = True
+        with self.assertRaisesRegex(ValueError, "Reserved runtime joints"):
+            newton.solvers.SolverPhoenX(
+                model, joint_mode="maximal_pgs", direct_joint_mask=exact, step_layout="single_world"
+            )
 
     def test_unsupported_configurations_raise(self):
         builder = newton.ModelBuilder()

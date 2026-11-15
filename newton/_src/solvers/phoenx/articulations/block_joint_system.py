@@ -32,8 +32,15 @@ def _dot_double(a: wp.spatial_vector, b: wp.spatial_vector) -> wp.float64:
 @wp.kernel(enable_backward=False)
 def _block_sweep(
     bodies: BodyContainer,
+    component_start: wp.array[wp.int32],
+    component_blocks: wp.array[wp.int32],
     block_rows: wp.array2d[wp.int32],
     block_count: wp.array[wp.int32],
+    block_cid: wp.array[wp.int32],
+    prepared_lower: wp.array[Mat66d],
+    prepared_diagonal: wp.array[Vec6d],
+    prepared_valid: wp.array[wp.int32],
+    copy_highest: wp.array[wp.int32],
     row_joint: wp.array[wp.int32],
     row_local: wp.array[wp.int32],
     row_dynamic: wp.array[wp.bool],
@@ -48,8 +55,11 @@ def _block_sweep(
     accumulated: wp.array[wp.float32],
     use_bias: wp.bool,
 ):
-    for block in range(block_count.shape[0]):
+    component = wp.tid()
+    for entry in range(component_start[component], component_start[component + 1]):
+        block = component_blocks[entry]
         count = block_count[block]
+        reuse_factor = copy_highest[0] == 0
         first_row = block_rows[block, 0]
         joint = row_joint[first_row]
         structural = joint_to_structural[joint]
@@ -73,38 +83,46 @@ def _block_sweep(
             elif use_bias:
                 residual += wp.float64(bias[structural, local])
             rhs[i] = -residual
-            for j in range(i + 1):
-                other_row = block_rows[block, j]
-                other_local = row_local[other_row]
-                k0 = wrench0[structural, other_local]
-                k1 = wrench1[structural, other_local]
-                response0 = _direct_wrench_response(k0, bodies.inverse_mass[b0], inertia0)
-                response1 = _direct_wrench_response(k1, bodies.inverse_mass[b1], inertia1)
-                value = _dot_double(j0, response0) + _dot_double(j1, response1)
-                if i == j and row_dynamic[row]:
-                    value += wp.float64(1.0) / wp.float64(dynamic_mass[row])
-                matrix[i, j] = value
-                matrix[j, i] = value
-
+            if not reuse_factor:
+                for j in range(i + 1):
+                    other_row = block_rows[block, j]
+                    other_local = row_local[other_row]
+                    k0 = wrench0[structural, other_local]
+                    k1 = wrench1[structural, other_local]
+                    response0 = _direct_wrench_response(k0, bodies.inverse_mass[b0], inertia0)
+                    response1 = _direct_wrench_response(k1, bodies.inverse_mass[b1], inertia1)
+                    value = _dot_double(j0, response0) + _dot_double(j1, response1)
+                    if i == j and row_dynamic[row]:
+                        value += wp.float64(1.0) / wp.float64(dynamic_mass[row])
+                    matrix[i, j] = value
+                    matrix[j, i] = value
         # Physical joint block LDL^T, without mass scaling or added compliance.
         # Valid independent joint rows have strictly positive pivots.
         lower = _Mat66d()
         diagonal = _Vec6d()
         valid = wp.bool(True)
-        for i in range(count):
-            pivot = matrix[i, i]
-            for j in range(i):
-                pivot -= lower[i, j] * lower[i, j] * diagonal[j]
-            diagonal[i] = pivot
-            lower[i, i] = wp.float64(1.0)
-            if pivot <= wp.float64(0.0):
-                valid = False
-            if valid:
-                for j in range(i + 1, count):
-                    value = matrix[j, i]
-                    for k in range(i):
-                        value -= lower[j, k] * lower[i, k] * diagonal[k]
-                    lower[j, i] = value / pivot
+        if reuse_factor:
+            # With no mass-splitting copies, the ordinary block preparation
+            # already factored this exact physical-mass matrix.
+            cid = block_cid[block]
+            lower = prepared_lower[cid]
+            diagonal = prepared_diagonal[cid]
+            valid = prepared_valid[cid] != 0
+        else:
+            for i in range(count):
+                pivot = matrix[i, i]
+                for j in range(i):
+                    pivot -= lower[i, j] * lower[i, j] * diagonal[j]
+                diagonal[i] = pivot
+                lower[i, i] = wp.float64(1.0)
+                if pivot <= wp.float64(0.0):
+                    valid = False
+                if valid:
+                    for j in range(i + 1, count):
+                        value = matrix[j, i]
+                        for k in range(i):
+                            value -= lower[j, k] * lower[i, k] * diagonal[k]
+                        lower[j, i] = value / pivot
         if valid:
             solution = _Vec6d()
             for i in range(count):
@@ -132,10 +150,13 @@ def _block_sweep(
                 impulse1 += impulse * wrench1[structural, local]
             response0 = _direct_wrench_response(impulse0, bodies.inverse_mass[b0], inertia0)
             response1 = _direct_wrench_response(impulse1, bodies.inverse_mass[b1], inertia1)
-            bodies.velocity[b0] += wp.spatial_top(response0)
-            bodies.angular_velocity[b0] += wp.spatial_bottom(response0)
-            bodies.velocity[b1] += wp.spatial_top(response1)
-            bodies.angular_velocity[b1] += wp.spatial_bottom(response1)
+            # Static anchors can be shared by independent components.
+            if bodies.inverse_mass[b0] > 0.0:
+                bodies.velocity[b0] += wp.spatial_top(response0)
+                bodies.angular_velocity[b0] += wp.spatial_bottom(response0)
+            if bodies.inverse_mass[b1] > 0.0:
+                bodies.velocity[b1] += wp.spatial_top(response1)
+                bodies.angular_velocity[b1] += wp.spatial_bottom(response1)
 
 
 class BlockJointSystem(DirectEqualitySystem):
@@ -143,7 +164,8 @@ class BlockJointSystem(DirectEqualitySystem):
 
     The owning world must bind this system before stepping. Ordinary color
     sweeps solve the blocks; only newly activated finite drive bounds require
-    an additional serial physical-mass correction sweep.
+    an additional physical-mass correction sweep, parallel across independent
+    mechanisms and ordered within each mechanism.
     """
 
     @property
@@ -201,7 +223,45 @@ class BlockJointSystem(DirectEqualitySystem):
         correction_indices = np.full((len(correction_groups), 6), -1, dtype=np.int32)
         for index, rows in enumerate(correction_groups.values()):
             correction_indices[index, : len(rows)] = rows
+        # Preserve Gauss-Seidel block order within each connected mechanism.
+        # Contacts are handled in a separate sweep; only shared movable bodies
+        # couple these corrections. World and kinematic anchors remain read-only.
+        parents = self.model.joint_parent.numpy()
+        children = self.model.joint_child.numpy()
+        movable = self.bodies.inverse_mass.numpy() > 0.0
+        roots = list(range(len(correction_groups)))
+
+        def root(index):
+            while roots[index] != index:
+                roots[index] = roots[roots[index]]
+                index = roots[index]
+            return index
+
+        owner = {}
+        for block, joint in enumerate(correction_groups):
+            for body in (int(parents[joint]) + 1, int(children[joint]) + 1):
+                if movable[body]:
+                    if body in owner:
+                        roots[root(block)] = root(owner[body])
+                    else:
+                        owner[body] = block
+        components = {}
+        for block in range(len(roots)):
+            components.setdefault(root(block), []).append(block)
+        joints = list(correction_groups)
+        components = {
+            key: blocks
+            for key, blocks in components.items()
+            if any(self.bounded_drive_joint_mask[joints[block]] for block in blocks)
+        }
+        starts = np.cumsum([0, *(len(blocks) for blocks in components.values())], dtype=np.int32)
+        blocks = np.asarray([block for group in components.values() for block in group], dtype=np.int32)
         device = self.model.device
+        self._correction_component_start = wp.array(starts, dtype=wp.int32, device=device)
+        self._correction_component_blocks = wp.array(blocks, dtype=wp.int32, device=device)
+        self._correction_cids = wp.array(
+            [self._block_mapping[joint] for joint in correction_groups], dtype=wp.int32, device=device
+        )
         self._correction_rows = wp.array(correction_indices, dtype=wp.int32, device=device)
         self._correction_counts = wp.array(correction_counts, dtype=wp.int32, device=device)
         data = BilateralJointData()
@@ -225,6 +285,12 @@ class BlockJointSystem(DirectEqualitySystem):
         data.inverse = wp.zeros(count, dtype=Mat66d, device=device)
         data.valid = wp.zeros(count, dtype=wp.int32, device=device)
         world.constraints.bilateral = data
+        if np.count_nonzero(counts) >= world._fuse_threshold:
+            # A six-row block carries substantially more work than one scalar
+            # contact column. Let the cooperative grid process medium colors
+            # instead of serializing hundreds of blocks in the one-block tail.
+            width = 4 if data.row_capacity == 3 else 8
+            world._fuse_threshold = min(world._fuse_threshold, world._fuse_tail_block_dim // width)
         ownership = world._joint_pgs_enabled.numpy().copy()
         ownership[counts > 0] = 1
         world.set_joint_pgs_ownership(ownership)
@@ -289,11 +355,18 @@ class BlockJointSystem(DirectEqualitySystem):
             return
         wp.launch(
             _block_sweep,
-            dim=1,
+            dim=self._correction_component_start.size - 1,
             inputs=[
                 self.bodies,
+                self._correction_component_start,
+                self._correction_component_blocks,
                 self._correction_rows,
                 self._correction_counts,
+                self._correction_cids,
+                self._block_world.constraints.bilateral.lower,
+                self._block_world.constraints.bilateral.diagonal,
+                self._block_world.constraints.bilateral.valid,
+                self._block_world._copy_state.highest_index_in_use,
                 self.row_joint,
                 self.row_local,
                 self.row_dynamic,
@@ -309,6 +382,7 @@ class BlockJointSystem(DirectEqualitySystem):
                 wp.bool(use_bias),
             ],
             device=self.model.device,
+            block_dim=32 if self.model.device.is_cuda else 256,
         )
 
     def resolve_bounded_drives(self, idt, *, use_bias):
@@ -335,7 +409,11 @@ class MixedJointSystem:
         excluded = np.zeros(joint_count, dtype=bool) if excluded_joint_mask is None else np.asarray(excluded_joint_mask)
         exact = np.asarray(exact_joint_mask, dtype=bool) & ~excluded
         self.blocks = BlockJointSystem(model, bodies, excluded_joint_mask=excluded | exact, **kwargs)
-        self.exact = DirectEqualitySystem(model, bodies, excluded_joint_mask=~exact, **kwargs)
+        # Runtime joints keep fixed row addresses in the block system. Exact
+        # mechanisms retain compact topology and never own reserved slots.
+        exact_options = dict(kwargs)
+        exact_options.pop("fixed_joint_rows", None)
+        self.exact = DirectEqualitySystem(model, bodies, excluded_joint_mask=~exact, **exact_options)
         self._parts = tuple(part for part in (self.blocks, self.exact) if part.enabled)
         self.d6_inequality_count = None
 
