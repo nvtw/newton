@@ -69,33 +69,36 @@ def _block_sweep(
         inertia1 = mat33_from_sym6(bodies.inverse_inertia_world[b1])
         twist0 = _body_com_twist(bodies, b0)
         twist1 = _body_com_twist(bodies, b1)
+        # Fixed bounds keep six-row temporaries statically indexed.
         matrix = _Mat66d()
         rhs = _Vec6d()
-        for i in range(count):
-            row = block_rows[block, i]
-            local = row_local[row]
-            j0 = wrench0[structural, local]
-            j1 = wrench1[structural, local]
-            residual = _dot_double(j0, twist0) + _dot_double(j1, twist1)
-            if row_dynamic[row]:
-                residual += wp.float64(accumulated[row]) / wp.float64(dynamic_mass[row])
-                residual -= wp.float64(reference[row])
-            elif use_bias:
-                residual += wp.float64(bias[structural, local])
-            rhs[i] = -residual
-            if not reuse_factor:
-                for j in range(i + 1):
-                    other_row = block_rows[block, j]
-                    other_local = row_local[other_row]
-                    k0 = wrench0[structural, other_local]
-                    k1 = wrench1[structural, other_local]
-                    response0 = _direct_wrench_response(k0, bodies.inverse_mass[b0], inertia0)
-                    response1 = _direct_wrench_response(k1, bodies.inverse_mass[b1], inertia1)
-                    value = _dot_double(j0, response0) + _dot_double(j1, response1)
-                    if i == j and row_dynamic[row]:
-                        value += wp.float64(1.0) / wp.float64(dynamic_mass[row])
-                    matrix[i, j] = value
-                    matrix[j, i] = value
+        for i in range(6):
+            if i < count:
+                row = block_rows[block, i]
+                local = row_local[row]
+                j0 = wrench0[structural, local]
+                j1 = wrench1[structural, local]
+                residual = _dot_double(j0, twist0) + _dot_double(j1, twist1)
+                if row_dynamic[row]:
+                    residual += wp.float64(accumulated[row]) / wp.float64(dynamic_mass[row])
+                    residual -= wp.float64(reference[row])
+                elif use_bias:
+                    residual += wp.float64(bias[structural, local])
+                rhs[i] = -residual
+                if not reuse_factor:
+                    for j in range(6):
+                        if j < i + 1:
+                            other_row = block_rows[block, j]
+                            other_local = row_local[other_row]
+                            k0 = wrench0[structural, other_local]
+                            k1 = wrench1[structural, other_local]
+                            response0 = _direct_wrench_response(k0, bodies.inverse_mass[b0], inertia0)
+                            response1 = _direct_wrench_response(k1, bodies.inverse_mass[b1], inertia1)
+                            value = _dot_double(j0, response0) + _dot_double(j1, response1)
+                            if i == j and row_dynamic[row]:
+                                value += wp.float64(1.0) / wp.float64(dynamic_mass[row])
+                            matrix[i, j] = value
+                            matrix[j, i] = value
         # Physical joint block LDL^T, without mass scaling or added compliance.
         # Valid independent joint rows have strictly positive pivots.
         lower = _Mat66d()
@@ -109,45 +112,55 @@ def _block_sweep(
             diagonal = prepared_diagonal[cid]
             valid = prepared_valid[cid] != 0
         else:
-            for i in range(count):
-                pivot = matrix[i, i]
-                for j in range(i):
-                    pivot -= lower[i, j] * lower[i, j] * diagonal[j]
-                diagonal[i] = pivot
-                lower[i, i] = wp.float64(1.0)
-                if pivot <= wp.float64(0.0):
-                    valid = False
-                if valid:
-                    for j in range(i + 1, count):
-                        value = matrix[j, i]
-                        for k in range(i):
-                            value -= lower[j, k] * lower[i, k] * diagonal[k]
-                        lower[j, i] = value / pivot
+            for i in range(6):
+                if i < count:
+                    pivot = matrix[i, i]
+                    for j in range(6):
+                        if j < i:
+                            pivot -= lower[i, j] * lower[i, j] * diagonal[j]
+                    diagonal[i] = pivot
+                    lower[i, i] = wp.float64(1.0)
+                    if pivot <= wp.float64(0.0):
+                        valid = False
+                    if valid:
+                        for j in range(6):
+                            if j >= i + 1 and j < count:
+                                value = matrix[j, i]
+                                for k in range(6):
+                                    if k < i:
+                                        value -= lower[j, k] * lower[i, k] * diagonal[k]
+                                lower[j, i] = value / pivot
         if valid:
             solution = _Vec6d()
-            for i in range(count):
-                value = rhs[i]
-                for j in range(i):
-                    value -= lower[i, j] * solution[j]
-                solution[i] = value
-            for i in range(count):
-                solution[i] /= diagonal[i]
-            for reverse in range(count):
-                i = count - reverse - 1
-                value = solution[i]
-                for j in range(i + 1, count):
-                    value -= lower[j, i] * solution[j]
-                solution[i] = value
+            for i in range(6):
+                if i < count:
+                    value = rhs[i]
+                    for j in range(6):
+                        if j < i:
+                            value -= lower[i, j] * solution[j]
+                    solution[i] = value
+            for i in range(6):
+                if i < count:
+                    solution[i] /= diagonal[i]
+            for reverse in range(6):
+                i = 5 - reverse
+                if i < count:
+                    value = solution[i]
+                    for j in range(6):
+                        if j >= i + 1 and j < count:
+                            value -= lower[j, i] * solution[j]
+                    solution[i] = value
 
             impulse0 = wp.spatial_vector()
             impulse1 = wp.spatial_vector()
-            for i in range(count):
-                row = block_rows[block, i]
-                local = row_local[row]
-                impulse = wp.float32(solution[i])
-                accumulated[row] += impulse
-                impulse0 += impulse * wrench0[structural, local]
-                impulse1 += impulse * wrench1[structural, local]
+            for i in range(6):
+                if i < count:
+                    row = block_rows[block, i]
+                    local = row_local[row]
+                    impulse = wp.float32(solution[i])
+                    accumulated[row] += impulse
+                    impulse0 += impulse * wrench0[structural, local]
+                    impulse1 += impulse * wrench1[structural, local]
             response0 = _direct_wrench_response(impulse0, bodies.inverse_mass[b0], inertia0)
             response1 = _direct_wrench_response(impulse1, bodies.inverse_mass[b1], inertia1)
             # Static anchors can be shared by independent components.
