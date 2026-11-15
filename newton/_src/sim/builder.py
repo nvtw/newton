@@ -80,7 +80,7 @@ from ..geometry.inertia import (
 )
 from ..geometry.rest_shape import _dihedral_angles, _tet_rest_geometry, _triangle_rest_geometry
 from ..geometry.sdf_utils import _resolve_paired_samples_flag
-from ..geometry.support_function import _CONVEX_HULL_VALID
+from ..geometry.support_function import _CONVEX_HULL_VALID, _MESH_COPLANAR_EDGES
 from ..geometry.types import Heightfield, _normalize_texture_input
 from ..geometry.utils import RemeshingMethod, compute_inertia_obb, remesh_convex_hull, remesh_mesh
 from ..math import quat_between_vectors_robust
@@ -303,6 +303,37 @@ def _deduplicate_convex_collision_mesh(source: Mesh) -> Mesh:
 
 _CONVEX_SUPPORT_MIN_VERTICES = 256
 _CONVEX_SUPPORT_LUT_RESOLUTION = 32
+
+
+def _coplanar_triangle_edges(source: Mesh) -> np.ndarray:
+    """Mark manifold interior edges shared by consistently wound coplanar faces."""
+    vertices, remap = np.unique(np.asarray(source.vertices, dtype=np.float64), axis=0, return_inverse=True)
+    triangles = remap[np.asarray(source.indices).reshape(-1, 3)]
+    masks = np.zeros(len(triangles), dtype=np.int32)
+    if len(triangles) < 2:
+        return masks
+    points = vertices[triangles]
+    normals = np.cross(points[:, 1] - points[:, 0], points[:, 2] - points[:, 0])
+    lengths = np.linalg.norm(normals, axis=1)
+    normals /= np.maximum(lengths[:, None], np.finfo(np.float64).tiny)
+    edges = np.stack((triangles, np.roll(triangles, -1, axis=1)), axis=-1).reshape(-1, 2)
+    keys = np.sort(edges, axis=1)
+    order = np.lexsort((keys[:, 1], keys[:, 0]))
+    sorted_keys = keys[order]
+    starts = np.r_[0, np.flatnonzero(np.any(sorted_keys[1:] != sorted_keys[:-1], axis=1)) + 1]
+    counts = np.diff(np.r_[starts, len(order)])
+    starts = starts[counts == 2]
+    first, second = order[starts], order[starts + 1]
+    a, b = first // 3, second // 3
+    valid = (
+        (lengths[a] > 0.0)
+        & (lengths[b] > 0.0)
+        & np.all(edges[first] == edges[second, ::-1], axis=1)
+        & (np.sum(normals[a] * normals[b], axis=1) > 1.0 - 1.0e-12)
+    )
+    np.bitwise_or.at(masks, a[valid], 1 << (first[valid] % 3))
+    np.bitwise_or.at(masks, b[valid], 1 << (second[valid] % 3))
+    return masks
 
 
 def _convex_hull_adjacency(source: Mesh, *, certify: bool = True) -> tuple[list[set[int]], np.ndarray] | None:
@@ -16388,6 +16419,7 @@ class ModelBuilder:
             support_offset_chunks = []
             support_neighbor_chunks = []
             support_cache = {}
+            triangle_cache = {}
             lut_offset = 0
             vertex_offset = 0
             neighbor_offset = 0
@@ -16434,6 +16466,19 @@ class ModelBuilder:
                             neighbor_offset += len(support_neighbor_chunks[-1])
                         support_cache[source_key] = cached
                     metadata = support_cache[source_key]
+                elif (
+                    shape_type == GeoType.MESH and isinstance(source, Mesh) and shape_flags & ShapeFlags.COLLIDE_SHAPES
+                ):
+                    source_key = hash(source)
+                    if source_key not in triangle_cache:
+                        masks = _coplanar_triangle_edges(source)
+                        cached = (-1, -1, -1, 0)
+                        if np.any(masks):
+                            cached = (-1, -1, neighbor_offset, _MESH_COPLANAR_EDGES)
+                            support_neighbor_chunks.append(masks)
+                            neighbor_offset += len(masks)
+                        triangle_cache[source_key] = cached
+                    metadata = triangle_cache[source_key]
                 shape_support_data.append(metadata)
 
             m._shape_support_data = wp.array(shape_support_data, dtype=wp.vec4i, device=device)
