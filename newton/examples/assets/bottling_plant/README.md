@@ -74,3 +74,11 @@ substeps, two solver iterations, the full geometry, and the same physical grip
 reach. Setup and image capture are outside the timing window. Performance varies
 with hardware and line state; this measures early packing, not unlimited steady
 production. Lower substep/iteration settings failed actuator and packing checks.
+
+A 130-second natural-flow validation sealed 27 cases and reached all four
+palletizers, which placed 2, 1, 1, and 1 cases. Poses and velocities remained
+finite, source joint-anchor error was approximately 0.2 mm, and palletizer,
+merge, and transport-station controllers remained fault-free. Two inlet
+holdbacks faulted late in the run, so strict long-run validation still fails:
+continuous production needs the source profile's operator recovery and supply
+replenishment described above. The documented 22-second test passes.
