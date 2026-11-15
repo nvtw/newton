@@ -12,7 +12,7 @@ import warp as wp
 
 import newton
 from newton.examples.phoenx._bottling_control import _seal_cases, _target_coordinates
-from newton.examples.phoenx._bottling_io import _case_drives, _photoeyes
+from newton.examples.phoenx._bottling_io import _case_drives, _photoeyes, _valves
 from newton.examples.phoenx._bottling_scene import load_plant
 from newton.tests.unittest_utils import USD_AVAILABLE
 
@@ -22,6 +22,42 @@ if USD_AVAILABLE:
 
 @unittest.skipUnless(USD_AVAILABLE, "Requires usd-core")
 class TestBottlingPlant(unittest.TestCase):
+    def test_valves_hold_stroke_limits_under_load(self):
+        """Hold both cylinder stops under opposing loads with the source valve law."""
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        for _ in range(2):
+            body = builder.add_link(mass=1.0, inertia=wp.mat33(np.eye(3)))
+            joint = builder.add_joint_prismatic(
+                -1,
+                body,
+                axis=newton.Axis.X,
+                limit_lower=0.0,
+                limit_upper=0.05,
+                target_kd=100.0,
+                effort_limit=10.0,
+                actuator_mode=newton.JointTargetMode.VELOCITY,
+            )
+            builder.add_articulation([joint])
+        model = builder.finalize()
+        state, control = model.state(), model.control()
+        solver = newton.solvers.SolverPhoenX(
+            model, joint_mode="maximal_pgs", step_layout="single_world", solver_iterations=4
+        )
+        wp.launch(
+            _valves,
+            dim=(1, 2),
+            inputs=[
+                wp.array([[0, 1]], dtype=int),
+                wp.array([[0.05, 0.0]], dtype=float),
+                wp.array([0.2, 0.2], dtype=float),
+                control.joint_target_qd,
+            ],
+        )
+        state.body_f.assign(np.array([[-2, 0, 0, 0, 0, 0], [2, 0, 0, 0, 0, 0]], dtype=np.float32))
+        for _ in range(240):
+            solver.step(state, state, control, None, 1.0 / 240.0)
+        np.testing.assert_allclose(state.joint_q.numpy(), (0.05, 0.0), atol=1e-5)
+
     def test_grasp_ray_respects_physical_reach(self):
         """Acquisition requires a real surface hit within the authored 6 mm."""
         mesh = newton.Mesh.create_box(0.03, 0.03, 0.115, compute_inertia=False)

@@ -709,7 +709,6 @@ class PlantController:
             inputs=[
                 self.actuator_dof,
                 self.valve_targets,
-                self.observation,
                 self.valve_speeds,
                 self.control.joint_target_qd,
             ],

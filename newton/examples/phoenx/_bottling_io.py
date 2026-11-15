@@ -98,13 +98,14 @@ def _actuator_observations(
 def _valves(
     actuator_dof: wp.array2d[int],
     target: wp.array2d[float],
-    observation: wp.array2d[float],
     speeds: wp.array[float],
     joint_target_qd: wp.array[float],
 ):
     cell, axis = wp.tid()
-    error = target[cell, axis] - observation[cell, 7 + axis]
-    joint_target_qd[actuator_dof[cell, axis]] = wp.clamp(error * 60.0, -speeds[axis], speeds[axis])
+    # Source pneumatic valves keep pressure on the cylinder at the stroke
+    # limit. The authored force cap and joint stops determine its response.
+    direction = 1.0 if target[cell, axis] > 0.0 else -1.0
+    joint_target_qd[actuator_dof[cell, axis]] = direction * speeds[axis]
 
 
 @wp.func
