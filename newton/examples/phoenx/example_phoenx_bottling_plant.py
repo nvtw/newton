@@ -470,6 +470,11 @@ class Example:
             "iterations": self.args.iterations,
             "temporal_iterations": self.args.temporal_iterations,
             "contact_hertz": self.args.contact_hertz,
+            "sleeping_velocity_threshold": self.args.sleeping_velocity_threshold,
+            "sleeping_bodies": int(
+                np.count_nonzero(self.solver.bodies.island_root.numpy()[1 : self.model.body_count + 1] >= 0)
+            ),
+            "parallel_contact_prepare": self.solver.world.parallel_contact_prepare,
             "joint_mode": self.args.joint_mode,
             "warmup_frames": self.args.timing_warmup,
         }
