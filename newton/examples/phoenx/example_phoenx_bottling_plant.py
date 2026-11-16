@@ -97,6 +97,8 @@ class Example:
             raise ValueError("--substeps must be positive")
         if args.cartons_per_packer < 1:
             raise ValueError("--cartons-per-packer must be positive")
+        if not np.isfinite(args.sleeping_velocity_threshold) or args.sleeping_velocity_threshold < 0.0:
+            raise ValueError("--sleeping-velocity-threshold must be finite and nonnegative")
         if args.controllers and not args.motor_off and args.joint_mode != "maximal_pgs":
             raise ValueError("Physical runtime grasp joints require --joint-mode maximal_pgs")
         self.frame_dt = 1.0 / 60.0
@@ -194,14 +196,17 @@ class Example:
                 ),
                 velocity_iterations=1,
                 enable_body_pair_grouping=True,
-                parallel_contact_prepare=self.model.device.is_cuda and not args.mass_splitting,
+                parallel_contact_prepare=(
+                    self.model.device.is_cuda and not args.mass_splitting and args.sleeping_velocity_threshold == 0.0
+                ),
                 mass_splitting=args.mass_splitting,
                 mass_splitting_overflow_only=args.mass_splitting,
                 max_colored_partitions=9,
                 mass_splitting_batch_size=1,
                 mass_splitting_unrolled=args.mass_splitting,
                 partitioner_algorithm="endpoint_owner" if args.mass_splitting else "greedy",
-                sleeping_velocity_threshold=0.0,
+                sleeping_velocity_threshold=args.sleeping_velocity_threshold,
+                sleeping_frames_required=30 * args.substeps,
             )
         else:
             self.solver = SolverPhoenX(
@@ -215,7 +220,8 @@ class Example:
                 joint_mode=args.joint_mode,
                 reduced_articulations=self.scene.articulations if args.joint_mode == "reduced" else None,
                 velocity_iterations=1,
-                sleeping_velocity_threshold=0.0,
+                sleeping_velocity_threshold=args.sleeping_velocity_threshold,
+                sleeping_frames_required=30 * args.substeps,
             )
         # Runtime joints install their default data during solver setup. This
         # filter also handles grasp pairs, alongside the source's hull groups.
@@ -308,6 +314,7 @@ class Example:
         if self.controller is not None:
             self.controller.simulate()
         self.viewer.apply_forces(self.state_0)
+        self.solver.wake_on_external_input(self.state_0)
         dt = self.frame_dt / self.args.substeps
         for _ in range(self.args.substeps):
             # Refresh contacts at the physics rate: sealed cases have thin
@@ -497,6 +504,12 @@ class Example:
         )
         parser.add_argument("--substeps", type=int, default=4, help="Collision and solver steps per 60 Hz frame.")
         parser.add_argument("--iterations", type=int, default=4)
+        parser.add_argument(
+            "--sleeping-velocity-threshold",
+            type=float,
+            default=0.01,
+            help="Experimental island sleep-score cutoff [m/s]; zero disables sleeping, with a 0.5 s quiet dwell.",
+        )
         parser.add_argument(
             "--temporal-iterations",
             action=argparse.BooleanOptionalAction,
