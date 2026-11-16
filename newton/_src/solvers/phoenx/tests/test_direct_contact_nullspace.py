@@ -14,36 +14,45 @@ import newton
 class TestDirectContactNullspace(unittest.TestCase):
     def test_kinematic_contact_endpoint_has_no_mobility(self):
         """Use only the dynamic sphere mass against a kinematic sphere."""
-        if not wp.is_cuda_available():
-            self.skipTest("CUDA required")
-        builder = newton.ModelBuilder(gravity=wp.vec3(0.0))
-        kinematic = builder.add_link(xform=wp.transform(wp.vec3(0.0, 0.0, 1.0), wp.quat_identity()), is_kinematic=True)
-        dynamic = builder.add_link(xform=wp.transform(wp.vec3(0.0, 0.0, 1.019), wp.quat_identity()))
-        for body in (kinematic, dynamic):
-            builder.add_shape_sphere(body, radius=0.01, cfg=newton.ModelBuilder.ShapeConfig(density=1000.0, mu=0.0))
-        builder.add_joint_prismatic(
-            -1, dynamic, axis=newton.Axis.Z, parent_xform=wp.transform(wp.vec3(0.0, 0.0, 1.019), wp.quat_identity())
-        )
-        model = builder.finalize(device="cuda:0")
-        pipeline = newton.CollisionPipeline(model, rigid_contact_max=32, contact_matching="sticky")
-        solver = newton.solvers.SolverPhoenX(
-            model,
-            collision_pipeline=pipeline,
-            joint_mode="maximal_direct",
-            step_layout="single_world",
-            sor_boost=1.0,
-            substeps=1,
-        )
-        state = model.state()
-        contacts = pipeline.contacts()
-        pipeline.collide(state, contacts)
-        solver.step(state, state, model.control(), contacts, 1.0 / 1200.0)
-        self.assertIsNotNone(solver._direct_contact_response)
-        self.assertEqual(int(contacts.rigid_contact_count.numpy()[0]), 1)
-        np.testing.assert_allclose(
-            solver._direct_contact_response.data.mobility.numpy()[0, 0], model.body_mass.numpy()[dynamic], rtol=1.0e-5
-        )
-        np.testing.assert_allclose(state.body_qd.numpy()[kinematic], np.zeros(6), atol=1.0e-7)
+        for device in ("cpu", "cuda:0") if wp.is_cuda_available() else ("cpu",):
+            with self.subTest(device=device), wp.ScopedDevice(device):
+                builder = newton.ModelBuilder(gravity=wp.vec3(0.0))
+                kinematic = builder.add_link(
+                    xform=wp.transform(wp.vec3(0.0, 0.0, 1.0), wp.quat_identity()), is_kinematic=True
+                )
+                dynamic = builder.add_link(xform=wp.transform(wp.vec3(0.0, 0.0, 1.019), wp.quat_identity()))
+                for body in (kinematic, dynamic):
+                    builder.add_shape_sphere(
+                        body, radius=0.01, cfg=newton.ModelBuilder.ShapeConfig(density=1000.0, mu=0.0)
+                    )
+                builder.add_joint_prismatic(
+                    -1,
+                    dynamic,
+                    axis=newton.Axis.Z,
+                    parent_xform=wp.transform(wp.vec3(0.0, 0.0, 1.019), wp.quat_identity()),
+                )
+                model = builder.finalize(device=device)
+                pipeline = newton.CollisionPipeline(model, rigid_contact_max=32, contact_matching="sticky")
+                solver = newton.solvers.SolverPhoenX(
+                    model,
+                    collision_pipeline=pipeline,
+                    joint_mode="maximal_direct",
+                    step_layout="single_world",
+                    sor_boost=1.0,
+                    substeps=1,
+                )
+                state = model.state()
+                contacts = pipeline.contacts()
+                pipeline.collide(state, contacts)
+                solver.step(state, state, model.control(), contacts, 1.0 / 1200.0)
+                self.assertIsNotNone(solver._direct_contact_response)
+                self.assertEqual(int(contacts.rigid_contact_count.numpy()[0]), 1)
+                np.testing.assert_allclose(
+                    solver._direct_contact_response.data.mobility.numpy()[0, 0],
+                    model.body_mass.numpy()[dynamic],
+                    rtol=1.0e-5,
+                )
+                np.testing.assert_allclose(state.body_qd.numpy()[kinematic], np.zeros(6), atol=1.0e-7)
 
     def test_ordinary_contact_preserves_kinematic_endpoint(self):
         """Use only the dynamic sphere mass against a kinematic sphere."""

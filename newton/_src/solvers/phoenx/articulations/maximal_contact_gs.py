@@ -51,8 +51,6 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_get_tangent1_lambda,
     cc_get_tangent2_lambda,
     cc_set_normal_lambda,
-    cc_set_r0,
-    cc_set_r1,
     cc_set_tangent1_lambda,
     cc_set_tangent2_lambda,
 )
@@ -63,31 +61,6 @@ from newton._src.solvers.phoenx.constraints.contact_projection import (
 from newton._src.solvers.phoenx.helpers.scan_and_sort import sort_variable_length_int64
 
 _INT64_MAX = 0x7FFFFFFFFFFFFFFF
-
-
-@wp.kernel(enable_backward=False)
-def rebase_owned_contact_levers_kernel(
-    columns: ContactColumnContainer,
-    contacts: ContactContainer,
-    bodies: BodyContainer,
-    scheduled_column: wp.array[wp.int32],
-    section_end: wp.array[wp.int32],
-):
-    scheduled = wp.tid()
-    if scheduled >= section_end[section_end.shape[0] - 1]:
-        return
-    column = scheduled_column[scheduled]
-    body0 = contact_get_body1(columns, column)
-    body1 = contact_get_body2(columns, column)
-    shift0 = bodies.position_prev_substep[body0] - bodies.position[body0]
-    shift1 = bodies.position_prev_substep[body1] - bodies.position[body1]
-    first = contact_get_contact_first(columns, column)
-    count = contact_get_contact_count(columns, column)
-    for contact in range(first, first + count):
-        # Retain the prepared world-space impulse point while COMs advance.
-        # Otherwise opposing impulses act at different world points.
-        cc_set_r0(contacts, contact, cc_get_r0(contacts, contact) + shift0)
-        cc_set_r1(contacts, contact, cc_get_r1(contacts, contact) + shift1)
 
 
 @wp.kernel(enable_backward=False)

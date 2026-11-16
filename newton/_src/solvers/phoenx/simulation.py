@@ -25,7 +25,6 @@ from newton._src.solvers.phoenx.articulations.direct_contact_response import Dir
 from newton._src.solvers.phoenx.articulations.maximal_contact_gs import (
     MaximalContactRunSchedule,
     iterate_maximal_contact_runs_kernel,
-    rebase_owned_contact_levers_kernel,
     refresh_maximal_contact_mobility_kernel,
     warm_start_maximal_contact_runs_kernel,
 )
@@ -59,6 +58,7 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     contact_scatter_colored_rows,
     contact_views_make,
     derive_side_witness_kernel,
+    rebase_owned_contact_levers_kernel,
 )
 from newton._src.solvers.phoenx.constraints.constraint_contact_solve import (
     _get_parallel_contact_prepare_kernel,

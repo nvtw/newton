@@ -55,6 +55,8 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_get_tangent1,
     cc_get_tangent1_lambda,
     cc_get_tangent2_lambda,
+    cc_set_r0,
+    cc_set_r1,
     cc_set_start_gap,
     cc_soft_coefficients,
 )
@@ -140,6 +142,7 @@ __all__ = [
     "contact_world_error_at",
     "contact_world_wrench",
     "contact_world_wrench_at",
+    "rebase_owned_contact_levers_kernel",
 ]
 
 
@@ -1615,3 +1618,29 @@ def contact_world_error(
     cid: wp.int32,
 ) -> wp.spatial_vector:
     return contact_world_error_at(constraints, cid, 0)
+
+
+@wp.kernel(enable_backward=False)
+def rebase_owned_contact_levers_kernel(
+    columns: ContactColumnContainer,
+    contacts: ContactContainer,
+    bodies: BodyContainer,
+    scheduled_column: wp.array[wp.int32],
+    section_end: wp.array[wp.int32],
+):
+    """Keep contact impulse points fixed as centers of mass advance on either device."""
+    scheduled = wp.tid()
+    if scheduled >= section_end[section_end.shape[0] - 1]:
+        return
+    column = scheduled_column[scheduled]
+    body0 = contact_get_body1(columns, column)
+    body1 = contact_get_body2(columns, column)
+    shift0 = bodies.position_prev_substep[body0] - bodies.position[body0]
+    shift1 = bodies.position_prev_substep[body1] - bodies.position[body1]
+    first = contact_get_contact_first(columns, column)
+    count = contact_get_contact_count(columns, column)
+    for contact in range(first, first + count):
+        # Retain the prepared world-space impulse point while COMs advance.
+        # Otherwise opposing impulses act at different world points.
+        cc_set_r0(contacts, contact, cc_get_r0(contacts, contact) + shift0)
+        cc_set_r1(contacts, contact, cc_get_r1(contacts, contact) + shift1)
