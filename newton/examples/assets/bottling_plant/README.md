@@ -32,7 +32,14 @@ measurements. `--no-cutaway` restores the source exterior variant.
 
 Product bodies stored below the floor are inactive supply pools and are omitted.
 The 2,458 bottles already on the line and all 56 open cases remain dynamic. Cases
-have their source hinged flaps. The inlet, case-line, transport, and palletizer
+have their source hinged flaps. All 60 existing dispenser pallets use their
+authored dynamic variants and compound colliders. The separator fingers retain
+their exact source triangles and the station's contact material. Coarse magazine
+proxies are retired only after their physical stock is installed. The wrapper
+ports start empty, matching the source live scenario: its layout-only loads and
+their proxies are removed together, without removing runtime products.
+
+The inlet, case-line, transport, and palletizer
 PLCs and motion libraries are read from `sim/`; Kit and Isaac Sim are not needed.
 Vacuum grasps require ray hits on the actual product surfaces within the source
 reach (6 mm for bottles, 12 mm for cases), then create physical constraints at
@@ -56,6 +63,10 @@ Palletizers wait for forklift withdrawal before accepting a replacement.
 These controls have isolated regression coverage; sustained autonomous physical
 routes through the full factory have not yet been validated. Wrapper outfeed,
 pallet dispensing, and outbound logistics remain incomplete.
+The first empty-pallet extraction has been tested with all 15 source pallets
+and physical separator supports. Stock remains supported, but the default
+four-iteration setting permits excessive upper-stack drift. Higher iterations
+stabilize this isolated stack; they are not yet a validated full-factory setting.
 The initial product stock and case supply are finite; continuous
 bottle-pool replenishment and the source profile's operator jam recovery are not
 implemented. Inlet faults remain visible and fail validation.
@@ -83,10 +94,12 @@ Using convex contacts on the same geometry caused loaded cases to catch at
 descending-ramp transitions. A small physical replay reproduced the failure;
 restoring triangle contacts restored case transport.
 
-The 130-second test with the defaults above retained twelve bottles in each of
+Before physical dispenser stock was enabled, the 130-second test with the
+defaults above retained twelve bottles in each of
 48 sealed cases. The four palletizers placed 3, 2, 2, and 1 cases, respectively,
 with no PLC faults. Maximum joint-anchor error was approximately 0.3 mm.
-This verifies a finite production run, not unlimited operation. Autonomous
+This verifies that earlier finite production configuration, not the updated
+stock or unlimited operation. Autonomous
 logistics and continuous replenishment remain incomplete as described above.
 No 60 rendered FPS result has been validated for sustained end-to-end production.
 

@@ -1,0 +1,1 @@
+Restore authored dynamic dispenser stock and exact separator contacts in the PhoenX bottling example, replacing covered coarse proxies and retiring the source wrapper's layout-only loads before runtime transport.

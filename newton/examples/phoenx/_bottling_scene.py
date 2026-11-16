@@ -20,6 +20,7 @@ import warp as wp
 
 import newton
 import newton.usd
+from newton.examples.phoenx._bottling_dispenser import disable_owned_proxies, prepare_dispensers
 from newton.examples.phoenx._bottling_wrap import build_wrapper, mesh_components
 
 
@@ -83,6 +84,23 @@ def _mesh_normals(mesh):
     return normals
 
 
+def _prepare_wrapper_inventory(stage):
+    """Start with empty wrapper ports, matching the source live scenario."""
+    from pxr import Usd  # noqa: PLC0415 - OpenUSD is optional.
+
+    retired = []
+    with Usd.EditContext(stage, stage.GetSessionLayer()):
+        for name in ("WL_U", "WL_D"):
+            path = f"/Plant/WrapLine/Lines/{name}/Loads"
+            prim = stage.GetPrimAtPath(path)
+            if prim:
+                # The source scenario's create_pool() removes these layout
+                # stand-ins before runtime inventory owns the empty ports.
+                prim.SetActive(False)
+                retired.append(path)
+    disable_owned_proxies(stage, retired)
+
+
 def load_plant(asset_root: Path, *, cutaway=True, visuals=True, motor_off=False) -> PlantScene:
     """Build the full line from local USD, retaining its authored SI properties."""
     from pxr import Gf, Usd, UsdGeom, UsdPhysics, UsdShade  # noqa: PLC0415 - OpenUSD is optional.
@@ -103,6 +121,8 @@ def load_plant(asset_root: Path, *, cutaway=True, visuals=True, motor_off=False)
     plant = stage.GetPrimAtPath("/Plant")
     if cutaway:
         plant.GetVariantSet("view").SetVariantSelection("cutaway")
+    _prepare_wrapper_inventory(stage)
+    prepare_dispensers(stage)
     prims = list(Usd.PrimRange.Stage(stage, Usd.TraverseInstanceProxies()))
     cache = UsdGeom.XformCache()
     scene = PlantScene(newton.ModelBuilder())
