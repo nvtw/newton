@@ -3,11 +3,166 @@
 
 """Reconstruct moving wrap-line assemblies from the source material meshes."""
 
+import json
+
 import numpy as np
 import warp as wp
 
 import newton
 import newton.geometry
+from newton.examples.phoenx._bottling_io import _case_photoeyes
+
+
+class WrapperController:
+    """Move seated pallets to the measured wrap position, then await the process.
+
+    This implements infeed only. Film application and labelling remain absent;
+    reaching the wrap position never releases an outbound pallet.
+    """
+
+    def __init__(self, model, state, control, asset_root, channels, fleet):
+        self.model, self.state, self.control = model, state, control
+        self.channels, self.fleet = channels, fleet
+        self.lines = {}
+        origins, directions, distances = [], [], []
+        self.pallets = np.asarray(fleet.pallet_bodies)
+        shape_body = model.shape_body.numpy()
+        shape_flags = model.shape_flags.numpy()
+        shapes = np.flatnonzero(
+            np.isin(shape_body, self.pallets) & ((shape_flags & int(newton.ShapeFlags.COLLIDE_SHAPES)) != 0)
+        )
+        kinds, scales = model.shape_type.numpy(), model.shape_scale.numpy()
+        if np.any(kinds[shapes] != int(newton.GeoType.BOX)):
+            raise ValueError("Wrapper pallet photoeyes require the authored box colliders")
+        self.shapes = wp.array(shapes, dtype=int)
+        self.bounds_lo = wp.array(-scales[shapes], dtype=wp.vec3)
+        self.bounds_hi = wp.array(scales[shapes], dtype=wp.vec3)
+        transforms = model.shape_transform.numpy()
+        corners = np.array([(x, y, z) for x in (-1, 1) for y in (-1, 1) for z in (-1, 1)])
+        self.pallet_corners = {}
+        for body in self.pallets:
+            points = []
+            for shape in shapes[shape_body[shapes] == body]:
+                transform = wp.transform(transforms[shape, :3], transforms[shape, 3:])
+                points.extend(np.asarray(wp.transform_point(transform, wp.vec3(p))) for p in corners * scales[shape])
+            self.pallet_corners[body] = np.asarray(points)
+        for name in ("WL_U", "WL_D"):
+            if not any(f"/{name}/" in label for label in channels):
+                continue
+            spec = json.loads((asset_root / f"plant/lines_1x8/wrapline/{name}.json").read_text())
+            if not any(zone["prim"] in channels for zone in spec["zones"].values()):
+                continue
+            joint = model.joint_label.index(spec["unit_root"] + "/Wrapper/rotation")
+            self.lines[name] = {
+                "spec": spec,
+                "state": "WAIT_DROP",
+                "pallet": None,
+                "fault": None,
+                "since": 0.0,
+                "quiet_since": None,
+                "rotor_q": int(model.joint_q_start.numpy()[joint]),
+                "rotor_qd": int(model.joint_qd_start.numpy()[joint]),
+            }
+            for sensor in ("PE_DROP", "PE_WRAP"):
+                beam = spec["sensors"][sensor]
+                origins.append(beam["origin"])
+                directions.append(beam["direction"])
+                distances.append(beam["distance"])
+        self.origins = wp.array(origins, dtype=wp.vec3)
+        self.directions = wp.array(directions, dtype=wp.vec3)
+        self.distances = wp.array(distances, dtype=float)
+        self.hits = wp.zeros(len(origins), dtype=int)
+
+    def before_step(self, time, speed, *, poses, coordinates):
+        """Use actual pallet rays and motor state; never infer completion from a timer."""
+        for channel in self.channels.values():
+            speed[channel] = 0.0
+        if not self.lines:
+            return
+        self.hits.zero_()
+        model = self.model
+        wp.launch(
+            _case_photoeyes,
+            dim=(len(self.hits), 32),
+            inputs=[
+                self.state.body_q,
+                model.shape_body,
+                model.shape_transform,
+                model.shape_scale,
+                model.shape_type,
+                model.shape_source_ptr,
+                self.shapes,
+                self.bounds_lo,
+                self.bounds_hi,
+                self.origins,
+                self.directions,
+                self.distances,
+                self.hits,
+            ],
+        )
+        hits = self.hits.numpy().reshape(-1, 2)
+        velocities = self.state.body_qd.numpy()
+        targets = self.control.joint_target_q.numpy()
+        joint_velocity = self.state.joint_qd.numpy()
+        for index, (name, line) in enumerate(self.lines.items()):
+            spec = line["spec"]
+            port = name + "_drop"
+            reserved = any(port in (mission.source, mission.destination) for mission in self.fleet.missions.values())
+            rotor_home = abs(coordinates[line["rotor_q"]] - targets[line["rotor_q"]]) < np.radians(2.0)
+            rotor_home = rotor_home and abs(joint_velocity[line["rotor_qd"]]) < 0.02
+            if line["state"] == "WAIT_DROP":
+                observed = self.fleet._port_observation(port, poses)
+                if reserved or not rotor_home or not hits[index, 0] or observed.pallet is None:
+                    continue
+                body = int(self.pallets[observed.pallet])
+                rotation = np.asarray(wp.quat_to_matrix(wp.quat(poses[body, 3:]))).reshape(3, 3)
+                front = (self.pallet_corners[body] @ rotation.T)[:, 0].max()
+                target_x = spec["sensors"]["PE_WRAP"]["origin"][0] - front
+                others = self.pallets[self.pallets != body]
+                blocked = (np.abs(poses[others, 0] - target_x) < 1.3) & (
+                    np.abs(poses[others, 1] - spec["ports"]["drop"]["xy"][1]) < 0.8
+                )
+                if np.any(blocked):
+                    continue
+                line.update(state="INFEED", pallet=body, since=time, target_x=target_x)
+            if line["state"] == "INFEED":
+                if reserved or not rotor_home:
+                    line.update(state="FAULT", fault="Infeed lost truck clearance or rotor home")
+                elif hits[index, 1]:
+                    line.update(state="SETTLING", since=time)
+                elif time - line["since"] > spec["timers_s"]["infeed_timeout_s"]:
+                    line.update(state="FAULT", fault="Pallet did not reach the wrap photoeye")
+                else:
+                    for zone in ("Z1", "Z2", "Z3"):
+                        speed[self.channels[spec["zones"][zone]["prim"]]] = 1.0
+            if line["state"] in ("SETTLING", "WAIT_WRAP_PROCESS"):
+                body = line["pallet"]
+                pose, velocity = poses[body], velocities[body]
+                up = 1.0 - 2.0 * (pose[3] ** 2 + pose[4] ** 2)
+                yaw = np.arctan2(2 * (pose[6] * pose[5] + pose[3] * pose[4]), 1 - 2 * (pose[4] ** 2 + pose[5] ** 2))
+                yaw = (yaw + np.pi / 2) % np.pi - np.pi / 2
+                positioned = (
+                    abs(pose[0] - line["target_x"]) < 0.01
+                    and abs(pose[1] - spec["ports"]["drop"]["xy"][1]) < 0.03
+                    and abs(pose[2] - spec["ports"]["drop"]["z"]) < 0.03
+                    and up > np.cos(np.radians(3.0))
+                    and abs(yaw) < np.radians(3.0)
+                )
+                radius = np.linalg.norm(self.pallet_corners[body], axis=1).max()
+                quiet = np.linalg.norm(velocity[:3]) + radius * np.linalg.norm(velocity[3:]) < 0.01
+                if positioned and quiet and hits[index, 1]:
+                    if line["quiet_since"] is None:
+                        line["quiet_since"] = time
+                    if time - line["quiet_since"] >= 0.5:
+                        line["state"] = "WAIT_WRAP_PROCESS"
+                else:
+                    line["quiet_since"] = None
+                    if time - line["since"] > 5.0:
+                        line.update(state="FAULT", fault="Pallet did not settle at the measured wrap position")
+
+    def report(self):
+        """Expose missing wrapping as a waiting state, never as finished product."""
+        return {name: {key: line[key] for key in ("state", "pallet", "fault")} for name, line in self.lines.items()}
 
 
 def mesh_components(mesh):

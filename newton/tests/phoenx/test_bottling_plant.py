@@ -7,15 +7,17 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import warp as wp
 
 import newton
 from newton.examples.phoenx._bottling_control import _Belt, _belt_speeds, _seal_cases, _target_coordinates
+from newton.examples.phoenx._bottling_fleet import FleetController, _Transfer
 from newton.examples.phoenx._bottling_io import _case_drives, _photoeyes, _valves
 from newton.examples.phoenx._bottling_scene import load_plant
-from newton.examples.phoenx._bottling_wrap import build_wrapper, mesh_components
+from newton.examples.phoenx._bottling_wrap import WrapperController, build_wrapper, mesh_components
 from newton.examples.phoenx.example_phoenx_bottling_plant import Example
 from newton.tests.unittest_utils import requires
 from newton.viewer import ViewerNull
@@ -23,6 +25,118 @@ from newton.viewer import ViewerNull
 
 @requires("pxr.Usd")
 class TestBottlingPlant(unittest.TestCase):
+    def test_wrapper_infeed_stops_loaded_pallets_after_withdrawal(self):
+        """Transport both line orientations using measured rays and stop before wrapping."""
+        with tempfile.TemporaryDirectory() as directory, wp.ScopedDevice("cpu"):
+            root = Path(directory)
+            folder = root / "plant/lines_1x8/wrapline"
+            folder.mkdir(parents=True)
+            builder = newton.ModelBuilder()
+            channels, ports, pallets, strands = {}, {}, [], []
+            for line, y, side in (("WL_U", 2.0, 1), ("WL_D", -2.0, -1)):
+                prefix = f"/Plant/WrapLine/Lines/{line}"
+                pallet = builder.add_body(
+                    xform=wp.transform(wp.vec3(0, y, 0.501)), mass=61.0, inertia=wp.mat33(np.eye(3) * 10)
+                )
+                pallets.append(pallet)
+                builder.add_shape_box(
+                    pallet,
+                    xform=wp.transform(wp.vec3(0, 0, 0.04)),
+                    hx=0.5,
+                    hy=0.6,
+                    hz=0.04,
+                    cfg=builder.ShapeConfig(density=0.0, mu=0.7, gap=0.002),
+                )
+                load = builder.add_body(xform=wp.transform(wp.vec3(0, y, 1.082)))
+                builder.add_shape_box(
+                    load,
+                    hx=0.45,
+                    hy=0.55,
+                    hz=0.5,
+                    cfg=builder.ShapeConfig(density=250.0 / (0.9 * 1.1), mu=0.7, gap=0.002),
+                )
+                rotor = builder.add_link(xform=wp.transform(wp.vec3(10, y, 3)), mass=1.0, inertia=wp.mat33(np.eye(3)))
+                joint = builder.add_joint_revolute(
+                    -1,
+                    rotor,
+                    parent_xform=builder.body_q[rotor],
+                    axis=(0, 0, 1),
+                    target_ke=1000.0,
+                    target_kd=100.0,
+                    label=prefix + "/Wrapper/rotation",
+                )
+                builder.add_articulation([joint])
+                zones = {f"Z{i}": {"prim": prefix + f"/Physics/Conveyors/Z{i}"} for i in range(1, 6)}
+                for zone in zones.values():
+                    channels[zone["prim"]] = len(channels)
+                for offset in (-0.5375, 0.5375):
+                    box = newton.Mesh.create_box(1.5, 0.018, 0.02, compute_inertia=False)
+                    mesh = newton.Mesh(box.vertices, box.indices, compute_inertia=False, enable_surface_velocity=True)
+                    builder.add_shape_mesh(
+                        -1,
+                        mesh=mesh,
+                        xform=wp.transform(wp.vec3(0.5, y + offset, 0.48)),
+                        cfg=builder.ShapeConfig(mu=0.7, gap=0.002),
+                    )
+                    strands.append((mesh, channels[zones["Z1"]["prim"]]))
+                ports[line + "_drop"] = SimpleNamespace(xy=(0, y), z=0.5, yaw=90.0 * side)
+                spec = {
+                    "unit_root": prefix,
+                    "zones": zones,
+                    "ports": {"drop": {"xy": [0, y], "z": 0.5}},
+                    "sensors": {
+                        name: {"origin": [x, y + side * 0.615, 0.532], "direction": [0, -side, 0], "distance": 0.5}
+                        for name, x in (("PE_DROP", 0), ("PE_WRAP", 1.0))
+                    },
+                    "timers_s": {"infeed_timeout_s": 8.0},
+                }
+                (folder / f"{line}.json").write_text(json.dumps(spec))
+            model = builder.finalize()
+            state, control = model.state(), model.control()
+            fleet = FleetController.__new__(FleetController)
+            fleet.pallet_bodies, fleet.state = np.asarray(pallets), state
+            fleet.transport = SimpleNamespace(case_roots=np.empty(0, dtype=int))
+            fleet.navigation = SimpleNamespace(ports=ports)
+            fleet.missions = {
+                name: _Transfer("source", name + "_drop", i, phase="home") for i, name in enumerate(("WL_U", "WL_D"))
+            }
+            wrapper = WrapperController(model, state, control, root, channels, fleet)
+            solver = newton.solvers.SolverPhoenX(
+                model,
+                substeps=1,
+                solver_iterations=24,
+                temporal_iterations=True,
+                contact_hertz=80,
+                joint_mode="maximal_pgs",
+                step_layout="single_world",
+            )
+            contacts = solver._collision_pipeline.contacts()
+            for frame in range(600):
+                if frame == 60:
+                    fleet.missions.clear()
+                    control.joint_target_q.fill_(0.5)
+                if frame == 90:
+                    control.joint_target_q.zero_()
+                speed = np.ones(len(channels), dtype=np.float32)
+                wrapper.before_step(frame / 120, speed, poses=state.body_q.numpy(), coordinates=state.joint_q.numpy())
+                if frame < 90:
+                    np.testing.assert_array_equal(speed, 0)
+                for label, channel in channels.items():
+                    if label.endswith(("Z4", "Z5")):
+                        self.assertEqual(speed[channel], 0)
+                for mesh, channel in strands:
+                    velocity = np.zeros((len(mesh.vertices), 3), dtype=np.float32)
+                    velocity[:, 0] = 0.2 * speed[channel]
+                    mesh.mesh.velocities.assign(velocity)
+                state.clear_forces()
+                solver.collide(state, contacts, dt=1 / 120)
+                solver.step(state, state, control, contacts, 1 / 120)
+            for line in wrapper.report().values():
+                self.assertEqual(line["state"], "WAIT_WRAP_PROCESS", line)
+                self.assertIsNone(line["fault"])
+            np.testing.assert_allclose(state.body_q.numpy()[pallets, 0], 0.5, atol=0.01)
+            np.testing.assert_array_equal(speed, 0)
+
     def test_sleep_colors_preserve_material_and_render_snapshot(self):
         """Dim real sleeping bodies and restore their tint after a force wakes them."""
         with wp.ScopedDevice("cpu"):

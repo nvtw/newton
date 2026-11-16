@@ -23,6 +23,7 @@ from newton.examples.phoenx._bottling_io import (
     _valves,
 )
 from newton.examples.phoenx._bottling_transport import TransportController
+from newton.examples.phoenx._bottling_wrap import WrapperController
 from newton.solvers import phoenx
 
 
@@ -375,6 +376,7 @@ class PlantController:
         self.wrapper_channels = {
             label: self.infeed.channel_end + i for i, label in enumerate(scene.metadata.get("wrapper_belt_zones", {}))
         }
+        self.wrapper = WrapperController(model, state, control, asset_root, self.wrapper_channels, self.fleet)
         descriptors = []
         self.nominal_arrays = []
         self.belt_channels = []
@@ -401,8 +403,7 @@ class PlantController:
         self.belts = wp.array(descriptors, dtype=_Belt)
         self.max_belt_vertices = max(d.velocity.shape[0] for d in descriptors)
         multipliers = np.ones(self.infeed.channel_end + len(self.wrapper_channels), dtype=np.float32)
-        # Keep wrapper zones stopped until their physical process controller
-        # takes ownership; the generic always-on conveyor channel is unsafe.
+        # Infeed starts only after measured placement, truck withdrawal and homing.
         multipliers[self.infeed.channel_end :] = 0.0
         self.multipliers = wp.array(multipliers, dtype=float)
 
@@ -675,6 +676,7 @@ class PlantController:
         self.transport.before_step(self.case_clock, speed, poses=poses, coordinates=coordinates)
         self.infeed.before_step(self.case_clock, commands, speed, coordinates=coordinates)
         self.fleet.before_step(self.case_clock, poses=poses, coordinates=coordinates)
+        self.wrapper.before_step(self.case_clock, speed, poses=poses, coordinates=coordinates)
         self.multipliers.assign(speed)
 
     def simulate(self):
@@ -774,6 +776,7 @@ class PlantController:
             "sealers": [sealer.state for sealer in self.sealers],
             "palletizers": self.transport.report(),
             "fleet": self.fleet.report(),
+            "wrapper": self.wrapper.report(),
             "infeed": self.infeed.status,
             "sealed_cases": int(self.sealed.numpy().sum()),
         }

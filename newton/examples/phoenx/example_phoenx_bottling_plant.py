@@ -428,6 +428,7 @@ class Example:
             assert all(line.station != "FAULT" for line in self.controller.case_lines), "a case station faulted"
             assert all(sealer.state != "FAULT" for sealer in self.controller.sealers), "a sealer faulted"
             assert all(p.fault is None for p in self.controller.transport.palletizers.values()), "a palletizer faulted"
+            assert all(line["fault"] is None for line in self.controller.wrapper.lines.values()), "a wrapper faulted"
             if self.sim_time >= 22.0:
                 assert (self.controller.placed.numpy() >= 12).all(), "each packer must fill at least one case"
             if self.sim_time + 0.5 * self.frame_dt >= 130.0:

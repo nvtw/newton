@@ -1,0 +1,1 @@
+Drive wrapper infeed from measured pallet placement, truck withdrawal, rotor homing, photoeyes, and settling. Stop at the wrap position while awaiting the still-unimplemented film and label processes.
