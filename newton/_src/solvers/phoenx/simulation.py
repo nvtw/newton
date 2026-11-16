@@ -4417,7 +4417,7 @@ class PhoenXWorld:
         if iterations > 0:
             if use_bias and direct is not None:
                 direct.compute_bias_velocity()
-                direct.apply_bias_velocity(-1.0)
+                response.apply_bias_velocity(-1.0)
             schedule.solve(
                 self.bodies,
                 self._contact_container,
@@ -4427,7 +4427,7 @@ class PhoenXWorld:
                 use_bias=use_bias,
             )
             if use_bias and direct is not None:
-                direct.apply_bias_velocity(1.0)
+                response.apply_bias_velocity(1.0)
 
     def _solve_maximal_articulated_contacts(self, *, use_bias: bool, refresh_mobility: bool) -> None:
         """Run one exact articulation-response contact correction sweep."""

@@ -286,7 +286,7 @@ class TestPhoenXAutoPerformancePolicy(unittest.TestCase):
         """Motor saturation can change the factor after warm start or in relaxation."""
         for use_bias in (True, False):
             with self.subTest(use_bias=use_bias):
-                response = SimpleNamespace(compute=Mock())
+                response = SimpleNamespace(compute=Mock(), apply_bias_velocity=Mock())
                 schedule = SimpleNamespace(solve=Mock())
                 direct = SimpleNamespace(
                     has_bounded_drives=True,

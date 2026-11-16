@@ -175,6 +175,18 @@ class TestDirectBodyResponse(unittest.TestCase):
             inactive = DirectContactResponse(direct, 8, 8, active_mechanisms=(False, True))
             np.testing.assert_array_equal(inactive.data.body_basis_item.numpy(), [-1, -1, -1, 0, 2, 4])
             self.assertEqual(inactive.contact_batch.task_capacity, 2)
+            # Removing recovery for one mechanism must not round-trip the
+            # velocities of other mechanisms through unrelated large biases.
+            velocity = np.full((6, 3), 1.0e-8, dtype=np.float32)
+            direct.bodies.velocity.assign(velocity)
+            direct.bodies.angular_velocity.assign(-velocity)
+            direct.bias_velocity = wp.full(6, wp.spatial_vector(1.0), device=self.device)
+            inactive.apply_bias_velocity(-1.0)
+            np.testing.assert_array_equal(direct.bodies.velocity.numpy()[3:], velocity[3:] - 1.0)
+            np.testing.assert_array_equal(direct.bodies.angular_velocity.numpy()[3:], -velocity[3:] - 1.0)
+            inactive.apply_bias_velocity(1.0)
+            np.testing.assert_array_equal(direct.bodies.velocity.numpy()[:3], velocity[:3])
+            np.testing.assert_array_equal(direct.bodies.angular_velocity.numpy()[:3], -velocity[:3])
 
     def test_grouped_response_matches_column_response(self):
         """Match endpoint responses and deferred joint reactions exactly."""
