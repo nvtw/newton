@@ -422,6 +422,8 @@ def _compute_column_endpoint_response_kernel(
     bodies: BodyContainer,
 ):
     column, target_endpoint, source = wp.tid()
+    if response.column_mechanism0[column] < wp.int32(0) and response.column_mechanism1[column] < wp.int32(0):
+        return
     source_endpoint = source // wp.int32(6)
     source_mechanism = response.column_mechanism0[column]
     target_mechanism = response.column_mechanism0[column]
