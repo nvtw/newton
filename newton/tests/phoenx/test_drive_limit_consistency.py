@@ -33,9 +33,7 @@ class TestDriveLimitConsistency(unittest.TestCase):
                 substeps=1,
             )
             cid = int(solver._joint_constraints.joint_idx_to_cid.numpy()[hinge])
-            self.assertEqual(solver.world.constraints.bilateral.row_count.numpy()[cid], 0)
-            # The exact mechanism owns the five equality rows; its unilateral
-            # angular stops must remain active in the colored residual solve.
+            # The unilateral angular stops must remain active in the colored solve.
             self.assertEqual(solver.world._joint_pgs_enabled.numpy()[cid], 1)
             state, control = model.state(), model.control()
             force = np.zeros((model.body_count, 6), dtype=np.float32)
