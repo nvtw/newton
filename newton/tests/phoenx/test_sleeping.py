@@ -13,6 +13,42 @@ from newton.solvers import SolverPhoenX
 
 
 class TestSleepingKinematicContact(unittest.TestCase):
+    def test_read_only_support_does_not_serialize_contacts(self):
+        """Keep independent awake contacts parallel when they share a kinematic support."""
+        results = []
+        for sleeping in (False, True):
+            with wp.ScopedDevice("cpu"):
+                builder = newton.ModelBuilder()
+                support = builder.add_body(is_kinematic=True)
+                builder.add_shape_box(support, hx=3, hy=1, hz=0.1)
+                for x in (-1, 0, 1):
+                    body = builder.add_body(xform=wp.transform(wp.vec3(x, 0, 0.3)))
+                    builder.add_shape_box(body, hx=0.2, hy=0.2, hz=0.2)
+                model = builder.finalize()
+                state = model.state()
+                velocity = state.body_qd.numpy()
+                velocity[1:, 0] = 0.1
+                state.body_qd.assign(velocity)
+                solver = SolverPhoenX(
+                    model,
+                    step_layout="single_world",
+                    substeps=1,
+                    solver_iterations=4,
+                    contact_hertz=80,
+                    sleeping_velocity_threshold=0.02 if sleeping else 0.0,
+                )
+                contacts = model._collision_pipeline.contacts()
+                solver.collide(state, contacts, dt=1 / 120)
+                solver.step(state, state, model.control(), contacts, 1 / 120)
+                world = solver.world
+                count = int(world._num_active_constraints.numpy()[0])
+                elements = world._elements.numpy()["bodies"][:count]
+                self.assertTrue(np.all(world.bodies.island_root.numpy()[1:] < 0))
+                results.append((int(world._partitioner.num_colors.numpy()[0]), elements, state.body_q.numpy()))
+        self.assertEqual(results[0][0], results[1][0])
+        np.testing.assert_array_equal(results[0][1], results[1][1])
+        np.testing.assert_array_equal(results[0][2], results[1][2])
+
     def test_moving_support_wakes_stack(self):
         """Wake the whole sleeping stack when its kinematic support rises."""
         with wp.ScopedDevice("cpu"):

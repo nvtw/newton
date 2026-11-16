@@ -679,19 +679,27 @@ def _phoenx_collapse_sleeping_elements_kernel(
     num_bodies: wp.int32,
     elements: wp.array[ElementInteractionData],
 ):
-    """Rewrite every per-element body slot whose body is sleeping to -1
-    so the partitioner adjacency count drops the constraint from every
-    colour bucket. Particles and already-``-1`` slots pass through."""
+    """Compact writable, awake endpoints after building the sleeping islands.
+
+    Kinematic endpoints connect islands for waking, but their read-only state
+    must not serialize independent contacts during graph coloring.
+    """
     tid = wp.tid()
     if tid >= num_active_constraints[0]:
         return
     el = elements[tid]
+    count = wp.int32(0)
     for j in range(MAX_BODIES):
         b = el.bodies[j]
         if b < 0:
-            break
-        if b < num_bodies and bodies.island_root[b] >= wp.int32(0):
-            el.bodies[j] = wp.int32(-1)
+            continue
+        if b < num_bodies:
+            if bodies.island_root[b] >= wp.int32(0) or bodies.motion_type[b] == MOTION_KINEMATIC:
+                continue
+        el.bodies[count] = b
+        count += wp.int32(1)
+    for j in range(count, MAX_BODIES):
+        el.bodies[j] = wp.int32(-1)
     elements[tid] = el
 
 
