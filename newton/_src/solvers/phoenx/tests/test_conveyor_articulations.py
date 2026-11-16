@@ -13,10 +13,10 @@ import warp as wp
 import newton
 
 
-def _build_belt_scene():
+def _build_belt_scene(gravity=-9.81):
     """Return a model with a free box (articulation 0) and a two-link hinged robot (articulation 1)."""
     cfg = newton.ModelBuilder.ShapeConfig(mu=0.8)
-    builder = newton.ModelBuilder()
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, gravity))
     box = builder.add_body(xform=wp.transform((0.0, -1.0, 0.1), wp.quat_identity()))
     builder.add_shape_box(box, hx=0.1, hy=0.1, hz=0.1, cfg=cfg)
     root = builder.add_link(xform=wp.transform((0.0, 1.0, 0.1), wp.quat_identity()))
@@ -61,6 +61,36 @@ class TestConveyorArticulations(unittest.TestCase):
             np.testing.assert_allclose(velocity[:, :3], np.tile(surface_velocity, (3, 1)), atol=2.0e-2)
             np.testing.assert_allclose(velocity[:, 3:], 0.0, atol=5.0e-2)
             np.testing.assert_allclose(state.body_q.numpy()[bodies, 2], 0.1, atol=3.0e-3)
+
+    def test_normal_surface_velocity(self):
+        """A moving surface imparts its outward normal velocity."""
+        for mode in ("maximal_direct", "reduced"):
+            for grouping in (False, True):
+                with self.subTest(mode=mode, grouping=grouping):
+                    model, belt, bodies = _build_belt_scene(gravity=0.0)
+                    kwargs = {"reduced_articulations": [1]} if mode == "reduced" else {}
+                    solver = newton.solvers.SolverPhoenX(
+                        model,
+                        joint_mode=mode,
+                        step_layout="single_world",
+                        substeps=4,
+                        enable_body_pair_grouping=grouping,
+                        **kwargs,
+                    )
+                    state, next_state = model.state(), model.state()
+                    contacts = model._collision_pipeline.contacts()
+                    belt.mesh.velocities.fill_(wp.vec3(0.0, 0.0, 0.5))
+                    with wp.ScopedCapture() as capture:
+                        solver.collide(state, contacts)
+                        solver.step(state, next_state, None, contacts, 1.0 / 60.0)
+                        for name in ("body_q", "body_qd", "joint_q", "joint_qd"):
+                            wp.copy(getattr(state, name), getattr(next_state, name))
+                    for _ in range(30):
+                        wp.capture_launch(capture.graph)
+                    velocity = state.body_qd.numpy()[bodies]
+                    np.testing.assert_allclose(velocity[:, 2], 0.5, atol=0.02)
+                    np.testing.assert_allclose(velocity[:, :2], 0.0, atol=0.02)
+                    np.testing.assert_allclose(velocity[:, 3:], 0.0, atol=0.05)
 
     def test_reduced_dense_fused_substep(self):
         """The warehouse configuration: reduced robots in the fused dense substep."""

@@ -552,9 +552,9 @@ def _prepare_contact_bias_geometry(
         # A conveyor drives the slip to its surface velocity; the witnesses part along it, and
         # pulling them back together would brake the ride.
         target = cc_prepare_surface_target(
-            contacts_state, contact, contacts.rigid_contact_surface_velocity, contact, tangent0, tangent1
+            contacts_state, contact, contacts.rigid_contact_surface_velocity, contact, tangent0, tangent1, normal
         )
-        if wp.length_sq(target) > wp.float32(0.0):
+        if target[0] * target[0] + target[1] * target[1] > wp.float32(0.0):
             bias_t0 = wp.float32(0.0)
             bias_t1 = wp.float32(0.0)
 
@@ -817,7 +817,7 @@ def reduced_contact_iterate_staged(
             normal,
             tangent0,
             tangent1,
-            wp.dot(relative_velocity, normal),
+            wp.dot(relative_velocity, normal) + surface_target[2],
             wp.dot(relative_velocity, tangent0) + surface_target[0],
             wp.dot(relative_velocity, tangent1) + surface_target[1],
             cc_get_eff_n(contacts_state, contact),

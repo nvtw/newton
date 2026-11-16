@@ -2736,7 +2736,7 @@ def _solve_reduced_contact_point(
         n,
         t0,
         t1,
-        velocity[0],
+        velocity[0] + surface_target[2],
         velocity[1] + surface_target[0],
         velocity[2] + surface_target[1],
         cc_get_eff_n(cc, contact),

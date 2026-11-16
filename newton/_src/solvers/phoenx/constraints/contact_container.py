@@ -171,10 +171,10 @@ class ContactContainer:
     lambdas: wp.array2d[wp.float32]
     prev_lambdas: wp.array2d[wp.float32]
     derived: wp.array2d[wp.float32]
-    #: Tangential target slip of conveyor-surface contacts along (t1, t2) [m/s]; empty unless
+    #: Target velocity of conveyor-surface contacts along (t1, t2, normal) [m/s]; empty unless
     #: the collision pipeline generates surface velocities, so other scenes never touch it.
     #: See :func:`cc_prepare_surface_target` and :func:`cc_get_surface_target`.
-    surface_target: wp.array[wp.vec2f]
+    surface_target: wp.array[wp.vec3f]
     #: Signed normal gap [m] of each prepared row, advanced by the rigid motion
     #: of every substep that reuses the prepared rows; empty when every
     #: substep prepares its rows.
@@ -632,31 +632,33 @@ def cc_prepare_surface_target(
     source_k: wp.int32,
     tangent1: wp.vec3f,
     tangent2: wp.vec3f,
-) -> wp.vec2f:
-    """Store and return the target slip of a conveyor contact along ``(tangent1, tangent2)`` [m/s].
+    normal: wp.vec3f,
+) -> wp.vec3f:
+    """Store and return the target slip of a conveyor contact along ``(tangent1, tangent2, normal)`` [m/s].
 
     ``surface_velocity`` holds the surface velocity of shape 1 minus that of shape 0 per
     contact. Returns zero and stores nothing unless the container carries targets and the
     contacts have surface velocities.
     """
-    target = wp.vec2f(0.0)
+    target = wp.vec3f(0.0)
     if cc.surface_target.shape[0] > 0 and surface_velocity.shape[0] > 0:
         velocity = surface_velocity[source_k]
-        target = wp.vec2f(wp.dot(velocity, tangent1), wp.dot(velocity, tangent2))
+        target = wp.vec3f(wp.dot(velocity, tangent1), wp.dot(velocity, tangent2), wp.dot(velocity, normal))
         cc.surface_target[k] = target
     return target
 
 
 @wp.func
-def cc_get_surface_target(cc: ContactContainer, k: wp.int32) -> wp.vec2f:
+def cc_get_surface_target(cc: ContactContainer, k: wp.int32) -> wp.vec3f:
     """Return the prepared target slip of contact ``k``, zero without conveyor surfaces.
 
-    Friction drives the tangential relative velocity of side 1 minus side 0 plus this target
-    to zero, in the biased and relax sweeps alike: it is a velocity target, not a bias.
+    Add this target to the relative contact velocity in both biased and relax sweeps.
+    The normal component participates in unilateral contact; the tangential components
+    participate in friction.
     """
     if cc.surface_target.shape[0] > 0:
         return cc.surface_target[k]
-    return wp.vec2f(0.0)
+    return wp.vec3f(0.0)
 
 
 @wp.func
@@ -717,7 +719,7 @@ def contact_container_zeros(
     cc.lambdas = wp.zeros((CC_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
     cc.prev_lambdas = wp.zeros((CC_RIGID_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
     cc.derived = wp.zeros((CC_DERIVED_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
-    cc.surface_target = wp.zeros(n if surface_velocity else 0, dtype=wp.vec2f, device=device)
+    cc.surface_target = wp.zeros(n if surface_velocity else 0, dtype=wp.vec3f, device=device)
     cc.gap = wp.zeros(n if track_gap else 0, dtype=wp.float32, device=device)
     contact_container_set_sweeps(cc, solver_iterations, velocity_iterations)
     return cc
@@ -743,7 +745,7 @@ def contact_solve_container_zeros(
     lambda_rows = CC_RIGID_DWORDS_PER_CONTACT if rigid_only else CC_DWORDS_PER_CONTACT
     cc.lambdas = wp.zeros((lambda_rows, n), dtype=wp.float32, device=device)
     cc.derived = wp.zeros((CC_DERIVED_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
-    cc.surface_target = wp.empty(0, dtype=wp.vec2f, device=device)
+    cc.surface_target = wp.empty(0, dtype=wp.vec3f, device=device)
     cc.gap = wp.zeros(n if track_gap else 0, dtype=wp.float32, device=device)
     contact_container_set_sweeps(cc, solver_iterations, velocity_iterations)
     return cc

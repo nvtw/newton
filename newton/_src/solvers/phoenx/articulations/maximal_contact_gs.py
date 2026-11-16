@@ -466,13 +466,14 @@ def iterate_maximal_contact_runs_kernel(
                         if mobility[0, contact] > wp.float32(1.0e-12):
                             projected_inverse_mass = wp.float32(1.0) / mobility[0, contact]
                             pd_eff = wp.float32(1.0) / (projected_inverse_mass + pd_gamma)
+                    surface_target = cc_get_surface_target(contacts, contact)
                     normal_impulse = -cc_get_normal_lambda(contacts, contact) * normal
                     if mobility[0, contact] > wp.float32(1.0e-12):
                         normal_impulse = contact_project_normal_velocity_update(
                             contacts,
                             contact,
                             normal,
-                            normal_velocity,
+                            normal_velocity + surface_target[2],
                             mobility[0, contact],
                             bias,
                             row_mass_coeff,
@@ -487,7 +488,6 @@ def iterate_maximal_contact_runs_kernel(
                     normal_delta = wp.dot(normal_impulse, normal)
                     normal_load = cc_get_normal_lambda(contacts, contact)
 
-                    surface_target = cc_get_surface_target(contacts, contact)
                     rhs0 = tangent_velocity0 + surface_target[0] + mobility[3, contact] * normal_delta
                     rhs1 = tangent_velocity1 + surface_target[1] + mobility[4, contact] * normal_delta
                     if use_bias:

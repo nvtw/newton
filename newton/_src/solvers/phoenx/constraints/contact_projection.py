@@ -20,6 +20,7 @@ from newton._src.solvers.phoenx.constraints.constraint_block import (
 from newton._src.solvers.phoenx.constraints.contact_container import (
     ContactContainer,
     cc_get_normal_lambda,
+    cc_get_surface_target,
     cc_get_tangent1_lambda,
     cc_get_tangent2_lambda,
     cc_set_normal_lambda,
@@ -543,6 +544,8 @@ def _make_contact_frame_velocity_update(has_soft_contact_pd: bool):
 
         rel = v1 - v0 + wp.cross(w1, r1) - wp.cross(w0, r0)
         jv_n = wp.dot(normal, rel)
+        if wp.static(has_soft_contact_pd):
+            jv_n += cc_get_surface_target(cc, k)[2]
         jv_t1 = wp.dot(tangent1, rel)
         jv_t2 = wp.dot(tangent2, rel)
 

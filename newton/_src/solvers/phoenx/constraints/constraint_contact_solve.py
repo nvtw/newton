@@ -829,9 +829,9 @@ def _make_contact_prepare_for_iteration_at(
                     # Conveyor surfaces: friction drives the slip to the surface velocity. The
                     # anchors would hold the bodies together, so they follow the contact instead.
                     target = cc_prepare_surface_target(
-                        cc, k, contacts.rigid_contact_surface_velocity, source_k, t1_dir, t2_dir
+                        cc, k, contacts.rigid_contact_surface_velocity, source_k, t1_dir, t2_dir, n
                     )
-                    if wp.length_sq(target) > wp.float32(0.0):
+                    if target[0] * target[0] + target[1] * target[1] > wp.float32(0.0):
                         point = wp.float32(0.5) * (p0_world + p1_world)
                         cc_set_friction_anchor0(cc, k, body_com1 + wp.quat_rotate_inv(orientation1, point - position1))
                         cc_set_friction_anchor1(cc, k, body_com2 + wp.quat_rotate_inv(orientation2, point - position2))
@@ -1644,6 +1644,8 @@ def _make_contact_iterate_at(
                     vel_rel = v2 + wp.cross(w2, r2) - v1 - wp.cross(w1, r1)
 
                 jv_n = wp.dot(vel_rel, n)
+                if wp.static(has_soft_contact_pd):
+                    jv_n += cc_get_surface_target(cc, k)[2]
                 jv_t1 = wp.float32(0.0)
                 jv_t2 = wp.float32(0.0)
                 eff_t1 = wp.float32(0.0)

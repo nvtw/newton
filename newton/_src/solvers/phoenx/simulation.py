@@ -3833,7 +3833,7 @@ class PhoenXWorld:
         """
         cc = self._contact_container
         if self.max_contact_columns > 0 and cc.surface_target.shape[0] == 0:
-            cc.surface_target = wp.zeros(max(1, int(self.rigid_contact_max)), dtype=wp.vec2f, device=self.device)
+            cc.surface_target = wp.zeros(max(1, int(self.rigid_contact_max)), dtype=wp.vec3f, device=self.device)
 
     def _mass_splitting_average_overflow_into_bodies(self) -> None:
         """Finish a rigid overflow pass without writing unused copy slots."""

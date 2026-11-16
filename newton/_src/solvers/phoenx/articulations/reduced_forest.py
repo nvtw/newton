@@ -523,7 +523,7 @@ def _make_forest_contact_solve(width):
                             n,
                             t1,
                             t2,
-                            v0,
+                            v0 + surface_target[2],
                             v1 + surface_target[0],
                             v2 + surface_target[1],
                             cc_get_eff_n(cc, contact),

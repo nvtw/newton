@@ -243,13 +243,14 @@ def _relax_direct_contact_point(
         pd_eff = wp.float32(0.0)
         if normal_mobility > wp.float32(1.0e-12):
             pd_eff = wp.float32(1.0) / ((wp.float32(1.0) / normal_mobility + pd_gamma) * split)
+    surface_target = cc_get_surface_target(contacts, contact)
     normal_impulse = -cc_get_normal_lambda(contacts, contact) * normal
     if normal_mobility > wp.float32(1.0e-12):
         normal_impulse = contact_project_normal_velocity_update(
             contacts,
             contact,
             normal,
-            wp.dot(relative_velocity, normal),
+            wp.dot(relative_velocity, normal) + surface_target[2],
             normal_mobility / split,
             bias,
             row_mass_coeff,
@@ -263,7 +264,6 @@ def _relax_direct_contact_point(
         cc_set_normal_lambda(contacts, contact, wp.float32(0.0))
     normal_delta = wp.dot(normal_impulse, normal)
     normal_load = cc_get_normal_lambda(contacts, contact)
-    surface_target = cc_get_surface_target(contacts, contact)
     rhs0 = (
         wp.dot(relative_velocity, tangent0) + surface_target[0] + split * response.mobility[3, contact] * normal_delta
     )
