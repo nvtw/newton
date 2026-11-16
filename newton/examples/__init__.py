@@ -1063,7 +1063,7 @@ def init(parser=None):
         _raise_benchmark_priority(realtime=args.realtime)
 
     # Create viewer based on type
-    visible_gl = args.viewer == "gl" and not args.headless
+    visible_window = args.viewer in ("gl", "optix") and not args.headless
     if args.viewer == "gl":
         viewer = newton.viewer.ViewerGL(headless=args.headless, paused=args.paused, num_frames=args.num_frames)
     elif args.viewer == "optix":
@@ -1097,9 +1097,9 @@ def init(parser=None):
     else:
         raise ValueError(f"Invalid viewer: {args.viewer}")
 
-    if visible_gl:
+    if visible_window:
         viewer.show_loading_splash("Loading...")
-        # Pump a few frames so the OS maps the GL surface before kernel
+        # Pump a few frames so the OS maps the window before kernel
         # compilation blocks the main thread.  No portable "window is on
         # screen" signal exists across X11/Wayland/macOS; three frames is
         # a best-effort heuristic that may still come up blank on slow
