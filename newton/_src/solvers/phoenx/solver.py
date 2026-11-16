@@ -509,8 +509,8 @@ class SolverPhoenX(SolverBase):
             enable_body_pair_grouping: Experimental contact-column policy. None
                 automatically groups compound-body contacts in eligible single-scene
                 layouts. True requests the grouped path, while False preserves
-                separate shape-pair manifolds. Shape-pair manifolds are appropriate for
-                disconnected or strongly nonconvex compound contact patches.
+                separate shape-pair columns. Grouping preserves every input contact;
+                contact reduction is controlled by the collision pipeline.
             default_friction: Fallback when Contacts/shapes carry no material.
             friction_combine_mode: Rule used to combine per-shape friction.
                 Supported values are ``"average"``, ``"min"``, ``"multiply"``,

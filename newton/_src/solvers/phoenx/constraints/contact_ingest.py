@@ -20,12 +20,6 @@ from newton._src.geometry.active_prefix_sort import (
     dispatch_active_prefix,
     radix_sort_prefix,
 )
-from newton._src.geometry.contact_reduction import (
-    NUM_NORMAL_BINS,
-    float_flip,
-    get_slot,
-)
-from newton._src.geometry.contact_reduction_global import BETA_THRESHOLD
 from newton._src.solvers.phoenx.body import BodyContainer
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
     ContactColumnContainer,
@@ -84,28 +78,6 @@ __all__ = [
 ]
 
 
-# One deepest point per normal bin plus support along the 26 nonzero directions of a local 3x3x3 stencil.
-# Ordinary manifolds bypass these kernels unchanged.
-_BODY_PAIR_SPATIAL_DIRECTIONS = 26
-_BODY_PAIR_CONTACT_CAP = NUM_NORMAL_BINS + _BODY_PAIR_SPATIAL_DIRECTIONS
-
-
-@wp.func
-def _body_pair_support_direction(direction: wp.int32) -> wp.vec3f:
-    # Enumerate the 26 nonzero directions of a 3x3x3 stencil. Axes,
-    # face diagonals and corner diagonals retain spatially separated
-    # regions of nonconvex compound manifolds.
-    code = direction
-    if code >= wp.int32(13):
-        code += wp.int32(1)
-    x = wp.float32(code % wp.int32(3) - wp.int32(1))
-    code /= wp.int32(3)
-    y = wp.float32(code % wp.int32(3) - wp.int32(1))
-    z = wp.float32(code / wp.int32(3) - wp.int32(1))
-    result = wp.vec3f(x, y, z)
-    return result / wp.length(result)
-
-
 class IngestScratch:
     """Pre-allocated device buffers reused each step. Sized to
     rigid_contact_max (per-contact + per-pair, worst case) and
@@ -130,7 +102,6 @@ class IngestScratch:
         "pair_source_idx",
         "prev_inv_sort_perm",
         "rigid_contact_max",
-        "selected_contact",
         "sort_perm",
         "sort_prefix_flags",
         "sorted_damping",
@@ -212,7 +183,6 @@ class IngestScratch:
             self.sorted_stiffness = wp.zeros(n_perm, dtype=wp.float32, device=device)
             self.sorted_damping = wp.zeros(n_perm, dtype=wp.float32, device=device)
             self.sorted_friction = wp.zeros(n_perm, dtype=wp.float32, device=device)
-            self.selected_contact = wp.zeros(n_perm, dtype=wp.uint64, device=device)
         else:
             self.body_pair_keys = None
             self.sort_prefix_flags = None
@@ -230,7 +200,6 @@ class IngestScratch:
             self.sorted_stiffness = None
             self.sorted_damping = None
             self.sorted_friction = None
-            self.selected_contact = None
 
 
 def allocate_ingest_scratch(
@@ -556,188 +525,6 @@ def _body_pair_boundary_kernel(
         pair_boundary[tid] = wp.int32(1)
     else:
         pair_boundary[tid] = wp.int32(0)
-
-
-@wp.func
-def _body_pair_contact_point_world(
-    bodies: BodyContainer,
-    body: wp.int32,
-    point: wp.vec3f,
-) -> wp.vec3f:
-    if body < wp.int32(0):
-        return point
-    return bodies.position[body] + wp.quat_rotate(bodies.orientation[body], point - bodies.body_com[body])
-
-
-@wp.func
-def _body_pair_contact_gap(
-    bodies: BodyContainer,
-    shape_body: wp.array[wp.int32],
-    shape0: wp.array[wp.int32],
-    shape1: wp.array[wp.int32],
-    point0: wp.array[wp.vec3f],
-    point1: wp.array[wp.vec3f],
-    normal: wp.array[wp.vec3f],
-    margin0: wp.array[wp.float32],
-    margin1: wp.array[wp.float32],
-    contact: wp.int32,
-) -> wp.float32:
-    body0 = shape_body[shape0[contact]]
-    body1 = shape_body[shape1[contact]]
-    world0 = _body_pair_contact_point_world(bodies, body0, point0[contact])
-    world1 = _body_pair_contact_point_world(bodies, body1, point1[contact])
-    return wp.dot(world1 - world0, normal[contact]) - (margin0[contact] + margin1[contact])
-
-
-@wp.func
-def _body_pair_contact_score(score: wp.float32, contact: wp.int32) -> wp.uint64:
-    return (wp.uint64(float_flip(score)) << wp.uint64(32)) | wp.uint64(contact)
-
-
-@wp.kernel(enable_backward=False, grid_stride=False)
-def _clear_body_pair_manifold_slots_kernel(
-    num_pairs: wp.array[wp.int32],
-    pair_first: wp.array[wp.int32],
-    pair_count: wp.array[wp.int32],
-    selected_contact: wp.array[wp.uint64],
-):
-    pair = wp.tid()
-    if pair >= num_pairs[0] or pair_count[pair] <= wp.static(_BODY_PAIR_CONTACT_CAP):
-        return
-    first = pair_first[pair]
-    for slot in range(wp.static(_BODY_PAIR_CONTACT_CAP)):
-        selected_contact[first + slot] = wp.uint64(0)
-
-
-@wp.kernel(enable_backward=False, grid_stride=False)
-def _select_body_pair_manifold_kernel(
-    pair_id: wp.array[wp.int32],
-    pair_first: wp.array[wp.int32],
-    pair_count: wp.array[wp.int32],
-    bodies: BodyContainer,
-    shape_body: wp.array[wp.int32],
-    shape0: wp.array[wp.int32],
-    shape1: wp.array[wp.int32],
-    normal: wp.array[wp.vec3f],
-    point0: wp.array[wp.vec3f],
-    point1: wp.array[wp.vec3f],
-    margin0: wp.array[wp.float32],
-    margin1: wp.array[wp.float32],
-    selected_contact: wp.array[wp.uint64],
-):
-    contact = wp.tid()
-    pair = pair_id[contact] - wp.int32(1)
-    if pair < wp.int32(0) or pair_count[pair] <= wp.static(_BODY_PAIR_CONTACT_CAP):
-        return
-    first = pair_first[pair]
-    if contact < first or contact >= first + pair_count[pair]:
-        return
-    body0 = shape_body[shape0[contact]]
-    body1 = shape_body[shape1[contact]]
-    reference_body = body0 if body0 >= wp.int32(0) else body1
-    if reference_body < wp.int32(0):
-        return
-    gap = _body_pair_contact_gap(bodies, shape_body, shape0, shape1, point0, point1, normal, margin0, margin1, contact)
-    local_normal = wp.quat_rotate_inv(bodies.orientation[reference_body], normal[contact])
-    normal_bin = get_slot(local_normal)
-    wp.atomic_max(selected_contact, first + normal_bin, _body_pair_contact_score(-gap, contact))
-
-    if gap < wp.static(BETA_THRESHOLD):
-        local_point = point0[contact] if body0 >= wp.int32(0) else point1[contact]
-        local_point -= bodies.body_com[reference_body]
-        for direction in range(wp.static(_BODY_PAIR_SPATIAL_DIRECTIONS)):
-            projection = wp.dot(local_point, _body_pair_support_direction(direction))
-            wp.atomic_max(
-                selected_contact,
-                first + wp.static(NUM_NORMAL_BINS) + direction,
-                _body_pair_contact_score(projection, contact),
-            )
-
-
-@wp.kernel(enable_backward=False, grid_stride=False)
-def _compact_body_pair_manifolds_kernel(
-    num_pairs: wp.array[wp.int32],
-    pair_first: wp.array[wp.int32],
-    pair_count: wp.array[wp.int32],
-    pair_id: wp.array[wp.int32],
-    shape0: wp.array[wp.int32],
-    shape1: wp.array[wp.int32],
-    match_index: wp.array[wp.int32],
-    normal: wp.array[wp.vec3f],
-    point0: wp.array[wp.vec3f],
-    point1: wp.array[wp.vec3f],
-    margin0: wp.array[wp.float32],
-    margin1: wp.array[wp.float32],
-    stiffness: wp.array[wp.float32],
-    damping: wp.array[wp.float32],
-    friction: wp.array[wp.float32],
-    surface_velocity: wp.array[wp.vec3f],
-    sort_perm: wp.array[wp.int32],
-    selected_contact: wp.array[wp.uint64],
-    inv_sort_perm: wp.array[wp.int32],
-):
-    pair = wp.tid()
-    if pair >= num_pairs[0]:
-        return
-    first = pair_first[pair]
-    count = pair_count[pair]
-    if count <= wp.static(_BODY_PAIR_CONTACT_CAP):
-        return
-
-    selected_count = wp.int32(0)
-    # The same contact may win several support directions. Compact unique
-    # source indices into the front of this pairs scratch range.
-    for slot in range(wp.static(_BODY_PAIR_CONTACT_CAP)):
-        packed = selected_contact[first + slot]
-        if packed == wp.uint64(0):
-            continue
-        contact = wp.int32(packed & wp.uint64(0xFFFFFFFF))
-        duplicate = wp.bool(False)
-        for selected_index in range(selected_count):
-            if wp.int32(selected_contact[first + selected_index]) == contact:
-                duplicate = wp.bool(True)
-        if not duplicate:
-            selected_contact[first + selected_count] = wp.uint64(contact)
-            selected_count += wp.int32(1)
-
-    # Source-order compaction is deterministic and safe in place: the i-th
-    # selected source is never before its destination at first + i.
-    for i in range(wp.static(_BODY_PAIR_CONTACT_CAP)):
-        if i >= selected_count:
-            break
-        for j in range(i + 1, wp.static(_BODY_PAIR_CONTACT_CAP)):
-            if j >= selected_count:
-                break
-            if selected_contact[first + j] < selected_contact[first + i]:
-                tmp = selected_contact[first + i]
-                selected_contact[first + i] = selected_contact[first + j]
-                selected_contact[first + j] = tmp
-
-    for offset in range(count):
-        pair_id[first + offset] = wp.int32(0)
-        inv_sort_perm[sort_perm[first + offset]] = wp.int32(-1)
-    for offset in range(wp.static(_BODY_PAIR_CONTACT_CAP)):
-        if offset >= selected_count:
-            break
-        source = wp.int32(selected_contact[first + offset])
-        destination = first + offset
-        shape0[destination] = shape0[source]
-        shape1[destination] = shape1[source]
-        match_index[destination] = match_index[source]
-        normal[destination] = normal[source]
-        point0[destination] = point0[source]
-        point1[destination] = point1[source]
-        margin0[destination] = margin0[source]
-        margin1[destination] = margin1[source]
-        stiffness[destination] = stiffness[source]
-        damping[destination] = damping[source]
-        friction[destination] = friction[source]
-        if destination < surface_velocity.shape[0]:
-            surface_velocity[destination] = surface_velocity[source]
-        sort_perm[destination] = sort_perm[source]
-        pair_id[destination] = pair + wp.int32(1)
-        inv_sort_perm[sort_perm[destination]] = destination
-    pair_count[pair] = selected_count
 
 
 # ---------------------------------------------------------------------------
@@ -1614,7 +1401,7 @@ def ingest_contacts(
         wp.utils.array_scan(scratch.pair_boundary, scratch.pair_id, inclusive=True)
 
         def group(dim: int) -> None:
-            """Count the contacts of each body pair and keep its manifold."""
+            """Count all contacts of each body pair without changing its manifold."""
             wp.launch(
                 kernel=_scatter_pair_starts_kernel,
                 dim=dim,
@@ -1651,63 +1438,6 @@ def ingest_contacts(
                     shape_no_response,
                 ],
                 outputs=[scratch.pair_count, scratch.pair_columns],
-                device=device,
-            )
-            wp.launch(
-                kernel=_clear_body_pair_manifold_slots_kernel,
-                dim=dim,
-                inputs=[
-                    scratch.num_pairs,
-                    scratch.pair_first,
-                    scratch.pair_count,
-                    scratch.selected_contact,
-                ],
-                device=device,
-            )
-            wp.launch(
-                kernel=_select_body_pair_manifold_kernel,
-                dim=dim,
-                inputs=[
-                    scratch.pair_id,
-                    scratch.pair_first,
-                    scratch.pair_count,
-                    bodies,
-                    shape_body,
-                    scratch.sorted_shape0,
-                    scratch.sorted_shape1,
-                    scratch.sorted_normal,
-                    scratch.sorted_point0,
-                    scratch.sorted_point1,
-                    scratch.sorted_margin0,
-                    scratch.sorted_margin1,
-                    scratch.selected_contact,
-                ],
-                device=device,
-            )
-            wp.launch(
-                kernel=_compact_body_pair_manifolds_kernel,
-                dim=dim,
-                inputs=[
-                    scratch.num_pairs,
-                    scratch.pair_first,
-                    scratch.pair_count,
-                    scratch.pair_id,
-                    scratch.sorted_shape0,
-                    scratch.sorted_shape1,
-                    scratch.sorted_match_index,
-                    scratch.sorted_normal,
-                    scratch.sorted_point0,
-                    scratch.sorted_point1,
-                    scratch.sorted_margin0,
-                    scratch.sorted_margin1,
-                    scratch.sorted_stiffness,
-                    scratch.sorted_damping,
-                    scratch.sorted_friction,
-                    scratch.sorted_surface_velocity,
-                    scratch.sort_perm,
-                    scratch.selected_contact,
-                    scratch.inv_sort_perm,
-                ],
                 device=device,
             )
 
