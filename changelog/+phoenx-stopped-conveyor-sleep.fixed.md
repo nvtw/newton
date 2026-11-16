@@ -1,0 +1,1 @@
+Let PhoenX stacks sleep on stopped conveyor surfaces and wake with their complete support contacts when the conveyor restarts. Preserve contact warm starts while bodies are still settling, and clear them once bodies sleep. Pipelines with surface velocities retain sleeping contact pairs; other pipelines keep their existing sleeping broad-phase pruning.

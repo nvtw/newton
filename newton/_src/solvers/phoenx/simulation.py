@@ -3057,8 +3057,8 @@ class PhoenXWorld:
         if self._sleeping_enabled:
             self._run_sleeping_pass(shape_body, shape_aabb_lower, shape_aabb_upper)
             if self._contact_input_active_this_step:
-                # Classify before gating: contacts can wake an island or start its
-                # quiet hysteresis this step. Keep substep-local warm starts intact.
+                # Classify before clearing newly dormant impulses. Awake contacts
+                # retain cross-frame history throughout their quiet hysteresis.
                 wp.launch(
                     _phoenx_clear_quiet_contact_warmstart_kernel,
                     dim=max(self.rigid_contact_max, self.max_contact_columns),
@@ -3835,8 +3835,8 @@ class PhoenXWorld:
         if self._island_root_per_compact is not None:
             self._island_root_per_compact.fill_(self.num_bodies)
 
-        # Driven mechanisms and velocity-bearing surfaces can receive new
-        # commands without a change in rigid-body pose. Keep their islands active.
+        # Driven mechanisms and moving surfaces can receive new commands
+        # without a change in rigid-body pose. Keep their islands active.
         wp.copy(self._sleeping_activity, self._sleeping_forced_awake)
         properties = (
             self._sleeping_filter_data.shape_mesh_properties if self._sleeping_filter_data is not None else None
@@ -3845,7 +3845,7 @@ class PhoenXWorld:
             wp.launch(
                 _phoenx_surface_activity_kernel,
                 dim=self.rigid_contact_max,
-                inputs=[self._contact_views, properties, self._sleeping_activity],
+                inputs=[self._contact_views, self._sleeping_activity],
                 device=self.device,
             )
 

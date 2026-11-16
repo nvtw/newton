@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import warp as wp
 
-from newton._src.geometry.flags import MeshProperties
 from newton._src.solvers.phoenx.body import MOTION_STATIC
 
 __all__ = [
@@ -45,12 +44,11 @@ def phoenx_sleeping_filter(pair: wp.vec2i, data: PhoenXSleepingFilterData) -> wp
             return wp.int32(0)
     if data.enabled == wp.int32(0):
         return wp.int32(1)
-    # Surface velocities may change while their owning rigid body is static.
+    # This array is present when the pipeline supports surface velocities.
+    # Keep the entire sleeping stack's contacts: a moving belt wakes it only
+    # after collision detection, when culled box-box pairs cannot be recovered.
     if data.shape_mesh_properties.shape[0] > 0:
-        if (data.shape_mesh_properties[pair[0]] | data.shape_mesh_properties[pair[1]]) & int(
-            MeshProperties.SURFACE_VELOCITY
-        ):
-            return wp.int32(1)
+        return wp.int32(1)
     slot_a = wp.int32(0)
     slot_b = wp.int32(0)
     if body_a >= 0:

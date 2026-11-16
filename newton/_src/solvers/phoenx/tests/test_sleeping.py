@@ -86,7 +86,7 @@ def _record_transport_offsets(
 
 
 class TestSleepingWarmstart(unittest.TestCase):
-    """Keep active contact history while quiet islands cold-start without losing anchors."""
+    """Keep awake contact history while dormant islands discard impulses without losing anchors."""
 
     def _check_gate(self, device, *, capture):
         with wp.ScopedDevice(device):
@@ -141,9 +141,11 @@ class TestSleepingWarmstart(unittest.TestCase):
             else:
                 classify_and_gate()
             expected = impulses.copy()
-            expected[:, [1, 2, 4]] = 0
+            # Body 2 is quiet but still awake: its load-bearing impulses remain
+            # valid until the dwell completes. Only body 3 is already sleeping.
+            expected[:, [2]] = 0
             expected_patch = patch_impulses.copy()
-            expected_patch[[0, 2, 3]] = 0
+            expected_patch[[0]] = 0
             np.testing.assert_array_equal(cc.impulses.numpy(), expected)
             np.testing.assert_array_equal(cc.lambdas.numpy(), references)
             np.testing.assert_array_equal(columns.patch.impulse_world.numpy(), expected_patch)
@@ -175,7 +177,7 @@ class TestSleepingWarmstart(unittest.TestCase):
             np.testing.assert_array_equal(cc.lambdas.numpy()[6:, :5], references[6:, :5])
 
     def test_quiet_contact_warmstart_preserves_active_history(self):
-        """Clear newly quiet and dormant impulses while retaining active impulses and friction anchors."""
+        """Clear dormant impulses while retaining awake quiet impulses and friction anchors."""
         self._check_gate("cpu", capture=False)
 
     @unittest.skipUnless(wp.is_cuda_available(), "CUDA graph capture requires CUDA")

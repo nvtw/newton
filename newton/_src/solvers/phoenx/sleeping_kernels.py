@@ -44,7 +44,6 @@ all sleep-aware orchestration lives here.
 
 import warp as wp
 
-from newton._src.geometry.flags import MeshProperties
 from newton._src.solvers.phoenx.body import (
     MOTION_DYNAMIC,
     MOTION_KINEMATIC,
@@ -105,7 +104,7 @@ def _body_needs_cold_contact_start(bodies: BodyContainer, body: wp.int32) -> wp.
         return False
     if bodies.motion_type[body] != MOTION_DYNAMIC or bodies.inverse_mass[body] == 0.0:
         return False
-    return bodies.island_root[body] >= 0 or bodies.frames_below_threshold[body] > 0
+    return bodies.island_root[body] >= 0
 
 
 @wp.kernel(enable_backward=False)
@@ -117,11 +116,12 @@ def _phoenx_clear_quiet_contact_warmstart_kernel(
     num_columns: wp.array[wp.int32],
     patch_enabled: wp.int32,
 ):
-    """Cold-start quiet islands after sleep classification, retaining friction anchors.
+    """Clear dormant impulses after sleep classification, retaining friction anchors.
 
-    Active islands keep matched impulses. Quiet candidates must shed cross-frame
-    impulses to settle; dormant rows must be cleared even when solving skips them,
-    so waking cannot resurrect a cached pre-sleep impulse.
+    Awake contacts retain matched impulses throughout their quiet dwell: removing
+    their load-bearing warm starts can excite motion before they reach sleep.
+    Dormant rows are cleared even when solving skips them, so waking cannot
+    resurrect a cached pre-sleep impulse.
     """
     index = wp.tid()
     if index < contacts.rigid_contact_count[0] and index < cc.impulses.shape[1]:
@@ -734,23 +734,24 @@ def _phoenx_joint_activity_kernel(
 
 
 @wp.kernel(enable_backward=False)
-def _phoenx_surface_activity_kernel(
-    contacts: ContactViews, properties: wp.array[wp.int32], activity: wp.array[wp.int32]
-):
+def _phoenx_surface_activity_kernel(contacts: ContactViews, activity: wp.array[wp.int32]):
     i = wp.tid()
     if i >= contacts.rigid_contact_count[0]:
+        return
+    if contacts.rigid_contact_surface_velocity.shape[0] == 0:
+        return
+    if wp.length_sq(contacts.rigid_contact_surface_velocity[i]) == 0.0:
         return
     a = contacts.rigid_contact_shape0[i]
     b = contacts.rigid_contact_shape1[i]
     if a < 0 or b < 0:
         return
-    if (properties[a] | properties[b]) & int(MeshProperties.SURFACE_VELOCITY):
-        for shape in range(2):
-            body = contacts.shape_body[a]
-            if shape == 1:
-                body = contacts.shape_body[b]
-            if body > 0:
-                wp.atomic_max(activity, body, 1)
+    for shape in range(2):
+        body = contacts.shape_body[a]
+        if shape == 1:
+            body = contacts.shape_body[b]
+        if body > 0:
+            wp.atomic_max(activity, body, 1)
 
 
 @wp.kernel(enable_backward=False)
