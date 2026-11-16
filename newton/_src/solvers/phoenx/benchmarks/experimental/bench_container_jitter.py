@@ -125,7 +125,7 @@ def run_case(name, args):
     solver = SolverPhoenX(
         model,
         collision_pipeline=pipeline,
-        substeps=1,
+        substeps=args.solver_substeps,
         solver_iterations=args.iterations,
         velocity_iterations=1,
         contact_hertz=args.contact_hertz,
@@ -230,7 +230,8 @@ def main():
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--duration", type=float, default=3)
     parser.add_argument("--settle", type=float, default=1)
-    parser.add_argument("--substeps", type=int, default=4)
+    parser.add_argument("--substeps", type=int, default=4, help="Collision passes per 60 Hz frame.")
+    parser.add_argument("--solver-substeps", type=int, default=1, help="Physics substeps per collision pass.")
     parser.add_argument("--iterations", type=int, default=4)
     parser.add_argument("--contact-hertz", type=float, default=80)
     parser.add_argument("--gap", type=float, default=0.002)
@@ -238,7 +239,7 @@ def main():
     parser.add_argument("--matching", choices=("sticky", "latest", "disabled"), default="sticky")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
-    if args.substeps < 1 or args.iterations < 1 or not 0 <= args.settle < args.duration:
+    if min(args.substeps, args.solver_substeps, args.iterations) < 1 or not 0 <= args.settle < args.duration:
         parser.error("positive substeps/iterations and 0 <= settle < duration are required")
     if args.gap < 0 or args.speculative_extension < 0 or args.contact_hertz <= 0:
         parser.error("gaps must be nonnegative and contact frequency must be positive")

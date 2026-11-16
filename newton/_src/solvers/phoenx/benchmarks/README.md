@@ -36,6 +36,10 @@ uv run --no-sync -m newton._src.solvers.phoenx.benchmarks.experimental.bench_con
 
 uv run --no-sync -m newton._src.solvers.phoenx.benchmarks.experimental.bench_container_jitter \
     --case box_12 --iterations 64 --output /tmp/container-jitter-reference.json
+
+# 120 Hz collision detection, 480 Hz physics:
+uv run --no-sync -m newton._src.solvers.phoenx.benchmarks.experimental.bench_container_jitter \
+    --case box_12 --substeps 2 --solver-substeps 4 --output /tmp/container-jitter-substeps.json
 ```
 
 Defaults are three simulated seconds, measurement after one second, four
@@ -51,6 +55,12 @@ The base-top metric accounts for relative tilt but does not check wall penetrati
 Runtime includes
 readbacks and may include kernel compilation: do not interpret it as rendered
 FPS or a clean solver-throughput benchmark.
+
+`--substeps` controls collision passes per 60 Hz frame; `--solver-substeps`
+controls physics steps between collision passes. Motion is sampled after each
+collision/solver call, so changing collision frequency also changes measurement
+cadence. Compare common sampling endpoints when isolating collision-rate effects;
+high-frequency jitter can otherwise alias into different RMS values.
 
 At the initial CPU baseline, relative speed RMS was approximately
 0.0012/0.00013/3.66/44.75/21.26 mm/s in the order above. Difficulty is a structural
