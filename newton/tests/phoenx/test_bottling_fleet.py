@@ -17,6 +17,64 @@ from newton.examples.phoenx._bottling_transport import TransportController
 
 
 class TestBottlingFleet(unittest.TestCase):
+    def test_wrapper_dispatch_requires_ready_inventory_and_free_resources(self):
+        """Gate route C on process readiness, physical stock and exclusive ports."""
+        with wp.ScopedDevice("cpu"):
+            builder = newton.ModelBuilder()
+            pallet = builder.add_body(xform=wp.transform(wp.vec3(4, 7, 0.5), wp.quat_identity()))
+            obstruction = builder.add_body(xform=wp.transform(wp.vec3(10, 7, 0.2), wp.quat_identity()))
+            model = builder.finalize()
+            fleet = FleetController.__new__(FleetController)
+            fleet.state = model.state()
+            fleet.pallet_bodies = np.array([pallet], dtype=np.int32)
+            fleet.transport = SimpleNamespace(case_roots=np.array([obstruction]), names=(), station_state=())
+            fleet.navigation = SimpleNamespace(
+                ports={
+                    "WL_U_pick": SimpleNamespace(xy=(4, 7), z=0.5, yaw=90.0, side="U"),
+                    "dropoff_U_drop": SimpleNamespace(xy=(10, 7), z=0.0, yaw=90.0),
+                }
+            )
+            fleet.roles = {"c_U": {("C", "U")}, "ab_U": {("A", "U")}}
+            fleet.missions = {}
+            fleet.wrapper_ready = {}
+            self.assertEqual(list(fleet._transfer_requests("c_U")), [])
+            fleet.notify_wrapper_ready("U", pallet)
+            fleet.notify_wrapper_ready("U", pallet)
+            requests = list(fleet._transfer_requests("c_U"))
+            self.assertEqual(requests, [("WL_U_pick", "dropoff_U_drop", 0, False)])
+            self.assertEqual(list(fleet._transfer_requests("ab_U")), [])
+            source, destination, identity, empty = requests[0]
+            poses = fleet.state.body_q.numpy()
+            self.assertIsNone(fleet._available_transfer(source, destination, poses, pallet=identity, empty=empty))
+            poses[obstruction, 0] += 3.0
+            fleet.state.body_q.assign(poses)
+            mission = fleet._available_transfer(source, destination, poses, pallet=identity, empty=empty)
+            self.assertEqual((mission.source, mission.destination, mission.pallet), (source, destination, 0))
+            self.assertIsNone(fleet._available_transfer(source, destination, poses, pallet=1))
+            for reserved in (
+                mission,
+                _Transfer("another", destination, 1),
+                _Transfer(source, "another", 1),
+                _Transfer(destination, "another", 1),
+                _Transfer("another", source, 1),
+                _Transfer("another", "elsewhere", 0),
+            ):
+                with self.subTest(reserved=reserved):
+                    fleet.missions["other"] = reserved
+                    self.assertIsNone(fleet._available_transfer(source, destination, poses, pallet=identity))
+                    if reserved.pallet == identity:
+                        with self.assertRaises(ValueError):
+                            fleet.notify_wrapper_ready("U", pallet)
+            fleet.missions.clear()
+            self.assertIsNotNone(fleet._available_transfer(source, destination, poses, pallet=identity))
+            poses[pallet, 2] += 0.2
+            fleet.state.body_q.assign(poses)
+            self.assertIsNone(fleet._available_transfer(source, destination, poses, pallet=identity))
+            with self.assertRaises(ValueError):
+                fleet.notify_wrapper_ready("U", pallet)
+            with self.assertRaises(ValueError):
+                fleet.notify_wrapper_ready("U", obstruction)
+
     def test_station_waits_for_withdrawal_before_reset(self):
         """Hold an empty seated replacement until its exchange truck withdraws."""
         with wp.ScopedDevice("cpu"):

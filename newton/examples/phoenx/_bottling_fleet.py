@@ -132,6 +132,7 @@ class FleetController:
         self.missions = {}
         self.completed = []
         self.waiting = {}
+        self.wrapper_ready = {}
         if transport is not None:
             data = json.loads((root.parent / "palletflow_model.json").read_text())
             self.navigation = source_model.from_json(
@@ -188,6 +189,65 @@ class FleetController:
             cells.update(self.traffic.fp.line_cells(outer, port.ref_at_tips(port.pick_tips_s), port.truck_yaw, True))
         return cells
 
+    def notify_wrapper_ready(self, side, pallet_body):
+        """Release a physically seated pallet after wrapping and labelling finish.
+
+        The wrapper process must call this only after its physical completion
+        checks pass. Occupancy alone never establishes process completion.
+        Repeated notification of the same waiting pallet is harmless.
+        """
+        source = f"WL_{side}_pick"
+        destination = f"dropoff_{side}_drop"
+        if source not in self.navigation.ports or destination not in self.navigation.ports:
+            raise ValueError(f"Unknown wrapper side: {side}")
+        indices = np.flatnonzero(self.pallet_bodies == pallet_body)
+        if len(indices) != 1:
+            raise ValueError(f"Unknown wrapper pallet body: {pallet_body}")
+        pallet = int(indices[0])
+        if self._port_observation(source, self.state.body_q.numpy()).pallet != pallet:
+            raise ValueError(f"Wrapper {side}: completed pallet is not seated at its pickup")
+        if any(mission.pallet == pallet for mission in self.missions.values()):
+            raise ValueError(f"Wrapper {side}: completed pallet is already reserved")
+        if source in self.wrapper_ready and self.wrapper_ready[source] != pallet:
+            raise ValueError(f"Wrapper {side}: a different completed pallet is still waiting")
+        self.wrapper_ready[source] = pallet
+
+    def _transfer_requests(self, truck_name):
+        """Enumerate physical A/B requests and explicitly completed C requests."""
+        roles = self.roles[truck_name]
+        for name, state in zip(self.transport.names, self.transport.station_state, strict=True):
+            station = name + "_A"
+            port = self.navigation.ports[station]
+            if state == "FULL":
+                source, destination, role = station, f"WL_{port.side}_drop", "A"
+            elif state == "EMPTY":
+                source, destination, role = f"EP_{name}_pick", station, "B"
+            else:
+                continue
+            if (role, port.side) in roles or (role, name) in roles:
+                yield source, destination, None, role == "B"
+        for source, pallet in self.wrapper_ready.items():
+            side = self.navigation.ports[source].side
+            if ("C", side) in roles:
+                yield source, f"dropoff_{side}_drop", pallet, False
+
+    def _available_transfer(self, source, destination, poses, *, pallet=None, empty=False):
+        """Require measured inventory and exclusive ownership of both ports."""
+        src, dst = self._port_observation(source, poses), self._port_observation(destination, poses)
+        if (
+            src.pallet is None
+            or (pallet is not None and src.pallet != pallet)
+            or (empty and not src.empty)
+            or not dst.clear
+        ):
+            return None
+        for mission in self.missions.values():
+            if mission.pallet == src.pallet or {source, destination}.intersection(
+                (mission.source, mission.destination)
+            ):
+                return None
+        return _Transfer(source, destination, src.pallet)
+
     def _dispatch(self, senses, poses):
         """Dispatch only observed physical stock; source timers/pools are never run."""
         for truck, sense in zip(self.driver.trucks, senses, strict=True):
@@ -199,30 +259,19 @@ class FleetController:
         for truck in self.driver.trucks:
             if not truck.idle() or truck.name in self.missions:
                 continue
-            for name, state in zip(self.transport.names, self.transport.station_state, strict=True):
-                station = name + "_A"
-                if self.station_busy(name):
-                    continue
-                port = self.navigation.ports[station]
-                if state == "FULL":
-                    source, destination, role = station, f"WL_{port.side}_drop", "A"
-                elif state == "EMPTY":
-                    source, destination, role = f"EP_{name}_pick", station, "B"
-                else:
-                    continue
-                if (role, port.side) not in self.roles[truck.name] and (role, name) not in self.roles[truck.name]:
-                    continue
-                src, dst = self._port_observation(source, poses), self._port_observation(destination, poses)
-                if src.pallet is None or (role == "B" and not src.empty) or not dst.clear:
-                    self.waiting[truck.name] = f"{source}->{destination}: source unavailable or destination occupied"
-                    continue
-                if any(destination == mission.destination for mission in self.missions.values()):
+            for source, destination, pallet, empty in self._transfer_requests(truck.name):
+                mission = self._available_transfer(source, destination, poses, pallet=pallet, empty=empty)
+                if mission is None:
+                    self.waiting[truck.name] = (
+                        f"{source}->{destination}: stock, landing or transfer reservation unavailable"
+                    )
                     continue
                 cells = self._mission_cells(truck, source, destination)
                 if not self.traffic.try_acquire(truck.name, cells, self.driver.t):
                     self.waiting[truck.name] = f"{source}->{destination}: traffic blocked"
                     continue
-                self.missions[truck.name] = _Transfer(source, destination, src.pallet)
+                self.missions[truck.name] = mission
+                self.wrapper_ready.pop(source, None)
                 self.waiting.pop(truck.name, None)
                 self._queue_route(truck, source, False)
                 break

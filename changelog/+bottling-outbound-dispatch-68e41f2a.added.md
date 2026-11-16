@@ -1,0 +1,1 @@
+Add gated outbound pallet dispatch to the PhoenX bottling fleet, requiring an explicit wrapper completion signal, seated inventory, a clear destination, and exclusive transfer reservations. Physical wrapper completion signalling remains to be implemented.
