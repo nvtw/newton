@@ -179,6 +179,10 @@ class ContactContainer:
     #: of every substep that reuses the prepared rows; empty when every
     #: substep prepares its rows.
     gap: wp.array[wp.float32]
+    #: Ratio of physical to split inverse normal effective mass. Temporal
+    #: overflow contacts retain physical spring compliance while splitting
+    #: inertia for the solve. Empty for other schedules; rebuilt by prepare.
+    normal_compliance_scale: wp.array[wp.float32]
     #: Nonzero when the sweep schedule or a requested contact frequency caps
     #: the maximal contact spring below the Nyquist limit
     #: (:func:`contact_container_set_sweeps`). The capped
@@ -721,6 +725,7 @@ def contact_container_zeros(
     cc.derived = wp.zeros((CC_DERIVED_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
     cc.surface_target = wp.zeros(n if surface_velocity else 0, dtype=wp.vec3f, device=device)
     cc.gap = wp.zeros(n if track_gap else 0, dtype=wp.float32, device=device)
+    cc.normal_compliance_scale = wp.empty(0, dtype=wp.float32, device=device)
     contact_container_set_sweeps(cc, solver_iterations, velocity_iterations)
     return cc
 
@@ -747,6 +752,7 @@ def contact_solve_container_zeros(
     cc.derived = wp.zeros((CC_DERIVED_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
     cc.surface_target = wp.empty(0, dtype=wp.vec3f, device=device)
     cc.gap = wp.zeros(n if track_gap else 0, dtype=wp.float32, device=device)
+    cc.normal_compliance_scale = wp.empty(0, dtype=wp.float32, device=device)
     contact_container_set_sweeps(cc, solver_iterations, velocity_iterations)
     return cc
 

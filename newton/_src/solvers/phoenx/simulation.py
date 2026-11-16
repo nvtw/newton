@@ -1282,6 +1282,13 @@ class PhoenXWorld:
                 if self._colored_contact_rows
                 else self._contact_container
             )
+            if self.temporal_iterations and self._singleworld_overflow_only_mass_splitting:
+                # Temporal contacts require canonical rows. Keep this scratch
+                # separate from packed geometry and previous-step history.
+                assert self._contact_container_solve is self._contact_container
+                self._contact_container.normal_compliance_scale = wp.empty(
+                    self.rigid_contact_max, dtype=wp.float32, device=self.device
+                )
             if self._colored_contact_rows:
                 self._contact_row_counts = wp.zeros(self._constraint_capacity, dtype=wp.int32, device=self.device)
                 self._contact_row_offsets = wp.zeros(self._constraint_capacity, dtype=wp.int32, device=self.device)

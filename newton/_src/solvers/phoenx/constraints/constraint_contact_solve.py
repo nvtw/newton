@@ -791,6 +791,23 @@ def _make_contact_prepare_for_iteration_at(
                 effective_gap = wp.dot(witness_delta, n)
                 p_diff = witness_delta
 
+            if wp.static(has_mass_splitting and not cloth_support):
+                if cc.normal_compliance_scale.shape[0] > k:
+                    scale = wp.float32(1.0)
+                    if inv_factor1 > wp.int32(1) or inv_factor2 > wp.int32(1):
+                        physical_eff_n = effective_mass_scalar(
+                            n,
+                            r1,
+                            r2,
+                            inv_mass1_raw,
+                            inv_mass2_raw,
+                            mat33_from_sym6(inv_inertia1_raw),
+                            mat33_from_sym6(inv_inertia2_raw),
+                        )
+                        if physical_eff_n > wp.float32(0.0):
+                            scale = eff_n / physical_eff_n
+                    cc.normal_compliance_scale[k] = scale
+
             # Recompute remaining separation from the current transformed
             # witnesses. A positive generation-time gap must not prevent a
             # speculative contact from activating during later substeps.
@@ -1717,6 +1734,18 @@ def _make_contact_iterate_at(
                 elif wp.static(use_bias):
                     mass_coeff_n = mass_coeff
                     impulse_coeff_n = impulse_coeff
+                    if wp.static(has_mass_splitting and not cloth_support and not patch_friction and not normal_first):
+                        if cc.normal_compliance_scale.shape[0] > k and pd_eff_soft_n <= wp.float32(0.0):
+                            scale = cc.normal_compliance_scale[k]
+                            if scale > wp.float32(0.0) and scale < wp.float32(1.0):
+                                # Keep gamma = (b/a) * W_physical unchanged
+                                # when W_split preconditions the solve. The
+                                # resulting coefficients are W_split/(W_split
+                                # + gamma) and gamma/(W_split + gamma).
+                                scaled_impulse = impulse_coeff * scale
+                                denominator = mass_coeff + scaled_impulse
+                                mass_coeff_n = mass_coeff / denominator
+                                impulse_coeff_n = scaled_impulse / denominator
                     mu_s_eff = mu_s
                     mu_k_eff = mu_k
                 else:

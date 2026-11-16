@@ -1,0 +1,1 @@
+Preserve physical normal-contact stiffness when PhoenX temporal iterations split overflow bodies into numerical copies, preventing copy-count-dependent sinking and jitter while retaining authored stiffness and damping.
