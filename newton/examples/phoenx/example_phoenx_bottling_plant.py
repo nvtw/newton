@@ -97,6 +97,8 @@ class Example:
             raise ValueError("--substeps must be positive")
         if args.cartons_per_packer < 1:
             raise ValueError("--cartons-per-packer must be positive")
+        if args.max_colored_partitions < 1:
+            raise ValueError("--max-colored-partitions must be positive")
         if not np.isfinite(args.sleeping_velocity_threshold) or args.sleeping_velocity_threshold < 0.0:
             raise ValueError("--sleeping-velocity-threshold must be finite and nonnegative")
         if args.controllers and not args.motor_off and args.joint_mode != "maximal_pgs":
@@ -201,7 +203,7 @@ class Example:
                 ),
                 mass_splitting=args.mass_splitting,
                 mass_splitting_overflow_only=args.mass_splitting,
-                max_colored_partitions=9,
+                max_colored_partitions=args.max_colored_partitions,
                 mass_splitting_batch_size=1,
                 mass_splitting_unrolled=args.mass_splitting,
                 partitioner_algorithm="endpoint_owner" if args.mass_splitting else "greedy",
@@ -469,6 +471,10 @@ class Example:
             "substeps": self.args.substeps,
             "iterations": self.args.iterations,
             "temporal_iterations": self.args.temporal_iterations,
+            "mass_splitting": self.args.mass_splitting,
+            "max_colored_partitions": self.args.max_colored_partitions,
+            "num_colors": int(self.solver.world._partitioner.num_colors.numpy()[0]),
+            "overflow_size": self.solver.step_report().overflow_size,
             "contact_hertz": self.args.contact_hertz,
             "sleeping_velocity_threshold": self.args.sleeping_velocity_threshold,
             "sleeping_bodies": int(
@@ -503,6 +509,12 @@ class Example:
             help="Total cartons per packer, including the initial carton at the filling station.",
         )
         parser.add_argument("--mass-splitting", action=argparse.BooleanOptionalAction, default=False)
+        parser.add_argument(
+            "--max-colored-partitions",
+            type=int,
+            default=9,
+            help="Regular colors before the overflow partition when --mass-splitting is enabled.",
+        )
         parser.add_argument("--diagnostics", action="store_true")
         parser.add_argument(
             "--correct-inertia", action="store_true", help="Balance source actuator inertia approximations."
