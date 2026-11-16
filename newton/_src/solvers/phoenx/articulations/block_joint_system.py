@@ -15,6 +15,8 @@ from ..constraints.bilateral_joint import (
     prepare_bilateral_joint_blocks,
 )
 from ..constraints.bilateral_joint_data import BilateralJointData, Mat66d, Vec6d
+from ..constraints.constraint_container import ConstraintContainer
+from ..sleeping_kernels import _phoenx_apply_island_wake_kernel
 from .direct_equality import DirectEqualitySystem, _body_com_twist, _direct_wrench_response
 
 _Vec6d = wp.types.vector(length=6, dtype=wp.float64)
@@ -30,6 +32,56 @@ def _dot_double(a: wp.spatial_vector, b: wp.spatial_vector) -> wp.float64:
 
 
 @wp.kernel(enable_backward=False)
+def _update_local_joint_enabled(
+    joints: wp.array[wp.int32],
+    cids: wp.array[wp.int32],
+    enabled: wp.array[wp.bool],
+    previous: wp.array[wp.bool],
+    saved_counts: wp.array[wp.vec3i],
+    saved_flags: wp.array2d[wp.int32],
+    constraints: ConstraintContainer,
+    ownership: wp.array[wp.int32],
+    dynamic: wp.array[wp.bool],
+    bounded: wp.array[wp.bool],
+    parent: wp.array[wp.int32],
+    child: wp.array[wp.int32],
+    bodies: BodyContainer,
+    wake: wp.array[wp.int32],
+):
+    index = wp.tid()
+    joint = joints[index]
+    active = enabled[joint]
+    if active == previous[index]:
+        return
+    previous[index] = active
+    cid = cids[joint]
+    counts = saved_counts[index]
+    bilateral = constraints.bilateral
+    bilateral.row_count[cid] = wp.where(active, counts[0], 0)
+    constraints.d6.row_count[cid] = wp.where(active, counts[1], 0)
+    ownership[cid] = wp.where(active, counts[2], 0)
+    bilateral.valid[cid] = 0
+    constraints.d6.reaction_wrench[cid] = wp.spatial_vector()
+    for local in range(6):
+        if local < counts[0]:
+            row = bilateral.row_indices[cid, local]
+            flags = saved_flags[index, local]
+            dynamic[row] = active and (flags & 1) != 0
+            bounded[row] = active and (flags & 2) != 0
+            bilateral.accumulated[row] = 0.0
+        constraints.d6.lower_impulse[cid, local] = 0.0
+        constraints.d6.upper_impulse[cid, local] = 0.0
+        constraints.d6.friction_impulse[cid, local] = 0.0
+    for side in range(2):
+        body = wp.where(side == 0, parent[joint], child[joint]) + 1
+        if body > 0:
+            root = bodies.island_root[body]
+            if root >= 0:
+                wp.atomic_max(wake, root, 1)
+            bodies.frames_below_threshold[body] = 0
+
+
+@wp.kernel(enable_backward=False)
 def _block_sweep(
     bodies: BodyContainer,
     component_start: wp.array[wp.int32],
@@ -40,6 +92,7 @@ def _block_sweep(
     prepared_lower: wp.array[Mat66d],
     prepared_diagonal: wp.array[Vec6d],
     prepared_valid: wp.array[wp.int32],
+    active_count: wp.array[wp.int32],
     copy_highest: wp.array[wp.int32],
     row_joint: wp.array[wp.int32],
     row_local: wp.array[wp.int32],
@@ -58,6 +111,8 @@ def _block_sweep(
     component = wp.tid()
     for entry in range(component_start[component], component_start[component + 1]):
         block = component_blocks[entry]
+        if active_count[block_cid[block]] == 0:
+            continue
         count = block_count[block]
         reuse_factor = copy_highest[0] == 0
         first_row = block_rows[block, 0]
@@ -307,6 +362,66 @@ class BlockJointSystem(DirectEqualitySystem):
         ownership = world._joint_pgs_enabled.numpy().copy()
         ownership[counts > 0] = 1
         world.set_joint_pgs_ownership(ownership)
+        # Reserved slots manage their own lifetime; only authored local columns
+        # have immutable descriptors that can be restored after a live toggle.
+        authored = int(self.model.joint_count)
+        capacity = self.model._dynamic_capacity
+        if capacity is not None:
+            authored = capacity.joint_start
+        joints = [j for j in range(authored) if not self._excluded_joint_mask[j] and self._block_mapping[j] >= 0]
+        self._enabled_joints = wp.array(joints, dtype=wp.int32, device=device)
+        self._enabled_previous = wp.ones(len(joints), dtype=wp.bool, device=device)
+        cids = self._block_mapping[joints]
+        self._enabled_counts = wp.array(
+            np.stack((counts[cids], world.constraints.d6.row_count.numpy()[cids], ownership[cids]), axis=1),
+            dtype=wp.vec3i,
+            device=device,
+        )
+        flags = np.zeros((len(joints), 6), dtype=np.int32)
+        dynamic = self.row_dynamic.numpy()
+        bounded = self.row_bounded_drive.numpy()
+        for index, cid in enumerate(cids):
+            for local in range(counts[cid]):
+                row = indices[cid, local]
+                flags[index, local] = int(dynamic[row]) | (int(bounded[row]) << 1)
+        self._enabled_flags = wp.array(flags, dtype=wp.int32, device=device)
+        self._enabled_wake = wp.zeros(len(self.bodies.island_root), dtype=wp.int32, device=device)
+
+    def update_enabled(self):
+        """Apply live toggles of existing authored local columns without recapture."""
+        if not self.enabled or not self._enabled_joints.size or self.model.joint_enabled is None:
+            return
+        world = self._block_world
+        if world._sleeping_enabled:
+            self._enabled_wake.zero_()
+        wp.launch(
+            _update_local_joint_enabled,
+            dim=self._enabled_joints.size,
+            inputs=[
+                self._enabled_joints,
+                self.constraint_cids,
+                self.model.joint_enabled,
+                self._enabled_previous,
+                self._enabled_counts,
+                self._enabled_flags,
+                world.constraints,
+                world._joint_pgs_enabled,
+                self.row_dynamic,
+                self.row_bounded_drive,
+                self.model.joint_parent,
+                self.model.joint_child,
+                self.bodies,
+                self._enabled_wake,
+            ],
+            device=self.model.device,
+        )
+        if world._sleeping_enabled:
+            wp.launch(
+                _phoenx_apply_island_wake_kernel,
+                dim=self._enabled_wake.size,
+                inputs=[self.bodies, self._enabled_wake],
+                device=self.model.device,
+            )
 
     def refresh_joint_properties(self):
         previous_rows = self.row_joint
@@ -379,6 +494,7 @@ class BlockJointSystem(DirectEqualitySystem):
                 self._block_world.constraints.bilateral.lower,
                 self._block_world.constraints.bilateral.diagonal,
                 self._block_world.constraints.bilateral.valid,
+                self._block_world.constraints.bilateral.row_count,
                 self._block_world._copy_state.highest_index_in_use,
                 self.row_joint,
                 self.row_local,

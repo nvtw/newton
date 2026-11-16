@@ -586,6 +586,11 @@ class SolverPhoenX(SolverBase):
                 rows in PhoenX PGS. ``"maximal_pgs"`` solves physical D6 joint
                 blocks in the contact color sweeps; it requires maximal
                 coordinates, rigid point contacts, and the single-world layout.
+                Initially enabled local joints support live ``model.joint_enabled``
+                toggles, including graph replay. Exact joints and initially disabled
+                authored joints require solver reconstruction to change ownership.
+                Re-enable local joints and step before notifying other joint-property
+                edits; changing properties while disabled requires reconstruction.
                 ``"reduced"`` lets generalized coordinates own declared tree
                 joints. The solver never changes this choice from model topology.
                 With ``"maximal_direct"``, revolute and
@@ -1836,6 +1841,13 @@ class SolverPhoenX(SolverBase):
         wp.copy(state_out.particle_q, particles.position)
         wp.copy(state_out.particle_qd, particles.velocity)
 
+    def _update_local_joint_enabled(self) -> None:
+        direct = self._direct_equality_system
+        if isinstance(direct, MixedJointSystem):
+            direct.blocks.update_enabled()
+        elif isinstance(direct, BlockJointSystem):
+            direct.update_enabled()
+
     def collide(self, state: State, contacts: Contacts, dt: float | None = None) -> None:
         """Run the configured Newton collision pipeline.
 
@@ -1847,6 +1859,7 @@ class SolverPhoenX(SolverBase):
         """
         if self._collision_pipeline is None:
             raise RuntimeError("SolverPhoenX.collide() requires a collision pipeline.")
+        self._update_local_joint_enabled()
         if self._has_deformable_collision:
             self._import_particle_state(state, force=True)
         self._collision_pipeline.collide(
@@ -1991,6 +2004,7 @@ class SolverPhoenX(SolverBase):
         """
         if not self._sleeping_enabled:
             return
+        self._update_local_joint_enabled()
         self._import_body_state(state_in, consume_fresh=False)
         self.world.wake_on_external_input()
 
@@ -2039,6 +2053,7 @@ class SolverPhoenX(SolverBase):
 
         if self.dynamics is not None:
             self.dynamics._commit()
+        self._update_local_joint_enabled()
         self._apply_joint_control(control)
         if self._reduced_articulation is None:
             self._accumulate_joint_forces(state_in, control, dt)
