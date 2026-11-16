@@ -70,6 +70,21 @@ def _filter_pair(pair: wp.vec2i, data: _PlantFilter) -> wp.int32:
     return 1
 
 
+@wp.kernel
+def _sleep_colors(
+    active: wp.array[wp.vec3],
+    shape_body: wp.array[wp.int32],
+    island_root: wp.array[wp.int32],
+    output: wp.array[wp.vec3],
+):
+    shape = wp.tid()
+    body = shape_body[shape]
+    color = active[shape]
+    if body >= 0 and island_root[body + 1] >= 0:
+        color *= 0.55
+    output[shape] = color
+
+
 class Example:
     """One factory world, with CUDA graph capture for collision and stepping."""
 
@@ -238,6 +253,12 @@ class Example:
         )
         self._render_contacts = [None, None]
         self._render_contact_snapshot = None
+        self._sleep_color_active = wp.clone(self.model.shape_color) if self.solver._sleeping_enabled else None
+        self._render_sleep_roots = (
+            tuple(wp.empty_like(self.solver.bodies.island_root) for _ in range(2))
+            if self._sleep_color_active is not None and overlap
+            else None
+        )
         self._render_state_index = 0
         self._render_state_prepared = False
         self._render_time = self.sim_time
@@ -249,6 +270,8 @@ class Example:
         if done is not None:
             wp.wait_event(done)
         wp.copy(self._render_states[self._render_state_index].body_q, self.state_0.body_q)
+        if self._render_sleep_roots is not None:
+            wp.copy(self._render_sleep_roots[self._render_state_index], self.solver.bodies.island_root)
         self._render_contact_snapshot = None
         if self.viewer.show_contacts:
             wp.copy(self._render_states[self._render_state_index].body_qd, self.state_0.body_qd)
@@ -304,6 +327,19 @@ class Example:
     def render(self):
         state = self._render_states[self._render_state_index] if self._render_state_prepared else self.state_0
         self.viewer.begin_frame(self._render_time if self._render_state_prepared else self.sim_time)
+        if self._sleep_color_active is not None:
+            roots = (
+                self._render_sleep_roots[self._render_state_index]
+                if self._render_state_prepared
+                else self.solver.bodies.island_root
+            )
+            wp.launch(
+                _sleep_colors,
+                dim=self.model.shape_count,
+                inputs=[self._sleep_color_active, self.model.shape_body, roots],
+                outputs=[self.model.shape_color],
+                device=self.model.device,
+            )
         self.viewer.log_state(state)
         contacts = self._render_contact_snapshot if self._render_state_prepared else self.contacts
         if contacts is not None or not self.viewer.show_contacts:

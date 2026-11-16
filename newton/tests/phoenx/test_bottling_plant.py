@@ -23,6 +23,61 @@ from newton.viewer import ViewerNull
 
 @requires("pxr.Usd")
 class TestBottlingPlant(unittest.TestCase):
+    def test_sleep_colors_preserve_material_and_render_snapshot(self):
+        """Dim real sleeping bodies and restore their tint after a force wakes them."""
+        with wp.ScopedDevice("cpu"):
+            builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+            body = builder.add_body(
+                xform=wp.transform(wp.vec3(0, 0, 1), wp.quat_identity()), mass=1.0, inertia=wp.mat33(np.eye(3))
+            )
+            mesh = newton.Mesh.create_box(0.1, 0.1, 0.1, compute_inertia=False)
+            mesh.texture = np.full((2, 2, 4), 255, dtype=np.uint8)
+            mesh.color = (0.8, 0.6, 0.4)
+            shape = builder.add_shape_mesh(body, mesh=mesh, cfg=builder.ShapeConfig(density=0.0))
+            builder.add_ground_plane()
+            model = builder.finalize()
+            solver = newton.solvers.SolverPhoenX(
+                model,
+                step_layout="single_world",
+                joint_mode="maximal_pgs",
+                sleeping_velocity_threshold=0.01,
+                sleeping_frames_required=2,
+            )
+            example = Example.__new__(Example)
+            example.model, example.solver = model, solver
+            example.state_0 = model.state()
+            example.contacts = model._collision_pipeline.contacts()
+            example.viewer = ViewerNull()
+            example.viewer.set_model(model)
+            example.viewer.show_contacts = False
+            example._render_states = (model.state(), model.state())
+            example._render_state_done = (None, None)
+            example._render_contacts = [None, None]
+            example._render_contact_snapshot = None
+            example._render_state_index = 0
+            example._render_state_prepared = False
+            example._sleep_color_active = wp.clone(model.shape_color)
+            example._render_sleep_roots = tuple(wp.empty_like(solver.bodies.island_root) for _ in range(2))
+            example.sim_time = 0.0
+            active = model.shape_color.numpy().copy()
+            for _ in range(4):
+                solver.collide(example.state_0, example.contacts)
+                solver.step(example.state_0, example.state_0, model.control(), example.contacts, 1.0 / 60.0)
+            self.assertGreaterEqual(int(solver.bodies.island_root.numpy()[body + 1]), 0)
+            example.prepare_render_state()
+            forces = np.zeros((model.body_count, 6), dtype=np.float32)
+            forces[body, 3] = 1.0
+            example.state_0.body_f.assign(forces)
+            solver.wake_on_external_input(example.state_0)
+            self.assertLess(int(solver.bodies.island_root.numpy()[body + 1]), 0)
+            example.render()
+            np.testing.assert_allclose(model.shape_color.numpy()[shape], 0.55 * active[shape], atol=1e-6)
+            np.testing.assert_allclose(model.shape_color.numpy()[-1], active[-1])
+            example.prepare_render_state()
+            example.render()
+            np.testing.assert_array_equal(model.shape_color.numpy(), active)
+            self.assertIs(model.shape_source[shape].texture, mesh.texture)
+
     def test_contact_overlay_uses_render_snapshot(self):
         """Render contact geometry and keep it independent of advancing physics."""
         with wp.ScopedDevice("cpu"):
@@ -48,6 +103,8 @@ class TestBottlingPlant(unittest.TestCase):
             example._render_state_done = (None, None)
             example._render_contacts = [None, None]
             example._render_contact_snapshot = None
+            example._sleep_color_active = None
+            example._render_sleep_roots = None
             example._render_state_index = 0
             example._render_state_prepared = False
             example.sim_time = 0.0
