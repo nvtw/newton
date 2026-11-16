@@ -322,19 +322,20 @@ def _make_cooperative_factor_kernel(block_size: int):
                 panel_id = backward_panel[panel_entry]
                 i = tile_i * block_size
                 if i + block_size > dimension:
-                    factor_partial_panel_row(
-                        dimension - i,
-                        panel_id,
-                        diagonal_panel,
-                        offdiag_update_start[panel_entry],
-                        offdiag_update_start[panel_entry + wp.int32(1)],
-                        offdiag_update_left,
-                        offdiag_update_right,
-                        matrix,
-                        factor,
-                        lane,
-                        wp.int32(block_size),
-                    )
+                    for row in range(lane, dimension - i, wp.block_dim()):
+                        factor_partial_panel_row(
+                            dimension - i,
+                            panel_id,
+                            diagonal_panel,
+                            offdiag_update_start[panel_entry],
+                            offdiag_update_start[panel_entry + wp.int32(1)],
+                            offdiag_update_left,
+                            offdiag_update_right,
+                            matrix,
+                            factor,
+                            row,
+                            wp.int32(block_size),
+                        )
                 else:
                     panel_matrix = wp.array(
                         ptr=_get_float_array_offset_ptr(matrix, panel_id * tile_elements),

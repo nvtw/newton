@@ -188,7 +188,7 @@ def _build_endpoint_equality_rhs(
     row_begin = response.mechanism_row_start[mechanism]
     row_end = response.mechanism_row_start[mechanism + wp.int32(1)]
     task_offset = item * response.workspace_stride
-    for local_row in range(lane, row_end - row_begin, wp.int32(_CONTACT_RHS_BLOCK_DIM)):
+    for local_row in range(lane, row_end - row_begin, wp.block_dim()):
         offset = task_offset + local_row * wp.int32(GROUPED_RHS_ITEM_WIDTH)
         response.rhs[offset] = wp.float32(0.0)
         response.rhs[offset + wp.int32(1)] = wp.float32(0.0)
@@ -203,7 +203,7 @@ def _build_endpoint_equality_rhs(
     for incidence in range(
         response.body_row_start[body] + lane,
         response.body_row_start[body + wp.int32(1)],
-        wp.int32(_CONTACT_RHS_BLOCK_DIM),
+        wp.block_dim(),
     ):
         row = response.body_rows[incidence]
         joint = response.row_joint[row]

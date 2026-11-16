@@ -15,7 +15,6 @@ from newton._src.solvers.phoenx.articulations.direct_contact_gs import (
 )
 from newton._src.solvers.phoenx.articulations.direct_contact_response import (
     DirectContactResponse,
-    _build_grouped_endpoint_equality_rhs_kernel,
 )
 from newton._src.solvers.phoenx.articulations.fixed_pattern_llt import FixedPatternPanelLLT
 from newton._src.solvers.phoenx.body import MOTION_DYNAMIC, body_container_zeros, inertia_sym6_pack_np
@@ -124,26 +123,40 @@ def _dense_constrained_mobility(direct):
     return inverse - inverse @ jacobian.T @ reaction
 
 
-def _compute_response(response, contacts, device):
-    if not wp.get_device(device).is_cuda:
-        # CPU launch_tiled does not execute the 64 cooperating CUDA lanes.
-        # Populate every lane's RHS before testing the common solver math.
-        wp.launch(
-            _build_grouped_endpoint_equality_rhs_kernel,
-            (response.contact_batch.task_capacity, 64),
-            [
-                response.data,
-                response.direct.bodies,
-                response.contact_batch.task_item,
-                response.contact_batch.task_mechanism,
-            ],
-            device=device,
-        )
-    response.compute(contacts)
-
-
 class TestDirectBodyResponse(unittest.TestCase):
     device = "cuda:0" if wp.is_cuda_available() else "cpu"
+
+    def test_cpu_partial_panel_factor(self):
+        """Factor every row of a final partial panel on the CPU."""
+        dimension, width = 24, 16
+        panel = FixedPatternPanelLLT(
+            (dimension,),
+            np.asarray([0, dimension], dtype=np.int32),
+            np.arange(dimension, dtype=np.int32),
+            tuple(frozenset((0,)) for _ in range(dimension)),
+            block_size=width,
+            device="cpu",
+        )
+        # Contact response requests full cooperative factors for grouped RHS.
+        panel.create_grouped_rhs_batch(1, 1)
+        rng = np.random.default_rng(25)
+        lower = np.tril(rng.normal(scale=0.1, size=(dimension, dimension)), -1) + np.eye(dimension)
+        matrix = lower @ lower.T
+        storage = np.zeros(panel.matrix.size, dtype=np.float32)
+        storage[panel.symbolic.matrix_storage] = matrix[panel.symbolic.matrix_row, panel.symbolic.matrix_column]
+        panel.matrix.assign(storage)
+        panel.compute()
+        factor = panel.factor.numpy()
+        table = panel.panel_index.numpy().reshape(2, 2)
+        actual = np.zeros((32, 32))
+        for row in range(2):
+            for column in range(row + 1):
+                start = int(table[row, column]) * width * width
+                actual[row * width : (row + 1) * width, column * width : (column + 1) * width] = factor[
+                    start : start + width * width
+                ].reshape(width, width)
+        actual = np.tril(actual)[:dimension, :dimension]
+        np.testing.assert_allclose(actual @ actual.T, matrix, rtol=2e-5, atol=2e-6)
 
     def test_storage_guard_includes_unconstrained_body_maps(self):
         """Retain column storage when world-sized lookup maps erase savings."""
@@ -190,61 +203,62 @@ class TestDirectBodyResponse(unittest.TestCase):
 
     def test_grouped_response_matches_column_response(self):
         """Match endpoint responses and deferred joint reactions exactly."""
-        with wp.ScopedDevice(self.device):
-            direct = _fixture(self.device)
-            shared = DirectContactResponse(direct, 8, 8)
-            legacy = DirectContactResponse(direct, 8, 8, shared_body_basis=False)
-            pairs = np.asarray([[1, 3], [2, 4], [0, 5], [2, 3], [1, 3], [2, 4], [0, 5], [1, 5]], dtype=np.int32)
-            mechanisms = np.asarray([-1, 0, 0, 1, 1, 1], dtype=np.int32)
-            contacts = contact_container_zeros(8, device=self.device)
-            wp.launch(_initialize_contacts, 8, [contacts], device=self.device)
-            for response in (shared, legacy):
-                for prefix in ("column", "contact"):
-                    getattr(response, prefix + "_body0").assign(pairs[:, 0])
-                    getattr(response, prefix + "_body1").assign(pairs[:, 1])
-                response.column_mechanism0.assign(mechanisms[pairs[:, 0]])
-                response.column_mechanism1.assign(mechanisms[pairs[:, 1]])
-                response.contact_column.assign(np.arange(8, dtype=np.int32))
-                response.contact_mechanism.fill_(0)
-                wp.launch(
-                    _fill_direct_contact_rhs_tasks_kernel,
-                    8,
-                    [response.data, response.contact_batch.task_mechanism, response.contact_batch.task_item],
-                    device=self.device,
-                )
-            direct.solver.compute()
-            _compute_response(shared, contacts, self.device)
-            _compute_response(legacy, contacts, self.device)
-            for field in ("endpoint_response", "contact_response", "mobility"):
-                np.testing.assert_array_equal(
-                    getattr(shared.data, field).numpy().view(np.uint32),
-                    getattr(legacy.data, field).numpy().view(np.uint32),
-                    err_msg=field,
-                )
-            # Body responses are indexed by basis slot: per body when shared,
-            # per column endpoint otherwise. Both must agree bitwise.
-            slots = []
-            body_basis_item = shared.data.body_basis_item.numpy()
-            for column, pair in enumerate(pairs):
-                for endpoint, body in enumerate(pair):
-                    if mechanisms[body] >= 0:
-                        slots.append((body, int(body_basis_item[body]) // 2, 2 * column + endpoint))
-            shared_response = shared.data.body_response.numpy()
-            legacy_response = legacy.data.body_response.numpy()
-            for _, shared_slot, legacy_slot in slots:
-                np.testing.assert_array_equal(
-                    shared_response[shared_slot].view(np.uint32), legacy_response[legacy_slot].view(np.uint32)
-                )
-            # Each block is the exact constrained twist response of a mechanism
-            # body to the six unit wrenches of the basis body.
-            mobility = _dense_constrained_mobility(direct)
-            mechanism_bodies = {0: (1, 2), 1: (3, 4, 5)}
-            for source, shared_slot, _ in slots:
-                for local, target in enumerate(mechanism_bodies[int(mechanisms[source])]):
-                    expected = mobility[6 * (target - 1) : 6 * target, 6 * (source - 1) : 6 * source]
-                    np.testing.assert_allclose(
-                        shared_response[shared_slot, local].T, expected, rtol=2.0e-5, atol=2.0e-6
+        for device in dict.fromkeys(("cpu", self.device)):
+            with self.subTest(device=device), wp.ScopedDevice(device):
+                direct = _fixture(device)
+                shared = DirectContactResponse(direct, 8, 8)
+                legacy = DirectContactResponse(direct, 8, 8, shared_body_basis=False)
+                pairs = np.asarray([[1, 3], [2, 4], [0, 5], [2, 3], [1, 3], [2, 4], [0, 5], [1, 5]], dtype=np.int32)
+                mechanisms = np.asarray([-1, 0, 0, 1, 1, 1], dtype=np.int32)
+                contacts = contact_container_zeros(8, device=device)
+                wp.launch(_initialize_contacts, 8, [contacts], device=device)
+                for response in (shared, legacy):
+                    for prefix in ("column", "contact"):
+                        getattr(response, prefix + "_body0").assign(pairs[:, 0])
+                        getattr(response, prefix + "_body1").assign(pairs[:, 1])
+                    response.column_mechanism0.assign(mechanisms[pairs[:, 0]])
+                    response.column_mechanism1.assign(mechanisms[pairs[:, 1]])
+                    response.contact_column.assign(np.arange(8, dtype=np.int32))
+                    response.contact_mechanism.fill_(0)
+                    wp.launch(
+                        _fill_direct_contact_rhs_tasks_kernel,
+                        8,
+                        [response.data, response.contact_batch.task_mechanism, response.contact_batch.task_item],
+                        device=device,
                     )
+                direct.solver.compute()
+                shared.compute(contacts)
+                legacy.compute(contacts)
+                for field in ("endpoint_response", "contact_response", "mobility"):
+                    np.testing.assert_array_equal(
+                        getattr(shared.data, field).numpy().view(np.uint32),
+                        getattr(legacy.data, field).numpy().view(np.uint32),
+                        err_msg=field,
+                    )
+                # Body responses are indexed by basis slot: per body when shared,
+                # per column endpoint otherwise. Both must agree bitwise.
+                slots = []
+                body_basis_item = shared.data.body_basis_item.numpy()
+                for column, pair in enumerate(pairs):
+                    for endpoint, body in enumerate(pair):
+                        if mechanisms[body] >= 0:
+                            slots.append((body, int(body_basis_item[body]) // 2, 2 * column + endpoint))
+                shared_response = shared.data.body_response.numpy()
+                legacy_response = legacy.data.body_response.numpy()
+                for _, shared_slot, legacy_slot in slots:
+                    np.testing.assert_array_equal(
+                        shared_response[shared_slot].view(np.uint32), legacy_response[legacy_slot].view(np.uint32)
+                    )
+                # Each block is the exact constrained twist response of a mechanism
+                # body to the six unit wrenches of the basis body.
+                mobility = _dense_constrained_mobility(direct)
+                mechanism_bodies = {0: (1, 2), 1: (3, 4, 5)}
+                for source, shared_slot, _ in slots:
+                    for local, target in enumerate(mechanism_bodies[int(mechanisms[source])]):
+                        expected = mobility[6 * (target - 1) : 6 * target, 6 * (source - 1) : 6 * source]
+                        np.testing.assert_allclose(
+                            shared_response[shared_slot, local].T, expected, rtol=2.0e-5, atol=2.0e-6
+                        )
 
     def test_row_impulses_match_dense_reactions(self):
         """Accumulate the joint reactions of pushed manifold wrenches exactly."""
@@ -263,7 +277,7 @@ class TestDirectBodyResponse(unittest.TestCase):
                 device=self.device,
             )
             direct.solver.compute()
-            _compute_response(response, contacts, self.device)
+            response.compute(contacts)
             wrenches = {
                 2: np.asarray([0.3, -0.4, 0.7, 0.2, 0.5, -0.8]),
                 3: np.asarray([-0.3, 0.4, -0.7, -0.1, 0.6, 0.2]),
@@ -308,7 +322,7 @@ class TestDirectBodyResponse(unittest.TestCase):
             np.testing.assert_array_equal(shared.data.body_basis_active.numpy(), [0, 0, 0, 1, 0, 0])
             shared.data.rhs.fill_(float("nan"))
             shared.data.solution.fill_(float("nan"))
-            _compute_response(shared, contacts, self.device)
+            shared.compute(contacts)
             rhs = shared.data.rhs.numpy().reshape(-1, int(shared.data.workspace_stride))
             solution = shared.data.solution.numpy().reshape(-1, int(shared.data.workspace_stride))
             # Zero the untouched neighboring body's live rows before solving.
@@ -328,7 +342,7 @@ class TestDirectBodyResponse(unittest.TestCase):
             np.testing.assert_array_equal(shared.contact_batch.task_mechanism.numpy(), [-1, -1, -1])
             np.testing.assert_array_equal(shared.data.body_basis_active.numpy(), 0)
             np.testing.assert_array_equal(shared.contact_batch.task_item.numpy(), items)
-            _compute_response(shared, contacts, self.device)
+            shared.compute(contacts)
             np.testing.assert_array_equal(
                 shared.data.solution.numpy().view(np.uint32), solution.reshape(-1).view(np.uint32)
             )
