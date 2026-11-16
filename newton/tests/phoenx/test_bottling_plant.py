@@ -22,6 +22,59 @@ from newton.viewer import ViewerNull
 
 @requires("pxr.Usd")
 class TestBottlingPlant(unittest.TestCase):
+    def test_contact_overlay_uses_render_snapshot(self):
+        """Render contact geometry and keep it independent of advancing physics."""
+        with wp.ScopedDevice("cpu"):
+            builder = newton.ModelBuilder()
+            body = builder.add_body(xform=wp.transform(wp.vec3(0, 0, 0.49), wp.quat_identity()))
+            builder.add_shape_sphere(body, radius=0.5)
+            builder.add_ground_plane()
+            model = builder.finalize()
+            example = Example.__new__(Example)
+            example.model = model
+            example.state_0 = model.state()
+            pipeline = newton.CollisionPipeline(model)
+            example.contacts = pipeline.contacts()
+            pipeline.collide(example.state_0, example.contacts)
+            count = int(example.contacts.rigid_contact_count.numpy()[0])
+            self.assertGreater(count, 0)
+            example.viewer = ViewerNull()
+            example.viewer.set_model(model)
+            example.viewer.show_contacts = True
+            example.viewer.show_contact_disks = False
+            example.viewer.show_contact_forces = False
+            example._render_states = (model.state(), model.state())
+            example._render_state_done = (None, None)
+            example._render_contacts = [None, None]
+            example._render_contact_snapshot = None
+            example._render_state_index = 0
+            example._render_state_prepared = False
+            example.sim_time = 0.0
+            example.render()
+            self.assertIsNotNone(example.viewer._contact_points0)
+            expected = example.viewer._contact_points0.numpy()[:count].copy()
+            lengths = np.linalg.norm(example.viewer._contact_points1.numpy()[:count] - expected, axis=1)
+            self.assertTrue(np.all(lengths > 0.0))
+            example.prepare_render_state()
+            snapshot = example._render_contact_snapshot
+            self.assertIsNot(snapshot, example.contacts)
+            # Physics may overwrite its buffers while the render stream consumes
+            # the snapshot. The displayed arrows must retain the old geometry.
+            example.contacts.rigid_contact_count.zero_()
+            example.contacts.rigid_contact_point0.fill_(wp.vec3(100, 100, 100))
+            example.state_0.body_q.fill_(wp.transform(wp.vec3(100, 0, 0), wp.quat_identity()))
+            example.render()
+            np.testing.assert_allclose(example.viewer._contact_points0.numpy()[:count], expected)
+            self.assertEqual(int(snapshot.rigid_contact_count.numpy()[0]), count)
+            example.viewer.show_contacts = False
+            example.prepare_render_state()
+            self.assertIsNone(example._render_contact_snapshot)
+            # Enabling in begin-frame UI after snapshotting must defer contacts,
+            # not read live buffers on the concurrently running physics stream.
+            example.viewer.show_contacts = True
+            example.render()
+            np.testing.assert_allclose(example.viewer._contact_points0.numpy()[:count], expected)
+
     def test_offset_box_hulls_preserve_exact_geometry(self):
         """Recognize float32 box corners without replacing tapered hulls."""
         from pxr import Usd, UsdGeom, UsdPhysics

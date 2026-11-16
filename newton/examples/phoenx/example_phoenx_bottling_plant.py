@@ -227,6 +227,8 @@ class Example:
         self._render_state_done = tuple(
             wp.Event(self.model.device) if self.model.device.is_cuda else None for _ in range(2)
         )
+        self._render_contacts = [None, None]
+        self._render_contact_snapshot = None
         self._render_state_index = 0
         self._render_state_prepared = False
         self._render_time = self.sim_time
@@ -238,6 +240,34 @@ class Example:
         if done is not None:
             wp.wait_event(done)
         wp.copy(self._render_states[self._render_state_index].body_q, self.state_0.body_q)
+        self._render_contact_snapshot = None
+        if self.viewer.show_contacts:
+            wp.copy(self._render_states[self._render_state_index].body_qd, self.state_0.body_qd)
+            contacts = self._render_contacts[self._render_state_index]
+            if contacts is None:
+                contacts = newton.Contacts(
+                    self.contacts.rigid_contact_max,
+                    0,
+                    device=self.contacts.device,
+                    requested_attributes={"force"} if self.contacts.force is not None else None,
+                )
+                self._render_contacts[self._render_state_index] = contacts
+            # Contact glyphs share the pose snapshot's reuse event, so rendering
+            # cannot race the next collision/solver update of the live arrays.
+            for name in (
+                "rigid_contact_count",
+                "rigid_contact_shape0",
+                "rigid_contact_shape1",
+                "rigid_contact_point0",
+                "rigid_contact_point1",
+                "rigid_contact_offset0",
+                "rigid_contact_normal",
+                "force",
+            ):
+                source = getattr(self.contacts, name)
+                if source is not None:
+                    wp.copy(getattr(contacts, name), source)
+            self._render_contact_snapshot = contacts
         self._render_time = self.sim_time
         self._render_state_prepared = True
 
@@ -266,6 +296,11 @@ class Example:
         state = self._render_states[self._render_state_index] if self._render_state_prepared else self.state_0
         self.viewer.begin_frame(self._render_time if self._render_state_prepared else self.sim_time)
         self.viewer.log_state(state)
+        contacts = self._render_contact_snapshot if self._render_state_prepared else self.contacts
+        if contacts is not None or not self.viewer.show_contacts:
+            # A disabled call hides old glyphs without reading live buffers. If
+            # enabled after snapshotting, defer glyphs until the next snapshot.
+            self.viewer.log_contacts(contacts if contacts is not None else self.contacts, state)
         if self._render_state_prepared:
             done = self._render_state_done[self._render_state_index]
             if done is not None:
