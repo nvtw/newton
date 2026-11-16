@@ -1486,6 +1486,23 @@ class PhoenXWorld:
             self._contact_body_entries = ContactBodyEntries(
                 self._constraint_capacity, self.rigid_contact_max, self.bodies.velocity.shape[0], self.device
             )
+        # Temporal warm starts only replay impulses; they need no color-order
+        # dependency. Keep other layouts on their existing specialized paths.
+        self._temporal_contact_body_entries = None
+        if (
+            self.temporal_iterations
+            and self.device.is_cuda
+            and self.max_contact_columns > 0
+            and not self._colored_contact_headers
+            and not self._colored_contact_rows
+            and not self.mass_splitting_enabled
+            and not self._contact_patch_enabled
+            and self.num_particles == 0
+            and self._reduced_articulation is None
+        ):
+            self._temporal_contact_body_entries = ContactBodyEntries(
+                self._constraint_capacity, self.rigid_contact_max, self.bodies.velocity.shape[0], self.device
+            )
 
     def _fast_tail_fixed_tpw(self) -> int:
         """Static kernel axis for fixed-tpw launches; 0 keeps dynamic lookup."""
@@ -2697,9 +2714,19 @@ class PhoenXWorld:
         """Enter the next contact substep: apply its share of forces and re-apply contact impulses."""
         self._temporal_apply_forces()
         if self._temporal_contacts_active():
-            head, fused = self._singleworld_contact_warm_start_kernels()
             self._partitioner.begin_sweep()
-            self._singleworld_head_plus_tail_sweep(head, fused, idt)
+            if self._temporal_contact_body_entries is not None:
+                self._temporal_contact_body_entries.apply_cached_warm_start(
+                    self._contact_cols,
+                    self.bodies,
+                    self._contact_container,
+                    self._partitioner.element_ids_by_color,
+                    self._num_active_constraints,
+                    self._contact_offset,
+                )
+            else:
+                head, fused = self._singleworld_contact_warm_start_kernels()
+                self._singleworld_head_plus_tail_sweep(head, fused, idt)
 
     def _temporal_end_sweep(self, last: bool) -> None:
         """Close a contact substep: track the contact gaps and the bodies' motion.
@@ -3063,6 +3090,15 @@ class PhoenXWorld:
         # substep. Prepare maps immutable Newton inputs through the canonical
         # range stored in each packed column and updates packed state in place.
         self._gather_colored_contact_rows()
+        if self._temporal_contact_body_entries is not None:
+            self._temporal_contact_body_entries.build(
+                self._contact_cols,
+                self._partitioner.element_ids_by_color,
+                self._num_active_constraints,
+                self._contact_offset,
+                self._contact_cols.articulation_owner,
+                packed_columns=False,
+            )
         if self._use_gathered_warm_start():
             self._contact_body_entries.build(
                 self._contact_cols_packed,

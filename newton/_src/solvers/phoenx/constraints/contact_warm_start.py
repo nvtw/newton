@@ -53,27 +53,33 @@ def _contact_body_entry_keys_kernel(
     num_active_constraints: wp.array[wp.int32],
     contact_offset: wp.int32,
     articulation_owner: wp.array[wp.int32],
+    packed_columns: wp.bool,
     keys: wp.array[wp.int32],
     values: wp.array[wp.int32],
     entry_count: wp.array[wp.int32],
 ):
-    """Emit ``(body, 2 * slot + side)`` for both endpoints of each live column."""
+    """Emit both endpoints, retaining color order within each body's list."""
     slot = wp.tid()
     active = num_active_constraints[0]
     if slot == wp.int32(0):
         entry_count[0] = wp.int32(2) * active
     key0 = _NO_BODY
     key1 = _NO_BODY
+    column = slot
     if slot < active:
         eid = element_ids_by_color[slot]
         # Articulation-owned columns apply their load through the owner.
-        if eid >= contact_offset and articulation_owner[eid - contact_offset] < wp.int32(0):
-            key0 = contact_get_body1(columns, slot)
-            key1 = contact_get_body2(columns, slot)
+        if eid >= contact_offset:
+            cid = eid - contact_offset
+            if not packed_columns:
+                column = cid
+            if articulation_owner[cid] < wp.int32(0) and (packed_columns or columns.static_owner[cid] < wp.int32(0)):
+                key0 = contact_get_body1(columns, column)
+                key1 = contact_get_body2(columns, column)
     keys[2 * slot] = key0
-    values[2 * slot] = 2 * slot
+    values[2 * slot] = 2 * column
     keys[2 * slot + 1] = key1
-    values[2 * slot + 1] = 2 * slot + 1
+    values[2 * slot + 1] = 2 * column + 1
 
 
 @wp.kernel(enable_backward=False)
@@ -113,6 +119,31 @@ def store_row_warm_start(
     linear[k] = imp
     angular0[k] = wp.cross(cc_get_r0(cc, k), imp)
     angular1[k] = wp.cross(cc_get_r1(cc, k), imp)
+
+
+@wp.kernel(enable_backward=False)
+def _refresh_cached_warm_start_kernel(
+    columns: ContactColumnContainer,
+    cc: ContactContainer,
+    element_ids_by_color: wp.array[wp.int32],
+    num_active_constraints: wp.array[wp.int32],
+    contact_offset: wp.int32,
+    linear: wp.array[wp.vec3f],
+    angular0: wp.array[wp.vec3f],
+    angular1: wp.array[wp.vec3f],
+):
+    """Refresh canonical rows from the current temporal sweep's impulses."""
+    slot = wp.tid()
+    if slot >= num_active_constraints[0]:
+        return
+    cid = element_ids_by_color[slot] - contact_offset
+    if cid < wp.int32(0):
+        return
+    if columns.articulation_owner[cid] >= wp.int32(0) or columns.static_owner[cid] >= wp.int32(0):
+        return
+    first = contact_get_contact_first(columns, cid)
+    for k in range(first, first + contact_get_contact_count(columns, cid)):
+        store_row_warm_start(cc, k, linear, angular0, angular1)
 
 
 @wp.kernel(enable_backward=False)
@@ -192,6 +223,8 @@ class ContactBodyEntries:
         num_active_constraints: wp.array[wp.int32],
         contact_offset: int,
         articulation_owner: wp.array[wp.int32],
+        *,
+        packed_columns: bool = True,
     ) -> None:
         """Sort live column endpoints by body once per step."""
         wp.launch(
@@ -203,6 +236,7 @@ class ContactBodyEntries:
                 num_active_constraints,
                 wp.int32(contact_offset),
                 articulation_owner,
+                wp.bool(packed_columns),
                 self.keys,
                 self.values,
                 self.entry_count,
@@ -218,6 +252,33 @@ class ContactBodyEntries:
             device=self.device,
         )
         wp.utils.array_scan(self.counts, self.starts, inclusive=False)
+
+    def apply_cached_warm_start(
+        self,
+        columns: ContactColumnContainer,
+        bodies: BodyContainer,
+        cc: ContactContainer,
+        element_ids_by_color: wp.array[wp.int32],
+        num_active_constraints: wp.array[wp.int32],
+        contact_offset: int,
+    ) -> None:
+        """Replay current canonical-row impulses using the existing endpoint list."""
+        wp.launch(
+            _refresh_cached_warm_start_kernel,
+            dim=self.keys.shape[0] // 4,
+            inputs=[
+                columns,
+                cc,
+                element_ids_by_color,
+                num_active_constraints,
+                wp.int32(contact_offset),
+                self.row_linear,
+                self.row_angular0,
+                self.row_angular1,
+            ],
+            device=self.device,
+        )
+        self.apply_warm_start(columns, bodies)
 
     def apply_warm_start(self, columns: ContactColumnContainer, bodies: BodyContainer) -> None:
         """Add the stored row impulses of every live column to body velocities."""
