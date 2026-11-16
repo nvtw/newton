@@ -1250,6 +1250,7 @@ class SolverPhoenX(SolverBase):
 
         # Bind the rigid broad phase to the live sleeping state and runtime joint pairs.
         self._body_filter_parent = wp.full(max(1, int(model.body_count)), -2, dtype=wp.int32, device=self.device)
+        self._sleeping_filter_data = None
         if uses_broad_phase_filter and int(model.shape_count) > 0 and not self._has_deformable_collision:
             filter_data = build_phoenx_sleeping_filter_data(
                 sleeping_enabled=self._sleeping_enabled,
@@ -1262,6 +1263,7 @@ class SolverPhoenX(SolverBase):
                 shape_mesh_properties=model._shape_mesh_properties
                 if model._collision_pipeline._rigid_contact_surface_velocity
                 else None,
+                belt_island=self.world._belt_island,
             )
             model._collision_pipeline.set_broad_phase_filter_data(filter_data)
             self._sleeping_filter_data = filter_data

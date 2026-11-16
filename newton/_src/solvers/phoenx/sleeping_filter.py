@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import warp as wp
 
+from newton._src.geometry.flags import MeshProperties
 from newton._src.solvers.phoenx.body import MOTION_STATIC
 
 __all__ = [
@@ -14,6 +15,9 @@ __all__ = [
     "build_phoenx_sleeping_filter_data",
     "phoenx_sleeping_filter",
 ]
+
+
+_SURFACE_VELOCITY = wp.constant(wp.int32(int(MeshProperties.SURFACE_VELOCITY)))
 
 
 @wp.struct
@@ -29,6 +33,9 @@ class PhoenXSleepingFilterData:
     shape_mesh_properties: wp.array[wp.int32]
     body_island_root: wp.array[wp.int32]
     body_motion_type: wp.array[wp.int32]
+    #: Per PhoenX body slot, nonzero when the sleeping island rooted there
+    #: rests on a surface-velocity mesh, or empty.
+    belt_island: wp.array[wp.int32]
 
 
 @wp.func
@@ -44,11 +51,6 @@ def phoenx_sleeping_filter(pair: wp.vec2i, data: PhoenXSleepingFilterData) -> wp
             return wp.int32(0)
     if data.enabled == wp.int32(0):
         return wp.int32(1)
-    # This array is present when the pipeline supports surface velocities.
-    # Keep the entire sleeping stack's contacts: a moving belt wakes it only
-    # after collision detection, when culled box-box pairs cannot be recovered.
-    if data.shape_mesh_properties.shape[0] > 0:
-        return wp.int32(1)
     slot_a = wp.int32(0)
     slot_b = wp.int32(0)
     if body_a >= 0:
@@ -57,9 +59,20 @@ def phoenx_sleeping_filter(pair: wp.vec2i, data: PhoenXSleepingFilterData) -> wp
         slot_b = body_b + data.phoenx_body_offset
     frozen_a = (data.body_island_root[slot_a] >= wp.int32(0)) or (data.body_motion_type[slot_a] == MOTION_STATIC)
     frozen_b = (data.body_island_root[slot_b] >= wp.int32(0)) or (data.body_motion_type[slot_b] == MOTION_STATIC)
-    if frozen_a and frozen_b:
-        return wp.int32(0)
-    return wp.int32(1)
+    if not (frozen_a and frozen_b):
+        return wp.int32(1)
+    # Keep every contact of a sleeping stack on a belt: a starting belt wakes
+    # it only after collision detection, when culled pairs cannot be recovered.
+    if data.shape_mesh_properties.shape[0] > 0:
+        surface = _SURFACE_VELOCITY
+        if (data.shape_mesh_properties[pair[0]] & surface) != 0 or (data.shape_mesh_properties[pair[1]] & surface) != 0:
+            return wp.int32(1)
+    if data.belt_island.shape[0] > 0:
+        root_a = data.body_island_root[slot_a]
+        root_b = data.body_island_root[slot_b]
+        if (root_a >= 0 and data.belt_island[root_a] != 0) or (root_b >= 0 and data.belt_island[root_b] != 0):
+            return wp.int32(1)
+    return wp.int32(0)
 
 
 def build_phoenx_sleeping_filter_data(
@@ -72,6 +85,7 @@ def build_phoenx_sleeping_filter_data(
     device: wp.context.Devicelike,
     body_filter_parent: wp.array[wp.int32] | None = None,
     shape_mesh_properties: wp.array[wp.int32] | None = None,
+    belt_island: wp.array[wp.int32] | None = None,
 ) -> PhoenXSleepingFilterData:
     """Build broad-phase filter data, using inert sentinels when disabled."""
 
@@ -83,6 +97,7 @@ def build_phoenx_sleeping_filter_data(
     data.shape_mesh_properties = (
         shape_mesh_properties if shape_mesh_properties is not None else wp.empty(0, dtype=wp.int32, device=device)
     )
+    data.belt_island = belt_island if belt_island is not None else wp.empty(0, dtype=wp.int32, device=device)
     data.phoenx_body_offset = wp.int32(int(phoenx_body_offset))
     data.shape_body = shape_body if shape_body is not None else wp.zeros(1, dtype=wp.int32, device=device)
     data.body_island_root = (

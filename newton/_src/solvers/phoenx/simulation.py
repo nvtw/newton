@@ -252,6 +252,7 @@ from newton._src.solvers.phoenx.sleeping_kernels import (
     _phoenx_activity_wake_kernel,
     _phoenx_apply_island_wake_kernel,
     _phoenx_apply_wake_flag_kernel,
+    _phoenx_belt_island_kernel,
     _phoenx_clear_quiet_contact_warmstart_kernel,
     _phoenx_collapse_sleeping_elements_kernel,
     _phoenx_compute_island_root_per_compact_kernel,
@@ -1384,6 +1385,10 @@ class PhoenXWorld:
             wp.zeros(self.num_bodies, dtype=wp.int32, device=self.device) if self._sleeping_enabled else None
         )
         self._sleeping_activity = (
+            wp.zeros(self.num_bodies, dtype=wp.int32, device=self.device) if self._sleeping_enabled else None
+        )
+        # Per island root: the sleeping island touches a surface-velocity mesh.
+        self._belt_island = (
             wp.zeros(self.num_bodies, dtype=wp.int32, device=self.device) if self._sleeping_enabled else None
         )
         self._island_builder: UnionFindIslandBuilder | None = None
@@ -4023,6 +4028,15 @@ class PhoenXWorld:
             ],
             device=self.device,
         )
+        # --- Mark sleeping islands on belts; the broad phase keeps their pairs. ---
+        self._belt_island.zero_()
+        if self._contact_input_active_this_step and properties is not None and properties.shape[0] > 0:
+            wp.launch(
+                _phoenx_belt_island_kernel,
+                dim=self.rigid_contact_max,
+                inputs=[self._contact_views, properties, self.bodies, self._belt_island],
+                device=self.device,
+            )
 
         # --- Collapse sleeping body slots in _elements for the partitioner. ---
         wp.launch(

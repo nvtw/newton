@@ -44,6 +44,7 @@ all sleep-aware orchestration lives here.
 
 import warp as wp
 
+from newton._src.geometry.flags import MeshProperties
 from newton._src.solvers.phoenx.body import (
     MOTION_DYNAMIC,
     MOTION_KINEMATIC,
@@ -96,6 +97,9 @@ __all__ = [
 
 
 _AABB_INIT_LARGE = wp.constant(wp.float32(1.0e30))
+
+
+_SURFACE_VELOCITY = wp.constant(wp.int32(int(MeshProperties.SURFACE_VELOCITY)))
 
 
 @wp.func
@@ -772,6 +776,37 @@ def _phoenx_surface_activity_kernel(contacts: ContactViews, activity: wp.array[w
             body = contacts.shape_body[b]
         if body > 0:
             wp.atomic_max(activity, body, 1)
+
+
+@wp.kernel(enable_backward=False)
+def _phoenx_belt_island_kernel(
+    contacts: ContactViews,
+    shape_mesh_properties: wp.array[wp.int32],
+    bodies: BodyContainer,
+    belt_island: wp.array[wp.int32],
+):
+    """Flag sleeping islands that touch a surface-velocity mesh, moving or stopped."""
+    i = wp.tid()
+    if i >= contacts.rigid_contact_count[0]:
+        return
+    a = contacts.rigid_contact_shape0[i]
+    b = contacts.rigid_contact_shape1[i]
+    if a < 0 or b < 0:
+        return
+    surface = _SURFACE_VELOCITY
+    for side in range(2):
+        belt = a
+        other = b
+        if side == 1:
+            belt = b
+            other = a
+        if (shape_mesh_properties[belt] & surface) == 0:
+            continue
+        body = contacts.shape_body[other]
+        if body > 0:
+            root = bodies.island_root[body]
+            if root >= 0:
+                belt_island[root] = wp.int32(1)
 
 
 @wp.kernel(enable_backward=False)

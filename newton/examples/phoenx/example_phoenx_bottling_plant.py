@@ -34,6 +34,11 @@ import warp as wp
 
 import newton
 import newton.examples
+from newton._src.solvers.phoenx.sleeping_filter import (
+    PhoenXSleepingFilterData,
+    build_phoenx_sleeping_filter_data,
+    phoenx_sleeping_filter,
+)
 from newton.examples.phoenx._bottling_control import PlantController
 from newton.examples.phoenx._bottling_scene import load_plant
 from newton.solvers import SolverPhoenX
@@ -47,6 +52,8 @@ class _PlantFilter:
     articulation: wp.array[wp.int32]
     shape_body: wp.array[wp.int32]
     held_by: wp.array[wp.int32]
+    # The solver's filter culls pairs between sleeping bodies.
+    sleeping: PhoenXSleepingFilterData
 
 
 @wp.func
@@ -67,7 +74,7 @@ def _filter_pair(pair: wp.vec2i, data: _PlantFilter) -> wp.int32:
     if ba >= 0 and bb >= 0:
         if data.held_by[ba] == bb + 1 or data.held_by[bb] == ba + 1:
             return 0
-    return 1
+    return phoenx_sleeping_filter(pair, data.sleeping)
 
 
 @wp.kernel
@@ -152,6 +159,14 @@ class Example:
         self.filter_data.articulation = wp.array(groups, dtype=wp.int32, device=self.model.device)
         self.filter_data.shape_body = self.model.shape_body
         self.filter_data.held_by = wp.zeros(self.model.body_count, dtype=int, device=self.model.device)
+        self.filter_data.sleeping = build_phoenx_sleeping_filter_data(
+            sleeping_enabled=False,
+            phoenx_body_offset=1,
+            shape_body=None,
+            body_island_root=None,
+            body_motion_type=None,
+            device=self.model.device,
+        )
         self.pipeline = newton.CollisionPipeline(
             self.model,
             contact_matching="sticky",
@@ -229,6 +244,8 @@ class Example:
             )
         # Runtime joints install their default data during solver setup. This
         # filter also handles grasp pairs, alongside the source's hull groups.
+        if self.solver._sleeping_filter_data is not None:
+            self.filter_data.sleeping = self.solver._sleeping_filter_data
         self.pipeline.set_broad_phase_filter_data(self.filter_data)
         self.state_0 = self.model.state()
         self.state_1 = self.model.state()
