@@ -316,7 +316,15 @@ class TestTemporalContactObservables(unittest.TestCase):
 
     def test_owned_support_force_prevents_position_drift(self):
         """Keep a free hinged pair resting when contact reactions balance its weight."""
-        with wp.ScopedDevice("cpu"):
+        self._check_owned_support_force("cpu")
+
+    @unittest.skipUnless(wp.is_cuda_available(), "CUDA device required")
+    def test_owned_support_force_balances_momentum_cuda(self):
+        """Balance GPU support forces against weight and measured momentum change."""
+        self._check_owned_support_force("cuda:0")
+
+    def _check_owned_support_force(self, device):
+        with wp.ScopedDevice(device):
             builder = newton.ModelBuilder()
             body = builder.add_link(xform=wp.transform(wp.vec3(0, 0, 0.1)))
             builder.add_shape_box(body, hx=0.1, hy=0.1, hz=0.1)
@@ -331,7 +339,7 @@ class TestTemporalContactObservables(unittest.TestCase):
                 child_xform=wp.transform(wp.vec3(-0.2, 0, 0)),
             )
             builder.add_articulation([root, joint])
-            builder.add_ground_plane()
+            ground = builder.add_ground_plane()
             model = builder.finalize()
             solver = SolverPhoenX(
                 model,
@@ -346,14 +354,29 @@ class TestTemporalContactObservables(unittest.TestCase):
             newton.eval_fk(model, model.joint_q, model.joint_qd, state)
             contacts = model._collision_pipeline.contacts()
             observables = solver.observables({SolverBase.ObservableKind.CONTACT_F}, contacts=contacts)
+            masses = model.body_mass.numpy().astype(np.float64)
+            weight = float(masses.sum()) * 9.81
             forces = []
+            expected_forces = []
             for frame in range(120):
+                previous_momentum = float(masses @ state.body_qd.numpy()[:, 2]) if frame >= 90 else 0.0
                 solver.collide(state, contacts, dt=1 / 120)
                 solver.step(state, state, control, contacts, 1 / 120, observables=observables)
                 if frame >= 90:
                     count = int(contacts.rigid_contact_count.numpy()[0])
-                    forces.append(abs(float(observables.contact_f.numpy()[:count, 2].sum())))
-            self.assertAlmostEqual(np.mean(forces), float(model.body_mass.numpy().sum()) * 9.81, delta=0.01)
+                    shape0 = contacts.rigid_contact_shape0.numpy()[:count]
+                    shape1 = contacts.rigid_contact_shape1.numpy()[:count]
+                    force_z = observables.contact_f.numpy()[:count, 2]
+                    support = np.concatenate((force_z[shape1 == ground], -force_z[shape0 == ground]))
+                    self.assertTrue(np.all(support >= -1.0e-6), "The floor must not pull on the bodies")
+                    forces.append(float(support.sum()))
+                    momentum = float(masses @ state.body_qd.numpy()[:, 2])
+                    expected_forces.append(weight + (momentum - previous_momentum) * 120)
+            # CUDA can still have a small settling acceleration in this window;
+            # comparing its force to weight alone would misdiagnose that motion.
+            np.testing.assert_allclose(forces, expected_forces, atol=0.001, rtol=0.0)
+            if device == "cpu":
+                self.assertAlmostEqual(np.mean(forces), weight, delta=0.01)
             np.testing.assert_allclose(state.body_q.numpy()[:, 2], 0.1, atol=0.001)
             self.assertLess(float(np.abs(state.body_qd.numpy()[:, 2]).max()), 0.005)
 
