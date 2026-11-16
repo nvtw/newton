@@ -99,6 +99,31 @@ class TestBottlingPlant(unittest.TestCase):
             self.assertEqual(len(bodies), 2)
             self.assertTrue(np.isfinite(state.body_q.numpy()).all())
 
+            # Continuous targets must retain phase through two revolutions.
+            # Position-only actuation ignores velocity feed-forward and trails
+            # by kd * angular_speed / ke even after acceleration has settled.
+            rotor_target = model.joint_target_q_start.numpy()[joints[0]]
+            speeds = control.joint_target_qd.numpy()
+            speeds[model.joint_qd_start.numpy()[joints[0]]] = np.pi / 2
+            speeds[model.joint_qd_start.numpy()[joints[1]]] = 0.1
+            control.joint_target_qd.assign(speeds)
+            for frame in range(480):
+                targets[rotor_target] = np.pi / 4 + (frame + 1) / 60 * np.pi / 2
+                targets[model.joint_target_q_start.numpy()[joints[1]]] = 0.3 + (frame + 1) / 60 * 0.1
+                control.joint_target_q.assign(targets)
+                solver.collide(state, contacts)
+                solver.step(state, state, control, contacts, 1.0 / 60.0)
+            newton.eval_ik(model, state, model.joint_q, model.joint_qd)
+            self.assertAlmostEqual(
+                float(model.joint_q.numpy()[model.joint_q_start.numpy()[joints[1]]]), 1.1, delta=0.005
+            )
+            angle = float(model.joint_q.numpy()[model.joint_q_start.numpy()[joints[0]]])
+            error = angle - targets[rotor_target]
+            self.assertAlmostEqual(float(np.arctan2(np.sin(error), np.cos(error))), 0.0, delta=0.05)
+            self.assertAlmostEqual(
+                float(model.joint_qd.numpy()[model.joint_qd_start.numpy()[joints[0]]]), np.pi / 2, delta=0.03
+            )
+
     def test_disabled_cube_belt_can_start(self):
         """Retain a stopped USD cube conveyor's runtime surface-velocity support."""
         with tempfile.TemporaryDirectory() as directory, wp.ScopedDevice("cpu"):

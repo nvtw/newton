@@ -91,3 +91,18 @@ polyethylene at 920 kg/m³, and rubber at 1100 kg/m³. Torque is limited to
 not measured machine specifications. Film tension, deposition, cutting and
 label application remain unimplemented; the reconstructed joints alone do
 not establish a working wrapping process.
+
+The wrapper drives explicitly accept both position and velocity targets.
+Continuous rotation requires continuous angular targets; wrapping targets into
+one revolution causes the position drive to reverse at the discontinuity.
+A two-revolution tracking regression checks finite-torque rotation and lift
+tracking, separately from wrapping-process validation.
+
+A clearance audit found that the source overhead crossbeams intersect the
+rotary arm and hub. The authored static collision proxies omit these overhead
+surfaces, so successful homing against those proxies does not establish full
+mechanical clearance. Adding the actual static triangle surfaces stalls the
+uncorrected assembly. A diagnostic translation of the moving assembly down by
+127 mm provides 10 mm overhead clearance and permits rotation; this placement
+correction has not been applied to the example. Full wrapper clearance and
+loaded-pallet wrapping remain unvalidated.
