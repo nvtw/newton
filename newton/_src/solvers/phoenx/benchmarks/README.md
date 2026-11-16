@@ -12,7 +12,53 @@ machine's GPU. Designed for quick iteration, so intentionally:
 - **Hand-triggered.** You decide whether to keep the results. Nothing
   is uploaded; `results/` is gitignored.
 
-## Run it
+## Resting-container jitter ladder
+
+The asset-free diagnostic in
+[`experimental/bench_container_jitter.py`](experimental/bench_container_jitter.py)
+provides reusable scenes for contact-solver comparisons:
+
+| Case | Support | Contents |
+|---|---|---|
+| `fixed_1` | Fixed flat box | One cylinder |
+| `plate_1` | Free 0.42 kg flat box | One cylinder |
+| `plate_4` | Free 0.42 kg flat box | Four cylinders |
+| `plate_12` | Free 0.42 kg flat box | Twelve cylinders |
+| `box_12` | Free 0.42 kg box shell | Twelve cylinders |
+
+Every cylinder weighs 0.57 kg. These controlled proxies require no private USD
+assets. Support inertia follows its geometry. The shell has four walls and a
+flat bottom; it does not reproduce the source factory's stepped carton floor.
+
+```bash
+uv run --no-sync -m newton._src.solvers.phoenx.benchmarks.experimental.bench_container_jitter \
+    --output /tmp/container-jitter.json
+
+uv run --no-sync -m newton._src.solvers.phoenx.benchmarks.experimental.bench_container_jitter \
+    --case box_12 --iterations 64 --output /tmp/container-jitter-reference.json
+```
+
+Defaults are three simulated seconds, measurement after one second, four
+collision/solver substeps per 60 Hz frame, four main iterations and one relax
+sweep per substep, requested 80 Hz contact frequency, sticky matching, and no
+sleeping or mass splitting. JSON records the settings, effective soft-contact
+coefficients, motion relative to the translating/rotating support, contact
+counts, floor clearance, support escape, and diagnostic runtime. Runtime includes
+readbacks and may include kernel compilation: do not interpret it as rendered
+FPS or a clean solver-throughput benchmark.
+
+At the initial CPU baseline, relative speed RMS was approximately
+0.0012/0.00013/3.66/44.75/21.26 mm/s in the order above. Difficulty is a structural
+progression, not a promise of monotonically increasing jitter. The two single-body
+controls settle; the loaded cases expose unresolved stability problems. Preserve
+all settings when evaluating a solver patch and also check longer runs. Do not
+accept quieter output caused by falling through the floor, escaping the support,
+altered masses, sleeping, damping, or permanently constraining the contents.
+Sliding, release, momentum, and contact-force tests remain separate acceptance
+requirements. The benchmark reports measurements rather than declaring the
+currently failing loaded cases successful.
+
+## Run the robot throughput sweep
 
 ```bash
 # Default: g1_flat + h1_flat, num_worlds in {1024, 4096, 16384},
