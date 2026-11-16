@@ -1834,6 +1834,39 @@ def _apply_direct_equality_descriptor_kernel(
     )
 
 
+_APPLY_LANES = 32
+
+
+@wp.kernel(enable_backward=False)
+def _apply_direct_equality_descriptor_tiled_kernel(
+    body_row_start: wp.array[wp.int32],
+    descriptor: wp.array[wp.vec2i],
+    row_wrench0: wp.array[wp.spatial_vector],
+    row_wrench1: wp.array[wp.spatial_vector],
+    delta: wp.array[wp.float32],
+    row_scale: wp.array[wp.float32],
+    bodies: BodyContainer,
+):
+    """Apply :func:`_apply_direct_equality_body` with one warp per body.
+
+    Mechanism mounts carry dozens of rows; a serial gather on one thread
+    bounded the whole launch. Lanes stride over the incidence list and a
+    fixed-order tile reduction keeps the result deterministic.
+    """
+    body, lane = wp.tid()
+    partial = wp.spatial_vector()
+    for incidence in range(body_row_start[body] + lane, body_row_start[body + wp.int32(1)], _APPLY_LANES):
+        metadata = descriptor[incidence]
+        row = metadata[0]
+        source = metadata[1] >> wp.int32(1)
+        row_wrench = row_wrench0[source] if (metadata[1] & wp.int32(1)) == wp.int32(0) else row_wrench1[source]
+        partial += row_scale[row] * delta[row] * row_wrench
+    wrench = wp.tile_sum(wp.tile(partial, preserve_type=True))[0]
+    if lane == 0 and body > wp.int32(0) and bodies.inverse_mass[body] > wp.float32(0.0):
+        bodies.velocity[body] += bodies.inverse_mass[body] * wp.spatial_top(wrench)
+        bodies.angular_velocity[body] += mat33_from_sym6(bodies.inverse_inertia_world[body]) * wp.spatial_bottom(wrench)
+
+
 @functools.cache
 def _make_fused_subgroup_projection_kernel(width: int, packed: bool):
     """Build, solve, accumulate, and apply one-panel mechanisms in one launch.
@@ -3014,9 +3047,9 @@ class DirectEqualitySystem:
                 inputs=[self.delta, self.row_scale, self.accumulated_impulse],
                 device=self.model.device,
             )
-            wp.launch(
-                _apply_direct_equality_descriptor_kernel,
-                dim=int(self.model.body_count) + 1,
+            wp.launch_tiled(
+                _apply_direct_equality_descriptor_tiled_kernel,
+                dim=[int(self.model.body_count) + 1],
                 inputs=[
                     self.body_row_start,
                     self._body_row_wrench_descriptors,
@@ -3026,6 +3059,7 @@ class DirectEqualitySystem:
                     self.row_scale,
                     self.bodies,
                 ],
+                block_dim=_APPLY_LANES,
                 device=self.model.device,
             )
 

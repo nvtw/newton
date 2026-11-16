@@ -57,7 +57,7 @@ def run(fused: bool, frames: int = 12):
 class TestDirectFusedProjection(unittest.TestCase):
     @unittest.skipUnless(wp.is_cuda_available(), "CUDA required")
     def test_fused_projection_matches_separate_kernels_bitwise(self):
-        """One fused projection reproduces RHS, solve, accumulation and body updates exactly."""
+        """One fused projection reproduces RHS, solve and accumulation exactly, and body updates to rounding."""
         viewer = ViewerNull()
         try:
             example = scene.Example(
@@ -92,7 +92,14 @@ class TestDirectFusedProjection(unittest.TestCase):
                 for name, reference, candidate in zip(
                     ("velocity", "angular_velocity", "impulse"), *results, strict=True
                 ):
-                    np.testing.assert_array_equal(candidate, reference, err_msg=f"{name}, bias={use_bias}")
+                    if name == "impulse":
+                        np.testing.assert_array_equal(candidate, reference, err_msg=f"{name}, bias={use_bias}")
+                    else:
+                        # The separate apply sums a body's rows with a warp tree reduction;
+                        # the fused projection sums them serially, so only rounding differs.
+                        np.testing.assert_allclose(
+                            candidate, reference, rtol=1e-5, atol=1e-7, err_msg=f"{name}, bias={use_bias}"
+                        )
             exact._fused_projection = fused_kernel
         finally:
             viewer.close()
