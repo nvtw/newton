@@ -359,6 +359,7 @@ class SolverPhoenX(SolverBase):
         solver_scheme: str = "soft",
         velocity_iterations: int = 1,
         velocity_relaxation: str = "each_substep",
+        temporal_iterations: bool = False,
         contact_hertz: float | None = None,
         joint_friction_model: str = "hard",
         contact_friction_model: str = "point",
@@ -438,6 +439,17 @@ class SolverPhoenX(SolverBase):
             velocity_relaxation: ``"each_substep"`` relaxes after every temporal
                 substep (the default). ``"final_substep"`` relaxes only after
                 the final substep of each solver step.
+            temporal_iterations: Experimental. Treat each of the ``solver_iterations`` biased sweeps
+                of a substep as a contact substep of ``dt / solver_iterations``:
+                forces and gravity enter in equal shares, contact rows use that
+                step's soft spring and warm start, gaps follow the motion between
+                sweeps, and positions integrate the sweeps' average velocity.
+                Joint factorization, row preparation, and direct contact
+                responses still run once per substep. Smaller contact steps can
+                reduce oscillation of heavy bodies on light movable supports;
+                the required schedule depends on the scene. Requires
+                ``step_layout="single_world"``, rigid bodies, and no mass
+                splitting or sleeping.
             contact_hertz: Natural frequency [Hz] of the rigid contact springs
                 (soft rows with damping ratio 1). ``None`` (the default) uses
                 the stiffest spring the sweep schedule keeps stable, which
@@ -1117,6 +1129,21 @@ class SolverPhoenX(SolverBase):
             device=self.device,
         )
 
+        if temporal_iterations and (
+            step_layout != "single_world"
+            or mass_splitting
+            or sleeping_velocity_threshold > 0.0
+            or solver_scheme != "soft"
+            or colored_contact_headers
+            or num_cloth_triangles
+            or num_cloth_bending
+            or num_soft_tetrahedra
+        ):
+            raise ValueError(
+                "temporal_iterations requires solver_scheme='soft', step_layout='single_world', rigid "
+                "bodies, uncolored contact headers, and no mass splitting or sleeping"
+            )
+
         # Body-pair grouping pays a sort/gather cost and reduces all shape-pair
         # patches between two bodies into one manifold. Keep an explicit opt-out
         # for disconnected or strongly nonconvex compound geometry.
@@ -1152,6 +1179,7 @@ class SolverPhoenX(SolverBase):
             solver_iterations=int(solver_iterations),
             velocity_iterations=int(velocity_iterations),
             velocity_relaxation=velocity_relaxation,
+            temporal_iterations=temporal_iterations,
             contact_hertz=contact_hertz,
             gravity=gravity_arg,
             rigid_contact_max=rigid_contact_max,
@@ -2031,6 +2059,10 @@ class SolverPhoenX(SolverBase):
                 state_kinematics_valid=state_kinematics_valid,
             )
 
+        if self.world.temporal_iterations:
+            # Live joint rows after runtime commits: grasps and seals change which bodies
+            # integrate their final velocity.
+            self.world.update_temporal_jointed_bodies(self.model)
         if self._sleeping_enabled:
             # Read live joint rows after runtime commits, including reused slots.
             self.world._sleeping_forced_awake.zero_()

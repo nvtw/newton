@@ -13,10 +13,12 @@ import warp as wp
 from newton._src.geometry.types import GeoType
 from newton._src.sim.collide import CollisionPipeline
 from newton._src.sim.contacts import Contacts
+from newton._src.sim.enums import JointType
 from newton._src.solvers.phoenx import diagnostics
 from newton._src.solvers.phoenx.adapter_kernels import (
     _accumulate_contact_impulse_kernel,
     _accumulate_substep_velocity_kernel,
+    _accumulate_temporal_contact_impulse_kernel,
 )
 from newton._src.solvers.phoenx.articulations.direct_contact_gs import (
     DirectContactRunSchedule,
@@ -273,6 +275,17 @@ from newton._src.solvers.phoenx.solver_config import (
     NUM_INNER_WHILE_ITERATIONS,
     PHOENX_USE_GREEDY_COLORING,
 )
+from newton._src.solvers.phoenx.temporal_contacts import (
+    temporal_accumulate_velocity_kernel,
+    temporal_apply_forces_kernel,
+    temporal_contact_gap_kernel,
+    temporal_initialize_weld_components_kernel,
+    temporal_mark_jointed_components_kernel,
+    temporal_restore_velocity_kernel,
+    temporal_scatter_jointed_kernel,
+    temporal_swap_average_velocity_kernel,
+    temporal_union_weld_components_kernel,
+)
 
 __all__ = [
     "DEFAULT_SHAPE_GAP",
@@ -415,6 +428,7 @@ class PhoenXWorld:
         contact_chunk_size: int = 0,
         contact_friction_model: str = "point",
         combine_direct_prepare_projection: bool = False,
+        temporal_iterations: bool = False,
         device: wp.context.Devicelike = None,
     ):
         """Take ownership of pre-built body and constraint containers.
@@ -698,6 +712,27 @@ class PhoenXWorld:
         if velocity_relaxation not in ("each_substep", "final_substep"):
             raise ValueError("velocity_relaxation must be 'each_substep' or 'final_substep'")
         self.velocity_relaxation = velocity_relaxation
+        #: Each biased sweep of a substep advances the contacts by ``1/solver_iterations``
+        #: of the substep, see :mod:`~newton._src.solvers.phoenx.temporal_contacts`.
+        self.temporal_iterations = bool(temporal_iterations) and int(solver_iterations) > 1
+        if self.temporal_iterations and (str(step_layout) != "single_world" or bool(mass_splitting)):
+            raise ValueError("temporal_iterations requires step_layout='single_world' without mass splitting")
+        self._temporal_velocity_sum = None
+        if self.temporal_iterations and self.num_bodies > 0:
+            self._temporal_velocity_sum = wp.zeros(self.num_bodies, dtype=wp.vec3f, device=self.device)
+            self._temporal_angular_velocity_sum = wp.zeros(self.num_bodies, dtype=wp.vec3f, device=self.device)
+            self._temporal_kept_velocity = wp.zeros(self.num_bodies, dtype=wp.vec3f, device=self.device)
+            self._temporal_kept_angular_velocity = wp.zeros(self.num_bodies, dtype=wp.vec3f, device=self.device)
+            #: Nonzero for bodies that integrate their final sweep velocity, see
+            #: :meth:`update_temporal_jointed_bodies`.
+            self._temporal_jointed = wp.zeros(self.num_bodies, dtype=wp.int32, device=self.device)
+            self._temporal_weld_entries = wp.empty(self.num_bodies, dtype=wp.int64, device=self.device)
+            self._temporal_weld_marked = wp.empty(self.num_bodies, dtype=wp.int32, device=self.device)
+        #: ``(substep_coefficients, sweep_coefficients, sweep_bias_rate, sweep_idt)``.
+        self._temporal_contact_coefficients = None
+        self._temporal_sweep_index = 0
+        self._temporal_record_contacts = None
+        self._temporal_joint_enabled = None
         if contact_hertz is not None and not (math.isfinite(contact_hertz) and contact_hertz > 0.0):
             raise ValueError(f"contact_hertz must be None or a positive finite frequency (got {contact_hertz})")
         self.contact_hertz = None if contact_hertz is None else float(contact_hertz)
@@ -1211,7 +1246,7 @@ class PhoenXWorld:
         if self.max_contact_columns > 0:
             # Substeps that reuse prepared rows advance each row's gap by the
             # substep's rigid motion, so its normal bias stays physical.
-            track_gap = self.prepare_refresh_stride > 1
+            track_gap = self.prepare_refresh_stride > 1 or self.temporal_iterations
             self._contact_container: ContactContainer = contact_container_zeros(
                 self.rigid_contact_max, device=self.device, track_gap=track_gap and not self._colored_contact_rows
             )
@@ -2607,6 +2642,192 @@ class PhoenXWorld:
         self._partitioner.begin_sweep()
         self._singleworld_head_plus_tail_sweep(cached_head, cached_fused, idt)
 
+    # ------------------------------------------------------------------
+    # Temporal iterations: each biased sweep is a contact substep of dt / n.
+    # See :mod:`newton._src.solvers.phoenx.temporal_contacts`.
+    # ------------------------------------------------------------------
+
+    def _temporal_contacts_active(self) -> bool:
+        return bool(self.temporal_iterations and self.max_contact_columns > 0 and self._contact_input_active_this_step)
+
+    def _temporal_contact_rows(self, advance_dt: float) -> None:
+        """Advance contact gaps by ``advance_dt`` of the current motion and refresh the sweep biases."""
+        _, _, bias_rate, sweep_idt = self._temporal_contact_coefficients
+        rows_per_column = 8 if self.device.is_cuda else 1
+        column_stride = self.max_contact_columns
+        if self.device.is_cuda:
+            column_stride = min(column_stride, self.device.sm_count * 1024 // rows_per_column)
+        wp.launch(
+            temporal_contact_gap_kernel,
+            dim=(column_stride, rows_per_column),
+            inputs=[
+                self._contact_cols,
+                self._contact_container,
+                self.bodies,
+                self._ingest_scratch.num_contact_columns,
+                self._contact_cols.articulation_owner,
+                wp.int32(rows_per_column),
+                wp.float32(advance_dt),
+                wp.float32(sweep_idt),
+                wp.float32(bias_rate),
+                wp.int32(column_stride),
+                self._contact_views.rigid_contact_stiffness,
+                self._contact_views.rigid_contact_damping,
+            ],
+            device=self.device,
+        )
+
+    def _temporal_accumulate_velocity(self, reset: bool) -> None:
+        wp.launch(
+            temporal_accumulate_velocity_kernel,
+            dim=self.num_bodies,
+            inputs=[self.bodies, wp.int32(1 if reset else 0)],
+            outputs=[self._temporal_velocity_sum, self._temporal_angular_velocity_sum],
+            device=self.device,
+        )
+
+    def _temporal_begin_sweeps(self) -> None:
+        """Start the substep's contact substeps after preparation and warm start."""
+        if self._temporal_contacts_active():
+            self._temporal_contact_rows(0.0)
+            self._apply_contact_coefficients(self._temporal_contact_coefficients[1])
+
+    def _temporal_next_sweep(self, idt: wp.float32) -> None:
+        """Enter the next contact substep: apply its share of forces and re-apply contact impulses."""
+        self._temporal_apply_forces()
+        if self._temporal_contacts_active():
+            head, fused = self._singleworld_contact_warm_start_kernels()
+            self._partitioner.begin_sweep()
+            self._singleworld_head_plus_tail_sweep(head, fused, idt)
+
+    def _temporal_end_sweep(self, last: bool) -> None:
+        """Close a contact substep: track the contact gaps and the bodies' motion.
+
+        The last contact substep's velocity enters the average at integration, after
+        the substep's remaining solves.
+        """
+        if self._temporal_contacts_active():
+            if last:
+                self._apply_contact_coefficients(self._temporal_contact_coefficients[0])
+            else:
+                self._temporal_contact_rows(float(self.substep_dt) / self.solver_iterations)
+                if self._temporal_record_contacts is not None:
+                    self._accumulate_contact_impulses(self._temporal_record_contacts, temporal_only=True)
+        if not last:
+            self._temporal_accumulate_velocity(reset=self._temporal_sweep_index == 0)
+            self._temporal_sweep_index += 1
+
+    def _temporal_apply_forces(self, shares: int = 1, jointed_dt: float = 0.0) -> None:
+        """Apply ``shares`` contact substeps' worth of forces to bodies that receive them per substep.
+
+        Bodies marked by :meth:`update_temporal_jointed_bodies` receive ``jointed_dt`` instead.
+        """
+        if self.num_bodies > 0 and self._has_maximal_dynamic_bodies and self._temporal_velocity_sum is not None:
+            wp.launch(
+                temporal_apply_forces_kernel,
+                dim=self.num_bodies,
+                inputs=[
+                    self.bodies,
+                    self.gravity,
+                    self._temporal_jointed,
+                    wp.float32(self.substep_dt * shares / self.solver_iterations),
+                    wp.float32(jointed_dt),
+                ],
+                device=self.device,
+            )
+
+    def _integrate_positions_temporal(self) -> None:
+        """Integrate positions with the substep's average sweep velocity, keeping the final velocity."""
+        self._temporal_accumulate_velocity(reset=self._temporal_sweep_index == 0)
+        self._temporal_sweep_index += 1
+        wp.launch(
+            temporal_swap_average_velocity_kernel,
+            dim=self.num_bodies,
+            inputs=[
+                self.bodies,
+                wp.float32(1.0 / max(self._temporal_sweep_index, 1)),
+                self._temporal_velocity_sum,
+                self._temporal_angular_velocity_sum,
+            ],
+            outputs=[self._temporal_kept_velocity, self._temporal_kept_angular_velocity],
+            device=self.device,
+        )
+        self._integrate_positions()
+        wp.launch(
+            temporal_restore_velocity_kernel,
+            dim=self.num_bodies,
+            inputs=[self.bodies, self._temporal_kept_velocity, self._temporal_kept_angular_velocity],
+            device=self.device,
+        )
+
+    def update_temporal_jointed_bodies(self, model) -> None:
+        """Mark weld components attached to free-axis joints for the outer force schedule.
+
+        Rebuild from live enabled joints so grasps and releases take effect during
+        graph replay. Union-find avoids joint-order and weld-chain-depth limits.
+        """
+        if self._temporal_velocity_sum is None:
+            return
+        self._temporal_jointed.zero_()
+        count = int(model.joint_count)
+        if count == 0:
+            return
+        if self._temporal_joint_enabled is None:
+            self._temporal_joint_enabled = (
+                model.joint_enabled
+                if model.joint_enabled is not None
+                else wp.ones(count, dtype=wp.bool, device=self.device)
+            )
+        entries, marked = self._temporal_weld_entries, self._temporal_weld_marked
+        wp.launch(
+            temporal_initialize_weld_components_kernel,
+            dim=self.num_bodies,
+            inputs=[entries, marked],
+            device=self.device,
+        )
+        joint_inputs = [
+            self._temporal_joint_enabled,
+            model.joint_type,
+            model.joint_parent,
+            model.joint_child,
+            model.joint_dof_dim,
+            int(JointType.FREE),
+            entries,
+        ]
+        wp.launch(temporal_union_weld_components_kernel, dim=count, inputs=joint_inputs, device=self.device)
+        wp.launch(
+            temporal_mark_jointed_components_kernel, dim=count, inputs=[*joint_inputs, marked], device=self.device
+        )
+        wp.launch(
+            temporal_scatter_jointed_kernel,
+            dim=self.num_bodies,
+            inputs=[entries, marked, self._temporal_jointed],
+            device=self.device,
+        )
+
+    def _singleworld_contact_warm_start_kernels(self):
+        """Return contact-only cached warm-start head/fused kernels (joint rows untouched)."""
+        return tuple(
+            get_singleworld_kernel(
+                phase="cached_prepare",
+                fused=fused,
+                cloth_support=False,
+                enable_column_timers=self.enable_column_timers,
+                soft_tet_neohookean=False,
+                has_joints=self.num_joints > 0,
+                has_contacts=self.max_contact_columns > 0,
+                skip_joint_pgs=True,
+                has_mass_splitting=self.mass_splitting_enabled,
+                packed_contact_headers=False,
+                has_sleeping=False,
+                has_soft_contact_pd=False,
+                rigid_direct=self._singleworld_rigid_direct(),
+                bilateral_joint_blocks=bool(self.constraints.bilateral.enabled),
+                **({"spread_contact_lanes": self.device.is_cuda} if not fused else {}),
+            )
+            for fused in (False, True)
+        )
+
     @property
     def _active_velocity_iterations(self) -> int:
         """Configured relaxation count for the current temporal substep."""
@@ -2639,6 +2860,32 @@ class PhoenXWorld:
             contact_container_set_sweeps(
                 self._contact_container_solve, self.solver_iterations, relax, self.contact_hertz, dt, step_dt
             )
+        if self.temporal_iterations:
+            # Each biased sweep is a contact substep of ``dt / n`` with one sweep and no
+            # relax; the substep's prepare, relax, and owned contacts keep the substep spring.
+            cc = self._contact_container
+            substep_coefficients = (cc.soft_capped, cc.soft_bias_dt, cc.soft_mass_coeff, cc.soft_impulse_coeff)
+            n = self.solver_iterations
+            sweep_dt = dt / n
+            contact_container_set_sweeps(cc, 1, 0, self.contact_hertz, sweep_dt, step_dt)
+            # Kernels scale ``soft_bias_dt`` by the substep rate; express the sweep's rate in it.
+            sweep_coefficients = (1, cc.soft_bias_dt * n, cc.soft_mass_coeff, cc.soft_impulse_coeff)
+            sweep_bias_rate = float(cc.soft_bias_dt) / sweep_dt
+            self._temporal_contact_coefficients = (
+                substep_coefficients,
+                sweep_coefficients,
+                sweep_bias_rate,
+                1.0 / sweep_dt,
+            )
+            self._apply_contact_coefficients(substep_coefficients)
+
+    def _apply_contact_coefficients(self, coefficients) -> None:
+        """Set ``(capped, bias_dt, mass, impulse)`` soft contact coefficients on the solve containers."""
+        containers = [self._contact_container]
+        if self._contact_container_solve is not self._contact_container:
+            containers.append(self._contact_container_solve)
+        for cc in containers:
+            cc.soft_capped, cc.soft_bias_dt, cc.soft_mass_coeff, cc.soft_impulse_coeff = coefficients
 
     def step(
         self,
@@ -2859,12 +3106,17 @@ class PhoenXWorld:
             # integrate_positions stays in step() -- identical for every
             # dispatcher.
             idt = wp.float32(1.0 / self.substep_dt)
+            self._temporal_sweep_index = 0
+            self._temporal_record_contacts = contacts if record_impulses else None
             self._dispatcher.solve(idt)
             if reduced_after_regular:
                 self._begin_reduced_substep()
             if self._penetration_free_data is not None:
                 self._penetration_free.limit_velocities(self._penetration_free_data, self.bodies, self.substep_dt)
-            self._integrate_positions()
+            if self._temporal_velocity_sum is not None:
+                self._integrate_positions_temporal()
+            else:
+                self._integrate_positions()
             if self._maximal_tree_projector is not None and not self._direct_tree_contacts:
                 # Position-level tree projection: pull post-integrate poses
                 # back onto the joint manifold so the prepare-time Baumgarte
@@ -3793,10 +4045,25 @@ class PhoenXWorld:
         if self._record_contact_impulses and self._contact_impulse_sum is None:
             self._contact_impulse_sum = wp.zeros(self.rigid_contact_max, dtype=wp.vec3f, device=self.device)
 
-    def _accumulate_contact_impulses(self, contacts) -> None:
+    def _accumulate_contact_impulses(self, contacts, *, temporal_only: bool = False) -> None:
         """Add the substep's rigid contact impulses to their step totals."""
         # Color-ordered rows hold the substep's impulses until they are scattered back.
         self._scatter_colored_contact_rows()
+        if temporal_only:
+            wp.launch(
+                _accumulate_temporal_contact_impulse_kernel,
+                dim=self.rigid_contact_max,
+                inputs=[
+                    contacts.rigid_contact_count,
+                    self._cid_of_contact_cur,
+                    self._contact_container,
+                    self._contact_offset,
+                    self._contact_cols.articulation_owner,
+                ],
+                outputs=[self._contact_impulse_sum],
+                device=self.device,
+            )
+            return
         wp.launch(
             _accumulate_contact_impulse_kernel,
             dim=self.rigid_contact_max,
@@ -4220,6 +4487,9 @@ class PhoenXWorld:
         in CUDA-graph capture.
         """
         force_dt = self.substep_dt
+        temporal = getattr(self, "_temporal_velocity_sum", None) is not None
+        if temporal:
+            force_dt = self.substep_dt / self.solver_iterations
         if self._temporal_force_step:
             # Retain the substep-entry launch for pose/access-state snapshots.
             # External force impulse is applied once per outer collision step.
@@ -4231,6 +4501,9 @@ class PhoenXWorld:
                 inputs=[self.bodies, self.gravity, wp.float32(force_dt)],
                 device=self.device,
             )
+            if temporal:
+                # Bodies on joints with free axes receive the whole substep's forces now.
+                self._temporal_apply_forces(0, jointed_dt=force_dt * (self.solver_iterations - 1))
         if self.num_particles > 0 and self.particles is not None:
             wp.launch(
                 cloth_predict_kernel,

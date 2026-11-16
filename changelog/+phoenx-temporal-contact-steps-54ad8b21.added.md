@@ -1,0 +1,1 @@
+Add experimental opt-in temporal contact iterations to PhoenX's single-world rigid solver, reusing joint preparation while advancing contact gaps, forces, and authored contact materials over smaller timesteps.

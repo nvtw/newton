@@ -1675,6 +1675,9 @@ def _make_contact_iterate_at(
                 eff_n = cc_get_eff_n(cc, k)
                 bias_val = cc_get_bias(cc, k)
                 speculative_bias = bias_val
+                friction_in_range = speculative_bias <= idt * wp.float32(0.002)
+                if cc.gap.shape[0] > 0:
+                    friction_in_range = cc.gap[k] <= wp.float32(0.002)
                 bias_t1_val = wp.float32(0.0)
                 bias_t2_val = wp.float32(0.0)
                 if not normal_only:
@@ -1705,7 +1708,7 @@ def _make_contact_iterate_at(
                 if is_speculative:
                     mass_coeff_n = wp.float32(1.0)
                     impulse_coeff_n = wp.float32(0.0)
-                    if speculative_bias <= idt * wp.float32(0.002):
+                    if friction_in_range:
                         mu_s_eff = mu_s
                         mu_k_eff = mu_k
                     else:
@@ -1997,7 +2000,7 @@ def _make_contact_iterate_at(
                 if wp.static(patch_friction):
                     if use_patch:
                         lambda_n_load = cc_get_normal_lambda(cc, k)
-                        if is_speculative and speculative_bias > idt * wp.float32(0.002):
+                        if is_speculative and not friction_in_range:
                             lambda_n_load = wp.float32(0.0)
                         patch_normal_load += lambda_n_load
 

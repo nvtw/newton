@@ -36,6 +36,7 @@ from newton._src.solvers.phoenx.helpers.math_helpers import rotate_inertia
 
 __all__ = [
     "_accumulate_contact_impulse_kernel",
+    "_accumulate_temporal_contact_impulse_kernel",
     "_apply_joint_drive_control_kernel",
     "_apply_joint_forces_kernel",
     "_contact_impulse_to_force_wrapper_kernel",
@@ -574,6 +575,25 @@ def _accumulate_contact_impulse_kernel(
     """Add each contact's substep impulse to its total over the step."""
     k = wp.tid()
     if k >= _active_contact_count(rigid_contact_count, impulse_sum.shape[0]) or cid_of_contact[k] < wp.int32(0):
+        return
+    impulse_sum[k] = impulse_sum[k] + _contact_impulse(cc, k)
+
+
+@wp.kernel(enable_backward=False)
+def _accumulate_temporal_contact_impulse_kernel(
+    rigid_contact_count: wp.array[wp.int32],
+    cid_of_contact: wp.array[wp.int32],
+    cc: ContactContainer,
+    contact_offset: wp.int32,
+    articulation_owner: wp.array[wp.int32],
+    impulse_sum: wp.array[wp.vec3f],
+):
+    """Record intermediate temporal impulses, excluding contacts solved after the loop."""
+    k = wp.tid()
+    if k >= _active_contact_count(rigid_contact_count, impulse_sum.shape[0]):
+        return
+    column = cid_of_contact[k] - contact_offset
+    if column < wp.int32(0) or articulation_owner[column] >= wp.int32(0):
         return
     impulse_sum[k] = impulse_sum[k] + _contact_impulse(cc, k)
 

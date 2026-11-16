@@ -31,7 +31,12 @@ class SingleWorldDispatcher:
     def solve(self, idt: wp.float32) -> None:
         w = self._world
         if w._constraint_capacity == 0:
+            if w.temporal_iterations:
+                w._temporal_apply_forces(w.solver_iterations - 1)
             return
+        if w.temporal_iterations and not w._regular_pgs_active_this_step:
+            # No contact substeps run: apply the substep's remaining forces before any projection.
+            w._temporal_apply_forces(w.solver_iterations - 1)
         direct = getattr(w, "_direct_equality_system", None)
         if direct is not None and direct.enabled:
             direct.prepare_and_factor(idt)
@@ -52,14 +57,24 @@ class SingleWorldDispatcher:
                 direct.solve(use_bias=False)
                 if w._combine_direct_prepare_projection:
                     direct.resolve_bounded_drives(idt, use_bias=False)
+            temporal = w.temporal_iterations
+            if temporal:
+                w._temporal_begin_sweeps()
             for iteration in range(w.solver_iterations):
+                last = iteration == w.solver_iterations - 1
+                if temporal and iteration > 0:
+                    w._temporal_next_sweep(idt)
                 w._partitioner.begin_sweep()
                 w._singleworld_head_plus_tail_sweep(iterate_head, iterate_fused, idt)
                 if direct is not None and direct.enabled:
-                    direct.solve(use_bias=iteration == w.solver_iterations - 1)
+                    # Every temporal sweep is a contact substep whose motion enters the
+                    # integrated positions, so each one carries the joint recovery bias.
+                    direct.solve(use_bias=last or temporal)
                     # Limits and contacts must react to the capped motor during
                     # iteration, not retain an uncapped reaction at integration.
-                    direct.resolve_bounded_drives(idt, use_bias=iteration == w.solver_iterations - 1)
+                    direct.resolve_bounded_drives(idt, use_bias=last or temporal)
+                if temporal:
+                    w._temporal_end_sweep(last)
         elif direct is not None and direct.enabled:
             w._warm_start_owned_contacts()
             direct.solve(use_bias=True)
