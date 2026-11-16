@@ -46,6 +46,33 @@ def _response(bodies: BodyContainer, body: wp.int32, wrench: wp.spatial_vector) 
     return wp.spatial_vector(linear, angular)
 
 
+@wp.func
+def _factor_bilateral_matrix(matrix: Mat66d, count: wp.int32):
+    """Factor the physical or copy-mass block in its fixed ascending row order."""
+    lower = Mat66d()
+    diagonal = Vec6d()
+    valid = wp.bool(True)
+    for i in range(6):
+        if i < count:
+            pivot = matrix[i, i]
+            for j in range(6):
+                if j < i:
+                    pivot -= lower[i, j] * lower[i, j] * diagonal[j]
+            diagonal[i] = pivot
+            lower[i, i] = wp.float64(1.0)
+            if pivot <= wp.float64(0.0):
+                valid = False
+            if valid:
+                for j in range(6):
+                    if j >= i + 1 and j < count:
+                        value = matrix[j, i]
+                        for k in range(6):
+                            if k < i:
+                                value -= lower[j, k] * lower[i, k] * diagonal[k]
+                        lower[j, i] = value / pivot
+    return lower, diagonal, valid
+
+
 @wp.kernel(enable_backward=False)
 def prepare_bilateral_joint_blocks(
     constraints: ConstraintContainer,
@@ -94,27 +121,7 @@ def prepare_bilateral_joint_blocks(
                         value += wp.float64(1.0) / wp.float64(data.dynamic_mass[row])
                     matrix[i, j] = value
                     matrix[j, i] = value
-    lower = Mat66d()
-    diagonal = Vec6d()
-    valid = wp.bool(True)
-    for i in range(6):
-        if i < count:
-            pivot = matrix[i, i]
-            for j in range(6):
-                if j < i:
-                    pivot -= lower[i, j] * lower[i, j] * diagonal[j]
-            diagonal[i] = pivot
-            lower[i, i] = wp.float64(1.0)
-            if pivot <= wp.float64(0.0):
-                valid = False
-            if valid:
-                for j in range(6):
-                    if j >= i + 1 and j < count:
-                        value = matrix[j, i]
-                        for k in range(6):
-                            if k < i:
-                                value -= lower[j, k] * lower[i, k] * diagonal[k]
-                        lower[j, i] = value / pivot
+    lower, diagonal, valid = _factor_bilateral_matrix(matrix, count)
     data.lower[cid] = lower
     data.diagonal[cid] = diagonal
     if valid:
@@ -122,7 +129,7 @@ def prepare_bilateral_joint_blocks(
 
 
 @functools.cache
-def _get_bilateral_impulse_functions(row_capacity: int):
+def _get_bilateral_impulse_functions(row_capacity: int, *, accumulate: bool = True):
     Vector = wp.types.vector(length=row_capacity, dtype=wp.float64)
 
     @wp.func
@@ -162,7 +169,8 @@ def _get_bilateral_impulse_functions(row_capacity: int):
                 row = data.row_indices[cid, i]
                 local = data.row_local[row]
                 impulse = wp.float32(solution[i])
-                data.accumulated[row] += impulse
+                if wp.static(accumulate):
+                    data.accumulated[row] += impulse
                 impulse0 += impulse * data.wrench0[structural, local]
                 impulse1 += impulse * data.wrench1[structural, local]
         return impulse0, impulse1
@@ -196,6 +204,68 @@ def _get_bilateral_impulse_functions(row_capacity: int):
 _backward_bilateral_impulses, _scatter_bilateral_impulses, _solve_bilateral_impulses = _get_bilateral_impulse_functions(
     6
 )
+
+
+_scatter_projection_impulses = _get_bilateral_impulse_functions(6, accumulate=False)[1]
+
+
+@wp.func
+def project_physical_bilateral_joint(constraints: ConstraintContainer, bodies: BodyContainer, cid: wp.int32):
+    """Project a split block on originals without overwriting its copy-mass factor."""
+    data = constraints.bilateral
+    count = data.row_count[cid]
+    for i in range(6):
+        if i < count and data.row_dynamic[data.row_indices[cid, i]]:
+            count = i
+    if count == 0:
+        return
+    structural = data.structural_index[cid]
+    body0 = constraint_get_body1(constraints, cid)
+    body1 = constraint_get_body2(constraints, cid)
+    twist0 = wp.spatial_vector(bodies.velocity[body0], bodies.angular_velocity[body0])
+    twist1 = wp.spatial_vector(bodies.velocity[body1], bodies.angular_velocity[body1])
+    matrix = Mat66d()
+    solution = Vec6d()
+    for i in range(6):
+        if i < count:
+            local = data.row_local[data.row_indices[cid, i]]
+            j0 = data.wrench0[structural, local]
+            j1 = data.wrench1[structural, local]
+            solution[i] = -(
+                _dot_double(j0, twist0) + _dot_double(j1, twist1) + wp.float64(data.bias[structural, local])
+            )
+            for j in range(6):
+                if j <= i:
+                    other = data.row_local[data.row_indices[cid, j]]
+                    response0 = _response(bodies, body0, data.wrench0[structural, other])
+                    response1 = _response(bodies, body1, data.wrench1[structural, other])
+                    value = _dot_double(j0, response0) + _dot_double(j1, response1)
+                    matrix[i, j] = value
+                    matrix[j, i] = value
+    lower, diagonal, valid = _factor_bilateral_matrix(matrix, count)
+    if not valid:
+        return
+    for i in range(6):
+        if i < count:
+            for j in range(6):
+                if j < i:
+                    solution[i] -= lower[i, j] * solution[j]
+    for i in range(6):
+        if i < count:
+            solution[i] /= diagonal[i]
+    for reverse in range(6):
+        i = 5 - reverse
+        if i < count:
+            for j in range(6):
+                if j > i and j < count:
+                    solution[i] -= lower[j, i] * solution[j]
+    impulse0, impulse1 = _scatter_projection_impulses(data, cid, count, structural, solution)
+    response0 = _response(bodies, body0, impulse0)
+    response1 = _response(bodies, body1, impulse1)
+    bodies.velocity[body0] += wp.spatial_top(response0)
+    bodies.angular_velocity[body0] += wp.spatial_bottom(response0)
+    bodies.velocity[body1] += wp.spatial_top(response1)
+    bodies.angular_velocity[body1] += wp.spatial_bottom(response1)
 
 
 @wp.func
@@ -418,7 +488,13 @@ def _prepare_bilateral_joint_blocks_cooperative(
 
 @functools.cache
 def get_iterate_bilateral_joint_block(
-    cooperative: bool = False, *, temporal_springs: bool = False, dense_inverse: bool = False, row_capacity: int = 6
+    cooperative: bool = False,
+    *,
+    temporal_springs: bool = False,
+    dense_inverse: bool = False,
+    row_capacity: int = 6,
+    structural_only: bool = False,
+    accumulate: bool = True,
 ):
     """Build a topology-sized D6 block solve with paired impulse scatter.
 
@@ -436,11 +512,13 @@ def get_iterate_bilateral_joint_block(
     are unchanged. This mode requires unbounded drives with zero armature and
     one spring solve per temporal substep. Velocity relaxation solves only
     structural rows; applying springs there would advance them beyond the step.
+    ``structural_only`` also permits a biased structural projection without
+    integrating the dynamic spring rows a second time.
     """
 
     Vector = wp.types.vector(length=row_capacity, dtype=wp.float64)
     tile_width = get_bilateral_joint_tile_width(row_capacity)
-    backward, scatter, solve = _get_bilateral_impulse_functions(row_capacity)
+    backward, scatter, solve = _get_bilateral_impulse_functions(row_capacity, accumulate=accumulate)
 
     @wp.func
     def iterate(
@@ -458,8 +536,8 @@ def get_iterate_bilateral_joint_block(
         if data.enabled == 0:
             return
         count = data.row_count[cid]
-        if wp.static(temporal_springs):
-            if not use_bias:
+        if wp.static(temporal_springs or structural_only):
+            if wp.static(structural_only) or not use_bias:
                 # Topology orders structural rows before springs. The leading
                 # LDL factor solves the structural block without spring forces,
                 # as PhysX conclude1DStep requires for velocity iterations.

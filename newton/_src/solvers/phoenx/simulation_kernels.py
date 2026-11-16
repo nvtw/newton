@@ -27,6 +27,7 @@ from newton._src.solvers.phoenx.constraints.bilateral_joint import (
     get_bilateral_joint_tile_width,
     get_iterate_bilateral_joint_block,
     iterate_bilateral_joint_block,
+    project_physical_bilateral_joint,
 )
 from newton._src.solvers.phoenx.constraints.constraint_cloth_bending import (
     CLOTH_BENDING_TIME_US_OFFSET,
@@ -4238,6 +4239,58 @@ def _make_singleworld_rigid_direct_color_func(
 
 
 @functools.cache
+def _make_structural_projection_color(cooperative: bool, row_capacity: int):
+    """Project live local joint rows on physical bodies in existing color order."""
+    iterate = get_iterate_bilateral_joint_block(
+        cooperative, row_capacity=row_capacity, structural_only=True, accumulate=False
+    )
+    width = get_bilateral_joint_tile_width(row_capacity) if cooperative else 1
+
+    @wp.func
+    def project(
+        constraints: ConstraintContainer,
+        bodies: BodyContainer,
+        particles: ParticleContainer,
+        copies: CopyStateContainer,
+        elements: wp.array[wp.int32],
+        ownership: wp.array[wp.int32],
+        start: wp.int32,
+        count: wp.int32,
+        num_joints: wp.int32,
+        num_bodies: wp.int32,
+        overflow: wp.bool,
+        lane: wp.int32,
+        stride: wp.int32,
+    ):
+        tile = lane / wp.static(width)
+        tile_lane = lane % wp.static(width)
+        advance = stride / wp.static(width)
+        if overflow:
+            # Overflow colors are not independent in physical body storage.
+            # One tile visits their joint rows in the existing stable CSR order.
+            if tile != 0:
+                return
+            advance = wp.int32(1)
+        entry = tile
+        while entry < count:
+            cid = elements[start + entry]
+            if cid < num_joints and ownership[cid] == 1:
+                b0 = constraint_get_body1(constraints, cid)
+                b1 = constraint_get_body2(constraints, cid)
+                asleep0 = bodies.motion_type[b0] != MOTION_DYNAMIC or bodies.island_root[b0] >= 0
+                asleep1 = bodies.motion_type[b1] != MOTION_DYNAMIC or bodies.island_root[b1] >= 0
+                if not (asleep0 and asleep1):
+                    if overflow:
+                        if tile_lane == 0:
+                            project_physical_bilateral_joint(constraints, bodies, cid)
+                    else:
+                        iterate(constraints, cid, bodies, particles, copies, num_bodies, -1, True, tile_lane)
+            entry += advance
+
+    return project
+
+
+@functools.cache
 def _make_singleworld_persistent_kernel(
     *,
     phase: str,
@@ -4276,7 +4329,9 @@ def _make_singleworld_persistent_kernel(
     is_prepare = phase == "prepare"
     is_cached_prepare = phase == "cached_prepare"
     is_iterate = phase == "iterate"
-    use_bias = is_iterate  # iterate ON, relax OFF (prepare ignores)
+    projection = phase == "joint_project"
+    project_color = _make_structural_projection_color(cooperative_joints, joint_row_capacity)
+    use_bias = is_iterate or projection  # iterate ON, relax OFF (prepare ignores)
 
     _dispatch_one_cid, _ = _make_singleworld_dispatch_func(
         cloth_support=cloth_support,
@@ -4441,6 +4496,26 @@ def _make_singleworld_persistent_kernel(
             thread_start = tid * ms_batch_size
             stride = total_num_threads * ms_batch_size
 
+        if wp.static(projection):
+            project_color(
+                constraints,
+                bodies,
+                particles,
+                copy_state,
+                element_ids_by_color,
+                joint_pgs_enabled,
+                start,
+                count,
+                num_joints,
+                num_bodies,
+                is_overflow_color,
+                tid,
+                total_num_threads,
+            )
+            if tid == 0:
+                color_cursor_next[0] = cursor - 1
+            return
+
         if wp.static(rigid_direct):
             if not is_overflow_color:
                 _dispatch_rigid_direct_color(
@@ -4553,7 +4628,9 @@ def _make_singleworld_fused_kernel(
     is_prepare = phase == "prepare"
     is_cached_prepare = phase == "cached_prepare"
     is_iterate = phase == "iterate"
-    use_bias = is_iterate
+    projection = phase == "joint_project"
+    project_color = _make_structural_projection_color(cooperative_joints, joint_row_capacity)
+    use_bias = is_iterate or projection
 
     _dispatch_one_cid, _ = _make_singleworld_dispatch_func(
         cloth_support=cloth_support,
@@ -4647,6 +4724,25 @@ def _make_singleworld_fused_kernel(
                 num_units = (count + ms_batch_size - wp.int32(1)) / ms_batch_size
             if num_units > fuse_threshold:
                 break
+            if wp.static(projection):
+                project_color(
+                    constraints,
+                    bodies,
+                    particles,
+                    copy_state,
+                    element_ids_by_color,
+                    joint_pgs_enabled,
+                    start,
+                    count,
+                    num_joints,
+                    num_bodies,
+                    is_overflow_color,
+                    lane,
+                    wp.block_dim(),
+                )
+                _sync_threads()
+                cursor -= 1
+                continue
             if wp.static(rigid_direct):
                 if not is_overflow_color:
                     _dispatch_rigid_direct_color(

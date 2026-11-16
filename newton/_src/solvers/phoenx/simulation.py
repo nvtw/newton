@@ -2739,6 +2739,30 @@ class PhoenXWorld:
                 head, fused = self._singleworld_contact_warm_start_kernels()
                 self._singleworld_head_plus_tail_sweep(head, fused, idt)
 
+    def _project_temporal_joints(self) -> None:
+        """Project the integration-average motion without changing physical reactions."""
+        system = self._direct_equality_system
+        blocks = getattr(system, "blocks", system)
+        if blocks is None or not blocks.enabled or not self.constraints.bilateral.enabled:
+            return
+        options = {
+            **self._dispatch_specialization_flags(),
+            "has_contacts": self._regular_solver_has_contacts(),
+            "has_mass_splitting": self.mass_splitting_enabled,
+            "packed_contact_headers": self._colored_contact_headers,
+            "bilateral_joint_blocks": True,
+            "cooperative_joints": self.device.is_cuda,
+            "joint_row_capacity": int(self.constraints.bilateral.row_capacity) or 6,
+        }
+        head = get_singleworld_kernel(phase="joint_project", fused=False, **options)
+        tail = get_singleworld_kernel(phase="joint_project", fused=True, **options)
+        # This projection belongs to the current sweep; do not advance its
+        # configured symmetric direction a second time.
+        wp.copy(self._partitioner.color_cursor, self._partitioner.num_colors)
+        self._singleworld_head_plus_tail_sweep(
+            head, tail, wp.float32(1.0 / self.substep_dt), structural_projection=True
+        )
+
     def _temporal_end_sweep(self, last: bool) -> None:
         """Close a contact substep: track the contact gaps and the bodies' motion.
 
@@ -2795,6 +2819,9 @@ class PhoenXWorld:
             outputs=[self._temporal_kept_velocity, self._temporal_kept_angular_velocity],
             device=self.device,
         )
+        # Project the virtual average used for integration, without adding
+        # physical reaction impulses. Restore the kept physical velocity below.
+        self._project_temporal_joints()
         self._integrate_positions()
         wp.launch(
             temporal_restore_velocity_kernel,
@@ -5446,6 +5473,7 @@ class PhoenXWorld:
         contact_container: ContactContainer | None = None,
         *,
         reverse_colors: bool = False,
+        structural_projection: bool = False,
     ) -> None:
         """Drain small colours before launching the persistent grid.
 
@@ -5458,7 +5486,7 @@ class PhoenXWorld:
         if head_kernel in heads:
             self._static_contact_phase = ("prepare", "iterate", "relax")[heads.index(head_kernel)]
 
-        if self._color_group_data is not None:
+        if self._color_group_data is not None and not structural_projection:
             self._color_group_sweep(head_kernel, idt, contact_container, reverse_colors=reverse_colors)
             return
 
