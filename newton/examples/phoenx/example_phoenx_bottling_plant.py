@@ -463,6 +463,9 @@ class Example:
         wp.synchronize_device(self.model.device)
         elapsed = time.perf_counter() - started
         result = {
+            "device": str(self.model.device),
+            "physics_cuda_graph": self.graph is not None,
+            "includes_host_controllers": self.controller is not None,
             "bodies": self.model.body_count,
             "bottles": len(self.bottle_bodies),
             "shapes": self.model.shape_count,
