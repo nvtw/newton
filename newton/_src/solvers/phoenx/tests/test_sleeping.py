@@ -413,7 +413,7 @@ class TestSleepingPipeline(unittest.TestCase):
         self.assertEqual(_is_sleeping(solver, 1), 0)
 
     def test_servo_responds_after_idle(self) -> None:
-        """Keep servo islands responsive to new commands after a stationary interval."""
+        """An idle servo holding its target may sleep; a new command wakes it and it tracks."""
         for friction in ("point", "patch"):
             with self.subTest(friction=friction):
                 builder = newton.ModelBuilder()
@@ -431,7 +431,7 @@ class TestSleepingPipeline(unittest.TestCase):
                 control = model.control()
                 contacts = model.contacts()
                 state, next_state = _run_frames(solver, state, next_state, control, contacts, model, n=90, dt=1.0 / 60)
-                self.assertEqual(_is_sleeping(solver, body + 1), 0)
+                self.assertEqual(_is_sleeping(solver, body + 1), 1)
                 control.joint_target_q.fill_(0.4)
                 state, next_state = _run_frames(solver, state, next_state, control, contacts, model, n=60, dt=1.0 / 60)
                 self.assertAlmostEqual(float(state.body_q.numpy()[body, 0]), 0.4, delta=0.02)

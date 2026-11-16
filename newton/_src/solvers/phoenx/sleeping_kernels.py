@@ -712,11 +712,31 @@ def _phoenx_joint_activity_kernel(
     damping: wp.array[wp.float32],
     parent: wp.array[wp.int32],
     child: wp.array[wp.int32],
+    coord_start: wp.array[wp.int32],
+    target_q: wp.array[wp.float32],
+    target_qd: wp.array[wp.float32],
+    previous_q: wp.array[wp.float32],
+    previous_qd: wp.array[wp.float32],
     activity: wp.array[wp.int32],
 ):
-    """Keep live servo islands responsive across runtime joint insertion and removal."""
+    """Wake servo islands whose drive command changes or moves the joint.
+
+    A drive holding a constant target is resting load, like a support
+    contact; the sleep score still sees any motion it causes. Empty target
+    arrays (no control) keep every driven island awake.
+    """
     joint = wp.tid()
-    if not enabled[joint]:
+    commanded = target_q.shape[0] == 0
+    if not commanded:
+        for k in range(coord_start[joint], coord_start[joint + 1]):
+            if target_q[k] != previous_q[k]:
+                commanded = True
+            previous_q[k] = target_q[k]
+        for dof in range(dof_start[joint], dof_start[joint + 1]):
+            if target_qd[dof] != 0.0 or target_qd[dof] != previous_qd[dof]:
+                commanded = True
+            previous_qd[dof] = target_qd[dof]
+    if not enabled[joint] or not commanded:
         return
     driven = bool(False)
     for dof in range(dof_start[joint], dof_start[joint + 1]):

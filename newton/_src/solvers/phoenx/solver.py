@@ -1027,6 +1027,13 @@ class SolverPhoenX(SolverBase):
         # PhoenX's warm-start path needs contact_matching != "disabled".
         # Auto-attach a sticky pipeline so users don't have to size Contacts.
         self._sleeping_enabled: bool = float(sleeping_velocity_threshold) > 0.0
+        # Drive commands of the previous step; NaN makes the first step a new command.
+        self._sleep_previous_target_q = None
+        self._sleep_previous_target_qd = None
+        if self._sleeping_enabled and model.joint_count:
+            nan = {"dtype": wp.float32, "device": model.device}
+            self._sleep_previous_target_q = wp.full(model.joint_coord_count, wp.nan, **nan)
+            self._sleep_previous_target_qd = wp.full(model.joint_dof_count, wp.nan, **nan)
         # Runtime joints filter collisions between their bodies in the same broad-phase filter.
         uses_broad_phase_filter = self._sleeping_enabled or (
             dynamic_capacity is not None and dynamic_capacity.joint_count > 0
@@ -2085,6 +2092,10 @@ class SolverPhoenX(SolverBase):
             # Read live joint rows after runtime commits, including reused slots.
             self.world._sleeping_forced_awake.zero_()
             if self.model.joint_count:
+                commanded = (
+                    control is not None and control.joint_target_q is not None and control.joint_target_qd is not None
+                )
+                empty = wp.empty(0, dtype=wp.float32, device=self.device)
                 wp.launch(
                     _phoenx_joint_activity_kernel,
                     dim=self.model.joint_count,
@@ -2096,6 +2107,11 @@ class SolverPhoenX(SolverBase):
                         self.model.joint_target_kd,
                         self.model.joint_parent,
                         self.model.joint_child,
+                        self.model.joint_q_start,
+                        control.joint_target_q if commanded else empty,
+                        control.joint_target_qd if commanded else empty,
+                        self._sleep_previous_target_q if commanded else empty,
+                        self._sleep_previous_target_qd if commanded else empty,
                     ],
                     outputs=[self.world._sleeping_forced_awake],
                     device=self.device,

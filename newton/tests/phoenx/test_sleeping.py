@@ -215,7 +215,7 @@ class TestTemporalSleeping(unittest.TestCase):
             for frame in range(100):
                 advance()
                 roots = solver.bodies.island_root.numpy()
-                self.assertLess(roots[servo + 1], 0)
+                # The idle servo may sleep; its new target below must wake it.
                 self.assertLess(roots[falling + 1], 0)
                 if 30 <= frame < 45:
                     self.assertAlmostEqual(support_force(), mass * 9.81, delta=0.01)

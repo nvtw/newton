@@ -3604,6 +3604,16 @@ def _make_singleworld_rigid_joint_dispatch_func(
     return _dispatch_rigid_joint
 
 
+@wp.func
+def _joint_frozen(constraints: ConstraintContainer, bodies: BodyContainer, cid: wp.int32) -> bool:
+    """Both endpoints are asleep or not dynamic, so the joint must not change them."""
+    b0 = constraint_get_body1(constraints, cid)
+    b1 = constraint_get_body2(constraints, cid)
+    asleep0 = bodies.motion_type[b0] != MOTION_DYNAMIC or bodies.island_root[b0] >= 0
+    asleep1 = bodies.motion_type[b1] != MOTION_DYNAMIC or bodies.island_root[b1] >= 0
+    return asleep0 and asleep1
+
+
 @functools.cache
 def _make_singleworld_dispatch_func(
     *,
@@ -3649,7 +3659,16 @@ def _make_singleworld_dispatch_func(
     )
 
     @wp.func
-    def _joint_pgs_enabled(cid: wp.int32, joint_pgs_enabled: wp.array[wp.int32]) -> bool:
+    def _joint_pgs_enabled(
+        cid: wp.int32,
+        joint_pgs_enabled: wp.array[wp.int32],
+        constraints: ConstraintContainer,
+        bodies: BodyContainer,
+    ) -> bool:
+        if wp.static(has_sleeping):
+            # Sleeping islands keep their joint rows; solving them would move frozen bodies.
+            if _joint_frozen(constraints, bodies, cid):
+                return False
         if wp.static(is_prepare or is_cached_prepare):
             return joint_pgs_enabled[cid] != wp.int32(0)
         return joint_pgs_enabled[cid] == wp.int32(1)
@@ -3773,7 +3792,7 @@ def _make_singleworld_dispatch_func(
             if cid < num_joints:
                 dispatched = True
                 if wp.static(has_joints and not skip_joint_pgs):
-                    if _joint_pgs_enabled(cid, joint_pgs_enabled):
+                    if _joint_pgs_enabled(cid, joint_pgs_enabled, constraints, bodies):
                         if wp.static(cloth_support):
                             b1 = constraint_get_body1(constraints, cid)
                             b2 = constraint_get_body2(constraints, cid)
@@ -3977,7 +3996,16 @@ def _make_singleworld_rigid_direct_color_func(
     )
 
     @wp.func
-    def _joint_pgs_enabled(cid: wp.int32, joint_pgs_enabled: wp.array[wp.int32]) -> bool:
+    def _joint_pgs_enabled(
+        cid: wp.int32,
+        joint_pgs_enabled: wp.array[wp.int32],
+        constraints: ConstraintContainer,
+        bodies: BodyContainer,
+    ) -> bool:
+        if wp.static(has_sleeping):
+            # Sleeping islands keep their joint rows; solving them would move frozen bodies.
+            if _joint_frozen(constraints, bodies, cid):
+                return False
         if wp.static(is_prepare or is_cached_prepare):
             return joint_pgs_enabled[cid] != wp.int32(0)
         return joint_pgs_enabled[cid] == wp.int32(1)
@@ -4044,7 +4072,7 @@ def _make_singleworld_rigid_direct_color_func(
                 base = lane / wp.static(joint_width)
                 while base < count_joints:
                     cid = read1d_i32(element_ids_by_color, joint_start + base)
-                    if _joint_pgs_enabled(cid, joint_pgs_enabled):
+                    if _joint_pgs_enabled(cid, joint_pgs_enabled, constraints, bodies):
                         parallel_id = wp.int32(0)
                         if wp.static(direct_regular_colors):
                             parallel_id = wp.int32(-1)
@@ -4077,7 +4105,7 @@ def _make_singleworld_rigid_direct_color_func(
                 base = lane
                 while base < count_joints:
                     cid = read1d_i32(element_ids_by_color, joint_start + base)
-                    if _joint_pgs_enabled(cid, joint_pgs_enabled):
+                    if _joint_pgs_enabled(cid, joint_pgs_enabled, constraints, bodies):
                         if wp.static(is_prepare or is_cached_prepare):
                             _dispatch_prepare_rigid_joint(
                                 constraints, bodies, particles, copy_state, num_bodies, idt, cid

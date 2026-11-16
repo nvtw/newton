@@ -1,0 +1,1 @@
+Let idle `SolverPhoenX` servo islands sleep while their drive targets stay constant; a changed target or a nonzero target velocity wakes them. Sleeping islands no longer solve their joint rows, which previously woke jointed bodies right after they fell asleep.
