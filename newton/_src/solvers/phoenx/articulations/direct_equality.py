@@ -2184,6 +2184,10 @@ class DirectEqualitySystem:
             # Joints created at runtime may add multi-axis dynamic rows later.
             self.has_dynamic_rows = True
             self.has_multi_axis_dynamic_rows = True
+            # Fixed addresses include excluded joints, but their structural
+            # rows belong to the other solver in a mixed mechanism.
+            structural_row_counts = structural_row_counts.copy()
+            structural_row_counts[excluded] = 0
             self.fixed_row_count = structural_row_counts + np.asarray([len(dofs) for dofs in dynamic_joint_dofs])
             self.topology = build_fixed_row_topology(model, structural_row_counts, dynamic_joint_dofs)
         else:

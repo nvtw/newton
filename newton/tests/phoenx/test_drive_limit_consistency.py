@@ -12,6 +12,41 @@ import newton
 
 
 class TestDriveLimitConsistency(unittest.TestCase):
+    def test_exact_hinge_with_reserved_joints_retains_limits(self):
+        """Reserve runtime bonds without duplicating exact rows or losing hard stops."""
+        with wp.ScopedDevice("cpu"):
+            builder = newton.ModelBuilder(gravity=(0, 0, 0))
+            body = builder.add_link(mass=1.0, inertia=wp.mat33(np.eye(3)))
+            builder.add_shape_box(body, hx=0.1, hy=0.1, hz=0.1, cfg=builder.ShapeConfig(density=0))
+            hinge = builder.add_joint_revolute(-1, body, axis=newton.Axis.Z, limit_lower=-0.1, limit_upper=0.1)
+            builder.add_articulation([hinge])
+            builder.reserve_dynamic_capacity(joints=1)
+            model = builder.finalize()
+            exact = np.zeros(model.joint_count, dtype=bool)
+            exact[hinge] = True
+            solver = newton.solvers.SolverPhoenX(
+                model,
+                joint_mode="maximal_pgs",
+                step_layout="single_world",
+                direct_joint_mask=exact,
+                solver_iterations=4,
+                substeps=1,
+            )
+            cid = int(solver._joint_constraints.joint_idx_to_cid.numpy()[hinge])
+            self.assertEqual(solver.world.constraints.bilateral.row_count.numpy()[cid], 0)
+            # The exact mechanism owns the five equality rows; its unilateral
+            # angular stops must remain active in the colored residual solve.
+            self.assertEqual(solver.world._joint_pgs_enabled.numpy()[cid], 1)
+            state, control = model.state(), model.control()
+            force = np.zeros((model.body_count, 6), dtype=np.float32)
+            force[body, 5] = 4.0
+            state.body_f.assign(force)
+            for _ in range(120):
+                solver.step(state, state, control, None, 1.0 / 240)
+            np.testing.assert_allclose(state.joint_q.numpy()[0], 0.1, atol=1e-4)
+            np.testing.assert_allclose(state.body_q.numpy()[body, :3], 0, atol=1e-6)
+            self.assertTrue(np.isfinite(state.body_qd.numpy()).all())
+
     def test_force_limited_drives_hold_hard_stops(self):
         """Reach and hold hard stops without recoiling when motor effort saturates."""
         with wp.ScopedDevice("cpu"):
