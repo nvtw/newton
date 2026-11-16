@@ -282,6 +282,34 @@ class TestPhoenXAutoPerformancePolicy(unittest.TestCase):
         self.assertEqual(self._resolve(step_layout="multi_world"), "multi_world")
         self.assertEqual(self._resolve(step_layout="single_world"), "single_world")
 
+    def test_bounded_drives_refresh_contact_mobility(self):
+        """Motor saturation can change the factor after warm start or in relaxation."""
+        for use_bias in (True, False):
+            with self.subTest(use_bias=use_bias):
+                response = SimpleNamespace(compute=Mock())
+                schedule = SimpleNamespace(solve=Mock())
+                direct = SimpleNamespace(
+                    has_bounded_drives=True,
+                    compute_bias_velocity=Mock(),
+                    apply_bias_velocity=Mock(),
+                )
+                world = SimpleNamespace(
+                    _contact_input_active_this_step=True,
+                    _direct_contact_response=response,
+                    _direct_contact_schedule=schedule,
+                    _direct_equality_system=direct,
+                    _direct_contact_response_current=use_bias,
+                    _contact_container=object(),
+                    bodies=object(),
+                    solver_iterations=4,
+                    _active_velocity_iterations=1,
+                    substep_dt=1.0 / 240.0,
+                    sor_boost=1.0,
+                )
+                PhoenXWorld._solve_direct_contacts(world, use_bias=use_bias, refresh_mobility=use_bias)
+                response.compute.assert_called_once_with(world._contact_container)
+                schedule.solve.assert_called_once()
+
     def test_contact_columns_use_shape_pair_capacity(self) -> None:
         """Size contact columns from shape pairs instead of contact points."""
         model = SimpleNamespace(shape_contact_pair_count=38_000)

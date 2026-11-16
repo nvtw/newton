@@ -4404,11 +4404,16 @@ class PhoenXWorld:
         schedule = self._direct_contact_schedule
         if not self._contact_input_active_this_step or response is None or schedule is None:
             return
-        if refresh_mobility and not self._direct_contact_response_current:
+        direct = getattr(self, "_direct_equality_system", None)
+        # Effort-bound activation can refactor the joint system after warm
+        # starting or during relaxation. Its cached contact mobility then
+        # describes a different motor response and must not be reused.
+        if (refresh_mobility and not self._direct_contact_response_current) or (
+            direct is not None and direct.has_bounded_drives
+        ):
             response.compute(self._contact_container)
         self._direct_contact_response_current = False
         iterations = self.solver_iterations if use_bias else self._active_velocity_iterations
-        direct = getattr(self, "_direct_equality_system", None)
         if iterations > 0:
             if use_bias and direct is not None:
                 direct.compute_bias_velocity()
