@@ -11,6 +11,7 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton.examples.phoenx._bottling_fleet import FleetController
 from newton.examples.phoenx._bottling_infeed import InfeedController
 from newton.examples.phoenx._bottling_io import (
     _actuator_observations,
@@ -370,6 +371,7 @@ class PlantController:
         self._setup_cases(vendor, starts)
         self.transport = TransportController(self, vendor)
         self.infeed = InfeedController(self, vendor, 17 + len(self.transport.zone_channels))
+        self.fleet = FleetController(model, state, control, asset_root, transport=self.transport)
         descriptors = []
         self.nominal_arrays = []
         self.belt_channels = []
@@ -659,6 +661,7 @@ class PlantController:
         self.ready.assign(np.asarray(ready, dtype=np.int32))
         self.transport.before_step(self.case_clock, speed)
         self.infeed.before_step(self.case_clock, commands, speed)
+        self.fleet.before_step(self.case_clock)
         self.multipliers.assign(speed)
 
     def simulate(self):
@@ -678,6 +681,7 @@ class PlantController:
         )
         self.transport.simulate()
         self.infeed.simulate()
+        self.fleet.simulate()
         wp.launch(
             _supply_cases,
             dim=(8, 5),
@@ -755,6 +759,7 @@ class PlantController:
             "case_stations": [line.station for line in self.case_lines],
             "sealers": [sealer.state for sealer in self.sealers],
             "palletizers": self.transport.report(),
+            "fleet": self.fleet.report(),
             "infeed": self.infeed.status,
             "sealed_cases": int(self.sealed.numpy().sum()),
         }

@@ -46,8 +46,17 @@ USD degrees to radians as specified by the
 [OpenUSD drive schema](https://openusd.org/release/api/class_usd_physics_drive_a_p_i.html).
 
 The runtime adapter does not execute arbitrary embedded Kit scripts. Forklifts
-start at their authored home positions; autonomous pallet-flow dispatch is not
-implemented. The initial product stock and case supply are finite; continuous
+start at their authored home positions. Dispatch uses the source navigation and
+pickup/place sequences with measured physical inventory: completed pallets go
+to an available wrapper infeed, and empty pallets can replace them only when
+physical stock exists at the corresponding supply port. Swept-route reservations
+coordinate trucks. Pickup and placement require measured load feedback; the
+source's pallet pose corrections and virtual stock pools are not executed.
+Palletizers wait for forklift withdrawal before accepting a replacement.
+These controls have isolated regression coverage; sustained autonomous physical
+routes through the full factory have not yet been validated. Wrapper outfeed,
+pallet dispensing, and outbound logistics remain incomplete.
+The initial product stock and case supply are finite; continuous
 bottle-pool replenishment and the source profile's operator jam recovery are not
 implemented. Inlet faults remain visible and fail validation.
 

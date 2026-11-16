@@ -164,9 +164,66 @@ class TransportController:
         self.positions = wp.zeros(len(self.drive_dofs), dtype=float)
         self.velocities = wp.zeros(len(self.drive_dofs), dtype=float)
         self.q_starts = model.joint_q_start.numpy()
+        initial = model.body_q.numpy()
+        self.pallet_bodies = np.asarray(
+            [body for label, body in scene.bodies.items() if label.endswith("/sm_pallet_block_a08_obj_00")],
+            dtype=np.int32,
+        )
+        self.station_positions = np.asarray(
+            [
+                initial[
+                    next(
+                        body
+                        for label, body in scene.bodies.items()
+                        if label.startswith(f"/Plant/Line/Palletizers/{name}/PalletA/")
+                        and label.endswith("/sm_pallet_block_a08_obj_00")
+                    ),
+                    :3,
+                ]
+                for name in self.names
+            ]
+        )
+        self.case_roots = np.asarray([bodies[0] for bodies in plant.case_body_groups.values()], dtype=np.int32)
+        self.station_state = ["LOADING"] * len(self.names)
+        self.station_ready_since = [None] * len(self.names)
+
+    def _observe_stations(self, time):
+        """Require a seated empty replacement after a completed pallet departs."""
+        poses = self.plant.state.body_q.numpy()
+        for i, name in enumerate(self.names):
+            offset = poses[self.pallet_bodies, :3] - self.station_positions[i]
+            present = bool(np.any((np.linalg.norm(offset[:, :2], axis=1) < 0.08) & (np.abs(offset[:, 2]) < 0.03)))
+            cases = poses[self.case_roots, :3] - self.station_positions[i]
+            occupied = bool(
+                np.any(
+                    (np.abs(cases[:, 0]) < 0.65)
+                    & (np.abs(cases[:, 1]) < 0.65)
+                    & (cases[:, 2] > 0.1)
+                    & (cases[:, 2] < 0.9)
+                )
+            )
+            palletizer = self.palletizers[name]
+            state = self.station_state[i]
+            if state == "LOADING" and palletizer.slot >= palletizer.n_slots and palletizer.state == "WAIT_CASE":
+                state = "FULL"
+            if not present:
+                if state == "LOADING" and (palletizer.slot > 0 or palletizer.state not in ("INIT", "WAIT_CASE")):
+                    raise RuntimeError(f"Palletizer {name}: pallet removed before its load was complete")
+                state = "EMPTY"
+                self.station_ready_since[i] = None
+            elif state == "EMPTY" and not occupied and not self.plant.fleet.station_busy(name):
+                if self.station_ready_since[i] is None:
+                    self.station_ready_since[i] = time
+                elif time - self.station_ready_since[i] >= 0.25:
+                    palletizer.slot = 0
+                    state = "LOADING"
+            else:
+                self.station_ready_since[i] = None
+            self.station_state[i] = state
 
     def before_step(self, time, multipliers):
         plant, model = self.plant, self.plant.model
+        self._observe_stations(time)
         self.hits.zero_()
         wp.launch(
             _case_photoeyes,
@@ -211,6 +268,7 @@ class TransportController:
             ready = self.conveyors.held(station["pick_eye"], 0.5) and not self.conveyors.run.get(
                 station["spur"][-1], True
             )
+            ready = ready and self.station_state[i] == "LOADING" and not plant.fleet.station_busy(name)
             fifo = self.conveyors.spur_fifo[name]
             previous = palletizer.state
             result = palletizer.step(
@@ -288,6 +346,11 @@ class TransportController:
 
     def report(self):
         return {
-            name: {"state": p.state, "placed_cases": len(p.placed), "fault": p.fault}
-            for name, p in self.palletizers.items()
+            name: {
+                "state": p.state,
+                "station": self.station_state[i],
+                "placed_cases": len(p.placed),
+                "fault": p.fault,
+            }
+            for i, (name, p) in enumerate(self.palletizers.items())
         }

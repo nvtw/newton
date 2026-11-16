@@ -1,0 +1,105 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
+# SPDX-License-Identifier: Apache-2.0
+
+"""Check physical inventory and placement gates without private factory assets."""
+
+import math
+import unittest
+from types import SimpleNamespace
+
+import numpy as np
+import warp as wp
+
+import newton
+from newton.examples.phoenx._bottling_control import PlantController
+from newton.examples.phoenx._bottling_fleet import FleetController, _observe_port, _placement_valid, _Transfer
+from newton.examples.phoenx._bottling_transport import TransportController
+
+
+class TestBottlingFleet(unittest.TestCase):
+    def test_station_waits_for_withdrawal_before_reset(self):
+        """Hold an empty seated replacement until its exchange truck withdraws."""
+        with wp.ScopedDevice("cpu"):
+            builder = newton.ModelBuilder()
+            pallet = builder.add_body(xform=wp.transform(wp.vec3(4, 7, 0), wp.quat_identity()))
+            model = builder.finalize()
+            plant = PlantController.__new__(PlantController)
+            plant.state = model.state()
+            fleet = FleetController.__new__(FleetController)
+            fleet.missions = {"truck": _Transfer("EP_PZ1_pick", "PZ1_A", 0, phase="place")}
+            plant.fleet = fleet
+            transport = TransportController.__new__(TransportController)
+            transport.plant = plant
+            transport.names = ("PZ1",)
+            transport.pallet_bodies = np.array([pallet], dtype=np.int32)
+            transport.case_roots = np.empty(0, dtype=np.int32)
+            transport.station_positions = np.array([[4, 7, 0]])
+            transport.station_state = ["EMPTY"]
+            transport.station_ready_since = [None]
+            # Only counter/state data is needed; the actual observer and fleet
+            # interlock run against a real Newton body's measured transform.
+            counters = SimpleNamespace(slot=34, n_slots=34, state="WAIT_CASE")
+            transport.palletizers = {"PZ1": counters}
+            transport._observe_stations(0.0)
+            transport._observe_stations(0.5)
+            self.assertEqual(transport.station_state, ["EMPTY"])
+            self.assertEqual(counters.slot, 34)
+            fleet.missions.clear()
+            transport._observe_stations(0.6)
+            self.assertEqual(transport.station_state, ["EMPTY"])
+            transport._observe_stations(0.9)
+            self.assertEqual(transport.station_state, ["LOADING"])
+            self.assertEqual(counters.slot, 0)
+
+    def test_inventory_requires_a_seated_empty_pallet(self):
+        """Distinguish usable empty stock from raised, loaded and ambiguous pallets."""
+        pallets = np.array([[4.0, 7.0, 0.5, 0, 0, 0, 1]], dtype=float)
+        cases = np.empty((0, 3))
+        observation = _observe_port(pallets, cases, (4, 7), 0.5, math.pi / 2)
+        self.assertEqual(observation.pallet, 0)
+        self.assertTrue(observation.empty)
+        self.assertFalse(observation.clear)
+        loaded = _observe_port(pallets, np.array([[4, 7, 0.8]]), (4, 7), 0.5, math.pi / 2)
+        self.assertEqual(loaded.pallet, 0)
+        self.assertFalse(loaded.empty)
+        self.assertFalse(loaded.clear)
+        pallets[0, 2] += 0.2
+        raised = _observe_port(pallets, cases, (4, 7), 0.5, math.pi / 2)
+        self.assertIsNone(raised.pallet)
+        self.assertFalse(raised.empty)
+        self.assertFalse(raised.clear)
+        pallets[0, 2] = 0.5
+        duplicate = _observe_port(np.repeat(pallets, 2, axis=0), cases, (4, 7), 0.5, math.pi / 2)
+        self.assertIsNone(duplicate.pallet)
+        self.assertFalse(duplicate.empty)
+
+    def test_landing_space_blocks_loose_cases_and_misaligned_pallets(self):
+        """Keep the landing blocked until obstructing geometry actually departs."""
+        cases = np.array([[4.5, 7, 0.7]])
+        absent = np.empty((0, 7))
+        self.assertFalse(_observe_port(absent, cases, (4, 7), 0.5, math.pi / 2).clear)
+        cases[0, 0] += 2.0
+        self.assertTrue(_observe_port(absent, cases, (4, 7), 0.5, math.pi / 2).clear)
+        pallets = np.array([[4, 7, 0.5, 0, 0, math.sin(0.1), math.cos(0.1)]])
+        rotated = _observe_port(pallets, cases, (4, 7), 0.5, math.pi / 2)
+        self.assertIsNone(rotated.pallet)
+        self.assertFalse(rotated.clear)
+        pallets[0, 3:] = [math.sin(0.1), 0, 0, math.cos(0.1)]
+        tilted = _observe_port(pallets, cases, (4, 7), 0.5, math.pi / 2)
+        self.assertIsNone(tilted.pallet)
+        self.assertFalse(tilted.clear)
+        # Pallet pockets are equivalent after a half-turn.
+        pallets[0, 3:] = [0, 0, 1, 0]
+        self.assertEqual(_observe_port(pallets, cases, (4, 7), 0.5, math.pi / 2).pallet, 0)
+
+    def test_placement_rejects_unseated_or_tilted_load(self):
+        """Reject failure in each measured placement dimension after withdrawal."""
+        error = {"xy_m": 0.002, "yaw_deg": 0.1, "z_m": 0.001, "tilt_deg": 0.2}
+        self.assertTrue(_placement_valid(error))
+        for field, value in (("xy_m", 0.031), ("yaw_deg", -3.1), ("z_m", 0.04), ("tilt_deg", 3.1)):
+            with self.subTest(field=field):
+                self.assertFalse(_placement_valid({**error, field: value}))
+
+
+if __name__ == "__main__":
+    unittest.main()
