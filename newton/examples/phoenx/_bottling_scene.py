@@ -477,7 +477,9 @@ def load_plant(asset_root: Path, *, cutaway=True, visuals=True, motor_off=False)
     for prim in prims:
         if prim.GetTypeName() not in geometry_types:
             continue
-        if any(prim.GetPath().HasPrefix(path) for path in prototypes):
+        # Walk this prim's ancestors instead of scanning every instancer
+        # prototype for every geometry prim in the factory.
+        if not prototypes.isdisjoint(prim.GetPath().GetPrefixes()):
             continue
         body = owner(prim)
         if body == -2:

@@ -1,0 +1,1 @@
+Reduce bottling plant USD loading time by checking geometry ancestors against the point-instancer prototype set instead of scanning every prototype for every geometry prim, preserving the imported scene.
