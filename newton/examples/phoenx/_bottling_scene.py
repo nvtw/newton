@@ -271,6 +271,17 @@ def load_plant(asset_root: Path, *, cutaway=True, visuals=True, motor_off=False)
             owner_cache[label] = result
         return owner_cache[label]
 
+    def moving_mesh(mesh, velocity):
+        mesh = newton.Mesh(mesh.vertices, mesh.indices, compute_inertia=False, enable_surface_velocity=True)
+        linear, angular, shape_pose, scale, belt_label = velocity
+        rotation = np.asarray(wp.quat_to_matrix(wp.quat(shape_pose[3:]))).reshape(3, 3)
+        points = np.asarray(mesh.vertices) * np.asarray(scale) @ rotation.T + np.asarray(shape_pose[:3])
+        # Newton rotates and scales vertex velocities. Undo the shape transform
+        # so the authored speed remains in metres per second in the body frame.
+        speeds = ((np.asarray(linear) + np.cross(np.asarray(angular), points)) @ rotation) / np.asarray(scale)
+        scene.belts.append((mesh, speeds.astype(np.float32), belt_label))
+        return mesh
+
     def mesh_for(prim, *, visual, velocity=None):
         points = prim.GetAttribute("points")
         stack = points.GetPropertyStack()
@@ -324,15 +335,7 @@ def load_plant(asset_root: Path, *, cutaway=True, visuals=True, motor_off=False)
                 if _value(prim, "physics:approximation", "none") == "convexHull":
                     # Cook the authored hull before assigning its velocity field.
                     mesh = mesh.compute_convex_hull()
-                mesh = newton.Mesh(mesh.vertices, mesh.indices, compute_inertia=False, enable_surface_velocity=True)
-                linear, angular, shape_pose, scale, belt_label = velocity
-                rotation = np.asarray(wp.quat_to_matrix(wp.quat(shape_pose[3:]))).reshape(3, 3)
-                points = np.asarray(mesh.vertices) * np.asarray(scale) @ rotation.T + np.asarray(shape_pose[:3])
-                # Newton transforms vertex velocities by the shape's scale
-                # as well as its rotation. USD's surface speed is already in
-                # metres per second in the body frame, so undo that scale here.
-                speeds = ((np.asarray(linear) + np.cross(np.asarray(angular), points)) @ rotation) / np.asarray(scale)
-                scene.belts.append((mesh, speeds.astype(np.float32), belt_label))
+                mesh = moving_mesh(mesh, velocity)
             meshes[key] = mesh
         return meshes[key]
 
@@ -359,18 +362,33 @@ def load_plant(asset_root: Path, *, cutaway=True, visuals=True, motor_off=False)
         color = _value(prim, "primvars:displayColor", None)
         if visual and color is not None and len(color):
             kw["color"] = tuple(color[0])
-        if kind == "Mesh":
-            velocity = None
-            if collision and body >= 0:
-                parent = body_prims[body]
-                if parent.GetAttribute("physxSurfaceVelocity:surfaceVelocityEnabled").Get():
-                    label = str(parent.GetPath())
-                    linear, angular = nominal.get(label, ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0)))
-                    if not motor_off and label.startswith("/Plant/Line/BottleLanes/"):
+        velocity = None
+        if collision and body >= 0:
+            parent = body_prims[body]
+            enabled = parent.GetAttribute("physxSurfaceVelocity:surfaceVelocityEnabled")
+            # A stopped conveyor still needs a velocity field for its PLC to
+            # start it later; the authored enable flag controls its initial speed.
+            if enabled:
+                label = str(parent.GetPath())
+                linear, angular = (0.0, 0.0, 0.0), (0.0, 0.0, 0.0)
+                if enabled.Get() and not motor_off:
+                    if label in nominal:
+                        linear, angular = nominal[label]
+                    else:
+                        linear = _value(parent, "physxSurfaceVelocity:surfaceVelocity", linear)
+                        angular = np.radians(_value(parent, "physxSurfaceVelocity:surfaceAngularVelocity", angular))
+                        body_pose, body_scale = transform(cache.GetLocalToWorldTransform(parent))
+                        if _value(parent, "physxSurfaceVelocity:surfaceVelocityLocalSpace", True):
+                            linear = np.asarray(linear) * body_scale
+                        else:
+                            rotation = np.asarray(wp.quat_to_matrix(body_pose.q)).reshape(3, 3)
+                            linear, angular = np.asarray(linear) @ rotation, np.asarray(angular) @ rotation
+                    if label.startswith("/Plant/Line/BottleLanes/"):
                         linear = (float(_value(parent, "bottle_lanes:speedNominal", 0.2)), 0.0, 0.0)
-                    if not motor_off and "/Packers/" in label and label.endswith(("/Belts/IN_A", "/Belts/IN_B")):
+                    if "/Packers/" in label and label.endswith(("/Belts/IN_A", "/Belts/IN_B")):
                         linear = (0.2 if label.endswith("IN_A") else 0.4, 0.0, 0.0)
-                    velocity = (linear, angular, tuple(pose.p) + tuple(pose.q), tuple(scale), label)
+                velocity = (tuple(linear), tuple(angular), tuple(pose.p) + tuple(pose.q), tuple(scale), label)
+        if kind == "Mesh":
             mesh = mesh_for(prim, visual=visual, velocity=velocity)
             approximation = _value(prim, "physics:approximation", "none")
             if collision and approximation == "convexHull" and velocity is None and len(mesh.vertices) == 8:
@@ -391,8 +409,13 @@ def load_plant(asset_root: Path, *, cutaway=True, visuals=True, motor_off=False)
             )
             add(body, mesh=mesh, scale=scale, **kw)
         elif kind == "Cube":
-            half = float(_value(prim, "size", 2.0)) * np.abs(scale) / 2.0
-            builder.add_shape_box(body, hx=half[0], hy=half[1], hz=half[2], **kw)
+            half = float(_value(prim, "size", 2.0)) / 2.0
+            if velocity is not None:
+                mesh = moving_mesh(newton.Mesh.create_box(half, compute_inertia=False), velocity)
+                builder.add_shape_mesh(body, mesh=mesh, scale=scale, **kw)
+            else:
+                half = half * np.abs(scale)
+                builder.add_shape_box(body, hx=half[0], hy=half[1], hz=half[2], **kw)
         elif kind == "Sphere":
             builder.add_shape_sphere(body, radius=float(_value(prim, "radius", 1.0)) * max(abs(scale)), **kw)
         elif kind == "Plane":

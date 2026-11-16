@@ -19,11 +19,81 @@ from newton.tests.unittest_utils import USD_AVAILABLE
 from newton.viewer import ViewerNull
 
 if USD_AVAILABLE:
-    from pxr import Usd, UsdGeom, UsdPhysics
+    from pxr import Sdf, Usd, UsdGeom, UsdPhysics
 
 
 @unittest.skipUnless(USD_AVAILABLE, "Requires usd-core")
 class TestBottlingPlant(unittest.TestCase):
+    def test_disabled_cube_belt_can_start(self):
+        """Retain a stopped USD cube conveyor's runtime surface-velocity support."""
+        with tempfile.TemporaryDirectory() as directory, wp.ScopedDevice("cpu"):
+            root = Path(directory)
+            path = root / "scenarios/line_sim/line_sim.usda"
+            path.parent.mkdir(parents=True)
+            path.write_text("""#usda 1.0
+(defaultPrim = "Plant"; metersPerUnit = 1; upAxis = "Z")
+def Xform "Plant" {
+ def Xform "Belt" (prepend apiSchemas = ["PhysicsRigidBodyAPI"]) {
+  bool physics:kinematicEnabled = true
+  custom bool physxSurfaceVelocity:surfaceVelocityEnabled = false
+  custom bool physxSurfaceVelocity:surfaceVelocityLocalSpace = true
+  custom vector3f physxSurfaceVelocity:surfaceVelocity = (0.2, 0, 0)
+  double3 xformOp:scale = (2, 1, 1)
+  uniform token[] xformOpOrder = ["xformOp:scale"]
+  def Cube "Strand" (prepend apiSchemas = ["PhysicsCollisionAPI"]) {
+   double size = 2
+   double3 xformOp:scale = (2, 0.025, 0.01)
+   uniform token[] xformOpOrder = ["xformOp:scale"]
+  }
+ }
+}
+""")
+            scene = load_plant(root, visuals=False, motor_off=True)
+            self.assertEqual(len(scene.belts), 1)
+            mesh, initial_velocity, label = scene.belts[0]
+            self.assertEqual(label, "/Plant/Belt")
+            np.testing.assert_array_equal(initial_velocity, 0.0)
+            shape = scene.builder.shape_source.index(mesh)
+            body = scene.builder.add_body(xform=wp.transform(wp.vec3(0, 0, 0.02), wp.quat_identity()))
+            scene.builder.add_shape_box(body, hx=0.01, hy=0.01, hz=0.01)
+            model = scene.builder.finalize()
+            pipeline = newton.CollisionPipeline(model)
+            contacts = pipeline.contacts()
+            state = model.state()
+            for speed in (0.0, 0.2, 0.0):
+                velocity = np.zeros_like(initial_velocity)
+                velocity[:, 0] = speed / scene.builder.shape_scale[shape][0]
+                mesh.mesh.velocities.assign(velocity)
+                pipeline.collide(state, contacts)
+                count = int(contacts.rigid_contact_count.numpy()[0])
+                self.assertGreater(count, 0)
+                first = contacts.rigid_contact_shape0.numpy()[:count] == shape
+                signs = np.where(first, 1.0, -1.0)
+                np.testing.assert_allclose(
+                    signs * contacts.rigid_contact_surface_velocity.numpy()[:count, 0], -speed, atol=1e-6
+                )
+            # Starting enabled must also honor authored linear speed and the
+            # schema's degrees/second angular speed, rather than zeroing them.
+            stage = Usd.Stage.Open(str(path))
+            belt = stage.GetPrimAtPath("/Plant/Belt")
+            belt.GetAttribute("physxSurfaceVelocity:surfaceVelocityEnabled").Set(True)
+            belt.CreateAttribute("physxSurfaceVelocity:surfaceAngularVelocity", Sdf.ValueTypeNames.Vector3f).Set(
+                (0.0, 0.0, 90.0)
+            )
+            stage.GetRootLayer().Save()
+            vendor = root / "sim/exts/bottling_plant.runtime/bottling_plant_runtime/vendor"
+            for module, data in (("ifm_v01", '{"belts":[],"speeds_mps":{}}'), ("ctp_v01", '{"modules":{}}')):
+                folder = vendor / module
+                folder.mkdir(parents=True)
+                (folder / "interface.json").write_text(data)
+            enabled_scene = load_plant(root, visuals=False)
+            moving, velocity, _ = enabled_scene.belts[0]
+            scale = np.asarray(enabled_scene.builder.shape_scale[0])
+            expected = np.array([0.4, 0.0, 0.0]) + np.cross(
+                np.array([0.0, 0.0, np.pi / 2]), np.asarray(moving.vertices) * scale
+            )
+            np.testing.assert_allclose(velocity * scale, expected, atol=1e-7)
+
     def test_authored_collision_groups(self):
         """Keep vehicle obstacles while honoring the line's USD exclusions."""
         with tempfile.TemporaryDirectory() as directory, wp.ScopedDevice("cpu"):
