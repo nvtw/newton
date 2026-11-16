@@ -154,6 +154,8 @@ class Example:
                 collision_pipeline=self.pipeline,
                 substeps=1,
                 solver_iterations=args.iterations,
+                temporal_iterations=args.temporal_iterations,
+                contact_hertz=args.contact_hertz,
                 contact_chunk_size=64,
                 step_layout="single_world",
                 joint_mode="maximal_pgs",
@@ -184,6 +186,8 @@ class Example:
                 step_layout="single_world",
                 substeps=1,
                 solver_iterations=args.iterations,
+                temporal_iterations=args.temporal_iterations,
+                contact_hertz=args.contact_hertz,
                 joint_mode=args.joint_mode,
                 reduced_articulations=self.scene.articulations if args.joint_mode == "reduced" else None,
                 velocity_iterations=1,
@@ -371,6 +375,10 @@ class Example:
             "physics_fps": self.args.timing_frames / elapsed,
             "substeps": self.args.substeps,
             "iterations": self.args.iterations,
+            "temporal_iterations": self.args.temporal_iterations,
+            "contact_hertz": self.args.contact_hertz,
+            "joint_mode": self.args.joint_mode,
+            "warmup_frames": self.args.timing_warmup,
         }
         self.test_final()
         print(json.dumps(result, indent=2))
@@ -397,6 +405,18 @@ class Example:
         )
         parser.add_argument("--substeps", type=int, default=4, help="Collision and solver steps per 60 Hz frame.")
         parser.add_argument("--iterations", type=int, default=4)
+        parser.add_argument(
+            "--temporal-iterations",
+            action=argparse.BooleanOptionalAction,
+            default=False,
+            help="Use experimental contact timesteps within solver sweeps.",
+        )
+        parser.add_argument(
+            "--contact-hertz",
+            type=float,
+            default=None,
+            help="Contact spring frequency [Hz]; omitted uses the solver schedule-dependent default.",
+        )
         parser.add_argument("--joint-mode", choices=("reduced", "maximal_pgs", "maximal_direct"), default="maximal_pgs")
         parser.add_argument("--timing-frames", type=int, default=0)
         parser.add_argument("--timing-warmup", type=int, default=120)
