@@ -58,6 +58,8 @@ def _seal_cases(
     requests: wp.array[int],
     sealed: wp.array[int],
     joints: wp.array2d[int],
+    hinges: wp.array2d[int],
+    joint_enabled: wp.array[wp.bool],
 ):
     case = wp.tid()
     if requests[case] == 0 or sealed[case] != 0:
@@ -74,12 +76,27 @@ def _seal_cases(
     if closed:
         # The source replaces this assembly with a rigid sealed-case proxy.
         # Fixed tape bonds retain the actual case, flaps, and physical contents.
+        failed = wp.bool(False)
         for flap in range(4):
             body = bodies[case, flap + 1]
             frame = wp.transform_multiply(wp.transform_inverse(poses[root]), poses[body])
             desc = phoenx.joint_desc(root, body, frame, wp.transform_identity())
             desc.collide_parent = False
-            joints[case, flap] = phoenx.add_joint(dynamics, desc)
+            joint = phoenx.add_joint(dynamics, desc)
+            joints[case, flap] = joint
+            if joint < 0:
+                failed = True
+        if failed:
+            for flap in range(4):
+                joint = joints[case, flap]
+                if joint >= 0:
+                    phoenx.remove_joint(dynamics, joint)
+                joints[case, flap] = -1
+            return
+        # Tape fixes the current flap pose and supersedes its folding hinge.
+        # Disable the hinge only after the whole replacement batch succeeds.
+        for flap in range(4):
+            joint_enabled[hinges[case, flap]] = False
         sealed[case] = 1
 
 
@@ -464,6 +481,18 @@ class PlantController:
                 self.case_local_groups[cell, box] = local
         self.case_index = {f"{self.names[cell]}_{box}": i for i, (cell, box) in enumerate(self.case_body_groups)}
         self.seal_bodies = wp.array(list(self.case_body_groups.values()), dtype=int)
+        parents, children = model.joint_parent.numpy(), model.joint_child.numpy()
+        types = model.joint_type.numpy()
+        hinge_for_body = {
+            int(child): joint for joint, child in enumerate(children) if types[joint] == int(newton.JointType.REVOLUTE)
+        }
+        hinges = []
+        for ids in self.case_body_groups.values():
+            row = [hinge_for_body[body] for body in ids[1:]]
+            if any(parents[joint] != ids[0] for joint in row):
+                raise ValueError("Case flap hinges must connect to their case root")
+            hinges.append(row)
+        self.seal_hinges = wp.array(hinges, dtype=int)
         self.seal_requests = wp.zeros(len(self.case_index), dtype=int)
         self.seal_requested = np.zeros(len(self.case_index), dtype=np.int32)
         self.sealed = wp.zeros(len(self.case_index), dtype=int)
@@ -692,6 +721,8 @@ class PlantController:
                 self.seal_requests,
                 self.sealed,
                 self.seal_joints,
+                self.seal_hinges,
+                self.model.joint_enabled,
             ],
         )
         self.transport.simulate()

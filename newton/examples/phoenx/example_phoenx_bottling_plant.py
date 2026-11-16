@@ -172,7 +172,9 @@ class Example:
             # D6 closures and runtime grasp/tape joints remain local blocks.
             exact = np.asarray(
                 [
-                    label.startswith("/Plant/") and kind != int(newton.JointType.D6)
+                    label.startswith("/Plant/")
+                    and not label.startswith("/Plant/Sim/Product/Cases/")
+                    and kind != int(newton.JointType.D6)
                     for label, kind in zip(self.model.joint_label, self.model.joint_type.numpy(), strict=True)
                 ],
                 dtype=bool,
@@ -448,7 +450,7 @@ class Example:
                     )
                 for name, palletizer in self.controller.transport.palletizers.items():
                     assert palletizer.placed, f"{name} must place at least one case within 130 seconds"
-            assert int(self.solver.dynamics.error_count.numpy()[0]) == 0, "a grasp constraint could not be created"
+            assert int(self.solver.dynamics.error_count.numpy()[0]) == 0, "a runtime constraint could not be created"
 
     def run_timing(self):
         """Measure steady-state physics separately from setup and compilation."""

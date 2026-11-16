@@ -825,7 +825,7 @@ def Xform "Plant" {
         builder.reserve_dynamic_capacity(joints=4)
         model = builder.finalize()
         exact = np.zeros(model.joint_count, dtype=bool)
-        exact[joints] = True
+        exact[joints[0]] = True
         pipeline = newton.CollisionPipeline(model, contact_matching="sticky")
         solver = newton.solvers.SolverPhoenX(
             model,
@@ -840,7 +840,17 @@ def Xform "Plant" {
         bodies = wp.array([[0, 1, 2, 3, 4]], dtype=int)
         requests, sealed = wp.ones(1, dtype=int), wp.zeros(1, dtype=int)
         attachments = wp.full((1, 4), -1, dtype=int)
-        inputs = [solver.dynamics.data, state.body_q, state.body_qd, bodies, requests, sealed, attachments]
+        inputs = [
+            solver.dynamics.data,
+            state.body_q,
+            state.body_qd,
+            bodies,
+            requests,
+            sealed,
+            attachments,
+            wp.array([joints[1:]], dtype=int),
+            model.joint_enabled,
+        ]
         wp.launch(_seal_cases, dim=1, inputs=inputs)
         self.assertEqual(int(sealed.numpy()[0]), 0)
         np.testing.assert_array_equal(attachments.numpy(), -1)
