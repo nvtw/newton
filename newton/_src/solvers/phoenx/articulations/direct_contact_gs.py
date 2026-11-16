@@ -632,11 +632,14 @@ _TWIST_WRITE = 1
 _TWIST_ADD = 2
 
 
-def make_solve_direct_contact_columns_kernel(body_capacity: int, max_mechanism_bodies: int):
+def make_solve_direct_contact_columns_kernel(body_capacity: int, max_mechanism_bodies: int, *, is_cuda: bool = True):
     """Build the ordered manifold sweep for a response's body capacity."""
     capacity = max(1, int(body_capacity))
-    rounds = max(1, (int(max_mechanism_bodies) + _COLUMN_LANES - 1) // _COLUMN_LANES)
-    shared = 24 * capacity <= _SHARED_TWIST_BYTES
+    # CPU native warp operations are scalar: visit every point and endpoint
+    # serially, using body arrays instead of CUDA-only shared twist storage.
+    lanes = _COLUMN_LANES if is_cuda else 1
+    rounds = max(1, (int(max_mechanism_bodies) + lanes - 1) // lanes)
+    shared = is_cuda and 24 * capacity <= _SHARED_TWIST_BYTES
     twist_state = _make_twist_state_access(capacity if shared else 1)
 
     @wp.func
@@ -698,7 +701,7 @@ def make_solve_direct_contact_columns_kernel(body_capacity: int, max_mechanism_b
             for item in range(mechanism_begin, mechanism_end):
                 mechanism = component_mechanism[item]
                 body_end = response.mechanism_body_start[mechanism + wp.int32(1)]
-                for index in range(response.mechanism_body_start[mechanism] + lane, body_end, wp.int32(_COLUMN_LANES)):
+                for index in range(response.mechanism_body_start[mechanism] + lane, body_end, wp.int32(lanes)):
                     twist_state(index, _body_twist(bodies, response.mechanism_body[index]), _TWIST_WRITE)
             _sync_warp()
 
@@ -731,7 +734,7 @@ def make_solve_direct_contact_columns_kernel(body_capacity: int, max_mechanism_b
                 split = wp.float32(wp.max(count, wp.int32(1)))
                 wrench0 = wp.spatial_vectorf(0.0)
                 wrench1 = wp.spatial_vectorf(0.0)
-                for offset in range(lane, count, wp.int32(_COLUMN_LANES)):
+                for offset in range(lane, count, wp.int32(lanes)):
                     contact = first + offset
                     impulse = _relax_direct_contact_point(
                         response,
@@ -758,7 +761,7 @@ def make_solve_direct_contact_columns_kernel(body_capacity: int, max_mechanism_b
                         basis_wrench[slot0] += wrench0
                     else:
                         _apply_raw_contact_wrench(bodies, body0, wrench0)
-                elif lane == wp.int32(1):
+                if lane == wp.int32(1) or wp.static(not is_cuda):
                     if slot1 >= wp.int32(0):
                         basis_wrench[slot1] += wrench1
                     else:
@@ -768,7 +771,7 @@ def make_solve_direct_contact_columns_kernel(body_capacity: int, max_mechanism_b
                 # be in flight before the twist updates.
                 same_mechanism = body_begin1 == body_begin0 and slot0 >= wp.int32(0) and slot1 >= wp.int32(0)
                 for round_index in range(wp.static(rounds)):
-                    local_body = round_index * _COLUMN_LANES + lane
+                    local_body = round_index * lanes + lane
                     value0 = wp.spatial_vectorf(0.0)
                     if slot0 >= wp.int32(0) and local_body < body_count0:
                         value0 = _push_response(response, slot0, local_body, wrench0)
@@ -786,7 +789,7 @@ def make_solve_direct_contact_columns_kernel(body_capacity: int, max_mechanism_b
             for item in range(mechanism_begin, mechanism_end):
                 mechanism = component_mechanism[item]
                 body_end = response.mechanism_body_start[mechanism + wp.int32(1)]
-                for index in range(response.mechanism_body_start[mechanism] + lane, body_end, wp.int32(_COLUMN_LANES)):
+                for index in range(response.mechanism_body_start[mechanism] + lane, body_end, wp.int32(lanes)):
                     body = response.mechanism_body[index]
                     twist = twist_state(index, wp.spatial_vectorf(0.0), _TWIST_READ)
                     bodies.velocity[body] = wp.spatial_top(twist)
@@ -818,7 +821,7 @@ class DirectContactRunSchedule:
         self.endpoint_key_stride = 2 * self.capacity + 1
         self.record_friction = wp.zeros(self.capacity, dtype=wp.vec2, device=device)
         self.solve_kernel = make_solve_direct_contact_columns_kernel(
-            response.body_capacity, response.max_mechanism_bodies
+            response.body_capacity, response.max_mechanism_bodies, is_cuda=device.is_cuda
         )
 
     def warm_start(self, bodies: BodyContainer, contacts: ContactContainer) -> None:
@@ -883,7 +886,7 @@ class DirectContactRunSchedule:
         wp.launch_tiled(
             self.solve_kernel,
             dim=self.section_end.size,
-            block_dim=_COLUMN_LANES,
+            block_dim=_COLUMN_LANES if device.is_cuda else 1,
             inputs=[
                 self.islands.set_sizes,
                 self.islands.set_sizes_compact,
