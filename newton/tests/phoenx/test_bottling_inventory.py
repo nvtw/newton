@@ -8,16 +8,15 @@ import unittest
 from pathlib import Path
 
 from newton.examples.phoenx._bottling_scene import load_plant
-from newton.tests.unittest_utils import USD_AVAILABLE
-
-if USD_AVAILABLE:
-    from pxr import Sdf, Usd, UsdGeom, UsdPhysics
+from newton.tests.unittest_utils import requires
 
 
-@unittest.skipUnless(USD_AVAILABLE, "Requires usd-core")
+@requires("pxr.Usd")
 class TestBottlingInventory(unittest.TestCase):
     def test_wrapper_layout_does_not_block_runtime_inventory(self):
         """Retire layout-only loads and their proxies, preserving real products."""
+        from pxr import Sdf, Usd, UsdGeom, UsdPhysics
+
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             path = root / "scenarios/line_sim/line_sim.usda"

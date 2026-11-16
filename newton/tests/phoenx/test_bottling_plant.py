@@ -16,15 +16,51 @@ from newton.examples.phoenx._bottling_io import _case_drives, _photoeyes, _valve
 from newton.examples.phoenx._bottling_scene import load_plant
 from newton.examples.phoenx._bottling_wrap import build_wrapper, mesh_components
 from newton.examples.phoenx.example_phoenx_bottling_plant import Example
-from newton.tests.unittest_utils import USD_AVAILABLE
+from newton.tests.unittest_utils import requires
 from newton.viewer import ViewerNull
 
-if USD_AVAILABLE:
-    from pxr import Sdf, Usd, UsdGeom, UsdPhysics
 
-
-@unittest.skipUnless(USD_AVAILABLE, "Requires usd-core")
+@requires("pxr.Usd")
 class TestBottlingPlant(unittest.TestCase):
+    def test_offset_box_hulls_preserve_exact_geometry(self):
+        """Recognize float32 box corners without replacing tapered hulls."""
+        from pxr import Usd, UsdGeom, UsdPhysics
+
+        with tempfile.TemporaryDirectory() as directory, wp.ScopedDevice("cpu"):
+            root = Path(directory)
+            path = root / "scenarios/line_sim/line_sim.usda"
+            path.parent.mkdir(parents=True)
+            stage = Usd.Stage.CreateNew(str(path))
+            UsdGeom.SetStageMetersPerUnit(stage, 1.0)
+            UsdGeom.SetStageUpAxis(stage, "Z")
+            corners = np.asarray(
+                [(-1, -1, -1), (1, -1, -1), (1, 1, -1), (-1, 1, -1), (-1, -1, 1), (1, -1, 1), (1, 1, 1), (-1, 1, 1)]
+            )
+            points = np.asarray(corners * (0.142875, 0.0015875, 0.127) + (0, 0.1063625, 0.130175), dtype=np.float32)
+            for name in ("Box", "Tapered"):
+                mesh = UsdGeom.Mesh.Define(stage, f"/Plant/{name}")
+                vertices = points.copy()
+                if name == "Tapered":
+                    vertices[4:, 0] *= 0.99
+                mesh.CreatePointsAttr(vertices.tolist())
+                mesh.CreateFaceVertexCountsAttr([4] * 6)
+                mesh.CreateFaceVertexIndicesAttr(
+                    [0, 3, 2, 1, 4, 5, 6, 7, 0, 1, 5, 4, 1, 2, 6, 5, 2, 3, 7, 6, 3, 0, 4, 7]
+                )
+                UsdPhysics.CollisionAPI.Apply(mesh.GetPrim())
+                UsdPhysics.MeshCollisionAPI.Apply(mesh.GetPrim()).CreateApproximationAttr("convexHull")
+            stage.GetRootLayer().Save()
+
+            builder = load_plant(root, visuals=False, motor_off=True).builder
+            box = builder.shape_label.index("/Plant/Box/collision")
+            tapered = builder.shape_label.index("/Plant/Tapered/collision")
+            self.assertEqual(builder.shape_type[box], newton.GeoType.BOX)
+            self.assertEqual(builder.shape_type[tapered], newton.GeoType.CONVEX_MESH)
+            center = np.asarray(builder.shape_transform[box].p)
+            half = np.asarray(builder.shape_scale[box])
+            np.testing.assert_allclose(center - half, points.min(axis=0), rtol=0, atol=2e-8)
+            np.testing.assert_allclose(center + half, points.max(axis=0), rtol=0, atol=2e-8)
+
     def test_wrapper_components_preserve_material_seams(self):
         """Split disconnected parts without welding away authored UV seams."""
         vertices = np.array(
@@ -126,6 +162,8 @@ class TestBottlingPlant(unittest.TestCase):
 
     def test_disabled_cube_belt_can_start(self):
         """Retain a stopped USD cube conveyor's runtime surface-velocity support."""
+        from pxr import Sdf, Usd
+
         with tempfile.TemporaryDirectory() as directory, wp.ScopedDevice("cpu"):
             root = Path(directory)
             path = root / "scenarios/line_sim/line_sim.usda"
@@ -196,6 +234,8 @@ def Xform "Plant" {
 
     def test_authored_collision_groups(self):
         """Keep vehicle obstacles while honoring the line's USD exclusions."""
+        from pxr import Usd, UsdGeom, UsdPhysics
+
         with tempfile.TemporaryDirectory() as directory, wp.ScopedDevice("cpu"):
             root = Path(directory)
             path = root / "scenarios/line_sim/line_sim.usda"
@@ -482,6 +522,8 @@ def Xform "Plant" {
 
     def test_composed_geometry_and_physics(self):
         """Preserve inertial frames, static joint anchors, and point instancing."""
+        from pxr import Usd, UsdGeom, UsdPhysics
+
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             path = root / "scenarios/line_sim/line_sim.usda"

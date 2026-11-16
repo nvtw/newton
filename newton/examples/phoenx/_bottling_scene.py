@@ -413,7 +413,8 @@ def load_plant(asset_root: Path, *, cutaway=True, visuals=True, motor_off=False)
             mesh = mesh_for(prim, visual=visual, velocity=velocity)
             approximation = _value(prim, "physics:approximation", "none")
             if collision and approximation == "convexHull" and velocity is None and len(mesh.vertices) == 8:
-                points = np.asarray(mesh.vertices)
+                # Avoid float32 midpoint rounding rejecting exact box corners.
+                points = np.asarray(mesh.vertices, dtype=np.float64)
                 center = (points.min(axis=0) + points.max(axis=0)) / 2.0
                 half = (points.max(axis=0) - points.min(axis=0)) / 2.0
                 if np.all(half > 0.0) and np.allclose(np.abs(points - center), half, rtol=0.0, atol=1e-8):

@@ -9,16 +9,15 @@ import numpy as np
 
 import newton
 from newton.examples.phoenx._bottling_dispenser import prepare_dispensers
-from newton.tests.unittest_utils import USD_AVAILABLE
-
-if USD_AVAILABLE:
-    from pxr import Sdf, Usd, UsdGeom, UsdPhysics, UsdShade
+from newton.tests.unittest_utils import requires
 
 
-@unittest.skipUnless(USD_AVAILABLE, "Requires usd-core")
+@requires("pxr.Usd")
 class TestBottlingDispenser(unittest.TestCase):
     def test_restore_existing_stock_and_support(self):
         """Restore source physics without changing stock poses or duplicating visuals."""
+        from pxr import Sdf, Usd, UsdGeom, UsdPhysics, UsdShade
+
         stage = Usd.Stage.CreateInMemory()
         root = "/Plant/WrapLine/Dispensers/EP_PZ1"
         positions = [(0.0, 0.0, 0.0), (0.0, 0.15, 0.2625)]
