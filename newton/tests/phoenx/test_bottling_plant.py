@@ -14,7 +14,9 @@ import newton
 from newton.examples.phoenx._bottling_control import _seal_cases, _target_coordinates
 from newton.examples.phoenx._bottling_io import _case_drives, _photoeyes, _valves
 from newton.examples.phoenx._bottling_scene import load_plant
+from newton.examples.phoenx.example_phoenx_bottling_plant import Example
 from newton.tests.unittest_utils import USD_AVAILABLE
+from newton.viewer import ViewerNull
 
 if USD_AVAILABLE:
     from pxr import Usd, UsdGeom, UsdPhysics
@@ -22,6 +24,55 @@ if USD_AVAILABLE:
 
 @unittest.skipUnless(USD_AVAILABLE, "Requires usd-core")
 class TestBottlingPlant(unittest.TestCase):
+    def test_authored_collision_groups(self):
+        """Keep vehicle obstacles while honoring the line's USD exclusions."""
+        with tempfile.TemporaryDirectory() as directory, wp.ScopedDevice("cpu"):
+            root = Path(directory)
+            path = root / "scenarios/line_sim/line_sim.usda"
+            path.parent.mkdir(parents=True)
+            stage = Usd.Stage.CreateNew(str(path))
+            UsdGeom.SetStageMetersPerUnit(stage, 1.0)
+            UsdGeom.SetStageUpAxis(stage, "Z")
+            paths = ["/Plant/Line/Item", "/Plant/Line/Allowed", "/Plant/Fleet/Truck", "/Plant/Keepouts/Box"]
+            for index, label in enumerate(paths):
+                cube = UsdGeom.Cube.Define(stage, label)
+                cube.CreateSizeAttr(0.2)
+                UsdPhysics.CollisionAPI.Apply(cube.GetPrim())
+                if index < 3:
+                    UsdPhysics.RigidBodyAPI.Apply(cube.GetPrim())
+                    UsdPhysics.MassAPI.Apply(cube.GetPrim()).CreateMassAttr(1.0)
+            line = UsdPhysics.CollisionGroup.Define(stage, "/Plant/Groups/Line")
+            line.GetCollidersCollectionAPI().GetIncludesRel().SetTargets(["/Plant/Line"])
+            line.GetCollidersCollectionAPI().GetExcludesRel().SetTargets([paths[1]])
+            obstacles = UsdPhysics.CollisionGroup.Define(stage, "/Plant/Groups/Obstacles")
+            obstacles.GetCollidersCollectionAPI().GetIncludesRel().SetTargets(["/Plant/Keepouts"])
+            obstacles.CreateFilteredGroupsRel().SetTargets([line.GetPath()])
+            stage.GetRootLayer().Save()
+            args = Example.create_parser().parse_args(
+                [
+                    "--asset-root",
+                    str(root),
+                    "--viewer",
+                    "null",
+                    "--no-controllers",
+                    "--motor-off",
+                    "--joint-mode",
+                    "maximal_direct",
+                ]
+            )
+            example = Example(ViewerNull(), args)
+            example.pipeline.collide(example.state_0, example.contacts, dt=1.0 / 240.0)
+            count = int(example.contacts.rigid_contact_count.numpy()[0])
+            first = example.contacts.rigid_contact_shape0.numpy()[:count]
+            second = example.contacts.rigid_contact_shape1.numpy()[:count]
+            labels = example.model.shape_label
+            pairs = {frozenset((labels[a], labels[b])) for a, b in zip(first, second, strict=True)}
+            paths = [path + "/collision" for path in paths]
+            self.assertNotIn(frozenset((paths[0], paths[3])), pairs)
+            self.assertIn(frozenset((paths[1], paths[3])), pairs)
+            self.assertIn(frozenset((paths[2], paths[3])), pairs)
+            self.assertIn(frozenset((paths[0], paths[2])), pairs)
+
     def test_valves_hold_stroke_limits_under_load(self):
         """Hold both cylinder stops under opposing loads with the source valve law."""
         builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))

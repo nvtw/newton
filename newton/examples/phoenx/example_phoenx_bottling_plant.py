@@ -41,6 +41,8 @@ from newton.solvers import SolverPhoenX
 @wp.struct
 class _PlantFilter:
     product: wp.array[wp.int32]
+    collision_membership: wp.array[wp.uint64]
+    collision_filtered: wp.array[wp.uint64]
     articulation: wp.array[wp.int32]
     shape_body: wp.array[wp.int32]
     held_by: wp.array[wp.int32]
@@ -49,6 +51,10 @@ class _PlantFilter:
 @wp.func
 def _filter_pair(pair: wp.vec2i, data: _PlantFilter) -> wp.int32:
     a, b = pair[0], pair[1]
+    if (data.collision_membership[a] & data.collision_filtered[b]) != wp.uint64(0) or (
+        data.collision_membership[b] & data.collision_filtered[a]
+    ) != wp.uint64(0):
+        return 0
     # The source excludes bottle bases against every other bottle hull.
     pa, pb = data.product[a], data.product[b]
     if (pa == 2 and pb > 0) or (pb == 2 and pa > 0):
@@ -111,6 +117,9 @@ class Example:
                 if label.startswith(scope + "/"):
                     groups[shape] = group
         self.filter_data = _PlantFilter()
+        membership, filtered = self.scene.collision_masks(self.model.shape_label)
+        self.filter_data.collision_membership = wp.array(membership, dtype=wp.uint64, device=self.model.device)
+        self.filter_data.collision_filtered = wp.array(filtered, dtype=wp.uint64, device=self.model.device)
         self.filter_data.product = wp.array(product, dtype=wp.int32, device=self.model.device)
         self.filter_data.articulation = wp.array(groups, dtype=wp.int32, device=self.model.device)
         self.filter_data.shape_body = self.model.shape_body

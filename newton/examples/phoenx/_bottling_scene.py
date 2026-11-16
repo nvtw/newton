@@ -47,6 +47,21 @@ class PlantScene:
     self_collision_scopes: list = field(default_factory=list)
     articulations: list = field(default_factory=list)
     frames: dict = field(default_factory=dict)
+    collision_groups: list = field(default_factory=list)
+
+    def collision_masks(self, labels):
+        """Map the source collections to compact per-shape collision masks."""
+        from pxr import Sdf  # noqa: PLC0415 - OpenUSD is optional.
+
+        membership = np.zeros(len(labels), dtype=np.uint64)
+        filtered = np.zeros(len(labels), dtype=np.uint64)
+        # The adapter appends /collision or /visual to source geometry paths.
+        paths = [Sdf.Path(label).GetParentPath() for label in labels]
+        for index, (query, excluded) in enumerate(self.collision_groups):
+            included = np.fromiter((query.IsPathIncluded(path) for path in paths), dtype=bool, count=len(paths))
+            membership[included] |= np.uint64(1 << index)
+            filtered[included] |= np.uint64(excluded)
+        return membership, filtered
 
 
 def _mesh_normals(mesh):
@@ -91,6 +106,19 @@ def load_plant(asset_root: Path, *, cutaway=True, visuals=True, motor_off=False)
     cache = UsdGeom.XformCache()
     scene = PlantScene(newton.ModelBuilder())
     builder = scene.builder
+    collision_table = UsdPhysics.CollisionGroup.ComputeCollisionGroupTable(stage)
+    collision_groups = collision_table.GetGroups()
+    if len(collision_groups) > 64:
+        raise ValueError("The plant adapter supports at most 64 USD collision groups")
+    for group in collision_groups:
+        source_group = UsdPhysics.CollisionGroup(stage.GetPrimAtPath(group))
+        if source_group.GetInvertFilteredGroupsAttr().Get():
+            raise ValueError("The plant adapter does not support inverted collision groups")
+        query = source_group.GetCollidersCollectionAPI().ComputeMembershipQuery()
+        excluded = sum(
+            1 << i for i, other in enumerate(collision_groups) if not collision_table.IsCollisionEnabled(group, other)
+        )
+        scene.collision_groups.append((query, excluded))
     for prim in prims:
         if _value(prim, "physxArticulation:enabledSelfCollisions", None) is False:
             root = prim
