@@ -70,7 +70,7 @@ class MultiWorldDispatcher:
                     else:
                         self._world._iterate_main(iteration)
                     direct.solve(use_bias=iteration == self._world.solver_iterations - 1)
-                direct.resolve_bounded_drives(idt, use_bias=True)
+                    direct.resolve_bounded_drives(idt, use_bias=iteration == self._world.solver_iterations - 1)
             elif block_world:
                 self._world._solve_main_block_world()
             else:
@@ -104,7 +104,7 @@ class MultiWorldDispatcher:
                     else:
                         self._world._relax_velocities(num_iterations=1, solve_direct=False, iteration_offset=iteration)
                     direct.solve(use_bias=False)
-                direct.resolve_bounded_drives(idt, use_bias=False)
+                    direct.resolve_bounded_drives(idt, use_bias=False)
             elif block_world:
                 self._world._relax_velocities_block_world()
             else:

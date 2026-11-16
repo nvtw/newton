@@ -57,8 +57,9 @@ class SingleWorldDispatcher:
                 w._singleworld_head_plus_tail_sweep(iterate_head, iterate_fused, idt)
                 if direct is not None and direct.enabled:
                     direct.solve(use_bias=iteration == w.solver_iterations - 1)
-            if direct is not None and direct.enabled:
-                direct.resolve_bounded_drives(idt, use_bias=True)
+                    # Limits and contacts must react to the capped motor during
+                    # iteration, not retain an uncapped reaction at integration.
+                    direct.resolve_bounded_drives(idt, use_bias=iteration == w.solver_iterations - 1)
         elif direct is not None and direct.enabled:
             w._warm_start_owned_contacts()
             direct.solve(use_bias=True)
@@ -85,8 +86,7 @@ class SingleWorldDispatcher:
                 w._singleworld_head_plus_tail_sweep(relax_head, relax_fused, idt)
                 if direct is not None and direct.enabled:
                     direct.solve(use_bias=False)
-            if direct is not None and direct.enabled:
-                direct.resolve_bounded_drives(idt, use_bias=False)
+                    direct.resolve_bounded_drives(idt, use_bias=False)
         elif direct is not None and direct.enabled and w._active_velocity_iterations > 0:
             direct.solve(use_bias=False)
             direct.resolve_bounded_drives(idt, use_bias=False)

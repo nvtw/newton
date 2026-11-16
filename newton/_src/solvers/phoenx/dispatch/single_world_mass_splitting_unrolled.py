@@ -153,10 +153,12 @@ class SingleWorldMassSplittingUnrolledDispatcher:
             if not w._singleworld_overflow_only_mass_splitting:
                 w._mass_splitting_average_and_broadcast(inv_dt)
             final = iteration == w.solver_iterations - 1
-            if project:
+            if project or (direct is not None and direct.enabled and direct.has_bounded_drives):
                 if sync_direct_copies:
                     w._mass_splitting_writeback(already_averaged=True)
-                direct.solve(use_bias=final, refine=every_iteration or final, **self._average_kwargs(fused_average))
+                if project:
+                    direct.solve(use_bias=final, refine=every_iteration or final, **self._average_kwargs(fused_average))
+                direct.resolve_bounded_drives(idt, use_bias=final)
                 if sync_direct_copies and iteration + 1 < w.solver_iterations:
                     w._mass_splitting_broadcast()
 
@@ -196,6 +198,7 @@ class SingleWorldMassSplittingUnrolledDispatcher:
                     w._mass_splitting_writeback(already_averaged=True)
                 w._wait_direct_factor()
                 direct.solve(use_bias=False, **self._average_kwargs(fused_average))
+                direct.resolve_bounded_drives(idt, use_bias=False)
                 if sync_direct_copies and iteration + 1 < w._active_velocity_iterations:
                     w._mass_splitting_broadcast()
 

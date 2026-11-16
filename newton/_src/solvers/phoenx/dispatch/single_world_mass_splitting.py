@@ -135,10 +135,14 @@ class SingleWorldMassSplittingDispatcher:
             # the joint graph. Final position recovery and the velocity pass
             # retain residual refinement.
             direct_projection = iteration in w._direct_joint_projection_iterations
-            if direct is not None and direct.enabled and direct_projection:
+            if direct is not None and direct.enabled and (direct_projection or direct.has_bounded_drives):
                 w._mass_splitting_writeback(already_averaged=True)
                 final_projection = iteration == w.solver_iterations - 1
-                direct.solve(use_bias=final_projection, refine=final_projection)
+                if direct_projection:
+                    direct.solve(use_bias=final_projection, refine=final_projection)
+                # Even between full projections, limits need the current
+                # finite motor bound rather than an uncapped drive reaction.
+                direct.resolve_bounded_drives(idt, use_bias=final_projection)
                 if iteration + 1 < w.solver_iterations:
                     w._mass_splitting_broadcast()
 
@@ -191,6 +195,7 @@ class SingleWorldMassSplittingDispatcher:
                 w._mass_splitting_writeback(already_averaged=True)
                 w._wait_direct_factor()
                 direct.solve(use_bias=False)
+                direct.resolve_bounded_drives(idt, use_bias=False)
                 if iteration + 1 < w._active_velocity_iterations:
                     w._mass_splitting_broadcast()
 
