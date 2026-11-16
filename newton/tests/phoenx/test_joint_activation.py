@@ -52,12 +52,25 @@ class TestJointActivation(unittest.TestCase):
                     solver.step(state, state, control, None, dt)
                 graph = captured.graph
 
+            trace = []
+
+            def snapshot():
+                trace.append(
+                    (
+                        state.body_q.numpy().copy(),
+                        state.body_qd.numpy().copy(),
+                        solver.bodies.island_root.numpy().copy(),
+                        solver.world._joint_pgs_enabled.numpy().copy(),
+                    )
+                )
+
             def advance(count):
                 for _ in range(count):
                     if graph is None:
                         solver.step(state, state, control, None, dt)
                     else:
                         wp.capture_launch(graph)
+                snapshot()
 
             for _ in range(2):
                 model.joint_enabled.assign(np.array([False, True]))
@@ -84,6 +97,15 @@ class TestJointActivation(unittest.TestCase):
             solver._collision_pipeline.collide(state, contacts, dt=dt)
             self.assertEqual(int(solver.bodies.island_root.numpy()[1]), -1)
             self.assertTrue(np.isfinite(state.body_q.numpy()).all())
+            snapshot()
+            return trace
+
+    def _check_repeatable_lifecycle(self, device, capture):
+        first = self._check_lifecycle(device, capture)
+        second = self._check_lifecycle(device, capture)
+        for phase, (left, right) in enumerate(zip(first, second, strict=True)):
+            for actual, expected in zip(left, right, strict=True):
+                np.testing.assert_array_equal(actual, expected, err_msg=f"Lifecycle phase {phase} is not repeatable")
 
     def _check_disabled_drive(self, device, overflow):
         with wp.ScopedDevice(device):
@@ -135,13 +157,13 @@ class TestJointActivation(unittest.TestCase):
         self._check_disabled_drive(wp.get_cuda_device(), True)
 
     def test_local_joint_lifecycle_cpu(self):
-        """Release and restore a joint twice and wake it from sleep on CPU."""
-        self._check_lifecycle("cpu", False)
+        """Repeat CPU release, restoration, and sleeping wakeup with identical state."""
+        self._check_repeatable_lifecycle("cpu", False)
 
     @unittest.skipUnless(wp.is_cuda_available(), "CUDA is unavailable")
     def test_local_joint_lifecycle_cuda_graph(self):
-        """Replay the same graph across live joint toggles and preserve momentum."""
-        self._check_lifecycle(wp.get_cuda_device(), True)
+        """Repeat captured toggles with identical poses, velocities, sleep, and ownership."""
+        self._check_repeatable_lifecycle(wp.get_cuda_device(), True)
 
 
 if __name__ == "__main__":
