@@ -780,24 +780,20 @@ then OptiX path tracing and DLSS continue on the render stream while the next ph
 step runs. Enabling debug contact arrows intentionally synchronizes the deferred step
 because contact buffers remain owned by the solver.
 
-The renderer uses the standalone ``warp-optix`` 0.3 API. Build and install a
-compatible checkout with its viewer extras into Newton's environment (Python 3.12):
+The viewer uses the ``otk-pyoptix`` backend and its ``warp_optix`` Python addon.
+Install both into Newton's environment:
 
 .. code-block:: bash
 
-    WARP_OPTIX_ENABLE_DLSS=ON uv pip install '/path/to/warp-optix[pathtracing,ui]'
+    git clone https://github.com/nvtw/otk-pyoptix.git
+    uv pip install ./otk-pyoptix
+    uv pip install './otk-pyoptix/warp_optix[pathtracing,ui]'
 
-The build requires a C++17 compiler and fetches the supported OptiX headers.
-The DLSS build option also fetches its SDK headers; omit that option for an
-OptiX-only build. Install the standard PyOptiX version pinned by ``warp-optix``
-rather than an older editable PyOptiX build with bundled DLSS bindings.
-
-The successor defaults to the driver-provided DLSS Ray Reconstruction runtime,
-which requires NVIDIA driver R620 or newer and a CUDA-capable NVIDIA RTX GPU. Newton
-selects DLSS when enabled and supported; otherwise it logs the reason and uses
-the backend's automatic denoiser selection. A renderer build without DLSS remains
-usable. The ``performance``, ``quality``, and ``native`` constructor quality
-values map to the successor's ``max_perf``, ``max_quality``, and ``dlaa`` modes.
+The native build downloads the supported OptiX and DLSS SDK components automatically
+and bundles the DLSS runtime. This adapter uses the original ``PathTracingViewerBackend``
+API; the successor ``warp-optix`` 0.3 package has a different API.
+A CUDA-capable NVIDIA RTX GPU and compatible display driver are required. When DLSS Ray
+Reconstruction is unavailable, the viewer continues at full render resolution without it.
 
 Run any compatible example by selecting the ``optix`` viewer:
 

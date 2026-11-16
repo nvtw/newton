@@ -179,16 +179,16 @@ class TestViewerOptix(unittest.TestCase):
             width=64, height=48, device="cuda:0", headless=True, enable_imgui=False, enable_dlss_rr=False
         )
         try:
-            self.assertEqual(viewer.active_denoiser, "none")
+            self.assertFalse(viewer._api.dlss_enabled)
             viewer.dlss_quality = "quality"
             self.assertEqual(viewer.dlss_quality, "quality")
-            self.assertEqual(viewer._api.dlss_quality, "max_quality")
+            self.assertEqual(viewer._api.dlss_quality, "quality")
             viewer.dlss_quality = "native"
             self.assertEqual(viewer.dlss_quality, "native")
-            self.assertEqual(viewer._api.dlss_quality, "dlaa")
+            self.assertEqual(viewer._api.dlss_quality, "native")
             viewer.dlss_quality = "performance"
             self.assertEqual(viewer.dlss_quality, "performance")
-            self.assertEqual(viewer._api.dlss_quality, "max_perf")
+            self.assertEqual(viewer._api.dlss_quality, "performance")
             viewer.set_model(model)
             viewer.set_world_offsets((4.0, 0.0, 0.0))
             state = model.state()

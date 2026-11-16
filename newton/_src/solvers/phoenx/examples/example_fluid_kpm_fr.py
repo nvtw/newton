@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import argparse
-import logging
 import math
 import time
 from pathlib import Path
@@ -12,8 +11,6 @@ import warp as wp
 
 import newton
 from newton.solvers import KPMFR3D, KPMFR3DConfig, rasterize_obstacles
-
-logger = logging.getLogger(__name__)
 
 _VOLUME_TRANSFER_TABLE = np.array(
     (
@@ -765,9 +762,9 @@ def make_filaments(api, solver, material, strand_count, points_per_strand):
 
 
 def main(*, volume_only=False):
+    import warp_optix as woptix  # noqa: PLC0415
     from PIL import Image
-    from warp_optix.gl import GLInteropViewer  # noqa: PLC0415
-    from warp_optix.pathtracing import Mesh, PathTracer, dlss_rr_requirements  # noqa: PLC0415
+    from warp_optix.pathtracing import Mesh, PathTracerAPI  # noqa: PLC0415
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, default=Path("volume.png"))
@@ -825,23 +822,18 @@ def main(*, volume_only=False):
         volume_data = make_volume(solver, args.volume_samples_per_cell or solver.config.order)
     realtime = args.live or args.max_frames > 1
     graph_capture = volume_only
-    denoiser = "none"
-    if not args.no_dlss_rr:
-        support = dlss_rr_requirements("cuda")
-        denoiser = "dlss" if support["supported"] else "auto"
-        if not support["supported"]:
-            logger.warning("DLSS Ray Reconstruction unavailable; using automatic denoising: %s", support["reason"])
-    api = PathTracer(
+    api = PathTracerAPI(
         args.width,
         args.height,
-        denoiser=denoiser,
+        enable_dlss_rr=not args.no_dlss_rr,
         enable_set=True,
         enable_cuda_graphs=graph_capture,
-        dlss_quality="max_quality",
+        dlss_quality="quality",
         samples_per_frame=1 if realtime else 8,
         max_bounces=2 if realtime else 3,
     )
-    api.initialize()
+    if not api.initialize():
+        raise RuntimeError("Failed to initialize path tracing")
     ground_color = (0.447988, 0.447988, 0.447988)
     sphere_color = (0.50, 0.54, 0.60)
     ground = api.create_pbr_material(
@@ -978,11 +970,11 @@ def main(*, volume_only=False):
             render_width, render_height = width, height
             api.resize(width, height)
 
-        viewer = GLInteropViewer(
+        viewer = woptix.GLInteropViewer(
             width=args.width,
             height=args.height,
             device="cuda",
-            title=f"KPM-FR live — {'DLSS-RR' if api.active_denoiser == 'dlss' else 'native'} — WASD + drag",
+            title=f"KPM-FR live — {'DLSS-RR' if api.dlss_enabled else 'native'} — WASD + drag",
             fps=args.fps,
             on_resize=resize,
             vsync=False,

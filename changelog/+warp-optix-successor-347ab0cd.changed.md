@@ -1,1 +1,1 @@
-Migrate the OptiX viewer and PhoenX fluid rendering to the standalone `warp-optix` 0.3 API and its pinned PyOptiX dependency. Preserve Newton's DLSS quality names, GUI controls, and rendering integration. The default driver-provided DLSS Ray Reconstruction runtime requires NVIDIA driver R620 or newer; when unavailable, the viewer reports the reason and selects automatic denoising.
+Restore the otk-pyoptix rendering backend with bundled DLSS Ray Reconstruction support.
