@@ -1604,6 +1604,7 @@ class SolverPhoenX(SolverBase):
         PhoenX's material table; each shape gets its own material index."""
 
         mu_np = self.model.shape_material_mu.numpy()
+        mu_static_np = self.model.shape_material_mu_static.numpy()
         restitution = (
             self.model.shape_material_restitution.numpy()
             if self.model.shape_material_restitution is not None
@@ -1612,7 +1613,7 @@ class SolverPhoenX(SolverBase):
         combine_mode = _COMBINE_MODES[self.friction_combine_mode]
         materials = [
             Material(
-                static_friction=float(mu_np[i]),
+                static_friction=float(mu_static_np[i]),
                 dynamic_friction=float(mu_np[i]),
                 restitution=float(restitution[i]),
                 friction_combine_mode=combine_mode,
