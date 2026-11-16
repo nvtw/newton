@@ -43,7 +43,12 @@ collision/solver substeps per 60 Hz frame, four main iterations and one relax
 sweep per substep, requested 80 Hz contact frequency, sticky matching, and no
 sleeping or mass splitting. JSON records the settings, effective soft-contact
 coefficients, motion relative to the translating/rotating support, contact
-counts, floor clearance, support escape, and diagnostic runtime. Runtime includes
+counts, floor and base-top clearance, direct contents-to-floor force, support
+escape, and diagnostic runtime. Negative clearance means penetration. Check
+these alongside motion: soft contacts can let the carton sink until the world
+floor supports its contents directly, producing misleadingly low jitter.
+The base-top metric accounts for relative tilt but does not check wall penetration.
+Runtime includes
 readbacks and may include kernel compilation: do not interpret it as rendered
 FPS or a clean solver-throughput benchmark.
 

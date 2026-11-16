@@ -38,7 +38,7 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton.solvers import SolverPhoenX
+from newton.solvers import SolverBase, SolverPhoenX
 
 CASES = {
     "fixed_1": (1, False, False),
@@ -135,8 +135,14 @@ def run_case(name, args):
         sleeping_velocity_threshold=0,
     )
     com = model.body_com.numpy()
+    observables = solver.observables({SolverBase.ObservableKind.CONTACT_F}, contacts=contacts)
+    shape_body = model.shape_body.numpy()
+    # The builder adds the world floor last, separately from the fixed base.
+    floor_shape = model.shape_count - 1
+    direct_floor_forces = []
     positions, speeds, angular_speeds, counts = [], [], [], []
     minimum_floor_clearance = float("inf")
+    minimum_support_clearance = float("inf")
     outside_footprint = 0
     dt = 1 / (60 * args.substeps)
     steps, settle_steps = round(args.duration / dt), round(args.settle / dt)
@@ -145,7 +151,7 @@ def run_case(name, args):
     for step in range(steps):
         state.clear_forces()
         pipeline.collide(state, contacts, dt=dt)
-        solver.step(state, state, control, contacts, dt)
+        solver.step(state, state, control, contacts, dt, observables=observables)
         if step < settle_steps:
             continue
         q, v = state.body_q.numpy(), state.body_qd.numpy()
@@ -164,6 +170,14 @@ def run_case(name, args):
         inverse = rotation * np.array([-1, -1, -1, 1])
         local = _rotate(inverse, offset)
         positions.append(local)
+        # Measure against the base's top face in its own frame, including tilt.
+        axes = np.asarray([_rotate(quat, np.array([0.0, 0.0, 1.0])) for quat in q[contents, 3:]])
+        relative_axes = _rotate(inverse, axes)
+        axis_normal = np.clip(relative_axes[:, 2], -1, 1)
+        support_extent = 0.125 * np.abs(axis_normal) + 0.0304 * np.sqrt(np.maximum(0, 1 - axis_normal**2))
+        support_com_z = com[support, 2] if support >= 0 else 0.0
+        support_clearance = local[:, 2] + support_com_z - 0.0032 - support_extent
+        minimum_support_clearance = min(minimum_support_clearance, float(support_clearance.min()))
         axis_z = 1 - 2 * np.sum(q[contents, 3:5] ** 2, axis=1)
         vertical_extent = 0.125 * np.abs(axis_z) + 0.0304 * np.sqrt(np.maximum(0, 1 - axis_z**2))
         minimum_floor_clearance = min(minimum_floor_clearance, float(np.min(q[contents, 2] - vertical_extent)))
@@ -172,7 +186,15 @@ def run_case(name, args):
         )
         speeds.append(np.sum(relative_velocity**2, axis=1))
         angular_speeds.append(np.sum((v[contents, 3:] - angular) ** 2, axis=1))
-        counts.append(int(contacts.rigid_contact_count.numpy()[0]))
+        count = int(contacts.rigid_contact_count.numpy()[0])
+        counts.append(count)
+        shape0 = contacts.rigid_contact_shape0.numpy()[:count]
+        shape1 = contacts.rigid_contact_shape1.numpy()[:count]
+        direct_floor = ((shape0 == floor_shape) & np.isin(shape_body[shape1], contents)) | (
+            (shape1 == floor_shape) & np.isin(shape_body[shape0], contents)
+        )
+        forces = observables.contact_f.numpy()[:count, :3]
+        direct_floor_forces.append(float(np.linalg.norm(forces[direct_floor], axis=1).sum()))
     wp.synchronize_device(model.device)
     elapsed = time.perf_counter() - start
     positions = np.asarray(positions)
@@ -189,6 +211,8 @@ def run_case(name, args):
         "contacts_max": int(np.max(counts)),
         "measured_samples": len(counts),
         "minimum_contents_floor_clearance_m": minimum_floor_clearance,
+        "minimum_contents_support_clearance_m": minimum_support_clearance,
+        "direct_contents_floor_force_magnitude_mean_N": float(np.mean(direct_floor_forces)),
         "contents_centers_outside_support_max": outside_footprint,
         "contact_soft_coefficients": {
             "capped": int(contact.soft_capped),
