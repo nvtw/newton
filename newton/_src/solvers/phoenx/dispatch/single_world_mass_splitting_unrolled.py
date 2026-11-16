@@ -75,9 +75,12 @@ class SingleWorldMassSplittingUnrolledDispatcher:
 
     def solve(self, idt: wp.float32) -> None:
         w = self._world
+        temporal = w.temporal_iterations
         if not w._singleworld_overflow_only_mass_splitting:
             w._mass_splitting_broadcast()
         if w._constraint_capacity == 0:
+            if temporal:
+                w._temporal_apply_forces(w.solver_iterations - 1)
             if not w._singleworld_overflow_only_mass_splitting:
                 w._mass_splitting_writeback()
             return
@@ -92,6 +95,8 @@ class SingleWorldMassSplittingUnrolledDispatcher:
                 direct.prepare_and_factor(idt)
 
         if not w._regular_pgs_active_this_step:
+            if temporal:
+                w._temporal_apply_forces(w.solver_iterations - 1)
             if not w._singleworld_overflow_only_mass_splitting:
                 w._mass_splitting_writeback()
             if direct is not None and direct.enabled:
@@ -141,8 +146,12 @@ class SingleWorldMassSplittingUnrolledDispatcher:
             if sync_direct_copies:
                 w._mass_splitting_broadcast()
         # Without explicit projection passes, project after every iteration.
-        every_iteration = w.direct_joint_projection_passes is None
+        every_iteration = temporal or w.direct_joint_projection_passes is None
+        if temporal:
+            w._temporal_begin_sweeps()
         for iteration in range(w.solver_iterations):
+            if temporal and iteration > 0:
+                w._temporal_next_sweep(idt)
             project = (
                 direct is not None
                 and direct.enabled
@@ -157,10 +166,18 @@ class SingleWorldMassSplittingUnrolledDispatcher:
                 if sync_direct_copies:
                     w._mass_splitting_writeback(already_averaged=True)
                 if project:
-                    direct.solve(use_bias=final, refine=every_iteration or final, **self._average_kwargs(fused_average))
-                direct.resolve_bounded_drives(idt, use_bias=final)
+                    direct.solve(
+                        use_bias=final or temporal,
+                        refine=every_iteration or final,
+                        **self._average_kwargs(fused_average),
+                    )
+                direct.resolve_bounded_drives(idt, use_bias=final or temporal)
                 if sync_direct_copies and iteration + 1 < w.solver_iterations:
                     w._mass_splitting_broadcast()
+            if temporal:
+                # Overflow has been averaged into physical body storage, also
+                # when the exact projection performs that average itself.
+                w._temporal_end_sweep(final)
 
         if (direct is None or not direct.enabled) and not w._singleworld_overflow_only_mass_splitting:
             w._mass_splitting_writeback(already_averaged=True)

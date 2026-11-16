@@ -75,7 +75,15 @@ class TestContactRestStability(unittest.TestCase):
 class TestPackedContainerRest(unittest.TestCase):
     def test_heavy_contents_settle_in_light_container(self):
         """Free cylinders in a movable light box must stop oscillating."""
-        with wp.ScopedDevice("cpu"):
+        self._check_packed_rest("cpu")
+
+    @unittest.skipUnless(wp.is_cuda_available(), "Overflow-only dispatch requires CUDA")
+    def test_temporal_overflow_contents_settle_cuda(self):
+        """Keep a light packed carton stable with twelve colors and real overflow."""
+        self._check_packed_rest("cuda:0", overflow_colors=12)
+
+    def _check_packed_rest(self, device, *, overflow_colors=None):
+        with wp.ScopedDevice(device):
             builder = newton.ModelBuilder()
             length, width, height, thickness = 0.286, 0.216, 0.261, 0.0032
             case_mass = 0.42
@@ -124,7 +132,7 @@ class TestPackedContainerRest(unittest.TestCase):
                     builder.add_shape_cylinder(body, radius=radius, half_height=cylinder_height / 2, cfg=cfg)
                     contents.append(body)
             builder.add_ground_plane(cfg=cfg)
-            model = builder.finalize(device="cpu")
+            model = builder.finalize(device=device)
             np.testing.assert_allclose(model.body_mass.numpy()[case], case_mass, rtol=1.0e-5)
             case_com = model.body_com.numpy()[case]
             state, control = model.state(), model.control()
@@ -132,6 +140,16 @@ class TestPackedContainerRest(unittest.TestCase):
                 model, contact_matching="sticky", rigid_contact_max=4096, speculative_contact_gap_max=0.005
             )
             contacts = pipeline.contacts()
+            options = {}
+            if overflow_colors is not None:
+                options = {
+                    "mass_splitting": True,
+                    "mass_splitting_overflow_only": True,
+                    "mass_splitting_unrolled": True,
+                    "mass_splitting_batch_size": 1,
+                    "max_colored_partitions": overflow_colors,
+                    "partitioner_algorithm": "endpoint_owner",
+                }
             solver = SolverPhoenX(
                 model,
                 collision_pipeline=pipeline,
@@ -143,12 +161,23 @@ class TestPackedContainerRest(unittest.TestCase):
                 contact_hertz=80,
                 enable_body_pair_grouping=True,
                 sleeping_velocity_threshold=0,
+                **options,
             )
+            graph = None
+            if model.device.is_cuda:
+                with wp.ScopedCapture() as capture:
+                    state.clear_forces()
+                    pipeline.collide(state, contacts, dt=1 / 120)
+                    solver.step(state, state, control, contacts, 1 / 120)
+                graph = capture.graph
             positions, speeds = [], []
             for step in range(360):
-                state.clear_forces()
-                pipeline.collide(state, contacts, dt=1 / 120)
-                solver.step(state, state, control, contacts, 1 / 120)
+                if graph is None:
+                    state.clear_forces()
+                    pipeline.collide(state, contacts, dt=1 / 120)
+                    solver.step(state, state, control, contacts, 1 / 120)
+                else:
+                    wp.capture_launch(graph)
                 if step < 120:
                     continue
                 poses, velocities = state.body_q.numpy(), state.body_qd.numpy()
@@ -167,6 +196,10 @@ class TestPackedContainerRest(unittest.TestCase):
             positions = np.asarray(positions)
             self.assertLess(float(np.sqrt(np.mean(speeds))), 1.0e-3, "persistent motion inside the resting container")
             self.assertLess(float(np.linalg.norm(positions - positions[0], axis=2).max()), 5.0e-4)
+            if overflow_colors is not None:
+                self.assertGreater(solver.step_report().overflow_size, 0)
+                starts = solver.world._partitioner.color_starts.numpy()
+                self.assertGreater(int(starts[overflow_colors] - starts[0]), 0)
 
 
 if __name__ == "__main__":

@@ -716,8 +716,12 @@ class PhoenXWorld:
         #: Each biased sweep of a substep advances the contacts by ``1/solver_iterations``
         #: of the substep, see :mod:`~newton._src.solvers.phoenx.temporal_contacts`.
         self.temporal_iterations = bool(temporal_iterations) and int(solver_iterations) > 1
-        if self.temporal_iterations and (str(step_layout) != "single_world" or bool(mass_splitting)):
-            raise ValueError("temporal_iterations requires step_layout='single_world' without mass splitting")
+        if self.temporal_iterations and (
+            str(step_layout) != "single_world" or (bool(mass_splitting) and not mass_splitting_overflow_only)
+        ):
+            raise ValueError(
+                "temporal_iterations requires step_layout='single_world' with no mass splitting or overflow-only splitting"
+            )
         self._temporal_velocity_sum = None
         if self.temporal_iterations and self.num_bodies > 0:
             self._temporal_velocity_sum = wp.zeros(self.num_bodies, dtype=wp.vec3f, device=self.device)
@@ -1495,7 +1499,7 @@ class PhoenXWorld:
             and self.max_contact_columns > 0
             and not self._colored_contact_headers
             and not self._colored_contact_rows
-            and not self.mass_splitting_enabled
+            and (not self.mass_splitting_enabled or self._singleworld_overflow_only_mass_splitting)
             and not self._contact_patch_enabled
             and self.num_particles == 0
             and self._reduced_articulation is None

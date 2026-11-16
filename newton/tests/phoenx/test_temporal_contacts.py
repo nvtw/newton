@@ -323,7 +323,12 @@ class TestTemporalContactObservables(unittest.TestCase):
         """Balance GPU support forces against weight and measured momentum change."""
         self._check_owned_support_force("cuda:0")
 
-    def _check_owned_support_force(self, device):
+    @unittest.skipUnless(wp.is_cuda_available(), "CUDA device required")
+    def test_owned_support_force_with_temporal_overflow_cuda(self):
+        """Balance exact-joint reactions alongside ordinary overflow contacts."""
+        self._check_owned_support_force("cuda:0", overflow=True)
+
+    def _check_owned_support_force(self, device, *, overflow=False):
         with wp.ScopedDevice(device):
             builder = newton.ModelBuilder()
             body = builder.add_link(xform=wp.transform(wp.vec3(0, 0, 0.1)))
@@ -339,16 +344,31 @@ class TestTemporalContactObservables(unittest.TestCase):
                 child_xform=wp.transform(wp.vec3(-0.2, 0, 0)),
             )
             builder.add_articulation([root, joint])
+            if overflow:
+                ordinary = builder.add_body(xform=wp.transform((2.0, 0, 0.1)))
+                builder.add_shape_box(ordinary, hx=0.1, hy=0.1, hz=0.1)
             ground = builder.add_ground_plane()
             model = builder.finalize()
+            options = {}
+            if overflow:
+                options = {
+                    "mass_splitting": True,
+                    "mass_splitting_overflow_only": True,
+                    "mass_splitting_unrolled": True,
+                    "mass_splitting_batch_size": 1,
+                    "max_colored_partitions": 0,
+                    "direct_joint_mask": np.ones(model.joint_count, dtype=bool),
+                    "direct_contact_mask": np.ones(model.joint_count, dtype=bool),
+                }
             solver = SolverPhoenX(
                 model,
-                joint_mode="maximal_direct",
+                joint_mode="maximal_pgs" if overflow else "maximal_direct",
                 step_layout="single_world",
                 temporal_iterations=True,
                 substeps=1,
                 solver_iterations=24,
                 contact_hertz=80,
+                **options,
             )
             state, control = model.state(), model.control()
             newton.eval_fk(model, model.joint_q, model.joint_qd, state)
@@ -375,6 +395,10 @@ class TestTemporalContactObservables(unittest.TestCase):
             # CUDA can still have a small settling acceleration in this window;
             # comparing its force to weight alone would misdiagnose that motion.
             np.testing.assert_allclose(forces, expected_forces, atol=0.001, rtol=0.0)
+            if overflow:
+                self.assertTrue(solver.world._direct_equality_system.enabled)
+                self.assertIsNotNone(solver.world._direct_contact_response)
+                self.assertGreater(solver.step_report().overflow_size, 0)
             if device == "cpu":
                 self.assertAlmostEqual(np.mean(forces), weight, delta=0.01)
             np.testing.assert_allclose(state.body_q.numpy()[:, 2], 0.1, atol=0.001)

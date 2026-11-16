@@ -1,0 +1,1 @@
+Support PhoenX temporal contact iterations with CUDA unrolled overflow-only mass splitting, retaining physical-body velocity averaging, force accumulation, and exact-joint projections between temporal sweeps.

@@ -448,8 +448,9 @@ class SolverPhoenX(SolverBase):
                 responses still run once per substep. Smaller contact steps can
                 reduce oscillation of heavy bodies on light movable supports;
                 the required schedule depends on the scene. Requires
-                ``step_layout="single_world"``, rigid bodies, and no mass
-                splitting or sleeping.
+                ``step_layout="single_world"`` and rigid bodies. Mass splitting
+                is supported only with CUDA unrolled overflow-only dispatch and
+                uncolored contact headers.
             contact_hertz: Natural frequency [Hz] of the rigid contact springs
                 (soft rows with damping ratio 1). ``None`` (the default) uses
                 the stiffest spring the sweep schedule keeps stable, which
@@ -1131,7 +1132,7 @@ class SolverPhoenX(SolverBase):
 
         if temporal_iterations and (
             step_layout != "single_world"
-            or mass_splitting
+            or (mass_splitting and not mass_splitting_overflow_only)
             or solver_scheme != "soft"
             or colored_contact_headers
             or num_cloth_triangles
@@ -1140,7 +1141,7 @@ class SolverPhoenX(SolverBase):
         ):
             raise ValueError(
                 "temporal_iterations requires solver_scheme='soft', step_layout='single_world', rigid "
-                "bodies, uncolored contact headers, and no mass splitting"
+                "bodies, uncolored contact headers, and either no mass splitting or overflow-only mass splitting"
             )
 
         # Body-pair grouping pays a sort/gather cost and reduces all shape-pair
