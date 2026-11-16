@@ -269,6 +269,51 @@ class TestTemporalContactMaterial(unittest.TestCase):
 
 
 class TestTemporalContactObservables(unittest.TestCase):
+    def test_ordinary_jointed_contacts_integrate_sweep_motion(self):
+        """Integrate observed sweep motion when jointed contacts are not solved by the late direct pass."""
+        for mode in ("maximal_pgs", "maximal_direct"):
+            with self.subTest(mode=mode), wp.ScopedDevice("cpu"):
+                builder = newton.ModelBuilder()
+                body = builder.add_link(xform=wp.transform(wp.vec3(0, 0, 0.1)))
+                builder.add_shape_box(body, hx=0.1, hy=0.1, hz=0.1)
+                joint = builder.add_joint_prismatic(
+                    -1,
+                    body,
+                    axis=newton.Axis.Z,
+                    parent_xform=wp.transform(wp.vec3(0, 0, 0.1)),
+                    target_ke=0,
+                    target_kd=0,
+                    limit_lower=-1e6,
+                    limit_upper=1e6,
+                )
+                builder.add_articulation([joint])
+                builder.add_ground_plane()
+                model = builder.finalize()
+                solver = SolverPhoenX(
+                    model,
+                    joint_mode=mode,
+                    direct_contact_mask=np.zeros(1, dtype=bool) if mode == "maximal_direct" else None,
+                    step_layout="single_world",
+                    substeps=1,
+                    solver_iterations=24,
+                    temporal_iterations=True,
+                    contact_hertz=80,
+                )
+                state, control = model.state(), model.control()
+                newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+                contacts = model._collision_pipeline.contacts()
+                dt = 1 / 120
+                for _ in range(30):
+                    previous_z = float(state.body_q.numpy()[body, 2])
+                    solver.collide(state, contacts, dt=dt)
+                    solver.step(state, state, control, contacts, dt)
+                    world = solver.world
+                    # Each ordinary-contact sweep advances dt / n. Their
+                    # displacement must survive the outer position update.
+                    displacement = float(world._temporal_velocity_sum.numpy()[body + 1, 2])
+                    displacement *= dt / world._temporal_sweep_index
+                    self.assertAlmostEqual(float(state.body_q.numpy()[body, 2]), previous_z + displacement, delta=1e-7)
+
     def test_owned_support_force_prevents_position_drift(self):
         """Keep a free hinged pair resting when contact reactions balance its weight."""
         with wp.ScopedDevice("cpu"):

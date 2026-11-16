@@ -141,6 +141,7 @@ def temporal_accumulate_velocity_kernel(
 def temporal_swap_average_velocity_kernel(
     bodies: BodyContainer,
     jointed: wp.array[wp.int32],
+    owned_body_mechanism: wp.array[wp.int32],
     inv_count: wp.float32,
     velocity_sum: wp.array[wp.vec3f],
     angular_velocity_sum: wp.array[wp.vec3f],
@@ -151,9 +152,12 @@ def temporal_swap_average_velocity_kernel(
     b = wp.tid()
     kept_velocity[b] = bodies.velocity[b]
     kept_angular_velocity[b] = bodies.angular_velocity[b]
-    # Jointed bodies receive outer-step forces; their owned contacts are solved
-    # after the temporal sweeps, so intermediate velocities lack that reaction.
-    if jointed[b] == 0:
+    # Only owned direct contacts react after the temporal sweeps. Ordinary
+    # contacts on jointed bodies already contribute to each sweep's motion.
+    use_final = False
+    if jointed[b] != 0 and b < owned_body_mechanism.shape[0]:
+        use_final = owned_body_mechanism[b] >= 0
+    if not use_final:
         bodies.velocity[b] = velocity_sum[b] * inv_count
         bodies.angular_velocity[b] = angular_velocity_sum[b] * inv_count
 

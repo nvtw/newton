@@ -724,7 +724,7 @@ class PhoenXWorld:
             self._temporal_angular_velocity_sum = wp.zeros(self.num_bodies, dtype=wp.vec3f, device=self.device)
             self._temporal_kept_velocity = wp.zeros(self.num_bodies, dtype=wp.vec3f, device=self.device)
             self._temporal_kept_angular_velocity = wp.zeros(self.num_bodies, dtype=wp.vec3f, device=self.device)
-            #: Nonzero for bodies that integrate their final sweep velocity, see
+            #: Nonzero for bodies receiving outer-step forces, see
             #: :meth:`update_temporal_jointed_bodies`.
             self._temporal_jointed = wp.zeros(self.num_bodies, dtype=wp.int32, device=self.device)
             self._temporal_weld_entries = wp.empty(self.num_bodies, dtype=wp.int64, device=self.device)
@@ -2738,7 +2738,7 @@ class PhoenXWorld:
             )
 
     def _integrate_positions_temporal(self) -> None:
-        """Average temporal body motion; retain final motion for outer-step jointed bodies."""
+        """Average sweep motion except for jointed bodies with late direct-contact reactions."""
         self._temporal_accumulate_velocity(reset=self._temporal_sweep_index == 0)
         self._temporal_sweep_index += 1
         wp.launch(
@@ -2747,6 +2747,9 @@ class PhoenXWorld:
             inputs=[
                 self.bodies,
                 self._temporal_jointed,
+                self._direct_contact_response.data.body_mechanism
+                if self._direct_contact_response is not None
+                else None,
                 wp.float32(1.0 / max(self._temporal_sweep_index, 1)),
                 self._temporal_velocity_sum,
                 self._temporal_angular_velocity_sum,
