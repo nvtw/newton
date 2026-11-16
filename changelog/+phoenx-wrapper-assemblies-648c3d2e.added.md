@@ -1,0 +1,1 @@
+Reconstruct the bottling example's wrapper rotary arms and film carriages with finite drives, geometry-derived lift travel, and documented mass estimates. Film wrapping and labelling remain incomplete.

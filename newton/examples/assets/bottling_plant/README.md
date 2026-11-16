@@ -80,3 +80,14 @@ with no PLC faults. Maximum joint-anchor error was approximately 0.3 mm.
 This verifies a finite production run, not unlimited operation. Autonomous
 logistics and continuous replenishment remain incomplete as described above.
 No 60 rendered FPS result has been validated for sustained end-to-end production.
+
+The wrapper arm and film carriage are reconstructed from disconnected components
+of the source material meshes. A revolute drive physically parks the arm clear
+of the infeed; a prismatic drive supports the carriage. The source supplies no
+wrapper mass or drive properties. The reconstruction estimates metal parts as
+3 mm shells (steel 7850 kg/m³, aluminium 2700 kg/m³), the film roll as solid
+polyethylene at 920 kg/m³, and rubber at 1100 kg/m³. Torque is limited to
+1000 Nm and lift force to 3000 N. These are explicit modeling assumptions,
+not measured machine specifications. Film tension, deposition, cutting and
+label application remain unimplemented; the reconstructed joints alone do
+not establish a working wrapping process.

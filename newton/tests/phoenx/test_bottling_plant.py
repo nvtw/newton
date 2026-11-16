@@ -14,6 +14,7 @@ import newton
 from newton.examples.phoenx._bottling_control import _seal_cases, _target_coordinates
 from newton.examples.phoenx._bottling_io import _case_drives, _photoeyes, _valves
 from newton.examples.phoenx._bottling_scene import load_plant
+from newton.examples.phoenx._bottling_wrap import build_wrapper, mesh_components
 from newton.examples.phoenx.example_phoenx_bottling_plant import Example
 from newton.tests.unittest_utils import USD_AVAILABLE
 from newton.viewer import ViewerNull
@@ -24,6 +25,80 @@ if USD_AVAILABLE:
 
 @unittest.skipUnless(USD_AVAILABLE, "Requires usd-core")
 class TestBottlingPlant(unittest.TestCase):
+    def test_wrapper_components_preserve_material_seams(self):
+        """Split disconnected parts without welding away authored UV seams."""
+        vertices = np.array(
+            [[0, 0, 0], [1, 0, 0], [0, 1, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0], [3, 0, 0], [4, 0, 0], [3, 1, 0]],
+            dtype=np.float32,
+        )
+        uvs = np.arange(18, dtype=np.float32).reshape(-1, 2) / 18
+        normals = np.tile([0, 0, 1], (9, 1)).astype(np.float32)
+        mesh = newton.Mesh(
+            vertices,
+            np.arange(9),
+            normals=normals,
+            uvs=uvs,
+            color=(0.2, 0.4, 0.6),
+            roughness=0.3,
+            metallic=0.7,
+            opacity=0.8,
+            texture="wrapper.png",
+            texture_transform=((2, 0, 0.1), (0, 3, 0.2)),
+            compute_inertia=False,
+        )
+        parts = mesh_components(mesh)
+        self.assertEqual(len(parts), 2)
+        self.assertEqual(len(parts[0].vertices), 6)
+        for part, indices in zip(parts, (np.arange(6), np.arange(6, 9)), strict=True):
+            np.testing.assert_array_equal(part.vertices, vertices[indices])
+            np.testing.assert_array_equal(part.uvs, uvs[indices])
+            np.testing.assert_array_equal(part.normals, normals[indices])
+            np.testing.assert_array_equal(part.color, mesh.color)
+            np.testing.assert_array_equal(part.texture_transform, mesh.texture_transform)
+            self.assertEqual(part.texture, mesh.texture)
+            self.assertEqual(part.roughness, mesh.roughness)
+            self.assertEqual(part.metallic, mesh.metallic)
+            self.assertEqual(part.opacity, mesh.opacity)
+        triangles = np.concatenate([part.vertices[part.indices] for part in parts])
+        np.testing.assert_array_equal(triangles, mesh.vertices[mesh.indices])
+        np.testing.assert_array_equal(mesh.vertices, vertices)
+        np.testing.assert_array_equal(mesh.uvs, uvs)
+
+    @unittest.skipUnless(wp.is_cuda_available(), "Wrapper direct-contact validation requires CUDA")
+    def test_wrapper_homes_and_holds_lift(self):
+        """Finite drives park the arm and support the carriage under gravity."""
+        with wp.ScopedDevice("cuda:0"):
+            components = []
+            for name, center, half in (
+                ("steel", (0, 0, 3), (0.34, 0.34, 0.0585)),
+                ("steel", (-0.95, -0.95, 1.7), (0.065, 0.065, 1.105)),
+                ("wrapline_film_roll", (-1.05, -0.53, 0.927), (0.125, 0.125, 0.25)),
+            ):
+                mesh = newton.Mesh.create_box(*half, compute_inertia=False)
+                components.append((name, mesh.copy(vertices=mesh.vertices + np.asarray(center))))
+            builder = newton.ModelBuilder()
+            bodies, joints, _ = build_wrapper(builder, components, label="/Wrapper", visuals=False)
+            model = builder.finalize()
+            self.assertTrue(np.all(model.body_mass.numpy() > 0.0))
+            self.assertTrue(np.all(np.linalg.eigvalsh(model.body_inertia.numpy()) > 0.0))
+            solver = newton.solvers.SolverPhoenX(model, substeps=4, solver_iterations=4)
+            state = model.state()
+            control = model.control()
+            targets = control.joint_target_q.numpy()
+            targets[model.joint_target_q_start.numpy()[joints[1]]] = 0.3
+            control.joint_target_q.assign(targets)
+            contacts = model._collision_pipeline.contacts()
+            for _ in range(240):
+                solver.collide(state, contacts)
+                solver.step(state, state, control, contacts, 1.0 / 60.0)
+            newton.eval_ik(model, state, model.joint_q, model.joint_qd)
+            q = model.joint_q.numpy()
+            self.assertAlmostEqual(float(q[model.joint_q_start.numpy()[joints[0]]]), np.pi / 4, delta=0.03)
+            self.assertAlmostEqual(float(q[model.joint_q_start.numpy()[joints[1]]]), 0.3, delta=0.005)
+            np.testing.assert_allclose(model.joint_qd.numpy(), 0.0, atol=0.02)
+            self.assertEqual(len(bodies), 2)
+            self.assertTrue(np.isfinite(state.body_q.numpy()).all())
+
     def test_disabled_cube_belt_can_start(self):
         """Retain a stopped USD cube conveyor's runtime surface-velocity support."""
         with tempfile.TemporaryDirectory() as directory, wp.ScopedDevice("cpu"):

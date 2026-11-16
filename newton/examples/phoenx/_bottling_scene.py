@@ -20,6 +20,7 @@ import warp as wp
 
 import newton
 import newton.usd
+from newton.examples.phoenx._bottling_wrap import build_wrapper, mesh_components
 
 
 def _value(prim, name, default):
@@ -448,6 +449,7 @@ def load_plant(asset_root: Path, *, cutaway=True, visuals=True, motor_off=False)
         else:
             raise ValueError(f"Unsupported geometry {kind} at {prim.GetPath()}")
 
+    wrappers = {}
     geometry_types = {"Mesh", "Cube", "Sphere", "Cylinder", "Capsule", "Cone", "Plane"}
     instancers = [UsdGeom.PointInstancer(p) for p in prims if p.IsA(UsdGeom.PointInstancer)]
     prototypes = {path for instancer in instancers for path in instancer.GetPrototypesRel().GetTargets()}
@@ -467,6 +469,25 @@ def load_plant(asset_root: Path, *, cutaway=True, visuals=True, motor_off=False)
         )
         collision = prim.HasAPI(UsdPhysics.CollisionAPI) and _value(prim, "physics:collisionEnabled", True)
         matrix = cache.GetLocalToWorldTransform(prim)
+        parent_path = str(prim.GetParent().GetPath())
+        if (
+            prim.GetTypeName() == "Mesh"
+            and parent_path.startswith("/Plant/WrapLine/Lines/")
+            and parent_path.endswith("/Wrapper")
+        ):
+            if collision:
+                raise ValueError(f"Wrapper visual mesh unexpectedly has authored collision: {prim.GetPath()}")
+            mesh = mesh_for(prim, visual=visuals)
+            world = np.asarray(matrix)
+            for part in mesh_components(mesh):
+                vertices = part.vertices @ world[:3, :3] + world[3, :3]
+                component = part.copy(vertices=vertices)
+                if part.normals is not None:
+                    normals = part.normals @ np.linalg.inv(world[:3, :3]).T
+                    lengths = np.linalg.norm(normals, axis=1, keepdims=True)
+                    component.normals[:] = normals / np.maximum(lengths, 1.0e-12)
+                wrappers.setdefault(parent_path, []).append((prim.GetName(), component))
+            continue
         if collision:
             add_geometry(prim, matrix, body, visual=False, collision=True)
         if visible:
@@ -722,6 +743,34 @@ def load_plant(asset_root: Path, *, cutaway=True, visuals=True, motor_off=False)
             add_source_joint(*plan)
     unsupported = {body for prim, ids, _ in constraints if prim.GetTypeName() == "PhysicsJoint" for body in ids}
     scene.articulations = [a for a in scene.articulations if articulation_bodies[a].isdisjoint(unsupported)]
+
+    for label, components in wrappers.items():
+        bodies, joints, _ = build_wrapper(builder, components, label=label, visuals=visuals)
+        scene.articulations.append(builder.articulation_count - 1)
+        for body in bodies:
+            scene.bodies[builder.body_label[body]] = body
+            scene.body_mass[body] = builder.body_mass[body]
+        for joint, kind in zip(joints, ("PhysicsRevoluteJoint", "PhysicsPrismaticJoint"), strict=True):
+            scene.joints[builder.joint_label[joint]] = joint
+            scene.joint_frames.append(
+                (
+                    [builder.joint_parent[joint], builder.joint_child[joint]],
+                    [builder.joint_X_p[joint], builder.joint_X_c[joint]],
+                    kind,
+                )
+            )
+    if wrappers:
+        scene.metadata["wrapper_mass_estimates"] = {
+            "metal_shell_thickness_m": 0.003,
+            "steel_density_kg_m3": 7850.0,
+            "aluminium_density_kg_m3": 2700.0,
+            "film_density_kg_m3": 920.0,
+            "rubber_density_kg_m3": 1100.0,
+            "rotor_effort_limit_nm": 1000.0,
+            "lift_effort_limit_n": 3000.0,
+            "lift_servo_frequency_hz": 10.0,
+            "source_has_authored_wrapper_dynamics": False,
+        }
 
     for body, mass in scene.body_mass.items():
         if not builder.body_lock_inertia[body] and mass > 0 and builder.body_mass[body] > 0:
