@@ -35,6 +35,7 @@ from newton._src.geometry.penetration_free import (
     Constraints,
     PenetrationFreeData,
     feature_support_point,
+    feature_support_slack,
     launch_limit_motion,
     launch_place_limits,
     motion_budget_fraction,
@@ -120,7 +121,13 @@ def _limiter_row(constraints: Constraints, bodies: BodyContainer, c: int, side: 
     if k == 1:
         q_support = wp.normalize(wp.quat_from_axis_angle(wp.normalize(w + wp.vec3(1.0e-12)), wp.length(w) * dt) * q)
     r = wp.quat_rotate(q, feature_support_point(constraints.feature[c, side], wp.quat_rotate_inv(q_support, n)))
-    room = constraints.limit[c][side] - reserve - wp.dot(n, bodies.position[slot] + r)
+    # Match the conservative support used by the final motion certificate.
+    room = (
+        constraints.limit[c][side]
+        - reserve
+        - feature_support_slack(constraints.feature[c, side])
+        - wp.dot(n, bodies.position[slot] + r)
+    )
     rn = wp.cross(r, n)
     mass = bodies.inverse_mass[slot] + wp.dot(rn, mat33_from_sym6(bodies.inverse_inertia_world[slot]) * rn)
     real = float(0.0)

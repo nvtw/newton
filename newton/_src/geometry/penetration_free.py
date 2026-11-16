@@ -421,14 +421,20 @@ def _feature_geom(f: ConstraintFeature) -> GenericShapeData:
 
 
 @wp.func
+def feature_support_slack(f: ConstraintFeature) -> float:
+    """Return the direction-independent support roundoff allowance [m]."""
+    magnitude = wp.length(f.local_pos) + f.reach + wp.length(f.scale) + wp.abs(f.margin)
+    return _SUPPORT_RELATIVE_SLACK * magnitude + _SUPPORT_ABSOLUTE_SLACK
+
+
+@wp.func
 def feature_support(f: ConstraintFeature, direction_body: wp.vec3) -> float:
     """Return the feature's support along a body-frame direction, relative to the center of mass.
 
     Includes the margin and a conservative float32 roundoff slack.
     """
     value = wp.dot(direction_body, f.local_pos) + _support(_feature_geom(f), f.local_rot, direction_body) + f.margin
-    magnitude = wp.length(f.local_pos) + f.reach + wp.length(f.scale) + wp.abs(f.margin)
-    return value + _SUPPORT_RELATIVE_SLACK * magnitude + _SUPPORT_ABSOLUTE_SLACK
+    return value + feature_support_slack(f)
 
 
 @wp.func

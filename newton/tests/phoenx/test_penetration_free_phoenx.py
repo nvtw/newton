@@ -213,6 +213,28 @@ def _make_run(builder, *, penetration_free, broad_phase="sap", pre_frame=None):
 
 
 class TestPenetrationFreePhoenX(unittest.TestCase):
+    def test_tight_tolerance_preserves_frictionless_sliding(self):
+        """Keep tangential speed when support roundoff exceeds the limiter reserve."""
+        builder = newton.ModelBuilder()
+        cfg = builder.ShapeConfig(mu=0.0, mu_static=0.0, margin=0.0, gap=0.002)
+        builder.add_ground_plane(cfg=cfg)
+        body = builder.add_body(xform=wp.transform((0.0, 0.0, 2.001), wp.quat_identity()))
+        builder.add_shape_sphere(body, radius=2.0, cfg=cfg)
+        tolerance = 1.0e-5
+        run = _make_run(builder, penetration_free=PenetrationFreeConfig(tolerance=tolerance))
+        velocity = run.state_0.body_qd.numpy()
+        velocity[body, 0] = 1.0
+        run.state_0.body_qd.assign(velocity)
+        for _ in range(60):
+            run.step()
+        pose = run.state_0.body_q.numpy()[body]
+        velocity = run.state_0.body_qd.numpy()[body]
+        self.assertAlmostEqual(float(pose[0]), 1.0, delta=0.01)
+        self.assertAlmostEqual(float(velocity[0]), 1.0, delta=0.01)
+        lowest = pose[2] - 2.0
+        self.assertGreaterEqual(float(lowest), -tolerance - 1.0e-6)
+        self.assertEqual(run.status_seen, 0)
+
     def _head_on_spheres(self, penetration_free):
         # Two worlds occupy the same space: the batched multi-world path must
         # certify each world and never pair bodies across worlds.
