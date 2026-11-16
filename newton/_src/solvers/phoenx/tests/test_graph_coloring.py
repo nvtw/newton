@@ -616,6 +616,24 @@ def _run_incremental_to_completion(
 class TestIncrementalGraphColoring(unittest.TestCase):
     """Tests for the one-partition-per-launch incremental partitioner."""
 
+    def test_explicit_device_overrides_default(self):
+        """Color on the requested device when another device is current."""
+        if not wp.is_cuda_available():
+            self.skipTest("Requires CPU and CUDA devices")
+        bodies = np.full((3, int(MAX_BODIES)), -1, dtype=np.int32)
+        bodies[:, :2] = [[0, 1], [0, 2], [1, 2]]
+        for device, default in (("cpu", "cuda:0"), ("cuda:0", "cpu")):
+            with self.subTest(device=device), wp.ScopedDevice(default):
+                partitioner = IncrementalContactPartitioner(3, 3, device=device)
+                elements = _make_stress_elements_array(bodies, device)
+                count = wp.array([3], dtype=wp.int32, device=device)
+                partitioner.reset(elements, count)
+                partitioner.build_csr_greedy()
+                colors = partitioner.interaction_id_to_partition.numpy()
+                self.assertEqual(int(partitioner.num_colors.numpy()[0]), 3)
+                self.assertEqual(sorted(colors.tolist()), [0, 1, 2])
+                self.assertEqual(sorted(partitioner.element_ids_by_color.numpy()[:3].tolist()), [0, 1, 2])
+
     def _workload(self, **kwargs) -> np.ndarray:
         return _generate_stress_workload(seed=0, **kwargs)
 

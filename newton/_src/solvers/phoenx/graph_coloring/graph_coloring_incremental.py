@@ -642,12 +642,14 @@ class IncrementalContactPartitioner:
                 0,
                 self.max_num_nodes,
             ],
+            device=self._overflow_flag.device,
         )
 
         wp.launch(
             partitioning_adjacency_count_kernel,
             dim=self.max_num_interactions,
             inputs=[self._adjacency_section_end_indices, elements, num_elements],
+            device=self._overflow_flag.device,
         )
 
         scan_variable_length(self._adjacency_section_end_indices, num_elements, inclusive=False)
@@ -663,24 +665,28 @@ class IncrementalContactPartitioner:
                 elements,
                 num_elements,
             ],
+            device=self._overflow_flag.device,
         )
 
         wp.launch(
             incremental_fill_minus_one_kernel,
             dim=self.max_num_interactions,
             inputs=[self._interaction_id_to_partition, num_elements],
+            device=self._overflow_flag.device,
         )
 
         wp.launch(
             incremental_init_remaining_ids_kernel,
             dim=self.max_num_interactions,
             inputs=[self._remaining_ids, num_elements],
+            device=self._overflow_flag.device,
         )
 
         wp.launch(
             incremental_init_kernel,
             dim=1,
             inputs=[self._current_color, self._num_remaining, self._partition_count, num_elements],
+            device=self._overflow_flag.device,
         )
 
     def reset_loop_state_only(self) -> None:
@@ -699,12 +705,14 @@ class IncrementalContactPartitioner:
                 self._interaction_id_to_partition,
                 self._num_elements,
             ],
+            device=self._overflow_flag.device,
         )
 
         wp.launch(
             incremental_init_remaining_ids_kernel,
             dim=self.max_num_interactions,
             inputs=[self._remaining_ids, self._num_elements],
+            device=self._overflow_flag.device,
         )
 
         wp.launch(
@@ -716,6 +724,7 @@ class IncrementalContactPartitioner:
                 self._partition_count,
                 self._num_elements,
             ],
+            device=self._overflow_flag.device,
         )
 
     def launch(self) -> None:
@@ -737,6 +746,7 @@ class IncrementalContactPartitioner:
                 self._num_remaining,
                 self._current_color,
             ],
+            device=self._overflow_flag.device,
         )
 
         # Fused compact + commit + advance, single-block tile-scan (graph-capture safe).
@@ -758,6 +768,7 @@ class IncrementalContactPartitioner:
                 self._interaction_id_to_partition,
             ],
             block_dim=int(TILE_SCAN_BLOCK_DIM),
+            device=self._overflow_flag.device,
         )
 
     def build_csr_endpoint_owner(self, *, compute_family_starts: bool = False) -> None:
@@ -778,6 +789,7 @@ class IncrementalContactPartitioner:
                 self._greedy_color_offsets,
                 int(GREEDY_MAX_COLORS),
             ],
+            device=self._overflow_flag.device,
         )
         wp.launch(
             endpoint_owner_reset_kernel,
@@ -789,12 +801,14 @@ class IncrementalContactPartitioner:
                 self._num_elements,
                 self._num_remaining,
             ],
+            device=self._overflow_flag.device,
         )
         for _ in range(_ENDPOINT_OWNER_ROUNDS):
             wp.launch(
                 endpoint_owner_clear_winners_kernel,
                 dim=self._owner_winners.shape[0],
                 inputs=[self._owner_winners],
+                device=self._overflow_flag.device,
             )
             wp.launch(
                 endpoint_owner_propose_kernel,
@@ -809,6 +823,7 @@ class IncrementalContactPartitioner:
                     self._color_tags,
                     self._owner_tentative_color,
                 ],
+                device=self._overflow_flag.device,
             )
             wp.launch(
                 endpoint_owner_commit_kernel,
@@ -825,6 +840,7 @@ class IncrementalContactPartitioner:
                     self._owner_tentative_color,
                     self._num_remaining,
                 ],
+                device=self._overflow_flag.device,
             )
         wp.launch(
             greedy_overflow_spill_kernel,
@@ -837,6 +853,7 @@ class IncrementalContactPartitioner:
                 self._overflow_flag,
                 cap,
             ],
+            device=self._overflow_flag.device,
         )
         wp.launch(
             greedy_color_histogram_kernel,
@@ -847,6 +864,7 @@ class IncrementalContactPartitioner:
                 self._greedy_color_count,
                 self._interaction_id_to_partition,
             ],
+            device=self._overflow_flag.device,
         )
         wp.launch(
             greedy_count_and_scan_color_starts_kernel,
@@ -857,6 +875,7 @@ class IncrementalContactPartitioner:
                 self._num_colors,
                 int(GREEDY_MAX_COLORS),
             ],
+            device=self._overflow_flag.device,
         )
         wp.launch(
             greedy_scatter_elements_by_color_kernel,
@@ -868,6 +887,7 @@ class IncrementalContactPartitioner:
                 self._element_ids_by_color,
                 self._num_elements,
             ],
+            device=self._overflow_flag.device,
         )
         self._sort_csr_by_body_locality()
 
@@ -909,11 +929,13 @@ class IncrementalContactPartitioner:
                 self._overflow_flag,
                 self._num_elements,
             ],
+            device=self._overflow_flag.device,
         )
         wp.launch(
             incremental_init_remaining_ids_kernel,
             dim=self.max_num_interactions,
             inputs=[self._remaining_ids, self._num_elements],
+            device=self._overflow_flag.device,
         )
         wp.capture_while(
             self._num_remaining,
@@ -938,6 +960,7 @@ class IncrementalContactPartitioner:
                     self._num_remaining,
                     self._current_color,
                 ],
+                device=self._overflow_flag.device,
             )
             wp.launch_tiled(
                 incremental_tile_compact_csr_and_advance_kernel,
@@ -956,6 +979,7 @@ class IncrementalContactPartitioner:
                     wp.int32(self._max_colored_partitions_kernel_arg),
                 ],
                 block_dim=int(TILE_SCAN_BLOCK_DIM),
+                device=self._overflow_flag.device,
             )
 
     # Greedy Mode B: JP-MIS + smallest-free-colour.
@@ -998,6 +1022,7 @@ class IncrementalContactPartitioner:
                 self._greedy_color_offsets,
                 int(GREEDY_MAX_COLORS),
             ],
+            device=self._overflow_flag.device,
         )
         wp.launch(
             incremental_reset_loop_state_csr_kernel,
@@ -1013,6 +1038,7 @@ class IncrementalContactPartitioner:
                 self._overflow_flag,
                 self._num_elements,
             ],
+            device=self._overflow_flag.device,
         )
         # Warm-start: seed ``color_tags`` from the cross-frame cache
         # before the MIS loop. Constraints whose previous-frame
@@ -1038,6 +1064,7 @@ class IncrementalContactPartitioner:
                     wp.int32(self._warm_start_invalidate_period),
                     wp.int32(self._warm_start_rotate_skip_width),
                 ],
+                device=self._overflow_flag.device,
             )
 
             wp.launch(
@@ -1054,6 +1081,7 @@ class IncrementalContactPartitioner:
                     self._warm_start_skip_color_start_plus_one,
                     self._warm_start_skip_color_end_plus_one,
                 ],
+                device=self._overflow_flag.device,
             )
             # Validation pass: detect colour conflicts under the
             # current adjacency. Two phases (mark + apply) so the
@@ -1070,6 +1098,7 @@ class IncrementalContactPartitioner:
                     wp.int32(self._max_colored_partitions_kernel_arg),
                     self._warm_start_invalid_mark,
                 ],
+                device=self._overflow_flag.device,
             )
             wp.launch(
                 warm_start_invalidate_apply_kernel,
@@ -1081,6 +1110,7 @@ class IncrementalContactPartitioner:
                     self._num_elements,
                     self._num_remaining,
                 ],
+                device=self._overflow_flag.device,
             )
         # Outer MIS loop. Three paths:
         #
@@ -1137,9 +1167,10 @@ class IncrementalContactPartitioner:
                 self._overflow_flag,
                 wp.int32(self._max_colored_partitions_kernel_arg),
             ],
+            device=self._overflow_flag.device,
         )
         if self._max_colored_partitions_kernel_arg == 0:
-            wp.launch(greedy_clear_int_kernel, dim=1, inputs=[self._num_remaining])
+            wp.launch(greedy_clear_int_kernel, dim=1, inputs=[self._num_remaining], device=self._overflow_flag.device)
         wp.launch(
             greedy_color_histogram_kernel,
             dim=self.max_num_interactions,
@@ -1149,6 +1180,7 @@ class IncrementalContactPartitioner:
                 self._greedy_color_count,
                 self._interaction_id_to_partition,
             ],
+            device=self._overflow_flag.device,
         )
         wp.launch(
             greedy_count_and_scan_color_starts_kernel,
@@ -1159,6 +1191,7 @@ class IncrementalContactPartitioner:
                 self._num_colors,
                 int(GREEDY_MAX_COLORS),
             ],
+            device=self._overflow_flag.device,
         )
         wp.launch(
             greedy_scatter_elements_by_color_kernel,
@@ -1170,6 +1203,7 @@ class IncrementalContactPartitioner:
                 self._element_ids_by_color,
                 self._num_elements,
             ],
+            device=self._overflow_flag.device,
         )
         self._sort_csr_by_body_locality()
         # Persist this build's coloring into the warm-start cache for
@@ -1199,6 +1233,7 @@ class IncrementalContactPartitioner:
                 self._ws_pair_keys,
                 self._ws_pair_values,
             ],
+            device=self._overflow_flag.device,
         )
         # Step 2: radix sort of the active prefix; the tail already holds
         # the sentinel. The sort needs 2*N buffers (ping-pong).
@@ -1214,6 +1249,7 @@ class IncrementalContactPartitioner:
                 self._num_elements,
                 self._ws_is_boundary,
             ],
+            device=self._overflow_flag.device,
         )
         # Step 4: exclusive prefix scan.
         wp.utils.array_scan(self._ws_is_boundary, self._ws_dest_idx, inclusive=False)
@@ -1222,6 +1258,7 @@ class IncrementalContactPartitioner:
             warm_start_reset_count_kernel,
             dim=1,
             inputs=[self._warm_start_cache.num_entries],
+            device=self._overflow_flag.device,
         )
         wp.launch(
             warm_start_dedup_pairs_kernel,
@@ -1237,6 +1274,7 @@ class IncrementalContactPartitioner:
                 self._warm_start_cache.colors,
                 self._warm_start_cache.num_entries,
             ],
+            device=self._overflow_flag.device,
         )
 
     def _sort_csr_by_body_locality(self) -> None:
@@ -1273,6 +1311,7 @@ class IncrementalContactPartitioner:
             else _locality_combined_keys_kernel,
             dim=n,
             inputs=locality_inputs,
+            device=self._overflow_flag.device,
         )
         radix_sort_active_prefix(
             self._locality_keys, self._locality_values, self._num_elements, self._locality_prefix_flags
@@ -1285,6 +1324,7 @@ class IncrementalContactPartitioner:
                 self._num_elements,
                 self._element_ids_by_color,
             ],
+            device=self._overflow_flag.device,
         )
         if not self._compute_color_family_starts:
             return
@@ -1292,6 +1332,7 @@ class IncrementalContactPartitioner:
             _zero_color_family_count_kernel,
             dim=self._color_family_count.shape[0],
             inputs=[self._color_family_count],
+            device=self._overflow_flag.device,
         )
         wp.launch(
             _count_color_families_kernel,
@@ -1304,6 +1345,7 @@ class IncrementalContactPartitioner:
                 self._num_elements,
                 self._color_family_count,
             ],
+            device=self._overflow_flag.device,
         )
         wp.launch(
             _scan_color_family_starts_kernel,
@@ -1318,13 +1360,14 @@ class IncrementalContactPartitioner:
                 wp.int32(self._max_colored_partitions_kernel_arg),
                 self._color_singleton_end,
             ],
+            device=self._overflow_flag.device,
         )
 
     def _capture_jp_fallback_step(self) -> None:
         """Greedy->JP fallback capture_while body. Clears fallback flag so the
         outer capture_while exits after one iteration."""
         self._build_csr_inner()
-        wp.launch(greedy_clear_int_kernel, dim=1, inputs=[self._fallback_flag])
+        wp.launch(greedy_clear_int_kernel, dim=1, inputs=[self._fallback_flag], device=self._overflow_flag.device)
 
     def _capture_build_csr_greedy_step(self) -> None:
         """build_csr_greedy capture_while body. Unrolled NUM_INNER_WHILE_ITERATIONS
@@ -1351,6 +1394,7 @@ class IncrementalContactPartitioner:
                     wp.int32(self._max_colored_partitions_kernel_arg),
                 ],
                 block_dim=_GREEDY_BLOCK_DIM,
+                device=self._overflow_flag.device,
             )
         # No iter-cap watcher needed: the outer host-side loop in
         # :meth:`_build_csr_greedy_inner` is bounded by
@@ -1392,6 +1436,7 @@ class IncrementalContactPartitioner:
                     self._spec_tentative_color,
                 ],
                 block_dim=_GREEDY_BLOCK_DIM,
+                device=self._overflow_flag.device,
             )
             wp.launch(
                 speculative_validate_commit_kernel,
@@ -1410,6 +1455,7 @@ class IncrementalContactPartitioner:
                     wp.int32(self._max_colored_partitions_kernel_arg),
                 ],
                 block_dim=_GREEDY_BLOCK_DIM,
+                device=self._overflow_flag.device,
             )
             # Force exit when the forbidden mask saturated -- without
             # this the capture_while spins forever on dense graphs
@@ -1419,6 +1465,7 @@ class IncrementalContactPartitioner:
                 speculative_overflow_exit_kernel,
                 dim=1,
                 inputs=[self._overflow_flag, self._num_remaining],
+                device=self._overflow_flag.device,
             )
 
     def begin_sweep(self) -> None:
@@ -1430,6 +1477,7 @@ class IncrementalContactPartitioner:
             incremental_begin_sweep_kernel,
             dim=1,
             inputs=[self._num_colors, self._color_cursor, self._sweep_direction, advance],
+            device=self._overflow_flag.device,
         )
 
     def set_warm_start_invalidate_period(self, period: int) -> None:

@@ -40,7 +40,7 @@ def sort_variable_length_int(
     keys: wp.array[int], values: wp.array[int], active_length: wp.array[int], end_bit: int | None = None
 ) -> None:
     count = keys.shape[0] // 2
-    wp.launch(_mask_tail_int, dim=count, inputs=[keys, active_length])
+    wp.launch(_mask_tail_int, dim=count, inputs=[keys, active_length], device=keys.device)
     # ``end_bit`` lets callers cap the radix passes when the key range is known
     # to be small (e.g. a world id). The inactive-tail sentinel is INT32_MAX, so
     # its low ``end_bit`` bits (2**end_bit - 1) still exceed any in-range key and
@@ -63,7 +63,7 @@ def sort_variable_length_int64(
     """
     count = keys.shape[0] // 2
     if not tail_masked:
-        wp.launch(_mask_tail_int64, dim=count, inputs=[keys, active_length])
+        wp.launch(_mask_tail_int64, dim=count, inputs=[keys, active_length], device=keys.device)
     # As for ``sort_variable_length_int``: callers whose nonnegative keys stay
     # below ``2**end_bit - 1`` get the full-width order with fewer passes.
     if prefix_flags is None:
