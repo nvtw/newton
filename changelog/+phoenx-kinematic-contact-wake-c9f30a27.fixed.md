@@ -1,0 +1,1 @@
+Preserve kinematic contact and joint endpoints during PhoenX sleeping island construction, and wake previous contact islands before moving kinematic supports leave collision detection. Reset quiet hysteresis on wake so newly unsupported bodies can fall.

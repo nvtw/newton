@@ -262,6 +262,7 @@ from newton._src.solvers.phoenx.sleeping_kernels import (
     _phoenx_inject_chain_edges_kernel,
     _phoenx_island_fanin_external_input_kernel,
     _phoenx_island_max_velocity_kernel,
+    _phoenx_kinematic_contact_wake_kernel,
     _phoenx_mark_sleeping_islands_kernel,
     _phoenx_propagate_sleep_to_bodies_kernel,
     _phoenx_seed_uf_num_interactions_kernel,
@@ -3604,6 +3605,7 @@ class PhoenXWorld:
                 wp.int32(self.num_joints),
                 self._joint_pgs_enabled,
                 wp.int32(1 if self._island_builder is not None else 0),
+                wp.int32(self._sleeping_enabled),
                 wp.int32(self.joint_coloring_priority),
                 wp.int32(self.num_cloth_triangles),
                 wp.int32(self.num_cloth_bending),
@@ -3636,8 +3638,8 @@ class PhoenXWorld:
             )
 
     def wake_on_external_input(self) -> None:
-        """Wake every island whose bodies carry a user-applied force or
-        torque, *before* ``CollisionPipeline.collide()`` runs the broad phase.
+        """Wake islands receiving a user wrench or moving kinematic support,
+        *before* ``CollisionPipeline.collide()`` runs the broad phase.
 
         The per-step sleeping pass inside :meth:`step` cannot drive
         broad-phase decisions on the wake frame: by the time it clears
@@ -3666,6 +3668,16 @@ class PhoenXWorld:
             outputs=[self._island_has_external_input],
             device=self.device,
         )
+        if self._ingest_scratch is not None and self.max_contact_columns > 0:
+            # These are the preceding collision's edges. Wake now, before a
+            # departing kinematic support disappears from the next broad phase.
+            wp.launch(
+                _phoenx_kinematic_contact_wake_kernel,
+                dim=self.max_contact_columns,
+                inputs=[self.bodies, self._contact_cols, self._ingest_scratch.num_contact_columns],
+                outputs=[self._island_has_external_input],
+                device=self.device,
+            )
         wp.launch(
             _phoenx_apply_island_wake_kernel,
             dim=self.num_bodies,

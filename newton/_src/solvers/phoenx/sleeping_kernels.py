@@ -86,6 +86,7 @@ __all__ = [
     "_phoenx_island_fanin_external_input_kernel",
     "_phoenx_island_max_velocity_kernel",
     "_phoenx_joint_activity_kernel",
+    "_phoenx_kinematic_contact_wake_kernel",
     "_phoenx_mark_sleeping_islands_kernel",
     "_phoenx_propagate_sleep_to_bodies_kernel",
     "_phoenx_seed_uf_num_interactions_kernel",
@@ -584,6 +585,7 @@ def _phoenx_apply_wake_flag_kernel(
         return
     if wake_flag[root] != wp.int32(0):
         bodies.island_root[b] = wp.int32(-1)
+        bodies.frames_below_threshold[b] = wp.int32(0)
 
 
 @wp.kernel(enable_backward=False)
@@ -608,6 +610,49 @@ def _phoenx_island_fanin_external_input_kernel(
 
 
 @wp.kernel(enable_backward=False)
+def _phoenx_kinematic_contact_wake_kernel(
+    bodies: BodyContainer,
+    columns: ContactColumnContainer,
+    num_columns: wp.array[wp.int32],
+    island_has_external: wp.array[wp.int32],
+):
+    """Wake old contact islands before a moving support can leave broad phase."""
+    cid = wp.tid()
+    if cid >= num_columns[0]:
+        return
+    first = contact_get_body1(columns, cid)
+    second = contact_get_body2(columns, cid)
+    for side in range(2):
+        mover, supported = first, second
+        if side == 1:
+            mover, supported = second, first
+        if (
+            mover < 0
+            or supported < 0
+            or mover >= bodies.motion_type.shape[0]
+            or supported >= bodies.motion_type.shape[0]
+        ):
+            continue
+        if bodies.motion_type[mover] != MOTION_KINEMATIC:
+            continue
+        root = bodies.island_root[supported]
+        if root < 0:
+            continue
+        moving = False
+        if bodies.kinematic_target_valid[mover] != 0:
+            delta = bodies.kinematic_target_pos[mover] - bodies.position[mover]
+            q = bodies.orientation[mover]
+            target = bodies.kinematic_target_orient[mover]
+            # Ignore roundoff in COM/frame conversion and quaternion sign flips.
+            rotation_error = wp.min(wp.dot(target - q, target - q), wp.dot(target + q, target + q))
+            moving = wp.length_sq(delta) > 1.0e-12 or rotation_error > 1.0e-12
+        else:
+            moving = wp.length_sq(bodies.velocity[mover]) > 0.0 or wp.length_sq(bodies.angular_velocity[mover]) > 0.0
+        if moving:
+            wp.atomic_max(island_has_external, root, wp.int32(1))
+
+
+@wp.kernel(enable_backward=False)
 def _phoenx_apply_island_wake_kernel(
     bodies: BodyContainer,
     island_has_external: wp.array[wp.int32],
@@ -619,6 +664,7 @@ def _phoenx_apply_island_wake_kernel(
         return
     if island_has_external[root] != wp.int32(0):
         bodies.island_root[b] = wp.int32(-1)
+        bodies.frames_below_threshold[b] = wp.int32(0)
 
 
 # ---------------------------------------------------------------------------

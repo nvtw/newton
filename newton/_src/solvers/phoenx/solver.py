@@ -1964,8 +1964,8 @@ class SolverPhoenX(SolverBase):
             )
 
     def wake_on_external_input(self, state_in: State) -> None:
-        """Wake every sleeping island whose bodies carry an external
-        force or torque set in ``state_in.body_f``, *before* the host
+        """Wake sleeping islands affected by external forces, torques,
+        or changed kinematic contact targets, *before* the host
         calls ``CollisionPipeline.collide(...)``.
 
         The per-step sleeping pass inside :meth:`step` cannot drive
@@ -1979,6 +1979,9 @@ class SolverPhoenX(SolverBase):
             solver.wake_on_external_input(state)  # propagate wake
             collision_pipeline.collide(state, contacts)  # broad-phase keeps pairs
             solver.step(state, state_out, ...)
+
+        Previous contact edges wake islands when their kinematic support moves,
+        even if the next collision pass no longer finds that support.
 
         Imports ``state_in.body_f`` into PhoenX's force accumulators
         first so the wake pass reads the user-applied wrench rather

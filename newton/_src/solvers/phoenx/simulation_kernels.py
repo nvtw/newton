@@ -2455,10 +2455,11 @@ def _contact_soft_tet_active_nodes(
 
 
 @wp.func
-def _rigid_graph_node(node: wp.int32, bodies: BodyContainer):
+def _rigid_graph_node(node: wp.int32, bodies: BodyContainer, preserve_kinematic: wp.int32):
     if node >= 0:
         if bodies.inverse_mass[node] == 0.0:
-            node = -1
+            if preserve_kinematic == 0 or bodies.motion_type[node] != MOTION_KINEMATIC:
+                node = -1
         else:
             node = bodies.constraint_node[node]
     return node
@@ -2479,15 +2480,13 @@ def _contact_primary_graph_node(
     bodies: BodyContainer,
     particles: ParticleContainer,
     num_bodies: wp.int32,
+    preserve_kinematic: wp.int32,
 ):
     if node >= 0:
         if side_kind == wp.int32(SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON) and not use_node:
             node = -1
         elif side_kind == wp.int32(SHAPE_ENDPOINT_KIND_RIGID):
-            if bodies.inverse_mass[node] == 0.0:
-                node = -1
-            else:
-                node = bodies.constraint_node[node]
+            node = _rigid_graph_node(node, bodies, preserve_kinematic)
         else:
             if particles.inverse_mass[node - num_bodies] == 0.0:
                 node = -1
@@ -2736,6 +2735,7 @@ def _constraints_to_elements_kernel(
     num_joints: wp.int32,
     joint_pgs_enabled: wp.array[wp.int32],
     preserve_equality_island_edges: wp.int32,
+    preserve_kinematic_island_edges: wp.int32,
     joint_coloring_priority: wp.int32,
     num_cloth_triangles: wp.int32,
     num_cloth_bending: wp.int32,
@@ -2784,8 +2784,8 @@ def _constraints_to_elements_kernel(
             return
         b1 = constraint_get_body1(constraints, tid)
         b2 = constraint_get_body2(constraints, tid)
-        b1 = _rigid_graph_node(b1, bodies)
-        b2 = _rigid_graph_node(b2, bodies)
+        b1 = _rigid_graph_node(b1, bodies, preserve_kinematic_island_edges)
+        b2 = _rigid_graph_node(b2, bodies, preserve_kinematic_island_edges)
         elements[tid] = _element_data_compact2(b1, b2)
         if track_rigid_topology != wp.int32(0):
             _record_rigid_topology(tid, b1, b2, previous_topology, topology_rebuild)
@@ -2911,8 +2911,12 @@ def _constraints_to_elements_kernel(
     # contacts and wake the impacted island (e.g. a camera collider
     # moving into a sleeping stack). Pure STATIC bodies still
     # collapse to -1.
-    b1 = _contact_primary_graph_node(b1, side0_kind, side0_use0, bodies, particles, num_bodies)
-    b2 = _contact_primary_graph_node(b2, side1_kind, side1_use0, bodies, particles, num_bodies)
+    b1 = _contact_primary_graph_node(
+        b1, side0_kind, side0_use0, bodies, particles, num_bodies, preserve_kinematic_island_edges
+    )
+    b2 = _contact_primary_graph_node(
+        b2, side1_kind, side1_use0, bodies, particles, num_bodies, preserve_kinematic_island_edges
+    )
 
     # Resolve up to three extra nodes per side. Rigid sides leave all
     # extras at -1; cloth-tri sides populate two; soft-tet sides populate
