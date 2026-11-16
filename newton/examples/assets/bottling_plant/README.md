@@ -128,6 +128,18 @@ measurements in the early production window, not sustained production results.
 Both controller reports matched at 12.5 simulated seconds. Keep mass splitting
 disabled by default until filled-carton stacking and later logistics pass.
 
+A later support-footprint regression exposed an independent solver-side contact
+cap, which could retain just one approaching support point. Removing that cap
+preserves the collision pipeline's manifold and supersedes the performance
+comparison above: a matched early factory pair increased from 30.84 to
+35.89 ms/physics frame while solving 67,779 rather than 51,182 contact points.
+The temporal joint-motion correction has no measurable additional early-frame
+cost. Corrected rendered throughput remains unmeasured. Canonical collision
+body-pair reduction with latest matching passed bounded stack, force, and creep
+controls, but increased factory physics time from 36.32 to 37.45 ms/frame and
+remains disabled. Filled cartons using runtime tape joints still fail the strict
+rest test, despite the passing equivalent rigid-compound control.
+
 The wrapper arm and film carriage are reconstructed from disconnected components
 of the source material meshes. A revolute drive physically parks the arm clear
 of the infeed; a prismatic drive supports the carriage. The source supplies no
