@@ -103,6 +103,31 @@ stock or unlimited operation. Autonomous
 logistics and continuous replenishment remain incomplete as described above.
 No 60 rendered FPS result has been validated for sustained end-to-end production.
 
+Color-cap experiments are available through `--mass-splitting` and
+`--max-colored-partitions`. With temporal iterations, this uses CUDA unrolled
+overflow-only mass splitting. The default keeps mass splitting disabled.
+For a controlled comparison, retain `--substeps 2 --iterations 24
+--temporal-iterations --contact-hertz 80` in both runs; add
+`--mass-splitting --max-colored-partitions 12` only to the candidate.
+Timing output includes the actual partition count and overflow size.
+
+An initial twelve-color experiment failed the captured real-carton stability
+test because overflow copies changed the effective normal compliance. After
+preserving physical compliance across copies, the same test measured 0.15 mm
+relative pose excursion with twelve colors, versus 0.19 mm without splitting,
+with no bottle-to-floor contacts through the carton. Force and momentum checks
+also pass. This does not establish stability of multiple stacked filled cartons.
+
+A matched short full-factory comparison with the compliance correction measured
+30.66 ms/frame without splitting and 27.37 ms/frame with twelve regular colors
+plus overflow. With the legacy OptiX viewer at 1920 by 1080, one sample and three
+bounces, the corresponding measurements were 31.22 and 29.26 ms/frame
+(32.03 and 34.18 FPS). Each measurement used 120 timed frames following 600
+physics warmup frames; rendering added 30 warmup frames. These are single paired
+measurements in the early production window, not sustained production results.
+Both controller reports matched at 12.5 simulated seconds. Keep mass splitting
+disabled by default until filled-carton stacking and later logistics pass.
+
 The wrapper arm and film carriage are reconstructed from disconnected components
 of the source material meshes. A revolute drive physically parks the arm clear
 of the infeed; a prismatic drive supports the carriage. The source supplies no
