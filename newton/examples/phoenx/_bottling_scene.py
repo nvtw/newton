@@ -204,6 +204,8 @@ def load_plant(asset_root: Path, *, cutaway=True, visuals=True, motor_off=False,
     cache = UsdGeom.XformCache()
     scene = PlantScene(newton.ModelBuilder())
     builder = scene.builder
+    # Carrier-box walls authored for convex decomposition, as PhysX cooks them.
+    decomposed = []
     collision_table = UsdPhysics.CollisionGroup.ComputeCollisionGroupTable(stage)
     collision_groups = collision_table.GetGroups()
     if len(collision_groups) > 64:
@@ -528,6 +530,8 @@ def load_plant(asset_root: Path, *, cutaway=True, visuals=True, motor_off=False,
                 if collision and approximation == "convexHull" and velocity is None
                 else builder.add_shape_mesh
             )
+            if collision and approximation == "convexDecomposition" and "/Geom/Walls/" in kw["label"] and body >= 0:
+                decomposed.append(builder.shape_count)
             add(body, mesh=mesh, scale=scale, **kw)
         elif kind == "Cube":
             half = float(_value(prim, "size", 2.0)) / 2.0
@@ -915,6 +919,18 @@ def load_plant(asset_root: Path, *, cutaway=True, visuals=True, motor_off=False,
             "source_has_authored_wrapper_dynamics": False,
         }
 
+    if decomposed:
+        # Case walls touch neighbouring cases on pallets. As triangle meshes
+        # those pairs need costly mesh-mesh contact; seven convex slabs per
+        # wall keep its 3.2 mm thickness (CoACD's remeshing would double it).
+        # Robot links keep their triangle surfaces. Parts add no mass.
+        builder.approximate_meshes(
+            "coacd",
+            shape_indices=decomposed,
+            raise_on_failure=True,
+            cache_dir=newton.config.cache_dir_meshes or Path.home() / ".cache/newton/convex",
+            preprocess_mode="off",
+        )
     for body, mass in scene.body_mass.items():
         if not builder.body_lock_inertia[body] and mass > 0 and builder.body_mass[body] > 0:
             ratio = mass / builder.body_mass[body]
