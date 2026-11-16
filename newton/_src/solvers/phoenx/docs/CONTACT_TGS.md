@@ -15,8 +15,9 @@ Run the default OptiX viewer (the same renderer as the Kapla tower):
 uv run -m newton.examples phoenx_colibri
 ```
 
-Use `--viewer gl` to select OpenGL explicitly. OptiX requires `pyoptix` and
-`warp_optix` from the local otk-pyoptix installation.
+Use `--viewer gl` to select OpenGL explicitly. OptiX uses the standalone
+`warp-optix` 0.3 package with its `pathtracing,ui` extras and pinned PyOptiX
+dependency. See the visualization guide for DLSS build and driver requirements.
 
 For a headless minute of simulation with physical checks:
 

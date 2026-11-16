@@ -103,7 +103,7 @@ class TestViewerOptix(unittest.TestCase):
                         origin = wp.vec3(*offset) + wp.vec3(0.0, 0.0, 1.0)
                         direction = wp.vec3(0.0, 0.0, -1.0)
                         viewer.picking.pick(state, origin, direction)
-                        self.assertEqual(int(viewer.picking.pick_body.numpy()[0]), index)
+                        self.assertEqual(viewer.picking.pick_body, index)
                         viewer.picking.update(origin, direction)
                         viewer.apply_forces(state)
                         actual = state.body_f.numpy().copy()
@@ -179,6 +179,16 @@ class TestViewerOptix(unittest.TestCase):
             width=64, height=48, device="cuda:0", headless=True, enable_imgui=False, enable_dlss_rr=False
         )
         try:
+            self.assertEqual(viewer.active_denoiser, "none")
+            viewer.dlss_quality = "quality"
+            self.assertEqual(viewer.dlss_quality, "quality")
+            self.assertEqual(viewer._api.dlss_quality, "max_quality")
+            viewer.dlss_quality = "native"
+            self.assertEqual(viewer.dlss_quality, "native")
+            self.assertEqual(viewer._api.dlss_quality, "dlaa")
+            viewer.dlss_quality = "performance"
+            self.assertEqual(viewer.dlss_quality, "performance")
+            self.assertEqual(viewer._api.dlss_quality, "max_perf")
             viewer.set_model(model)
             viewer.set_world_offsets((4.0, 0.0, 0.0))
             state = model.state()
@@ -224,6 +234,9 @@ class TestViewerOptix(unittest.TestCase):
                 viewer.log_state(state)
                 viewer.end_frame()
                 self.assertTrue(all(b.hidden != visible for b in viewer._batches.values()))
+            frame = viewer.get_frame().numpy()
+            self.assertEqual(frame.shape, (48, 64, 3))
+            self.assertGreater(int(np.ptp(frame)), 0)
         finally:
             viewer.close()
 

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import ctypes
+import logging
 import math
 from collections.abc import Callable, Sequence
 from typing import Any, Literal
@@ -19,8 +20,11 @@ from .picking import Picking
 from .viewer import _DEFAULT_LAYER_ID, Layer, ViewerBase
 from .viewer_gui import ViewerGui
 
+logger = logging.getLogger(__name__)
+
 try:
-    from warp_optix.pathtracing import PathTracingViewerBackend as _PathTracingViewerBackend
+    from warp_optix.pathtracing import ViewerBackend as _PathTracingViewerBackend
+    from warp_optix.pathtracing import dlss_rr_requirements as _dlss_rr_requirements
 except ImportError as error:
     _WARP_OPTIX_IMPORT_ERROR: ImportError | None = error
 
@@ -30,7 +34,7 @@ except ImportError as error:
         def __init__(self, *args, **kwargs):
             del args, kwargs
             raise ImportError(
-                "ViewerOptix requires warp-optix with its pathtracing extras. "
+                "ViewerOptix requires warp-optix 0.3 with its pathtracing extras. "
                 "Install warp-optix before creating the viewer."
             ) from _WARP_OPTIX_IMPORT_ERROR
 
@@ -154,7 +158,7 @@ class _OptixOverlayRenderer:
 class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
     """Interactive OptiX path-tracing viewer with DLSS Ray Reconstruction.
 
-    This viewer adapts :class:`warp_optix.pathtracing.PathTracingViewerBackend`
+    This viewer adapts :class:`warp_optix.pathtracing.ViewerBackend`
     to Newton's common viewer interface. It supports Newton model/state logging,
     camera navigation, body picking, an ImGui overlay, and headless frame
     extraction. Rendering and DLSS are provided by the separately installed
@@ -260,11 +264,11 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
             contrast: Display contrast multiplier.
             saturation: Display saturation multiplier.
             **kwargs: Additional arguments forwarded to
-                ``PathTracingViewerBackend``.
+                ``warp_optix.pathtracing.ViewerBackend``.
         """
         if _WARP_OPTIX_IMPORT_ERROR is not None:
             raise ImportError(
-                "ViewerOptix requires warp-optix with its pathtracing extras. "
+                "ViewerOptix requires warp-optix 0.3 with its pathtracing extras. "
                 "Install warp-optix before creating the viewer."
             ) from _WARP_OPTIX_IMPORT_ERROR
 
@@ -320,6 +324,16 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
         self._overlay_depth_cuda = None
         self._overlay_depth_size = (0, 0)
         kwargs.setdefault("picking_factory", _make_picking)
+        if "denoiser" not in kwargs:
+            kwargs["denoiser"] = "auto" if enable_dlss_rr else "none"
+            if enable_dlss_rr and kwargs.get("api") is None:
+                support = _dlss_rr_requirements(kwargs.get("device", "cuda"))
+                if support["supported"]:
+                    kwargs["denoiser"] = "dlss"
+                else:
+                    logger.warning(
+                        "DLSS Ray Reconstruction unavailable; using automatic denoising: %s", support["reason"]
+                    )
         super().__init__(
             width=width,
             height=height,
@@ -329,8 +343,9 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
             paused=paused,
             render_when_paused=True,
             num_frames=num_frames,
-            enable_dlss_rr=enable_dlss_rr,
-            dlss_quality=dlss_quality,
+            dlss_quality={"performance": "max_perf", "quality": "max_quality", "native": "dlaa"}.get(
+                dlss_quality, dlss_quality
+            ),
             samples_per_frame=samples_per_frame,
             max_bounces=max_bounces,
             direct_light_samples=direct_light_samples,
@@ -390,6 +405,18 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
         self._vsync = bool(enabled)
         if self._presenter is not None:
             self._presenter.window.set_vsync(self._vsync)
+
+    @property
+    def dlss_quality(self) -> str:
+        """Return the current DLSS quality using Newton's existing mode names."""
+        value = self._api.dlss_quality
+        return {"max_perf": "performance", "max_quality": "quality", "dlaa": "native"}.get(value, value)
+
+    @dlss_quality.setter
+    def dlss_quality(self, value: str) -> None:
+        """Update DLSS quality, accepting the existing Newton mode names."""
+        quality = {"performance": "max_perf", "quality": "max_quality", "native": "dlaa"}.get(value, value)
+        self.set_denoiser(self.denoiser, dlss_quality=quality)
 
     @property
     def exposure(self) -> float:
@@ -653,8 +680,8 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
 
     def _ui_populate_rendering_panel(self, imgui) -> None:
         """Render OptiX-specific controls inside the shared rendering panel."""
-        imgui.text("DLSS RR: active" if self._api.dlss_enabled else "DLSS RR: inactive")
-        quality_modes = list(self._api.viewer.DLSS_QUALITY_MODES)
+        imgui.text(f"Denoiser: {self.active_denoiser}")
+        quality_modes = ["performance", "balanced", "quality", "ultra_performance", "native"]
         quality_index = quality_modes.index(self.dlss_quality)
         changed, quality_index = imgui.combo("DLSS Quality", quality_index, quality_modes)
         if changed:
@@ -673,7 +700,7 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
         )
         if changed:
             self.set_ray_budget(russian_roulette_start_bounce=roulette_start)
-        if not self._api.dlss_enabled:
+        if self.active_denoiser != "dlss":
             changed, samples_per_frame = imgui.slider_int("Samples Per Frame", self.samples_per_frame, 1, 8)
             if changed:
                 self.set_ray_budget(samples_per_frame=samples_per_frame)
@@ -1532,6 +1559,21 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
         from .gl.opengl import update_line_batch  # noqa: PLC0415
 
         update_line_batch(self.arrows, self._qualify(name), starts, ends, colors, self.device, hidden=hidden)
+
+    @override
+    def log_points(self, name, points, radii=None, colors=None, hidden: bool = False):
+        """Accept point logs; point-cloud rendering is not supported by this viewer."""
+        del name, points, radii, colors, hidden
+
+    @override
+    def log_array(self, name, array):
+        """Accept array logs; array plots are not supported by this viewer."""
+        del name, array
+
+    @override
+    def log_scalar(self, name, value, *, clear: bool = False, smoothing: int = 1):
+        """Accept scalar logs; scalar plots are not supported by this viewer."""
+        del name, value, clear, smoothing
 
     @override
     def end_frame(self) -> None:
