@@ -19,6 +19,7 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton._src.exceptions import NewtonDeprecationWarning
 from newton._src.geometry.broad_phase_implicit_tree import BroadPhaseImplicitTree
 from newton._src.geometry.types import GeoType
 from newton._src.sim import BodyFlags, CollisionPipeline, Contacts, Control, JointType, Model, ModelFlags, State
@@ -642,7 +643,7 @@ class SolverPhoenX(SolverBase):
         if solver_flavor is not None:
             warnings.warn(
                 "SolverPhoenX.solver_flavor is deprecated; omit it to use the production solver.",
-                DeprecationWarning,
+                NewtonDeprecationWarning,
                 stacklevel=2,
             )
             if solver_flavor != "standard":
@@ -652,7 +653,7 @@ class SolverPhoenX(SolverBase):
         if jacobi_max_colors is not None:
             warnings.warn(
                 "SolverPhoenX.jacobi_max_colors is deprecated and has no effect.",
-                DeprecationWarning,
+                NewtonDeprecationWarning,
                 stacklevel=2,
             )
         joint_modes = {

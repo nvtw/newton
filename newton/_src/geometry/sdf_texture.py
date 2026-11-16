@@ -868,10 +868,11 @@ def _read_cell_corners(
             (``cw_mul(clamped - sdf_box_lower, inv_sdf_dx)``).
 
     Returns:
-        ``(corners, tx, ty, tz, inverse_spacing_scale)`` where *corners* packs the 8 SDF values as
+        ``(corners, tx, ty, tz, cell_fraction)`` where *corners* packs the 8 SDF values as
         ``[v000, v100, v010, v110, v001, v101, v011, v111]`` and
         ``(tx, ty, tz)`` are the fractional interpolation weights in [0, 1].
-        The final value scales fine-grid inverse spacing to the sampled cell.
+        ``cell_fraction`` converts fine-grid inverse spacing to this cell's
+        inverse spacing (one for fine cells, ``fine_to_coarse`` otherwise).
     """
     loc = _locate_cell(sdf, f)
 
@@ -887,8 +888,10 @@ def _read_cell_corners(
     tx = loc.tx
     ty = loc.ty
     tz = loc.tz
+    cell_fraction = float(1.0)
 
     if loc.start_slot >= SLOT_LINEAR:
+        cell_fraction = sdf.fine_to_coarse
         cx = float(loc.x_base)
         cy = float(loc.y_base)
         cz = float(loc.z_base)
@@ -932,10 +935,7 @@ def _read_cell_corners(
         v111 = apply_subgrid_sdf_scale(v111, sdf.subgrids_min_sdf_value, sdf.subgrids_sdf_value_range)
 
     corners = vec8f(v000, v100, v010, v110, v001, v101, v011, v111)
-    inverse_spacing_scale = float(1.0)
-    if loc.start_slot >= SLOT_LINEAR:
-        inverse_spacing_scale = sdf.fine_to_coarse
-    return corners, tx, ty, tz, inverse_spacing_scale
+    return corners, tx, ty, tz, cell_fraction
 
 
 @wp.func
@@ -1753,7 +1753,7 @@ def texture_sample_sdf_grad(
     diff_mag = wp.length(diff)
 
     f = wp.cw_mul(clamped - sdf.sdf_box_lower, sdf.inv_sdf_dx)
-    corners, tx, ty, tz, inverse_spacing_scale = _read_cell_corners(sdf, f)
+    corners, tx, ty, tz, cell_fraction = _read_cell_corners(sdf, f)
 
     sdf_val = _trilinear(corners, tx, ty, tz)
 
@@ -1775,8 +1775,7 @@ def texture_sample_sdf_grad(
     gy = omtx * omtz * (v010 - v000) + tx * omtz * (v110 - v100) + omtx * tz * (v011 - v001) + tx * tz * (v111 - v101)
     gz = omtx * omty * (v001 - v000) + tx * omty * (v101 - v100) + omtx * ty * (v011 - v010) + tx * ty * (v111 - v110)
 
-    inv_spacing = sdf.inv_sdf_dx * inverse_spacing_scale
-    grad = wp.cw_mul(wp.vec3(gx, gy, gz), inv_spacing)
+    grad = wp.cw_mul(wp.vec3(gx, gy, gz), sdf.inv_sdf_dx) * cell_fraction
 
     if diff_mag > 0.0:
         sdf_val = sdf_val + diff_mag

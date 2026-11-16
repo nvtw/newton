@@ -1,1 +1,1 @@
-Optimize dodecahedral contact-normal bin lookup using scalar constants and fixed search ranges, preserving the existing twelve-bin selection policy and 100-slot spatial depth budget. No API or scene migration is required.
+Use optimized dodecahedral normal bins for contact reduction, retaining the 100-slot spatial depth budget for mesh and SDF contacts. No API or scene migration is required; contact selection and resulting simulation trajectories may change.

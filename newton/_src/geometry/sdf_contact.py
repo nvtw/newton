@@ -964,9 +964,9 @@ def _create_sdf_contact_funcs(
         edges much shorter than the target precision exit Brent in 0
         queries (the midpoint is already accurate enough).
 
-        After the interior search, evaluates the more promising endpoint
-        (the one closer to the unconverged bracket boundary) so that vertex
-        contacts at edge corners are not missed.
+        After the interior search, evaluates both endpoints. Nonconvex SDFs
+        can have multiple wells along an edge, so a local Brent bracket
+        cannot exclude either endpoint from containing a deeper minimum.
 
         The endpoint result is zero for an interior winner, one for ``v0``,
         and two for ``v1`` so duplicate corner contacts can honor edge ownership.
@@ -1125,14 +1125,16 @@ def _create_sdf_contact_funcs(
                     v_brent = u
                     fv = fu
 
-        # Check endpoints only while Brent's bracket still includes them.
-        # Once a bound has moved inward, Brent has already excluded that
-        # endpoint from containing the minimum.
+        # Brent's bracket only describes the local interior search. Always
+        # retain endpoint coverage, including for nonconvex distance fields.
         best_endpoint = int(0)
         best_t = x
         best_f = fx
-        if a == 0.0:
-            f_end = _sample_sdf_at_t(
+        endpoint_values = wp.vec2(0.0)
+        if wp.static(use_texture_sdf_only and not enable_heightfields):
+            endpoint_values = wp.static(sample_pair)(texture_sdf, v0, v1)
+        else:
+            endpoint_values[0] = _sample_sdf_at_t(
                 texture_sdf,
                 sdf_mesh_id,
                 v0,
@@ -1146,12 +1148,7 @@ def _create_sdf_contact_funcs(
                 hfd_sdf,
                 elevation_data,
             )
-            if f_end < best_f:
-                best_t = 0.0
-                best_f = f_end
-                best_endpoint = 1
-        if b == 1.0:
-            f_end = _sample_sdf_at_t(
+            endpoint_values[1] = _sample_sdf_at_t(
                 texture_sdf,
                 sdf_mesh_id,
                 v0,
@@ -1165,10 +1162,14 @@ def _create_sdf_contact_funcs(
                 hfd_sdf,
                 elevation_data,
             )
-            if f_end < best_f:
-                best_t = 1.0
-                best_f = f_end
-                best_endpoint = 2
+        if endpoint_values[0] < best_f:
+            best_t = 0.0
+            best_f = endpoint_values[0]
+            best_endpoint = 1
+        if endpoint_values[1] < best_f:
+            best_t = 1.0
+            best_f = endpoint_values[1]
+            best_endpoint = 2
 
         p = v0 + edge_dir * best_t
 

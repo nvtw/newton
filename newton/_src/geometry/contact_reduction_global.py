@@ -65,6 +65,7 @@ from newton._src.geometry.hashtable import (
     hashtable_find_or_insert,
 )
 
+from ..exceptions import NewtonWarning
 from ..utils.heightfield import HeightfieldData, get_triangle_shape_from_heightfield
 from .collision_core import (
     create_compute_gjk_mpr_contacts,
@@ -1134,7 +1135,7 @@ class GlobalContactReducer:
                 f"falling back to fast (non-deterministic) packing so the buffer "
                 f"holds every edge-test attempt instead of dropping ~"
                 f"{100 * (capacity - max_det_contacts) // capacity}% silently.",
-                RuntimeWarning,
+                NewtonWarning,
                 stacklevel=2,
             )
             deterministic = False

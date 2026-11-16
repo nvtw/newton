@@ -17,8 +17,9 @@ runtime overhead. Changing them requires restarting the process (standard Warp
 kernel-caching behavior).
 
 .. note::
-   The default ``"dodecahedron"`` configuration is covered on CPU and CUDA.
-   The octahedron and hexahedron configurations remain experimental.
+   Only the default ``"dodecahedron"`` polyhedron configuration is currently
+   tested on CI. Other polyhedra (icosahedron, octahedron, hexahedron) are
+   functional but should be considered experimental.
 
 **Contact Reduction Strategy Overview:**
 
@@ -64,12 +65,13 @@ import warp as wp
 # =====================================================================
 # Polyhedron for normal binning.  Determines NUM_NORMAL_BINS.
 #   "icosahedron"  -> 20 bins  (finer normal resolution)
-#   "dodecahedron" -> 12 bins  (default, good balance)
+#   "dodecahedron" -> 12 bins  (default)
 #   "octahedron"   ->  8 bins  (cheaper, coarser)
 #   "hexahedron"   ->  6 bins  (cheapest, coarsest)
 #
-# NOTE: The default dodecahedron configuration is tested on CPU and CUDA.
-# Octahedron and hexahedron remain experimental.
+# NOTE: Only the default "dodecahedron" configuration is currently tested
+# on CI. Other polyhedra are functional but should be considered
+# experimental. Use at your own discretion.
 NORMAL_BINNING_POLYHEDRON = "dodecahedron"
 
 # Scan directions per normal bin (2D extremes on each face plane).
@@ -220,28 +222,76 @@ def get_face_normal(face_idx: int) -> wp.vec3:
     """Return a face normal using scalar lookups for dodecahedra and icosahedra."""
     if wp.static(NORMAL_BINNING_POLYHEDRON == "dodecahedron"):
         if face_idx == 0:
-            return wp.vec3(0.32491969, 0.93903535, 0.11242688)
+            return wp.vec3(
+                wp.static(_DODECAHEDRON_NORMALS[0]),
+                wp.static(_DODECAHEDRON_NORMALS[1]),
+                wp.static(_DODECAHEDRON_NORMALS[2]),
+            )
         if face_idx == 1:
-            return wp.vec3(-0.66874031, 0.6687403, 0.3249197)
+            return wp.vec3(
+                wp.static(_DODECAHEDRON_NORMALS[3]),
+                wp.static(_DODECAHEDRON_NORMALS[4]),
+                wp.static(_DODECAHEDRON_NORMALS[5]),
+            )
         if face_idx == 2:
-            return wp.vec3(0.11242688, 0.32491969, 0.93903535)
+            return wp.vec3(
+                wp.static(_DODECAHEDRON_NORMALS[6]),
+                wp.static(_DODECAHEDRON_NORMALS[7]),
+                wp.static(_DODECAHEDRON_NORMALS[8]),
+            )
         if face_idx == 3:
-            return wp.vec3(-0.3249197, 0.66874031, -0.6687403)
+            return wp.vec3(
+                wp.static(_DODECAHEDRON_NORMALS[9]),
+                wp.static(_DODECAHEDRON_NORMALS[10]),
+                wp.static(_DODECAHEDRON_NORMALS[11]),
+            )
         if face_idx == 4:
-            return wp.vec3(0.93903535, 0.11242688, 0.32491969)
+            return wp.vec3(
+                wp.static(_DODECAHEDRON_NORMALS[12]),
+                wp.static(_DODECAHEDRON_NORMALS[13]),
+                wp.static(_DODECAHEDRON_NORMALS[14]),
+            )
         if face_idx == 5:
-            return wp.vec3(0.6687403, 0.3249197, -0.66874031)
+            return wp.vec3(
+                wp.static(_DODECAHEDRON_NORMALS[15]),
+                wp.static(_DODECAHEDRON_NORMALS[16]),
+                wp.static(_DODECAHEDRON_NORMALS[17]),
+            )
         if face_idx == 6:
-            return wp.vec3(-0.6687403, -0.3249197, 0.66874031)
+            return wp.vec3(
+                wp.static(_DODECAHEDRON_NORMALS[18]),
+                wp.static(_DODECAHEDRON_NORMALS[19]),
+                wp.static(_DODECAHEDRON_NORMALS[20]),
+            )
         if face_idx == 7:
-            return wp.vec3(-0.93903535, -0.11242688, -0.32491969)
+            return wp.vec3(
+                wp.static(_DODECAHEDRON_NORMALS[21]),
+                wp.static(_DODECAHEDRON_NORMALS[22]),
+                wp.static(_DODECAHEDRON_NORMALS[23]),
+            )
         if face_idx == 8:
-            return wp.vec3(0.3249197, -0.66874031, 0.6687403)
+            return wp.vec3(
+                wp.static(_DODECAHEDRON_NORMALS[24]),
+                wp.static(_DODECAHEDRON_NORMALS[25]),
+                wp.static(_DODECAHEDRON_NORMALS[26]),
+            )
         if face_idx == 9:
-            return wp.vec3(-0.11242688, -0.32491969, -0.93903535)
+            return wp.vec3(
+                wp.static(_DODECAHEDRON_NORMALS[27]),
+                wp.static(_DODECAHEDRON_NORMALS[28]),
+                wp.static(_DODECAHEDRON_NORMALS[29]),
+            )
         if face_idx == 10:
-            return wp.vec3(0.66874031, -0.6687403, -0.3249197)
-        return wp.vec3(-0.32491969, -0.93903535, -0.11242688)
+            return wp.vec3(
+                wp.static(_DODECAHEDRON_NORMALS[30]),
+                wp.static(_DODECAHEDRON_NORMALS[31]),
+                wp.static(_DODECAHEDRON_NORMALS[32]),
+            )
+        return wp.vec3(
+            wp.static(_DODECAHEDRON_NORMALS[33]),
+            wp.static(_DODECAHEDRON_NORMALS[34]),
+            wp.static(_DODECAHEDRON_NORMALS[35]),
+        )
     if wp.static(NORMAL_BINNING_POLYHEDRON != "icosahedron"):
         return FACE_NORMALS[face_idx]
     if face_idx == 0:

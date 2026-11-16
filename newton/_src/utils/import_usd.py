@@ -3220,6 +3220,6 @@ def _raise_on_stage_errors(usd_stage, stage_source: str, *, ignore: bool = False
     formatted = "\n".join(f"- {message}" for message in messages)
     message = f"USD stage has composition errors while loading {stage_source}:\n{formatted}"
     if ignore:
-        warnings.warn(message, stacklevel=_external_warning_stacklevel())
+        warnings.warn(message, NewtonWarning, stacklevel=_external_warning_stacklevel())
         return
     raise RuntimeError(message)
