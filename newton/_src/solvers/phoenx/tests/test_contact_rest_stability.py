@@ -23,7 +23,7 @@ import warp as wp
 
 import newton
 from newton._src.solvers.phoenx.tests.test_stacking import _PhoenXScene
-from newton.examples.phoenx._bottling_control import _seal_cases
+from newton.examples.phoenx._bottling_control import _attach_sealed_flaps, _seal_cases
 from newton.solvers import SolverPhoenX
 
 #: Kapla plank half extents [m]: 8 mm thick, 100 mm long, 25 mm tall.
@@ -444,6 +444,30 @@ class TestSealedCartonStack(unittest.TestCase):
                 ],
             )
             np.testing.assert_array_equal(sealed.numpy(), [1, 1])
+            # As in the factory, sealed flap shapes move onto their case body.
+            collide = (model.shape_flags.numpy() & int(newton.ShapeFlags.COLLIDE_SHAPES)) != 0
+            shape_body = model.shape_body.numpy()
+            flap_shapes = [
+                [int(shape) for flap in ids[1:5] for shape in np.flatnonzero((shape_body == flap) & collide)]
+                for ids in groups
+            ]
+            wp.launch(
+                _attach_sealed_flaps,
+                dim=2,
+                inputs=[
+                    state.body_q,
+                    bodies,
+                    sealed,
+                    wp.array(flap_shapes, dtype=int),
+                    wp.zeros(2, dtype=int),
+                    model.shape_body,
+                    model.shape_transform,
+                    solver._shape_body,
+                ],
+            )
+            np.testing.assert_array_equal(
+                model.shape_body.numpy()[np.ravel(flap_shapes)], np.repeat(bodies.numpy()[:, 0], 4)
+            )
             self.assertFalse(model.joint_enabled.numpy()[hinges].any())
             self.assertTrue(np.all(joint_ids.numpy() >= 0))
             initial = state.body_q.numpy().copy()

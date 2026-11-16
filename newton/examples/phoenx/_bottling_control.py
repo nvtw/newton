@@ -104,6 +104,42 @@ def _seal_cases(
 
 
 @wp.kernel
+def _attach_sealed_flaps(
+    poses: wp.array[wp.transform],
+    bodies: wp.array2d[int],
+    sealed: wp.array[int],
+    flap_shapes: wp.array2d[int],
+    attached: wp.array[int],
+    shape_body: wp.array[int],
+    shape_transform: wp.array[wp.transform],
+    solver_shape_body: wp.array[wp.int32],
+):
+    """Carry sealed flap collision shapes on the case body, as the source's sealed proxy does.
+
+    Taped flaps already move rigidly with their case. Their shapes keep their
+    current pose; the flap bodies keep their mass on the tape bonds. Stacked
+    cases then load the case body directly, not a 20 g flap through its bond.
+    """
+    case = wp.tid()
+    if sealed[case] == 0 or attached[case] != 0:
+        return
+    root = bodies[case, 0]
+    to_root = wp.transform_inverse(poses[root])
+    for k in range(flap_shapes.shape[1]):
+        shape = flap_shapes[case, k]
+        if shape < 0:
+            continue
+        flap = shape_body[shape]
+        shape_transform[shape] = wp.transform_multiply(
+            to_root, wp.transform_multiply(poses[flap], shape_transform[shape])
+        )
+        shape_body[shape] = root
+        # PhoenX indexes bodies from one; slot zero is the world.
+        solver_shape_body[shape] = wp.int32(root + 1)
+    attached[case] = 1
+
+
+@wp.kernel
 def _supply_cases(
     enabled: wp.array[int],
     bodies: wp.array2d[int],
@@ -506,6 +542,14 @@ class PlantController:
         self.case_hits = wp.zeros(len(origins), dtype=int)
         self.clamp_coordinates = wp.array(clamps, dtype=int)
         flags, bodies = model.shape_flags.numpy(), model.shape_body.numpy()
+        collide = (flags & int(newton.ShapeFlags.COLLIDE_SHAPES)) != 0
+        flap_shapes = [
+            [shape for flap in ids[1:5] for shape in np.flatnonzero((bodies == flap) & collide)]
+            for ids in self.case_body_groups.values()
+        ]
+        width = max(1, *(len(row) for row in flap_shapes))
+        self.flap_shapes = wp.array([row + [-1] * (width - len(row)) for row in flap_shapes], dtype=int)
+        self.flaps_attached = wp.zeros(len(self.case_index), dtype=int)
         case_bodies = {b for label, b in scene.bodies.items() if label.startswith("/Plant/Sim/Product/Cases/")}
         shapes = [
             i
@@ -728,9 +772,24 @@ class PlantController:
                 self.model.joint_enabled,
             ],
         )
+        wp.launch(
+            _attach_sealed_flaps,
+            dim=len(self.case_index),
+            inputs=[
+                self.state.body_q,
+                self.seal_bodies,
+                self.sealed,
+                self.flap_shapes,
+                self.flaps_attached,
+                self.model.shape_body,
+                self.model.shape_transform,
+                self.solver._shape_body,
+            ],
+        )
         self.transport.simulate()
         self.infeed.simulate()
         self.fleet.simulate()
+        self.wrapper.simulate()
         wp.launch(
             _supply_cases,
             dim=(8, 5),
