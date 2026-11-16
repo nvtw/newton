@@ -61,43 +61,46 @@ def _seal_cases(
     hinges: wp.array2d[int],
     joint_enabled: wp.array[wp.bool],
 ):
-    case = wp.tid()
-    if requests[case] == 0 or sealed[case] != 0:
+    # Stable allocation order keeps runtime joint IDs and solver ordering repeatable.
+    if wp.tid() != 0:
         return
-    root = bodies[case, 0]
-    normal = wp.quat_rotate(poses[root].q, wp.vec3(0.0, 0.0, 1.0))
-    closed = bool(True)
-    for flap in range(4):
-        body = bodies[case, flap + 1]
-        other = wp.quat_rotate(poses[body].q, wp.vec3(0.0, 0.0, 1.0))
-        relative = wp.spatial_bottom(velocity[body]) - wp.spatial_bottom(velocity[root])
-        if wp.abs(wp.dot(normal, other)) < 0.9961947 or wp.length(relative) > 0.5:
-            closed = False
-    if closed:
-        # The source replaces this assembly with a rigid sealed-case proxy.
-        # Fixed tape bonds retain the actual case, flaps, and physical contents.
-        failed = wp.bool(False)
+    for case in range(requests.shape[0]):
+        if requests[case] == 0 or sealed[case] != 0:
+            continue
+        root = bodies[case, 0]
+        normal = wp.quat_rotate(poses[root].q, wp.vec3(0.0, 0.0, 1.0))
+        closed = bool(True)
         for flap in range(4):
             body = bodies[case, flap + 1]
-            frame = wp.transform_multiply(wp.transform_inverse(poses[root]), poses[body])
-            desc = phoenx.joint_desc(root, body, frame, wp.transform_identity())
-            desc.collide_parent = False
-            joint = phoenx.add_joint(dynamics, desc)
-            joints[case, flap] = joint
-            if joint < 0:
-                failed = True
-        if failed:
+            other = wp.quat_rotate(poses[body].q, wp.vec3(0.0, 0.0, 1.0))
+            relative = wp.spatial_bottom(velocity[body]) - wp.spatial_bottom(velocity[root])
+            if wp.abs(wp.dot(normal, other)) < 0.9961947 or wp.length(relative) > 0.5:
+                closed = False
+        if closed:
+            # The source replaces this assembly with a rigid sealed-case proxy.
+            # Fixed tape bonds retain the actual case, flaps, and physical contents.
+            failed = wp.bool(False)
             for flap in range(4):
-                joint = joints[case, flap]
-                if joint >= 0:
-                    phoenx.remove_joint(dynamics, joint)
-                joints[case, flap] = -1
-            return
-        # Tape fixes the current flap pose and supersedes its folding hinge.
-        # Disable the hinge only after the whole replacement batch succeeds.
-        for flap in range(4):
-            joint_enabled[hinges[case, flap]] = False
-        sealed[case] = 1
+                body = bodies[case, flap + 1]
+                frame = wp.transform_multiply(wp.transform_inverse(poses[root]), poses[body])
+                desc = phoenx.joint_desc(root, body, frame, wp.transform_identity())
+                desc.collide_parent = False
+                joint = phoenx.add_joint(dynamics, desc)
+                joints[case, flap] = joint
+                if joint < 0:
+                    failed = True
+            if failed:
+                for flap in range(4):
+                    joint = joints[case, flap]
+                    if joint >= 0:
+                        phoenx.remove_joint(dynamics, joint)
+                    joints[case, flap] = -1
+                continue
+            # Tape fixes the current flap pose and supersedes its folding hinge.
+            # Disable the hinge only after the whole replacement batch succeeds.
+            for flap in range(4):
+                joint_enabled[hinges[case, flap]] = False
+            sealed[case] = 1
 
 
 @wp.kernel
@@ -712,7 +715,7 @@ class PlantController:
         """Update belt friction, valve drives, arm targets, and grasp constraints."""
         wp.launch(
             _seal_cases,
-            dim=len(self.case_index),
+            dim=1,
             inputs=[
                 self.solver.dynamics.data,
                 self.state.body_q,
