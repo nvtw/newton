@@ -31,24 +31,28 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_set_tangent2_lambda,
     contact_container_zeros,
 )
-from newton._src.solvers.phoenx.constraints.contact_warm_start import ContactBodyEntries
+from newton._src.solvers.phoenx.constraints.contact_warm_start import (
+    ContactBodyEntries,
+    _refresh_cached_warm_start_kernel,
+    store_row_warm_start,
+)
 from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
 from newton._src.solvers.phoenx.particle import ParticleContainer
 
 
 @wp.kernel
-def _initialize_columns(columns: ContactColumnContainer, cc: ContactContainer):
+def _initialize_columns(columns: ContactColumnContainer, cc: ContactContainer, rows: int):
     cid = wp.tid()
     contact_set_body1(columns, cid, cid % 4)
     contact_set_body2(columns, cid, 1 + (cid + 1) % 4)
-    contact_set_contact_first(columns, cid, 2 * cid)
-    contact_set_contact_count(columns, cid, 2)
+    contact_set_contact_first(columns, cid, rows * cid)
+    contact_set_contact_count(columns, cid, rows)
     if cid == 4:
         columns.articulation_owner[cid] = 0
     if cid == 5:
         columns.static_owner[cid] = 1
-    for j in range(2):
-        k = 2 * cid + j
+    for j in range(rows):
+        k = rows * cid + j
         cc_set_normal(cc, k, wp.vec3(0.0, 0.0, 1.0))
         cc_set_tangent1(cc, k, wp.vec3(1.0, 0.0, 0.0))
         cc_set_r0(cc, k, wp.vec3(0.1 * wp.float32(j + 1), -0.2, 0.3))
@@ -56,6 +60,23 @@ def _initialize_columns(columns: ContactColumnContainer, cc: ContactContainer):
         cc_set_normal_lambda(cc, k, 0.3 * wp.float32(k + 1))
         cc_set_tangent1_lambda(cc, k, -0.1 * wp.float32(k + 1))
         cc_set_tangent2_lambda(cc, k, 0.07 * wp.float32(k + 1))
+
+
+@wp.kernel
+def _refresh_reference(
+    cc: ContactContainer,
+    active: int,
+    rows: int,
+    linear: wp.array[wp.vec3],
+    angular0: wp.array[wp.vec3],
+    angular1: wp.array[wp.vec3],
+):
+    # The fixture's first three slots contain columns 2, a joint, and 0.
+    # Its next five add the excluded owners, columns 1 and 3, and a joint.
+    for cid in range(4):
+        if active == 8 or (active == 3 and (cid == 0 or cid == 2)):
+            for k in range(rows * cid, rows * (cid + 1)):
+                store_row_warm_start(cc, k, linear, angular0, angular1)
 
 
 @wp.kernel
@@ -77,16 +98,40 @@ def _colored_reference(
 
 class TestContactWarmStart(unittest.TestCase):
     @staticmethod
-    def _fixture():
+    def _fixture(rows=2):
         columns = contact_column_container_zeros(7)
-        cc = contact_container_zeros(14)
-        wp.launch(_initialize_columns, 7, inputs=[columns, cc])
+        cc = contact_container_zeros(7 * rows)
+        wp.launch(_initialize_columns, 7, inputs=[columns, cc, rows])
         # Joint slots, shared bodies, two excluded owners, and one inactive column.
         ids = wp.array([4, 0, 2, 7, 3, 1, 6, 5, 8], dtype=wp.int32)
         active = wp.array([8], dtype=wp.int32)
-        entries = ContactBodyEntries(9, 14, 5, wp.get_device())
+        entries = ContactBodyEntries(9, 7 * rows, 5, wp.get_device())
         entries.build(columns, ids, active, 2, columns.articulation_owner, packed_columns=False)
         return columns, cc, ids, active, entries
+
+    def test_refresh_rows_match_serial_reference(self):
+        """Refresh each live row exactly once while preserving excluded rows."""
+        devices = ["cpu"] + (["cuda:0"] if wp.is_cuda_available() else [])
+        for device in devices:
+            with wp.ScopedDevice(device):
+                for rows in (1, 2, 19):
+                    columns, cc, ids, active, _ = self._fixture(rows)
+                    for count in (8, 3, 0):
+                        with self.subTest(device=device, rows=rows, active=count):
+                            active.assign(np.array([count], dtype=np.int32))
+                            actual = [wp.full(7 * rows, wp.vec3(-123.0), dtype=wp.vec3) for _ in range(3)]
+                            expected = [wp.clone(array) for array in actual]
+                            wp.launch(_refresh_reference, 1, inputs=[cc, count, rows, *expected])
+                            # Two column lanes force multiple grid-stride passes;
+                            # 19 rows exercise more than one eight-lane row pass.
+                            lanes = 8 if wp.get_device().is_cuda else 1
+                            wp.launch(
+                                _refresh_cached_warm_start_kernel,
+                                (2, lanes),
+                                inputs=[columns, cc, ids, active, 2, *actual, 2, lanes],
+                            )
+                            for result, reference in zip(actual, expected, strict=True):
+                                np.testing.assert_array_equal(result.numpy(), reference.numpy())
 
     def test_canonical_entries_preserve_order_and_reset(self):
         """Exclude owned and inactive columns while retaining endpoint order."""

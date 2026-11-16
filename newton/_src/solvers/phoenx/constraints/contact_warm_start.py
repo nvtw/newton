@@ -131,19 +131,18 @@ def _refresh_cached_warm_start_kernel(
     linear: wp.array[wp.vec3f],
     angular0: wp.array[wp.vec3f],
     angular1: wp.array[wp.vec3f],
+    column_stride: wp.int32,
+    row_lanes: wp.int32,
 ):
     """Refresh canonical rows from the current temporal sweep's impulses."""
-    slot = wp.tid()
-    if slot >= num_active_constraints[0]:
-        return
-    cid = element_ids_by_color[slot] - contact_offset
-    if cid < wp.int32(0):
-        return
-    if columns.articulation_owner[cid] >= wp.int32(0) or columns.static_owner[cid] >= wp.int32(0):
-        return
-    first = contact_get_contact_first(columns, cid)
-    for k in range(first, first + contact_get_contact_count(columns, cid)):
-        store_row_warm_start(cc, k, linear, angular0, angular1)
+    first_slot, lane = wp.tid()
+    for slot in range(first_slot, num_active_constraints[0], column_stride):
+        cid = element_ids_by_color[slot] - contact_offset
+        if cid >= wp.int32(0):
+            if columns.articulation_owner[cid] < wp.int32(0) and columns.static_owner[cid] < wp.int32(0):
+                first = contact_get_contact_first(columns, cid)
+                for k in range(first + lane, first + contact_get_contact_count(columns, cid), row_lanes):
+                    store_row_warm_start(cc, k, linear, angular0, angular1)
 
 
 @wp.kernel(enable_backward=False)
@@ -263,9 +262,16 @@ class ContactBodyEntries:
         contact_offset: int,
     ) -> None:
         """Replay current canonical-row impulses using the existing endpoint list."""
+        device = wp.get_device(self.device)
+        row_lanes = 8 if device.is_cuda else 1
+        column_stride = self.keys.shape[0] // 4
+        if device.is_cuda:
+            # Spread independent rows across lanes without launching for the
+            # entire reserved capacity when only a small prefix is active.
+            column_stride = min(column_stride, device.sm_count * 1024 // row_lanes)
         wp.launch(
             _refresh_cached_warm_start_kernel,
-            dim=self.keys.shape[0] // 4,
+            dim=(column_stride, row_lanes),
             inputs=[
                 columns,
                 cc,
@@ -275,6 +281,8 @@ class ContactBodyEntries:
                 self.row_linear,
                 self.row_angular0,
                 self.row_angular1,
+                wp.int32(column_stride),
+                wp.int32(row_lanes),
             ],
             device=self.device,
         )
