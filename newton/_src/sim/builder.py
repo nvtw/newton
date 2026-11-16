@@ -16646,18 +16646,19 @@ class ModelBuilder:
                     interior_point = np.zeros(3)
                     # Compute AABB based on shape type
                     if shape_type == GeoType.MESH and shape_src is not None:
-                        # Compute local AABB from mesh vertices
-                        vertices = shape_src.vertices
-                        lo = vertices.min(axis=0) * np.array(shape_scale)
-                        hi = vertices.max(axis=0) * np.array(shape_scale)
+                        # Reuse geometry bounds across differently scaled instances.
+                        lower, upper = shape_src._get_local_bounds()
+                        lo = lower * np.array(shape_scale)
+                        hi = upper * np.array(shape_scale)
                         aabb_lower = np.minimum(lo, hi)
                         aabb_upper = np.maximum(lo, hi)
 
                         nx, ny, nz = compute_voxel_resolution_from_aabb(aabb_lower, aabb_upper, voxel_budget)
 
                     elif shape_type == GeoType.CONVEX_MESH and shape_src is not None:
-                        lo = shape_src.vertices.min(axis=0) * np.array(shape_scale)
-                        hi = shape_src.vertices.max(axis=0) * np.array(shape_scale)
+                        lower, upper = shape_src._get_local_bounds()
+                        lo = lower * np.array(shape_scale)
+                        hi = upper * np.array(shape_scale)
                         centroid = _convex_hull_interior_point(shape_src.vertices, shape_src.indices)
                         interior_point = centroid * np.array(shape_scale)
                         aabb_lower = np.minimum(lo, hi)
