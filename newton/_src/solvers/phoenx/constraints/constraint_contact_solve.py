@@ -773,22 +773,23 @@ def _make_contact_prepare_for_iteration_at(
             else:
                 local_p0, extra0 = contact_side_witness(contacts, source_k, wp.int32(0))
                 local_p1, extra1 = contact_side_witness(contacts, source_k, wp.int32(1))
-                p0_world = position1 + wp.quat_rotate(orientation1, local_p0 - body_com1) + (margin0 + extra0) * n
-                p1_world = position2 + wp.quat_rotate(orientation2, local_p1 - body_com2) - (margin1 + extra1) * n
+                relative_p0 = wp.quat_rotate(orientation1, local_p0 - body_com1) + (margin0 + extra0) * n
+                relative_p1 = wp.quat_rotate(orientation2, local_p1 - body_com2) - (margin1 + extra1) * n
+                witness_delta = (position2 - position1) + (relative_p1 - relative_p0)
                 # Apply equal and opposite impulses at a common point so
                 # separated collision witnesses cannot create a friction couple.
                 weight1 = contact_point_weight(bodies, b1, b2)
-                impulse_point = weight1 * p0_world + (wp.float32(1.0) - weight1) * p1_world
-                r1 = impulse_point - position1
-                r2 = impulse_point - position2
+                # Avoid losing local precision by adding and subtracting world positions.
+                r1 = relative_p0 + (wp.float32(1.0) - weight1) * witness_delta
+                r2 = relative_p1 - weight1 * witness_delta
                 # Only ``eff_n`` is consumed before the sticky-break anchor
                 # decision (bias below). ``eff_t1`` / ``eff_t2``
                 # are deferred until after that block so they are computed once
                 # from the final ``r1`` / ``r2`` instead of twice when the
                 # break re-projects fresh anchors. Bit-identical either way.
                 eff_n = effective_mass_scalar(n, r1, r2, inv_mass1, inv_mass2, inv_inertia1, inv_inertia2)
-                effective_gap = wp.dot(p1_world - p0_world, n)
-                p_diff = p1_world - p0_world
+                effective_gap = wp.dot(witness_delta, n)
+                p_diff = witness_delta
 
             # Recompute remaining separation from the current transformed
             # witnesses. A positive generation-time gap must not prevent a
@@ -801,9 +802,9 @@ def _make_contact_prepare_for_iteration_at(
                 cc.gap[k] = effective_gap
 
             if wp.static(not cloth_support):
-                friction_p0 = position1 + wp.quat_rotate(orientation1, cc_get_friction_anchor0(cc, k) - body_com1)
-                friction_p1 = position2 + wp.quat_rotate(orientation2, cc_get_friction_anchor1(cc, k) - body_com2)
-                p_diff = friction_p1 - friction_p0
+                friction_r0 = wp.quat_rotate(orientation1, cc_get_friction_anchor0(cc, k) - body_com1)
+                friction_r1 = wp.quat_rotate(orientation2, cc_get_friction_anchor1(cc, k) - body_com2)
+                p_diff = (position2 - position1) + (friction_r1 - friction_r0)
 
             drift_t1_raw = wp.dot(p_diff, t1_dir)
             drift_t2_raw = wp.dot(p_diff, t2_dir)
@@ -818,9 +819,10 @@ def _make_contact_prepare_for_iteration_at(
                     # A supported manifold can briefly unload individual witnesses
                     # within a step. Keep their reference while friction remains
                     # eligible, including the stricter stale-witness gap rule.
-                    point = wp.float32(0.5) * (p0_world + p1_world)
-                    anchor0 = body_com1 + wp.quat_rotate_inv(orientation1, point - position1)
-                    anchor1 = body_com2 + wp.quat_rotate_inv(orientation2, point - position2)
+                    midpoint_r0 = relative_p0 + wp.float32(0.5) * witness_delta
+                    midpoint_r1 = relative_p1 - wp.float32(0.5) * witness_delta
+                    anchor0 = body_com1 + wp.quat_rotate_inv(orientation1, midpoint_r0)
+                    anchor1 = body_com2 + wp.quat_rotate_inv(orientation2, midpoint_r1)
                     cc_set_friction_anchor0(cc, k, anchor0)
                     cc_set_friction_anchor1(cc, k, anchor1)
                     drift_t1_raw = wp.float32(0.0)
@@ -832,9 +834,10 @@ def _make_contact_prepare_for_iteration_at(
                         cc, k, contacts.rigid_contact_surface_velocity, source_k, t1_dir, t2_dir, n
                     )
                     if target[0] * target[0] + target[1] * target[1] > wp.float32(0.0):
-                        point = wp.float32(0.5) * (p0_world + p1_world)
-                        cc_set_friction_anchor0(cc, k, body_com1 + wp.quat_rotate_inv(orientation1, point - position1))
-                        cc_set_friction_anchor1(cc, k, body_com2 + wp.quat_rotate_inv(orientation2, point - position2))
+                        midpoint_r0 = relative_p0 + wp.float32(0.5) * witness_delta
+                        midpoint_r1 = relative_p1 - wp.float32(0.5) * witness_delta
+                        cc_set_friction_anchor0(cc, k, body_com1 + wp.quat_rotate_inv(orientation1, midpoint_r0))
+                        cc_set_friction_anchor1(cc, k, body_com2 + wp.quat_rotate_inv(orientation2, midpoint_r1))
                         drift_t1_raw = wp.float32(0.0)
                         drift_t2_raw = wp.float32(0.0)
 
