@@ -372,6 +372,9 @@ class PlantController:
         self.transport = TransportController(self, vendor)
         self.infeed = InfeedController(self, vendor, 17 + len(self.transport.zone_channels))
         self.fleet = FleetController(model, state, control, asset_root, transport=self.transport)
+        self.wrapper_channels = {
+            label: self.infeed.channel_end + i for i, label in enumerate(scene.metadata.get("wrapper_belt_zones", {}))
+        }
         descriptors = []
         self.nominal_arrays = []
         self.belt_channels = []
@@ -386,6 +389,8 @@ class PlantController:
                 channel = self.transport.zone_channels[self.transport.channels[label]]
             if label in self.infeed.channels:
                 channel = self.infeed.channels[label]
+            if label in self.wrapper_channels:
+                channel = self.wrapper_channels[label]
             item = _Belt()
             item.velocity = mesh.mesh.velocities
             item.nominal = wp.array(velocities, dtype=wp.vec3)
@@ -395,7 +400,11 @@ class PlantController:
             self.belt_channels.append(channel)
         self.belts = wp.array(descriptors, dtype=_Belt)
         self.max_belt_vertices = max(d.velocity.shape[0] for d in descriptors)
-        self.multipliers = wp.ones(self.infeed.channel_end, dtype=float)
+        multipliers = np.ones(self.infeed.channel_end + len(self.wrapper_channels), dtype=np.float32)
+        # Keep wrapper zones stopped until their physical process controller
+        # takes ownership; the generic always-on conveyor channel is unsafe.
+        multipliers[self.infeed.channel_end :] = 0.0
+        self.multipliers = wp.array(multipliers, dtype=float)
 
     def _setup_cases(self, vendor, dof_starts):
         """Bind the source CC01 and sealer PLCs to optical case sensors."""
@@ -643,6 +652,7 @@ class PlantController:
         targets, ready = [], []
         commands = {}
         speed = np.ones(len(self.multipliers), dtype=np.float32)
+        speed[self.infeed.channel_end :] = 0.0
         for cell, plc in enumerate(self.plcs):
             obs = {
                 "beams": dict(zip(self.sensor_names, observations[cell, :7] != 0, strict=True)),

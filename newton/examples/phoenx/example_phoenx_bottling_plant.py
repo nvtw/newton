@@ -105,8 +105,11 @@ class Example:
                 index = starts[joint]
                 coordinates[index] = (coordinates[index] + np.pi) % (2.0 * np.pi) - np.pi
         self.model.joint_q.assign(coordinates)
-        for mesh, velocity, _ in self.scene.belts:
-            mesh.mesh.velocities.assign(velocity)
+        for mesh, velocity, label in self.scene.belts:
+            if label in self.scene.metadata.get("wrapper_belt_zones", {}):
+                mesh.mesh.velocities.zero_()
+            else:
+                mesh.mesh.velocities.assign(velocity)
         product = np.zeros(self.model.shape_count, dtype=np.int32)
         groups = np.zeros(self.model.shape_count, dtype=np.int32)
         scopes = sorted(set(self.scene.self_collision_scopes), key=len)

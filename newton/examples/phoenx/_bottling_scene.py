@@ -159,6 +159,17 @@ def load_plant(asset_root: Path, *, cutaway=True, visuals=True, motor_off=False)
     parked = set()
     body_prims = {}
     nominal = {}
+    wrapper_belt_zones = {}
+    for line in ("WL_U", "WL_D"):
+        sidecar = asset_root / f"plant/lines_1x8/wrapline/{line}.json"
+        if not sidecar.is_file():
+            continue
+        for zone, spec in json.loads(sidecar.read_text())["zones"].items():
+            label = spec["prim"]
+            wrapper_belt_zones[label] = {"line": line, "zone": zone, "speed_mps": spec["speed_mps"]}
+            if not motor_off:
+                nominal[label] = (tuple(np.asarray(spec["local_axis"]) * spec["speed_mps"]), (0.0, 0.0, 0.0))
+    scene.metadata["wrapper_belt_zones"] = wrapper_belt_zones
     vendor = asset_root / "sim/exts/bottling_plant.runtime/bottling_plant_runtime/vendor"
     if not motor_off:
         interface = json.loads((vendor / "ifm_v01/interface.json").read_text())
@@ -392,7 +403,11 @@ def load_plant(asset_root: Path, *, cutaway=True, visuals=True, motor_off=False)
             if enabled:
                 label = str(parent.GetPath())
                 linear, angular = (0.0, 0.0, 0.0), (0.0, 0.0, 0.0)
-                if enabled.Get() and not motor_off:
+                if label in wrapper_belt_zones and not motor_off:
+                    # Wrapper USD starts with zero speed. Its sidecar supplies
+                    # the operating field; separate controller channels keep it stopped.
+                    linear, angular = nominal[label]
+                elif enabled.Get() and not motor_off:
                     if label in nominal:
                         linear, angular = nominal[label]
                     else:

@@ -3,6 +3,7 @@
 
 """Check the example's USD adapter without requiring the private plant assets."""
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,7 +12,7 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton.examples.phoenx._bottling_control import _seal_cases, _target_coordinates
+from newton.examples.phoenx._bottling_control import _Belt, _belt_speeds, _seal_cases, _target_coordinates
 from newton.examples.phoenx._bottling_io import _case_drives, _photoeyes, _valves
 from newton.examples.phoenx._bottling_scene import load_plant
 from newton.examples.phoenx._bottling_wrap import build_wrapper, mesh_components
@@ -284,6 +285,70 @@ def Xform "Plant" {
                 np.array([0.0, 0.0, np.pi / 2]), np.asarray(moving.vertices) * scale
             )
             np.testing.assert_allclose(velocity * scale, expected, atol=1e-7)
+
+            # Wrapper sidecars provide operating speeds even though their USD
+            # layers author both the enable flag and the velocity as zero.
+            belt.GetAttribute("physxSurfaceVelocity:surfaceVelocityEnabled").Set(False)
+            belt.GetAttribute("physxSurfaceVelocity:surfaceVelocity").Set((0.0, 0.0, 0.0))
+            belt.GetAttribute("physxSurfaceVelocity:surfaceAngularVelocity").Set((0.0, 0.0, 0.0))
+            stage.GetRootLayer().Save()
+            sidecar = root / "plant/lines_1x8/wrapline/WL_U.json"
+            sidecar.parent.mkdir(parents=True)
+            sidecar.write_text(
+                json.dumps(
+                    {
+                        "zones": {
+                            "Z1": {
+                                "prim": "/Plant/Belt",
+                                "local_axis": [1, 0, 0],
+                                "speed_mps": 0.2,
+                            }
+                        }
+                    }
+                )
+            )
+            wrapper_scene = load_plant(root, visuals=False)
+            wrapper_mesh, nominal, wrapper_label = wrapper_scene.belts[0]
+            self.assertEqual(
+                wrapper_scene.metadata["wrapper_belt_zones"][wrapper_label],
+                {
+                    "line": "WL_U",
+                    "zone": "Z1",
+                    "speed_mps": 0.2,
+                },
+            )
+            wrapper_shape = wrapper_scene.builder.shape_source.index(wrapper_mesh)
+            load = wrapper_scene.builder.add_body(xform=wp.transform(wp.vec3(0, 0, 0.02), wp.quat_identity()))
+            wrapper_scene.builder.add_shape_box(load, hx=0.01, hy=0.01, hz=0.01)
+            wrapper_model = wrapper_scene.builder.finalize()
+            np.testing.assert_array_equal(wrapper_mesh.mesh.velocities.numpy(), 0.0)
+            physical_velocity = nominal * np.asarray(wrapper_scene.builder.shape_scale[0])
+            np.testing.assert_allclose(physical_velocity[:, 0], 0.2, atol=1e-7)
+            np.testing.assert_array_equal(physical_velocity[:, 1:], 0.0)
+            descriptor = _Belt()
+            descriptor.velocity = wrapper_mesh.mesh.velocities
+            descriptor.nominal = wp.array(nominal, dtype=wp.vec3)
+            descriptor.channel = 1
+            descriptors = wp.array([descriptor], dtype=_Belt)
+            multiplier = wp.array([1.0, 0.0], dtype=float)
+            wrapper_pipeline = newton.CollisionPipeline(wrapper_model)
+            wrapper_contacts = wrapper_pipeline.contacts()
+            wrapper_state = wrapper_model.state()
+            for enabled in (0.0, 1.0, 0.0):
+                multiplier.assign(np.array([1.0, enabled], dtype=np.float32))
+                wp.launch(_belt_speeds, dim=(1, len(nominal)), inputs=[descriptors, multiplier])
+                wrapper_pipeline.collide(wrapper_state, wrapper_contacts)
+                count = int(wrapper_contacts.rigid_contact_count.numpy()[0])
+                self.assertGreater(count, 0)
+                first = wrapper_contacts.rigid_contact_shape0.numpy()[:count] == wrapper_shape
+                signs = np.where(first, 1.0, -1.0)
+                np.testing.assert_allclose(
+                    signs * wrapper_contacts.rigid_contact_surface_velocity.numpy()[:count, 0],
+                    -0.2 * enabled,
+                    atol=1e-6,
+                )
+            stopped_scene = load_plant(root, visuals=False, motor_off=True)
+            np.testing.assert_array_equal(stopped_scene.belts[0][1], 0.0)
 
     def test_authored_collision_groups(self):
         """Keep vehicle obstacles while honoring the line's USD exclusions."""
