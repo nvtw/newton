@@ -269,6 +269,49 @@ class TestTemporalContactMaterial(unittest.TestCase):
 
 
 class TestTemporalContactObservables(unittest.TestCase):
+    def test_owned_support_force_prevents_position_drift(self):
+        """Keep a free hinged pair resting when contact reactions balance its weight."""
+        with wp.ScopedDevice("cpu"):
+            builder = newton.ModelBuilder()
+            body = builder.add_link(xform=wp.transform(wp.vec3(0, 0, 0.1)))
+            builder.add_shape_box(body, hx=0.1, hy=0.1, hz=0.1)
+            other = builder.add_link(xform=wp.transform(wp.vec3(0.4, 0, 0.1)))
+            builder.add_shape_box(other, hx=0.1, hy=0.1, hz=0.1)
+            root = builder.add_joint_free(child=body)
+            joint = builder.add_joint_revolute(
+                body,
+                other,
+                axis=newton.Axis.Y,
+                parent_xform=wp.transform(wp.vec3(0.2, 0, 0)),
+                child_xform=wp.transform(wp.vec3(-0.2, 0, 0)),
+            )
+            builder.add_articulation([root, joint])
+            builder.add_ground_plane()
+            model = builder.finalize()
+            solver = SolverPhoenX(
+                model,
+                joint_mode="maximal_direct",
+                step_layout="single_world",
+                temporal_iterations=True,
+                substeps=1,
+                solver_iterations=24,
+                contact_hertz=80,
+            )
+            state, control = model.state(), model.control()
+            newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+            contacts = model._collision_pipeline.contacts()
+            observables = solver.observables({SolverBase.ObservableKind.CONTACT_F}, contacts=contacts)
+            forces = []
+            for frame in range(120):
+                solver.collide(state, contacts, dt=1 / 120)
+                solver.step(state, state, control, contacts, 1 / 120, observables=observables)
+                if frame >= 90:
+                    count = int(contacts.rigid_contact_count.numpy()[0])
+                    forces.append(abs(float(observables.contact_f.numpy()[:count, 2].sum())))
+            self.assertAlmostEqual(np.mean(forces), float(model.body_mass.numpy().sum()) * 9.81, delta=0.01)
+            np.testing.assert_allclose(state.body_q.numpy()[:, 2], 0.1, atol=0.001)
+            self.assertLess(float(np.abs(state.body_qd.numpy()[:, 2]).max()), 0.005)
+
     def test_owned_contacts_accumulate_only_after_their_solve(self):
         """Count articulation impulses only when their contacts are solved."""
         builder = newton.ModelBuilder(gravity=(0.0, 0.0, -9.81), up_axis=newton.Axis.Z)

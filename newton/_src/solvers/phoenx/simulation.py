@@ -2738,7 +2738,7 @@ class PhoenXWorld:
             )
 
     def _integrate_positions_temporal(self) -> None:
-        """Integrate positions with the substep's average sweep velocity, keeping the final velocity."""
+        """Average temporal body motion; retain final motion for outer-step jointed bodies."""
         self._temporal_accumulate_velocity(reset=self._temporal_sweep_index == 0)
         self._temporal_sweep_index += 1
         wp.launch(
@@ -2746,6 +2746,7 @@ class PhoenXWorld:
             dim=self.num_bodies,
             inputs=[
                 self.bodies,
+                self._temporal_jointed,
                 wp.float32(1.0 / max(self._temporal_sweep_index, 1)),
                 self._temporal_velocity_sum,
                 self._temporal_angular_velocity_sum,
