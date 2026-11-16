@@ -1,0 +1,1 @@
+Default the bottling plant to 50 cartons per packer and expose `--cartons-per-packer`, retaining carton masses and hinged flaps with additional stock on supported staging platforms. Reserve delivery still uses the existing inlet pose-transfer mechanism.

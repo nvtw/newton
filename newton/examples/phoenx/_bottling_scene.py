@@ -101,7 +101,83 @@ def _prepare_wrapper_inventory(stage):
     disable_owned_proxies(stage, retired)
 
 
-def load_plant(asset_root: Path, *, cutaway=True, visuals=True, motor_off=False) -> PlantScene:
+def _prepare_case_inventory(stage, cartons_per_packer):
+    """Extend finite carton stock on explicit offsite staging platforms.
+
+    Preserve authored cases and their positions. Additional reserves reference
+    the same open carton, including its four flap joints, on separated static
+    supports outside the source plant bounds. This does not implement physical
+    delivery from staging to the existing case supply entrance.
+    """
+    from pxr import Gf, Usd, UsdGeom, UsdPhysics  # noqa: PLC0415 - OpenUSD is optional.
+
+    if cartons_per_packer is not None and cartons_per_packer < 1:
+        raise ValueError("cartons_per_packer must be positive")
+    root = stage.GetPrimAtPath("/Plant/Sim/Product/Cases")
+    if not root:
+        return {}, []
+    existing = {}
+    for prim in root.GetChildren():
+        cell, _, name = prim.GetName().rpartition("_")
+        if name == "C0" or (name.startswith("E") and name[1:].isdigit()):
+            existing.setdefault(cell, []).append(name)
+    bounds = None
+    inventory, staging = {}, []
+    for cell, names in sorted(existing.items()):
+        if "C0" not in names:
+            raise ValueError(f"{cell}: initial C0 carton is missing")
+        reserves = sorted((name for name in names if name != "C0"), key=lambda name: int(name[1:]))
+        requested = (
+            ["C0", *reserves]
+            if cartons_per_packer is None
+            else ["C0", *(f"E{i:02}" for i in range(cartons_per_packer - 1))]
+        )
+        inventory[cell] = requested
+        for name in names:
+            if name not in requested:
+                stage.GetPrimAtPath(root.GetPath().AppendChild(f"{cell}_{name}")).SetActive(False)
+        additions = [name for name in requested if name not in names]
+        if not additions:
+            continue
+        template = stage.GetPrimAtPath(root.GetPath().AppendChild(f"{cell}_E00"))
+        if not template:
+            raise ValueError(f"{cell}: cannot extend stock without an authored E00 carton")
+        if bounds is None:
+            bounds = UsdGeom.BBoxCache(Usd.TimeCode.Default(), ["default", "render", "proxy", "guide"])
+            plant_range = bounds.ComputeWorldBound(stage.GetPrimAtPath("/Plant")).ComputeAlignedRange()
+            next_x = float(plant_range.GetMax()[0]) + 1.0
+        template_range = bounds.ComputeWorldBound(template).ComputeAlignedRange()
+        size = np.asarray(template_range.GetSize())
+        pitch = size[:2] + 0.1
+        columns = min(7, len(additions))
+        rows = math.ceil(len(additions) / columns)
+        extent = np.array([columns, rows]) * pitch
+        corner = np.array([next_x, float(plant_range.GetMin()[1])])
+        platform_path = f"/Plant/Sim/CaseStaging/{cell}"
+        platform = UsdGeom.Cube.Define(stage, platform_path)
+        platform.CreateSizeAttr(2.0)
+        platform.AddTranslateOp().Set(Gf.Vec3d(*(corner + extent * 0.5), 0.3))
+        platform.AddScaleOp().Set(Gf.Vec3d(*(extent * 0.5), 0.3))
+        UsdPhysics.CollisionAPI.Apply(platform.GetPrim())
+        template_center = np.asarray(template_range.GetMidpoint())
+        for index, name in enumerate(additions):
+            path = root.GetPath().AppendChild(f"{cell}_{name}")
+            prim = stage.DefinePrim(path, "Xform")
+            prim.GetReferences().AddInternalReference(template.GetPath())
+            target = corner + (np.array([index % columns, index // columns]) + 0.5) * pitch
+            shift = np.array([*(target - template_center[:2]), 0.6005 - template_range.GetMin()[2]])
+            # Source cases have a translate then rotate stack, with no rotated
+            # ancestor; overriding that translation preserves all local joints.
+            translate = prim.GetAttribute("xformOp:translate")
+            if not translate or not translate.HasAuthoredValueOpinion():
+                raise ValueError(f"{cell}: reserve template has no authored translation")
+            translate.Set(Gf.Vec3d(*(np.asarray(translate.Get()) + shift)))
+        staging.append({"cell": cell, "platform": platform_path, "cartons": additions})
+        next_x += float(extent[0]) + 1.0
+    return inventory, staging
+
+
+def load_plant(asset_root: Path, *, cutaway=True, visuals=True, motor_off=False, cartons_per_packer=None) -> PlantScene:
     """Build the full line from local USD, retaining its authored SI properties."""
     from pxr import Gf, Usd, UsdGeom, UsdPhysics, UsdShade  # noqa: PLC0415 - OpenUSD is optional.
 
@@ -123,6 +199,7 @@ def load_plant(asset_root: Path, *, cutaway=True, visuals=True, motor_off=False)
         plant.GetVariantSet("view").SetVariantSelection("cutaway")
     _prepare_wrapper_inventory(stage)
     prepare_dispensers(stage)
+    case_inventory, case_staging = _prepare_case_inventory(stage, cartons_per_packer)
     prims = list(Usd.PrimRange.Stage(stage, Usd.TraverseInstanceProxies()))
     cache = UsdGeom.XformCache()
     scene = PlantScene(newton.ModelBuilder())
@@ -150,6 +227,13 @@ def load_plant(asset_root: Path, *, cutaway=True, visuals=True, motor_off=False)
                 root = stage.GetPrimAtPath(targets[0]).GetParent() if targets else prim.GetParent()
             scene.self_collision_scopes.append(str(root.GetPath()))
     scene.metadata = dict(stage.GetRootLayer().customLayerData)
+    scene.metadata["case_inventory"] = case_inventory
+    if case_staging:
+        scene.metadata["case_staging"] = case_staging
+        scene.metadata["case_supply_limitation"] = (
+            "Additional finite stock rests on offsite staging platforms. The existing controller transfers "
+            "reserve poses to the case inlet; physical upstream delivery remains unimplemented."
+        )
     for path in ("/Plant/Line/Packers", "/Plant/Line/Palletizers", "/Plant/Line"):
         parent = stage.GetPrimAtPath(path)
         if parent:

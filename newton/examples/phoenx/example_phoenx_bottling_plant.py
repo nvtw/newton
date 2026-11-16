@@ -16,6 +16,7 @@ Success criteria:
 - Inlet, case-line, sealer, and palletizer controllers remain free of faults.
 - Runs of at least 22 simulated seconds fill a case at each of the eight packers.
 - Runs of at least 130 simulated seconds deliver a case through every palletizer.
+- Runs of at least 130 simulated seconds fill at least three cases at every packer.
 
 Runs:
 - `python -m newton.examples phoenx_bottling_plant`
@@ -79,6 +80,8 @@ class Example:
         self.args = args
         if args.substeps < 1:
             raise ValueError("--substeps must be positive")
+        if args.cartons_per_packer < 1:
+            raise ValueError("--cartons-per-packer must be positive")
         if args.controllers and not args.motor_off and args.joint_mode != "maximal_pgs":
             raise ValueError("Physical runtime grasp joints require --joint-mode maximal_pgs")
         self.frame_dt = 1.0 / 60.0
@@ -88,9 +91,12 @@ class Example:
             cutaway=args.cutaway,
             visuals=args.visuals if args.visuals is not None else args.viewer != "null",
             motor_off=args.motor_off,
+            cartons_per_packer=args.cartons_per_packer,
         )
         if args.controllers and not args.motor_off:
-            self.scene.builder.reserve_dynamic_capacity(joints=320)
+            carton_count = sum(len(cases) for cases in self.scene.metadata["case_inventory"].values())
+            # Four tape bonds per carton, four grasps per packer, and one per palletizer.
+            self.scene.builder.reserve_dynamic_capacity(joints=max(320, 4 * carton_count + 36))
         self.scene.builder.validate_inertia_detailed = args.diagnostics
         # Several source actuator tensors are positive definite but violate
         # the triangle inequality. Keep those authored approximations unless
@@ -389,6 +395,11 @@ class Example:
             if self.sim_time >= 22.0:
                 assert (self.controller.placed.numpy() >= 12).all(), "each packer must fill at least one case"
             if self.sim_time + 0.5 * self.frame_dt >= 130.0:
+                placed = self.controller.placed.numpy()
+                for name, count in zip(self.controller.names, placed, strict=True):
+                    assert count >= 36, (
+                        f"{name} must fill at least three cases within 130 seconds; placed {count} bottles"
+                    )
                 for name, palletizer in self.controller.transport.palletizers.items():
                     assert palletizer.placed, f"{name} must place at least one case within 130 seconds"
             assert int(self.solver.dynamics.error_count.numpy()[0]) == 0, "a grasp constraint could not be created"
@@ -436,6 +447,12 @@ class Example:
         parser.add_argument("--cutaway", action=argparse.BooleanOptionalAction, default=True)
         parser.add_argument("--motor-off", action="store_true", help="Leave conveyor surfaces stationary.")
         parser.add_argument("--controllers", action=argparse.BooleanOptionalAction, default=True)
+        parser.add_argument(
+            "--cartons-per-packer",
+            type=int,
+            default=50,
+            help="Total cartons per packer, including the initial carton at the filling station.",
+        )
         parser.add_argument("--mass-splitting", action=argparse.BooleanOptionalAction, default=False)
         parser.add_argument("--diagnostics", action="store_true")
         parser.add_argument(

@@ -411,11 +411,11 @@ class PlantController:
         model, scene = self.model, self.scene
         self.case_modules = _load_case_controllers(vendor)
         design = self.case_modules.design
-        self.case_lines = [self.case_modules.lines_l02.CaseLineL02(6) for _ in self.names]
+        self.supply = [[case for case in scene.metadata["case_inventory"][name] if case != "C0"] for name in self.names]
+        self.case_lines = [self.case_modules.lines_l02.CaseLineL02(len(supply)) for supply in self.supply]
         self.sealers = [self.case_modules.lines.Sealer(process_s=1.5) for _ in self.names]
         for line in self.case_lines:
             line.seed("Z2", "C0", holding=True)
-        self.supply = [[f"E{i:02}" for i in range(6)] for _ in self.names]
         self.case_ack = [0] * 8
         self.closed_cases = set()
         self.case_clock = 0.0
@@ -770,6 +770,7 @@ class PlantController:
             "placed_bottles": self.placed.numpy().tolist(),
             "robot_modes": self.mode.numpy().tolist(),
             "case_stations": [line.station for line in self.case_lines],
+            "reserve_cartons": {name: len(supply) for name, supply in zip(self.names, self.supply, strict=True)},
             "sealers": [sealer.state for sealer in self.sealers],
             "palletizers": self.transport.report(),
             "fleet": self.fleet.report(),
