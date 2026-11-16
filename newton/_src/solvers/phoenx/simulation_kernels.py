@@ -4540,6 +4540,9 @@ def _make_singleworld_fused_kernel(
     direct_regular_colors: bool = False,
     patch_friction: bool = False,
     bilateral_joint_blocks: bool = False,
+    cooperative_joints: bool = False,
+    joint_row_capacity: int = 6,
+    spread_contact_lanes: bool = False,
 ):
     """Single-block tail-fused PGS kernel; same axes as
     :func:`_make_singleworld_persistent_kernel`."""
@@ -4577,6 +4580,9 @@ def _make_singleworld_fused_kernel(
         use_bias=use_bias,
         enable_column_timers=enable_column_timers,
         bilateral_joint_blocks=bilateral_joint_blocks,
+        cooperative_joints=cooperative_joints,
+        joint_row_capacity=joint_row_capacity,
+        spread_contact_lanes=spread_contact_lanes,
     )
 
     @wp.kernel(enable_backward=False, module="unique")
@@ -4659,7 +4665,7 @@ def _make_singleworld_fused_kernel(
                         idt,
                         sor_boost,
                         lane,
-                        fuse_threshold,
+                        wp.block_dim(),
                     )
                     _sync_threads()
                     cursor = cursor - 1
@@ -4731,9 +4737,13 @@ def get_singleworld_kernel(
     """Lazy singleworld kernel builder. Each axis combination is cached
     after first build by the underlying factory's ``functools.cache``."""
     factory = _make_singleworld_fused_kernel if fused else _make_singleworld_persistent_kernel
-    # The single-block fused tail keeps scalar rows; both paths are bitwise equal.
+    # Contact tiles remain on the head path; joint tiles also fit the fused block.
     extra = (
-        {}
+        {
+            "cooperative_joints": cooperative_joints,
+            "joint_row_capacity": joint_row_capacity,
+            "spread_contact_lanes": spread_contact_lanes,
+        }
         if fused
         else {
             "cooperative_joints": cooperative_joints,

@@ -134,8 +134,10 @@ class TestCooperativeJointRHS(unittest.TestCase):
                             self.assertEqual(a.tobytes(), b.tobytes())
 
 
-def _simulate_single_world_chains(*, cooperative: bool, steps: int = 30) -> np.ndarray:
-    """Drop hinged box chains onto the ground with overflow-only mass splitting."""
+def _simulate_single_world_chains(
+    *, cooperative: bool, steps: int = 30, fused_threshold: int | None = None
+) -> np.ndarray:
+    """Drop hinged box chains onto the ground using fused or unrolled dispatch."""
     builder = newton.ModelBuilder()
     builder.add_ground_plane()
     for chain in range(24):
@@ -173,9 +175,12 @@ def _simulate_single_world_chains(*, cooperative: bool, steps: int = 30) -> np.n
         if "cooperative_joints" in kwargs:
             kwargs["cooperative_joints"] = kwargs["cooperative_joints"] and cooperative
             requested.append(kwargs["cooperative_joints"])
+            if kwargs.get("fused"):
+                fused_requested.append(kwargs["cooperative_joints"])
         return original(*args, **kwargs)
 
     requested = []
+    fused_requested = []
     with patch.object(phoenx_simulation, "get_singleworld_kernel", get_kernel):
         solver = newton.solvers.SolverPhoenX(
             model,
@@ -185,15 +190,17 @@ def _simulate_single_world_chains(*, cooperative: bool, steps: int = 30) -> np.n
             substeps=2,
             solver_iterations=4,
             velocity_iterations=1,
-            mass_splitting=True,
-            mass_splitting_overflow_only=True,
+            mass_splitting=fused_threshold is None,
+            mass_splitting_overflow_only=fused_threshold is None,
             mass_splitting_batch_size=1,
-            mass_splitting_unrolled=True,
+            mass_splitting_unrolled=fused_threshold is None,
             max_colored_partitions=2,
-            partitioner_algorithm="endpoint_owner",
-            colored_contact_headers=True,
-            colored_contact_rows=True,
+            partitioner_algorithm="endpoint_owner" if fused_threshold is None else "greedy",
+            colored_contact_headers=fused_threshold is None,
+            colored_contact_rows=fused_threshold is None,
         )
+        if fused_threshold is not None:
+            solver.world._fuse_threshold = fused_threshold
         state = model.state()
         control = model.control()
 
@@ -205,9 +212,11 @@ def _simulate_single_world_chains(*, cooperative: bool, steps: int = 30) -> np.n
         with wp.ScopedCapture() as capture:
             simulate()
     assert any(requested) == cooperative
+    if fused_threshold is not None:
+        assert any(fused_requested) == cooperative
     for _ in range(steps):
         wp.capture_launch(capture.graph)
-    return state.body_q.numpy()
+    return np.concatenate((state.body_q.numpy(), state.body_qd.numpy()), axis=1)
 
 
 @unittest.skipUnless(_cuda_with_graph_capture(), "Cooperative joint RHS requires CUDA")
@@ -218,6 +227,15 @@ class TestSingleWorldCooperativeJoints(unittest.TestCase):
         cooperative = _simulate_single_world_chains(cooperative=True)
         self.assertTrue(np.isfinite(scalar).all())
         self.assertEqual(scalar.tobytes(), cooperative.tobytes())
+
+    def test_fused_cooperative_joints_match_scalar(self):
+        """Preserve mixed-color dynamics with fusion thresholds below the block width."""
+        for threshold in (32, 256):
+            with self.subTest(threshold=threshold):
+                scalar = _simulate_single_world_chains(cooperative=False, fused_threshold=threshold)
+                cooperative = _simulate_single_world_chains(cooperative=True, fused_threshold=threshold)
+                self.assertTrue(np.isfinite(scalar).all())
+                self.assertEqual(scalar.tobytes(), cooperative.tobytes())
 
 
 class TestCooperativeJointPolicy(unittest.TestCase):

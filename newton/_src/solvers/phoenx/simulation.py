@@ -5514,7 +5514,7 @@ class PhoenXWorld:
         spread = {"spread_contact_lanes": self._spread_contact_lanes()}
         return (
             get_singleworld_kernel(phase="prepare", fused=False, **kw, **spread),
-            get_singleworld_kernel(phase="prepare", fused=True, **kw),
+            get_singleworld_kernel(phase="prepare", fused=True, **kw, **spread),
             get_singleworld_kernel(
                 phase="iterate",
                 fused=False,
@@ -5526,9 +5526,9 @@ class PhoenXWorld:
                 and self._colored_singleton_contact_lanes
                 and not kw["has_soft_contact_pd"],
             ),
-            get_singleworld_kernel(phase="iterate", fused=True, **kw),
+            get_singleworld_kernel(phase="iterate", fused=True, **kw, **cooperative, **spread),
             get_singleworld_kernel(phase="relax", fused=False, **kw, **cooperative, **spread),
-            get_singleworld_kernel(phase="relax", fused=True, **kw),
+            get_singleworld_kernel(phase="relax", fused=True, **kw, **cooperative, **spread),
         )
 
     def _spread_contact_lanes(self) -> bool:
