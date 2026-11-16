@@ -158,13 +158,17 @@ class Example:
                 step_layout="single_world",
                 joint_mode="maximal_pgs",
                 direct_joint_mask=exact,
-                direct_contact_mask=exact
-                & np.asarray(
-                    [label.startswith("/Plant/Logistics/Fleet/") for label in self.model.joint_label], dtype=bool
+                direct_contact_mask=(
+                    exact
+                    & np.asarray(
+                        [label.startswith("/Plant/Logistics/Fleet/") for label in self.model.joint_label], dtype=bool
+                    )
+                    if np.any(exact)
+                    else None
                 ),
                 velocity_iterations=1,
                 enable_body_pair_grouping=True,
-                parallel_contact_prepare=not args.mass_splitting,
+                parallel_contact_prepare=self.model.device.is_cuda and not args.mass_splitting,
                 mass_splitting=args.mass_splitting,
                 mass_splitting_overflow_only=args.mass_splitting,
                 max_colored_partitions=9,

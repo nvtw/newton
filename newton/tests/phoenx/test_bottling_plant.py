@@ -126,8 +126,6 @@ def Xform "Plant" {
                     "null",
                     "--no-controllers",
                     "--motor-off",
-                    "--joint-mode",
-                    "maximal_direct",
                 ]
             )
             example = Example(ViewerNull(), args)
