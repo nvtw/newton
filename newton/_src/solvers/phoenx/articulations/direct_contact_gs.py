@@ -951,7 +951,12 @@ class DirectContactRunSchedule:
             ],
             device=self.response.direct.model.device,
         )
-        sort_variable_length_int64(self.keys, self.columns, num_columns)
+        sort_variable_length_int64(
+            self.keys,
+            self.columns,
+            num_columns,
+            end_bit=(self.section_end.size * (self.capacity + 1)).bit_length(),
+        )
         wp.utils.array_scan(self.section_end, self.section_end, inclusive=True)
         wp.launch(
             _build_direct_contact_records_kernel,
@@ -975,7 +980,14 @@ class DirectContactRunSchedule:
             ],
             device=self.response.direct.model.device,
         )
-        sort_variable_length_int64(self.endpoint_keys, self.endpoint_entries, self.endpoint_count)
+        sort_variable_length_int64(
+            self.endpoint_keys,
+            self.endpoint_entries,
+            self.endpoint_count,
+            end_bit=(
+                (self.basis_wrench.shape[0] + self.response.direct.bodies.position.shape[0]) * self.endpoint_key_stride
+            ).bit_length(),
+        )
         wp.launch(
             _fill_direct_contact_rhs_tasks_kernel,
             dim=self.capacity,
