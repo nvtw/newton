@@ -293,15 +293,18 @@ class FleetController:
             "waiting": dict(self.waiting),
         }
 
-    def before_step(self, time):
+    def before_step(self, time, *, poses=None, coordinates=None):
         """Advance queued operations from physical feedback and upload drive targets."""
         if not self.driver.trucks:
             return
-        q = self.state.joint_q.numpy()[self.q_indices]
+        if coordinates is None:
+            coordinates = self.state.joint_q.numpy()
+        if poses is None:
+            poses = self.state.body_q.numpy()
+        q = coordinates[self.q_indices]
         qd = self.state.joint_qd.numpy()[self.qd_indices]
-        poses = self.state.body_q.numpy()[self.bodies]
         senses = []
-        for i, pose in enumerate(poses):
+        for i, pose in enumerate(poses[self.bodies]):
             sense = self.source.Sense()
             sense.t = time
             sense.pos = pose[:3]
@@ -314,9 +317,8 @@ class FleetController:
         self.previous = [sense.rp.copy() for sense in senses]
         self.driver.t = time
         if self.transport is not None:
-            physical_poses = self.state.body_q.numpy()
-            self._advance_missions(physical_poses, senses)
-            self._dispatch(senses, physical_poses)
+            self._advance_missions(poses, senses)
+            self._dispatch(senses, poses)
         counts = [len(truck.log) for truck in self.driver.trucks]
         # Only reuse the operation sequencer: source Fleet.tick() also corrects
         # pallet poses, which would bypass the physical fork contacts.

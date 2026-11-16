@@ -659,9 +659,12 @@ class PlantController:
             speed[2 + cell * 2] = command["speeds"]["INB"] / 0.4
         self.valve_targets.assign(np.asarray(targets, dtype=np.float32))
         self.ready.assign(np.asarray(ready, dtype=np.int32))
-        self.transport.before_step(self.case_clock, speed)
-        self.infeed.before_step(self.case_clock, commands, speed)
-        self.fleet.before_step(self.case_clock)
+        # All controllers observe the same physical state before simulation.
+        poses = self.state.body_q.numpy()
+        coordinates = self.state.joint_q.numpy()
+        self.transport.before_step(self.case_clock, speed, poses=poses, coordinates=coordinates)
+        self.infeed.before_step(self.case_clock, commands, speed, coordinates=coordinates)
+        self.fleet.before_step(self.case_clock, poses=poses, coordinates=coordinates)
         self.multipliers.assign(speed)
 
     def simulate(self):

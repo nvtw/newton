@@ -59,7 +59,7 @@ class InfeedController:
         self.oscillators = [o["name"] for o in self.interface["oscillators"]]
         self.status = None
 
-    def before_step(self, time, commands, multipliers):
+    def before_step(self, time, commands, multipliers, *, coordinates=None):
         plant = self.plant
         self.observation.zero_()
         wp.launch(
@@ -87,7 +87,9 @@ class InfeedController:
             }
             for port in self.interface["ports"]
         }
-        angles = np.degrees(plant.state.joint_q.numpy()[self.state_coordinates])
+        if coordinates is None:
+            coordinates = plant.state.joint_q.numpy()
+        angles = np.degrees(coordinates[self.state_coordinates])
         angles = (angles + 180.0) % 360.0 - 180.0
         output = self.plc.step(
             {

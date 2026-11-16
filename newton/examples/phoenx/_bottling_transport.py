@@ -187,9 +187,10 @@ class TransportController:
         self.station_state = ["LOADING"] * len(self.names)
         self.station_ready_since = [None] * len(self.names)
 
-    def _observe_stations(self, time):
+    def _observe_stations(self, time, poses=None):
         """Require a seated empty replacement after a completed pallet departs."""
-        poses = self.plant.state.body_q.numpy()
+        if poses is None:
+            poses = self.plant.state.body_q.numpy()
         for i, name in enumerate(self.names):
             offset = poses[self.pallet_bodies, :3] - self.station_positions[i]
             present = bool(np.any((np.linalg.norm(offset[:, :2], axis=1) < 0.08) & (np.abs(offset[:, 2]) < 0.03)))
@@ -221,9 +222,9 @@ class TransportController:
                 self.station_ready_since[i] = None
             self.station_state[i] = state
 
-    def before_step(self, time, multipliers):
+    def before_step(self, time, multipliers, *, poses=None, coordinates=None):
         plant, model = self.plant, self.plant.model
-        self._observe_stations(time)
+        self._observe_stations(time, poses)
         self.hits.zero_()
         wp.launch(
             _case_photoeyes,
@@ -247,7 +248,8 @@ class TransportController:
         )
         beams = dict(zip(self.eye_names, self.hits.numpy() != 0, strict=True))
         self.beams = beams
-        coordinates = plant.state.joint_q.numpy()
+        if coordinates is None:
+            coordinates = plant.state.joint_q.numpy()
         position = {name: float(coordinates[self.q_starts[joint]]) for name, (_, joint, _) in self.mechanisms.items()}
         output = self.conveyors.step(time, beams, position)
         for zone, speed in output["speeds"].items():
