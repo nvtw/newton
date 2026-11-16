@@ -17,7 +17,12 @@ from newton.examples.phoenx._bottling_control import _Belt, _belt_speeds, _seal_
 from newton.examples.phoenx._bottling_fleet import FleetController, _Transfer
 from newton.examples.phoenx._bottling_io import _case_drives, _photoeyes, _valves
 from newton.examples.phoenx._bottling_scene import load_plant
-from newton.examples.phoenx._bottling_wrap import WrapperController, build_wrapper, mesh_components
+from newton.examples.phoenx._bottling_wrap import (
+    WrapperController,
+    build_wrapper,
+    correct_wrapper_frame,
+    mesh_components,
+)
 from newton.examples.phoenx.example_phoenx_bottling_plant import Example
 from newton.tests.unittest_utils import requires
 from newton.viewer import ViewerNull
@@ -25,6 +30,165 @@ from newton.viewer import ViewerNull
 
 @requires("pxr.Usd")
 class TestBottlingPlant(unittest.TestCase):
+    @staticmethod
+    def _wrapper_components(side):
+        components = []
+        for name, center, half in (
+            ("steel", (0, 0, 2.9585), (0.34, 0.34, 0.0585)),
+            ("steel", (-0.95, -0.95, 1.722), (0.065, 0.065, 1.105)),
+            ("wrapline_film_roll", (-1.05, -0.53, 0.927), (0.125, 0.125, 0.25)),
+            ("machine", (-0.25, 0, 3.025), (0.06, 1.425, 0.125)),
+            ("machine", (0.25, 0, 3.025), (0.06, 1.425, 0.125)),
+            ("machine", (-0.85, -1.5, 1.5825), (0.075, 0.075, 1.5675)),
+            ("machine", (-0.85, 1.5, 1.5825), (0.075, 0.075, 1.5675)),
+            ("machine", (0.85, -1.5, 1.5825), (0.075, 0.075, 1.5675)),
+            ("machine", (0.85, 1.5, 1.5825), (0.075, 0.075, 1.5675)),
+            ("galv", (-0.85, -1.5, 0.0075), (0.125, 0.125, 0.0075)),
+            ("galv", (-0.85, 1.5, 0.0075), (0.125, 0.125, 0.0075)),
+            ("galv", (0.85, -1.5, 0.0075), (0.125, 0.125, 0.0075)),
+            ("galv", (0.85, 1.5, 0.0075), (0.125, 0.125, 0.0075)),
+        ):
+            mesh = newton.Mesh.create_box(*half, compute_inertia=False)
+            translated = np.asarray(center) * (1, side, 1) + (5, side * 10, 0)
+            components.append((name, mesh.copy(vertices=mesh.vertices + translated)))
+        return components
+
+    def test_wrapper_frame_clearance(self):
+        """Remove source crossmember interference without altering moving mass or geometry."""
+        with wp.ScopedDevice("cpu"):
+            for side in (-1, 1):
+                components = self._wrapper_components(side)
+                original = newton.ModelBuilder()
+                _, _, assignment = build_wrapper(original, components, label="/Wrapper", visuals=True)
+                fixed = [
+                    i
+                    for i, label in enumerate(original.shape_label)
+                    if label.endswith("/collision") and original.shape_body[i] < 0
+                ]
+                self.assertEqual(len(fixed), 10, "Every fixed frame component needs an actual collider")
+                for shape, shape_label in enumerate(original.shape_label):
+                    if shape_label.endswith("/collision"):
+                        self.assertEqual(original.shape_gap[shape], 0.002)
+
+                corrected, info = correct_wrapper_frame(components, label="/Wrapper")
+                self.assertAlmostEqual(info["raise_m"], 0.127, places=5)
+                builder = newton.ModelBuilder()
+                build_wrapper(builder, corrected, label="/Wrapper", visuals=True)
+                np.testing.assert_array_equal(builder.body_mass, original.body_mass)
+                np.testing.assert_array_equal(builder.body_inertia, original.body_inertia)
+                np.testing.assert_array_equal(builder.body_q, original.body_q)
+                for i, ((name, before), (_, after)) in enumerate(zip(components, corrected, strict=True)):
+                    if assignment[i] >= 0:
+                        np.testing.assert_array_equal(before.vertices, after.vertices)
+                    else:
+                        collision = builder.shape_label.index(f"/Wrapper/{name}_{i}/collision")
+                        visual = builder.shape_label.index(f"/Wrapper/{name}_{i}/visual")
+                        np.testing.assert_array_equal(
+                            builder.shape_source[collision].vertices, builder.shape_source[visual].vertices
+                        )
+
+                for corrected_mode, scene in ((False, original), (True, builder)):
+                    model = scene.finalize()
+                    state = model.state()
+                    pipeline = newton.CollisionPipeline(model, broad_phase="nxn", rigid_contact_max=1024)
+                    contacts = pipeline.contacts()
+                    shape_body = model.shape_body.numpy()
+                    q = model.joint_q.numpy()
+                    penetrations = 0
+                    for angle in range(0, 360, 45) if corrected_mode else (0,):
+                        q[0] = np.radians(angle)
+                        model.joint_q.assign(q)
+                        newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+                        pipeline.collide(state, contacts)
+                        count = int(contacts.rigid_contact_count.numpy()[0])
+                        a = contacts.rigid_contact_shape0.numpy()[:count]
+                        b = contacts.rigid_contact_shape1.numpy()[:count]
+                        p0 = contacts.rigid_contact_point0.numpy()[:count]
+                        p1 = contacts.rigid_contact_point1.numpy()[:count]
+                        normals = contacts.rigid_contact_normal.numpy()[:count]
+                        poses = state.body_q.numpy()
+                        for k in range(count):
+                            if (shape_body[a[k]] >= 0) == (shape_body[b[k]] >= 0):
+                                continue
+                            points = []
+                            for shape, point in ((a[k], p0[k]), (b[k], p1[k])):
+                                body = shape_body[shape]
+                                points.append(
+                                    np.asarray(
+                                        wp.transform_point(
+                                            wp.transform(poses[body, :3], poses[body, 3:]), wp.vec3(point)
+                                        )
+                                    )
+                                    if body >= 0
+                                    else point
+                                )
+                            penetrations += np.dot(points[1] - points[0], normals[k]) < -1e-4
+                    if corrected_mode:
+                        self.assertEqual(penetrations, 0)
+                    else:
+                        self.assertGreater(penetrations, 0, "The source geometry must expose the actual interference")
+
+    def test_wrapper_portal_proxy_ownership(self):
+        """Replace portal proxies only when exact wrapper colliders own their contacts."""
+        from pxr import Usd, UsdGeom, UsdPhysics
+
+        with tempfile.TemporaryDirectory() as directory, wp.ScopedDevice("cpu"):
+            root = Path(directory)
+            path = root / "scenarios/line_sim/line_sim.usda"
+            path.parent.mkdir(parents=True)
+            stage = Usd.Stage.CreateNew(str(path))
+            stage.SetDefaultPrim(UsdGeom.Xform.Define(stage, "/Plant").GetPrim())
+            UsdGeom.SetStageMetersPerUnit(stage, 1.0)
+            UsdGeom.SetStageUpAxis(stage, "Z")
+            label = "/Plant/WrapLine/Lines/WL_U/Wrapper"
+            groups = {}
+            for name, mesh in self._wrapper_components(1):
+                groups.setdefault(name, []).append(mesh)
+            for name, meshes in groups.items():
+                prim = UsdGeom.Mesh.Define(stage, label + "/" + name)
+                points = np.concatenate([mesh.vertices for mesh in meshes])
+                starts = np.cumsum([0] + [len(mesh.vertices) for mesh in meshes[:-1]])
+                indices = np.concatenate([mesh.indices + offset for mesh, offset in zip(meshes, starts, strict=True)])
+                prim.CreatePointsAttr(points.tolist())
+                prim.CreateFaceVertexIndicesAttr(indices.tolist())
+                prim.CreateFaceVertexCountsAttr([3] * (len(indices) // 3))
+            portals = []
+            centers = [(4.15, 8.5), (4.15, 11.5), (5.85, 8.5), (5.85, 11.5)]
+            for suffix, (x, y) in zip(("da", "df", "ua", "uf"), centers, strict=True):
+                portal_path = label.removesuffix("/Wrapper") + "/Physics/Static/portal_" + suffix
+                portal = UsdGeom.Cube.Define(stage, portal_path)
+                portal.CreateSizeAttr(1.0)
+                portal.AddTranslateOp().Set((x, y, 1.575))
+                portal.AddScaleOp().Set((0.15, 0.15, 3.15))
+                UsdPhysics.CollisionAPI.Apply(portal.GetPrim())
+                portals.append(portal_path)
+            for reconstructed in (True, False):
+                stage.GetPrimAtPath(label).SetActive(reconstructed)
+                stage.GetRootLayer().Save()
+                scene = load_plant(root, visuals=False, motor_off=True)
+                builder = scene.builder
+                probes = []
+                for x, y in centers:
+                    body = builder.add_body(xform=wp.transform((x + 0.08, y, 1.0), wp.quat_identity()))
+                    probes.append(builder.add_shape_sphere(body, radius=0.01))
+                model = builder.finalize()
+                pipeline = newton.CollisionPipeline(model, broad_phase="nxn")
+                contacts = pipeline.contacts()
+                pipeline.collide(model.state(), contacts)
+                count = int(contacts.rigid_contact_count.numpy()[0])
+                first = contacts.rigid_contact_shape0.numpy()[:count]
+                second = contacts.rigid_contact_shape1.numpy()[:count]
+                for probe in probes:
+                    hit_shapes = set(second[first == probe]) | set(first[second == probe])
+                    self.assertEqual(len(hit_shapes), 1, "Each post must have one collider owner, without a gap")
+                if reconstructed:
+                    self.assertTrue({path + "/collision" for path in portals}.isdisjoint(builder.shape_label))
+                    self.assertEqual(
+                        scene.metadata["wrapper_frame_corrections"][label]["replaced_collision_proxies"], portals
+                    )
+                else:
+                    self.assertTrue({path + "/collision" for path in portals}.issubset(builder.shape_label))
+
     def test_wrapper_infeed_stops_loaded_pallets_after_withdrawal(self):
         """Transport both line orientations using measured rays and stop before wrapping."""
         with tempfile.TemporaryDirectory() as directory, wp.ScopedDevice("cpu"):

@@ -21,7 +21,7 @@ import warp as wp
 import newton
 import newton.usd
 from newton.examples.phoenx._bottling_dispenser import disable_owned_proxies, prepare_dispensers
-from newton.examples.phoenx._bottling_wrap import build_wrapper, mesh_components
+from newton.examples.phoenx._bottling_wrap import build_wrapper, correct_wrapper_frame, mesh_components
 
 
 def _value(prim, name, default):
@@ -570,6 +570,7 @@ def load_plant(asset_root: Path, *, cutaway=True, visuals=True, motor_off=False,
             raise ValueError(f"Unsupported geometry {kind} at {prim.GetPath()}")
 
     wrappers = {}
+    wrapper_proxies = {}
     geometry_types = {"Mesh", "Cube", "Sphere", "Cylinder", "Capsule", "Cone", "Plane"}
     instancers = [UsdGeom.PointInstancer(p) for p in prims if p.IsA(UsdGeom.PointInstancer)]
     prototypes = {path for instancer in instancers for path in instancer.GetPrototypesRel().GetTargets()}
@@ -610,6 +611,17 @@ def load_plant(asset_root: Path, *, cutaway=True, visuals=True, motor_off=False,
                     component.normals[:] = normals / np.maximum(lengths, 1.0e-12)
                 wrappers.setdefault(parent_path, []).append((prim.GetName(), component))
             continue
+        if (
+            collision
+            and parent_path.startswith("/Plant/WrapLine/Lines/")
+            and parent_path.endswith("/Physics/Static")
+            and prim.GetName() in ("portal_da", "portal_df", "portal_ua", "portal_uf")
+        ):
+            # These four coarse posts are covered by the reconstructed frame
+            # and feet. Defer them until their replacement is known to exist.
+            wrapper = parent_path.removesuffix("/Physics/Static") + "/Wrapper"
+            wrapper_proxies.setdefault(wrapper, []).append((prim, matrix, body))
+            collision = False
         if collision:
             add_geometry(prim, matrix, body, visual=False, collision=True)
         if visible:
@@ -867,7 +879,12 @@ def load_plant(asset_root: Path, *, cutaway=True, visuals=True, motor_off=False,
     scene.articulations = [a for a in scene.articulations if articulation_bodies[a].isdisjoint(unsupported)]
 
     for label, components in wrappers.items():
-        bodies, joints, _ = build_wrapper(builder, components, label=label, visuals=visuals)
+        corrected, correction = correct_wrapper_frame(components, label=label)
+        bodies, joints, _ = build_wrapper(builder, corrected, label=label, visuals=visuals)
+        correction["replaced_collision_proxies"] = [
+            str(prim.GetPath()) for prim, _, _ in wrapper_proxies.get(label, [])
+        ]
+        scene.metadata.setdefault("wrapper_frame_corrections", {})[label] = correction
         scene.articulations.append(builder.articulation_count - 1)
         for body in bodies:
             scene.bodies[builder.body_label[body]] = body
@@ -881,6 +898,10 @@ def load_plant(asset_root: Path, *, cutaway=True, visuals=True, motor_off=False,
                     kind,
                 )
             )
+    for label, proxies in wrapper_proxies.items():
+        if label not in wrappers:
+            for prim, matrix, body in proxies:
+                add_geometry(prim, matrix, body, visual=False, collision=True)
     if wrappers:
         scene.metadata["wrapper_mass_estimates"] = {
             "metal_shell_thickness_m": 0.003,

@@ -213,15 +213,8 @@ def mesh_components(mesh):
     return parts
 
 
-def build_wrapper(builder, components, *, label, visuals=True):
-    """Build a rotary arm and lift from world-space material components.
-
-    Masses are estimates: metal covers use 3 mm shells (steel 7850 and
-    aluminium 2700 kg/m3); the roll and rubber use solid densities 920 and
-    1100 kg/m3. These assumptions are explicit because the source wrapper
-    has visual geometry but no authored masses, joints, or drive limits.
-    Returns body/joint IDs and the body assigned to each source component.
-    """
+def _wrapper_groups(components, label):
+    """Identify the source hub, carriage, and their material components."""
     centers = np.array([(m.vertices.min(axis=0) + m.vertices.max(axis=0)) * 0.5 for _, m in components])
     sizes = np.array([m.vertices.max(axis=0) - m.vertices.min(axis=0) for _, m in components])
     hubs = [
@@ -248,6 +241,58 @@ def build_wrapper(builder, components, *, label, visuals=True):
                 assignment[i] = 1
         elif name == "machine" and near_lift and size[2] < 0.1:
             assignment[i] = 1
+    return centers, sizes, pivot, lift_origin, assignment
+
+
+def correct_wrapper_frame(components, *, label):
+    """Raise the source's intersecting fixed frame, leaving the mechanism intact.
+
+    The two authored 120 x 2850 x 250 mm crossmembers intersect the rotary
+    hub. This explicit reconstruction extends the posts and raises the fixed
+    upper frame/motor to provide 10 mm clearance. The ideal revolute bearing
+    spans the increased gap; no shaft mass or stiffness is invented.
+    """
+    _, sizes, _, _, assignment = _wrapper_groups(components, label)
+    beams = [
+        i
+        for i, (name, _) in enumerate(components)
+        if assignment[i] < 0 and name == "machine" and np.allclose(sizes[i], (0.12, 2.85, 0.25), atol=0.002)
+    ]
+    if len(beams) != 2:
+        raise ValueError(f"{label}: source upper-frame crossmembers must be uniquely identifiable")
+    beam_bottom = min(components[i][1].vertices[:, 2].min() for i in beams)
+    rotor_top = max(mesh.vertices[:, 2].max() for i, (_, mesh) in enumerate(components) if assignment[i] == 0)
+    clearance = 0.01
+    rise = max(0.0, float(rotor_top - beam_bottom + clearance))
+    corrected = []
+    for i, (name, mesh) in enumerate(components):
+        transformed = mesh
+        if assignment[i] < 0:
+            vertices = mesh.vertices.copy()
+            vertices[vertices[:, 2] >= beam_bottom - 1.0e-5, 2] += rise
+            transformed = mesh.copy(vertices=vertices)
+        corrected.append((name, transformed))
+    return corrected, {
+        "raise_m": rise,
+        "rotor_clearance_m": clearance,
+        "collision_gap_m": 0.002,
+        "bearing_gap_increase_m": rise,
+        "bearing_model": "ideal revolute joint; no reconstructed shaft mass or stiffness",
+        "source_frame_modified": rise > 0.0,
+    }
+
+
+def build_wrapper(builder, components, *, label, visuals=True):
+    """Build a rotary arm, lift, and fixed frame from world-space components.
+
+    Masses are estimates: metal covers use 3 mm shells (steel 7850 and
+    aluminium 2700 kg/m3); the roll and rubber use solid densities 920 and
+    1100 kg/m3. These assumptions are explicit because the source wrapper
+    has visual geometry but no authored masses, joints, or drive limits.
+    Reconstructed colliders use a 2 mm contact gap, not continuous collision
+    detection. Returns body/joint IDs and each source component's body group.
+    """
+    centers, sizes, pivot, lift_origin, assignment = _wrapper_groups(components, label)
 
     bodies = []
     for group, origin in enumerate((pivot, lift_origin)):
@@ -292,14 +337,22 @@ def build_wrapper(builder, components, *, label, visuals=True):
 
     for i, (name, mesh) in enumerate(components):
         group = assignment[i]
-        if group < 0 or name == "wrapline_product_film":
+        if name == "wrapline_product_film":
+            continue
+        if group < 0:
+            builder.add_shape_mesh(
+                -1,
+                mesh=mesh,
+                cfg=builder.ShapeConfig(density=0.0, mu=0.5, gap=0.002, is_visible=False),
+                label=f"{label}/{name}_{i}/collision",
+            )
             continue
         origin = pivot if group == 0 else lift_origin
         collider = newton.Mesh(mesh.vertices - origin, mesh.indices, compute_inertia=False)
         builder.add_shape_convex_hull(
             bodies[group],
             mesh=collider,
-            cfg=builder.ShapeConfig(density=0.0, mu=0.5, is_visible=False),
+            cfg=builder.ShapeConfig(density=0.0, mu=0.5, gap=0.002, is_visible=False),
             label=f"{label}/{name}_{i}/collision",
         )
     if visuals:
