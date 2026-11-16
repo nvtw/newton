@@ -29,6 +29,9 @@ provides reusable scenes for contact-solver comparisons:
 Every cylinder weighs 0.57 kg. These controlled proxies require no private USD
 assets. Support inertia follows its geometry. The shell has four walls and a
 flat bottom; it does not reproduce the source factory's stepped carton floor.
+`--support-mass` varies free-support mass while keeping geometry fixed and
+scaling its inertia consistently. The default is 0.42 kg; fixed supports remain
+static. Mass changes are diagnostic controls, not fixes for the factory scene.
 
 ```bash
 uv run --no-sync -m newton._src.solvers.phoenx.benchmarks.experimental.bench_container_jitter \
@@ -40,6 +43,10 @@ uv run --no-sync -m newton._src.solvers.phoenx.benchmarks.experimental.bench_con
 # 120 Hz collision detection, 480 Hz physics:
 uv run --no-sync -m newton._src.solvers.phoenx.benchmarks.experimental.bench_container_jitter \
     --case box_12 --substeps 2 --solver-substeps 4 --output /tmp/container-jitter-substeps.json
+
+# Isolate a single heavy cylinder on a light support:
+uv run --no-sync -m newton._src.solvers.phoenx.benchmarks.experimental.bench_container_jitter \
+    --case plate_1 --support-mass 0.035 --output /tmp/container-jitter-light-plate.json
 ```
 
 Defaults are three simulated seconds, measurement after one second, four

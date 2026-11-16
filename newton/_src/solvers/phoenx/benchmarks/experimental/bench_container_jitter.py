@@ -6,7 +6,7 @@
 These asset-free cylinders are controlled proxies, not the authored bottle USD.
 The default ladder contains fixed/free single-cylinder controls, four and twelve
 cylinders on a free plate, and twelve cylinders inside a free box shell. All
-free supports weigh 0.42 kg with geometry-derived inertia; each cylinder weighs
+free supports default to 0.42 kg with geometry-derived inertia; each cylinder weighs
 0.57 kg. No sleeping, added damping, attachments, or pose resets are used.
 
 Report motion in the translating/rotating support frame after settling. Runtime
@@ -62,7 +62,7 @@ def _build_scene(name, args):
         volume += 2 * thickness * (width + length - 2 * thickness) * (height - thickness)
     material = {"mu": 0.4, "mu_static": 0.45, "gap": args.gap, "margin": 0, "restitution": 0}
     cfg = builder.ShapeConfig(density=0, **material)
-    support_cfg = builder.ShapeConfig(density=0.42 / volume if dynamic else 0, **material)
+    support_cfg = builder.ShapeConfig(density=args.support_mass / volume if dynamic else 0, **material)
     support = builder.add_body(xform=wp.transform((0, 0, 0.001), wp.quat_identity())) if dynamic else -1
     builder.add_shape_box(
         support,
@@ -108,7 +108,7 @@ def _build_scene(name, args):
     builder.add_ground_plane(cfg=cfg)
     model = builder.finalize(device=args.device)
     if dynamic:
-        np.testing.assert_allclose(model.body_mass.numpy()[support], 0.42, rtol=1e-5)
+        np.testing.assert_allclose(model.body_mass.numpy()[support], args.support_mass, rtol=1e-5)
     return model, support, contents
 
 
@@ -203,6 +203,7 @@ def run_case(name, args):
         "case": name,
         "bodies": model.body_count,
         "shapes": model.shape_count,
+        "support_mass_kg": float(model.body_mass.numpy()[support]) if support >= 0 else 0.0,
         "relative_speed_rms_m_s": float(np.sqrt(np.mean(speeds))),
         "relative_angular_speed_rms_rad_s": float(np.sqrt(np.mean(angular_speeds))),
         "relative_excursion_m": float(np.linalg.norm(positions - positions[0], axis=2).max()),
@@ -234,6 +235,7 @@ def main():
     parser.add_argument("--solver-substeps", type=int, default=1, help="Physics substeps per collision pass.")
     parser.add_argument("--iterations", type=int, default=4)
     parser.add_argument("--contact-hertz", type=float, default=80)
+    parser.add_argument("--support-mass", type=float, default=0.42, help="Mass of each free support [kg].")
     parser.add_argument("--gap", type=float, default=0.002)
     parser.add_argument("--speculative-extension", type=float, default=0.005)
     parser.add_argument("--matching", choices=("sticky", "latest", "disabled"), default="sticky")
@@ -243,6 +245,8 @@ def main():
         parser.error("positive substeps/iterations and 0 <= settle < duration are required")
     if args.gap < 0 or args.speculative_extension < 0 or args.contact_hertz <= 0:
         parser.error("gaps must be nonnegative and contact frequency must be positive")
+    if not np.isfinite(args.support_mass) or args.support_mass <= 0:
+        parser.error("support mass must be finite and positive")
     if round(args.duration * 60 * args.substeps) <= round(args.settle * 60 * args.substeps):
         parser.error("measurement window must contain at least one step")
     wp.init()
