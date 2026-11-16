@@ -237,7 +237,7 @@ class TestPhoenXAutoPerformancePolicy(unittest.TestCase):
 
     def test_direct_contact_sweeps_share_one_launch(self) -> None:
         """Run all biased direct-contact iterations in one ordered sweep call."""
-        response = SimpleNamespace(compute=Mock())
+        response = SimpleNamespace(compute=Mock(), direct=None)
         schedule = SimpleNamespace(solve=Mock())
         world = SimpleNamespace(
             _contact_input_active_this_step=True,
@@ -259,7 +259,7 @@ class TestPhoenXAutoPerformancePolicy(unittest.TestCase):
 
     def test_direct_contact_response_reused_after_warm_start(self) -> None:
         """Reuse the warm start's mobility for the biased sweep of the same substep."""
-        response = SimpleNamespace(compute=Mock())
+        response = SimpleNamespace(compute=Mock(), direct=None)
         schedule = SimpleNamespace(solve=Mock())
         world = SimpleNamespace(
             _contact_input_active_this_step=True,
@@ -293,6 +293,7 @@ class TestPhoenXAutoPerformancePolicy(unittest.TestCase):
                     compute_bias_velocity=Mock(),
                     apply_bias_velocity=Mock(),
                 )
+                response.direct = direct
                 world = SimpleNamespace(
                     _contact_input_active_this_step=True,
                     _direct_contact_response=response,

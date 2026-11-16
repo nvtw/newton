@@ -149,6 +149,10 @@ class Example:
                 step_layout="single_world",
                 joint_mode="maximal_pgs",
                 direct_joint_mask=exact,
+                direct_contact_mask=exact
+                & np.asarray(
+                    [label.startswith("/Plant/Logistics/Fleet/") for label in self.model.joint_label], dtype=bool
+                ),
                 velocity_iterations=1,
                 enable_body_pair_grouping=True,
                 parallel_contact_prepare=not args.mass_splitting,

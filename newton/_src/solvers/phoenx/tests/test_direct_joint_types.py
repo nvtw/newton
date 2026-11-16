@@ -369,6 +369,87 @@ def _make_solver(
 
 @unittest.skipUnless(wp.is_cuda_available(), "PhoenX direct-joint tests require CUDA")
 class TestDirectJointTypes(unittest.TestCase):
+    def test_invalid_direct_contact_masks(self) -> None:
+        """Reject masks that omit joints of a selected exact mechanism."""
+        model, _, _ = _build_closed_loop_contact_model()
+        selected = np.zeros(model.joint_count, dtype=bool)
+        selected[1] = True
+        with self.assertRaisesRegex(ValueError, "one entry per model joint"):
+            newton.solvers.SolverPhoenX(model, direct_contact_mask=selected[:-1])
+        with self.assertRaisesRegex(ValueError, "complete exact mechanisms"):
+            newton.solvers.SolverPhoenX(model, direct_contact_mask=selected)
+        with self.assertRaisesRegex(ValueError, "requires exact joint mechanisms"):
+            newton.solvers.SolverPhoenX(
+                model, joint_mode="maximal_pgs", step_layout="single_world", direct_contact_mask=selected
+            )
+        with self.assertRaisesRegex(ValueError, "only exact joints"):
+            newton.solvers.SolverPhoenX(
+                model,
+                joint_mode="maximal_pgs",
+                step_layout="single_world",
+                direct_joint_mask=~selected,
+                direct_contact_mask=selected,
+            )
+
+    def test_mixed_contact_response_after_drive_activation(self) -> None:
+        """Rebind mixed contact response when a drive adds exact factor rows."""
+        model = _build_two_prismatic_mechanism_contact_model()
+        selected = np.ones(model.joint_count, dtype=bool)
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            joint_mode="maximal_pgs",
+            step_layout="single_world",
+            direct_joint_mask=selected,
+            direct_contact_mask=selected,
+        )
+        previous = solver._direct_contact_response
+        model.joint_target_mode.fill_(int(newton.JointTargetMode.POSITION))
+        model.joint_target_ke.fill_(100.0)
+        solver.notify_model_changed(newton.ModelFlags.JOINT_DOF_PROPERTIES)
+        response = solver._direct_contact_response
+        self.assertIsNot(response, previous)
+        self.assertIs(response.direct, solver._direct_equality_system.exact)
+        state = model.state()
+        newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+        contacts = model._collision_pipeline.contacts()
+        model._collision_pipeline.collide(state, contacts)
+        solver.step(state, state, model.control(), contacts, 1.0 / 600.0)
+        self.assertTrue(np.isfinite(state.body_q.numpy()).all())
+        self.assertTrue(np.isfinite(response.data.mobility.numpy()[:1]).all())
+
+    def test_selected_exact_mechanism_contacts(self) -> None:
+        """Solve selected ground contacts exactly while retaining ordinary contacts."""
+        for mode in ("maximal_direct", "maximal_pgs"):
+            with self.subTest(mode=mode):
+                model, bodies = _build_two_grounded_mechanisms()
+                selected = np.array([True, True, False, False])
+                solver = newton.solvers.SolverPhoenX(
+                    model,
+                    joint_mode=mode,
+                    step_layout="single_world",
+                    direct_joint_mask=np.ones(model.joint_count, dtype=bool) if mode == "maximal_pgs" else None,
+                    direct_contact_mask=selected,
+                    substeps=1,
+                    solver_iterations=4,
+                )
+                state = model.state()
+                control = model.control()
+                newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+                pipeline = model._collision_pipeline
+                contacts = pipeline.contacts()
+                for _ in range(20):
+                    state.clear_forces()
+                    pipeline.collide(state, contacts)
+                    solver.step(state, state, control, contacts, 1.0 / 120.0)
+                self.assertEqual(solver._direct_contact_response.active_mechanisms, (True, False))
+                count = int(solver.world._ingest_scratch.num_contact_columns.numpy()[0])
+                owners = solver.world._contact_cols.articulation_owner.numpy()[:count]
+                self.assertTrue(np.any(owners >= 0))
+                self.assertTrue(np.any(owners < 0))
+                poses = state.body_q.numpy()[list(bodies)]
+                self.assertTrue(np.isfinite(poses).all())
+                self.assertGreater(float(poses[:, 2].min()), 0.09)
+
     def test_batched_transform_composition_matches_scalar(self) -> None:
         """Match batched setup transforms to the scalar composition contract."""
         rng = np.random.default_rng(20260804)

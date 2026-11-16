@@ -4404,7 +4404,7 @@ class PhoenXWorld:
         schedule = self._direct_contact_schedule
         if not self._contact_input_active_this_step or response is None or schedule is None:
             return
-        direct = getattr(self, "_direct_equality_system", None)
+        direct = response.direct
         # Effort-bound activation can refactor the joint system after warm
         # starting or during relaxation. Its cached contact mobility then
         # describes a different motor response and must not be reused.

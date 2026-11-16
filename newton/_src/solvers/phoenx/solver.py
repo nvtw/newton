@@ -398,6 +398,7 @@ class SolverPhoenX(SolverBase):
         reduced_backend: str = "auto",
         reduced_articulations: Sequence[int] | Sequence[str] | None = None,
         direct_joint_mask: np.ndarray | None = None,
+        direct_contact_mask: np.ndarray | None = None,
         tracking_volumes: Sequence[int] | None = None,
         rigid_contact_max: int | None = None,
     ):
@@ -608,6 +609,11 @@ class SolverPhoenX(SolverBase):
                 the normal minus both margins, is at most zero. Runtime shapes become volumes
                 through ``ShapeDesc.tracking_volume``. Volume contacts count against
                 ``rigid_contact_max``.
+            direct_contact_mask: Optional per-joint boolean mask selecting complete exact
+                mechanisms for constrained contact response. Use with ``maximal_direct``
+                or ``maximal_pgs`` and ``direct_joint_mask``. Unselected mechanisms keep
+                regular contact iteration. ``None`` preserves the mode's default policy.
+                This is a runtime solver policy, not an authored physical property.
             reduced_articulation_path: ``"reference"`` uses the established
                 reduced solver. Experimental ``"persistent"`` enables
                 topology-proven cross-phase articulation fusion on CUDA.
@@ -730,6 +736,18 @@ class SolverPhoenX(SolverBase):
                 raise ValueError("direct_joint_mask must contain one entry per model joint")
             if not np.any(direct_joint_mask):
                 direct_joint_mask = None
+        if direct_contact_mask is not None:
+            direct_contact_mask = np.asarray(direct_contact_mask, dtype=bool)
+            if direct_contact_mask.shape != (int(model.joint_count),):
+                raise ValueError("direct_contact_mask must contain one entry per model joint")
+            if joint_solver != "direct" and direct_joint_mask is None:
+                raise ValueError("direct_contact_mask requires exact joint mechanisms")
+            if articulation_mode != "maximal":
+                raise ValueError("direct_contact_mask requires maximal coordinates")
+            if direct_joint_mask is not None and np.any(direct_contact_mask & ~direct_joint_mask):
+                raise ValueError("direct_contact_mask must select only exact joints")
+            if mass_splitting_color_group_size or has_deformables or contact_friction_model != "point":
+                raise ValueError("direct_contact_mask requires rigid point contacts without mass splitting")
         if mass_splitting_overflow_only and has_constraint_joints and joint_solver != "block_pgs":
             raise ValueError("mass_splitting_overflow_only requires joint_mode='maximal_pgs' when joints are present")
         if solver_scheme == "tgs":
@@ -863,7 +881,7 @@ class SolverPhoenX(SolverBase):
         # Eligibility is resolved from the enabled joint graph after joint constraint has
         # classified D6 joints; reduced-coordinate metadata is never an input.
         direct_tree_contact_candidate = bool(
-            joint_solver == "direct"
+            (joint_solver == "direct" or direct_contact_mask is not None)
             and articulation_mode == "maximal"
             and contact_friction_model == "point"
             and mass_splitting_color_group_size == 0
@@ -1243,7 +1261,7 @@ class SolverPhoenX(SolverBase):
         self.world.constraints.d6 = d6_data
         active_joint = joint_idx_to_cid >= 0
         full_coordinate_tree_joints: tuple[tuple[int, ...], ...] = ()
-        if direct_tree_contact_candidate:
+        if direct_tree_contact_candidate and joint_solver == "direct" and direct_contact_mask is None:
             full_coordinate_tree_joints = find_full_coordinate_revolute_trees(model)
             self._direct_tree_contacts = bool(full_coordinate_tree_joints)
             if self._direct_tree_contacts:
@@ -1425,12 +1443,14 @@ class SolverPhoenX(SolverBase):
                     self.world.constraints.d6 = d6_data
 
                 if direct_tree_contact_candidate and self.world.max_contact_columns > 0:
-                    direct_joint_mask = self._direct_equality_system.joint_mask
+                    direct = self._direct_equality_system
+                    exact = direct.exact if isinstance(direct, MixedJointSystem) else direct
+                    direct_joint_mask = exact.joint_mask
                     tree_joint_sets = {
                         frozenset(joint for joint in joints if direct_joint_mask[joint])
                         for joints in full_coordinate_tree_joints
                     }
-                    topology = self._direct_equality_system.topology
+                    topology = exact.topology
                     active_mechanisms = tuple(
                         frozenset(
                             topology.row_joint[
@@ -1440,10 +1460,21 @@ class SolverPhoenX(SolverBase):
                         not in tree_joint_sets
                         for mechanism in range(len(topology.dimensions))
                     )
+                    if direct_contact_mask is not None:
+                        selected = []
+                        for mechanism in range(len(topology.dimensions)):
+                            joints = topology.row_joint[
+                                topology.mechanism_row_start[mechanism] : topology.mechanism_row_start[mechanism + 1]
+                            ]
+                            mask = direct_contact_mask[joints]
+                            if np.any(mask) and not np.all(mask):
+                                raise ValueError("direct_contact_mask must select complete exact mechanisms")
+                            selected.append(bool(np.any(mask)))
+                        active_mechanisms = tuple(selected)
                     if any(active_mechanisms):
                         self._direct_contact_active_mechanisms = active_mechanisms
                         self._direct_contact_response = DirectContactResponse(
-                            self._direct_equality_system,
+                            exact,
                             self.world.rigid_contact_max,
                             self.world.max_contact_columns,
                             active_mechanisms=active_mechanisms,
@@ -1601,6 +1632,7 @@ class SolverPhoenX(SolverBase):
         """Rebind general contact mobility after a direct factor rebuild."""
         active_mechanisms = self._direct_contact_active_mechanisms
         direct = self._direct_equality_system
+        direct = direct.exact if isinstance(direct, MixedJointSystem) else direct
         if active_mechanisms is None or direct is None or not direct.enabled:
             return
         self._direct_contact_response = DirectContactResponse(
@@ -2152,7 +2184,9 @@ class SolverPhoenX(SolverBase):
             if self._joint_constraints.num_joint_columns > 0:
                 self.world.initialize_joint_constraints(**self._joint_constraints.to_initialize_kwargs())
             if self._direct_equality_system is not None:
-                previous_direct_solver = getattr(self._direct_equality_system, "solver", None)
+                direct = self._direct_equality_system
+                contact_direct = direct.exact if isinstance(direct, MixedJointSystem) else direct
+                previous_direct_solver = getattr(contact_direct, "solver", None)
                 self._direct_equality_system.refresh_joint_properties()
                 self._direct_equality_system.bind_constraint_indices(self._joint_constraints.joint_idx_to_cid)
                 friction_dof_owned = self._direct_equality_system.direct_friction_dof_mask
@@ -2167,7 +2201,7 @@ class SolverPhoenX(SolverBase):
             self.world.constraints.d6 = d6_data
             if self._direct_equality_system is not None:
                 self._direct_equality_system.d6_inequality_count = d6_inequality_count
-                if previous_direct_solver is not getattr(self._direct_equality_system, "solver", None):
+                if previous_direct_solver is not getattr(contact_direct, "solver", None):
                     self._rebuild_direct_contact_response()
                 self._refresh_direct_joint_ownership()
         cable_rest_changed = bool(flags & int(ModelFlags.JOINT_REFERENCE_POSE_PROPERTIES))
