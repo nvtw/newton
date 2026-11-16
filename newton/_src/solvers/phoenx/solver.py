@@ -1132,7 +1132,6 @@ class SolverPhoenX(SolverBase):
         if temporal_iterations and (
             step_layout != "single_world"
             or mass_splitting
-            or sleeping_velocity_threshold > 0.0
             or solver_scheme != "soft"
             or colored_contact_headers
             or num_cloth_triangles
@@ -1141,7 +1140,7 @@ class SolverPhoenX(SolverBase):
         ):
             raise ValueError(
                 "temporal_iterations requires solver_scheme='soft', step_layout='single_world', rigid "
-                "bodies, uncolored contact headers, and no mass splitting or sleeping"
+                "bodies, uncolored contact headers, and no mass splitting"
             )
 
         # Body-pair grouping pays a sort/gather cost and reduces all shape-pair
@@ -2064,7 +2063,7 @@ class SolverPhoenX(SolverBase):
 
         if self.world.temporal_iterations:
             # Live joint rows after runtime commits: grasps and seals change which bodies
-            # integrate their final velocity.
+            # receive forces over the outer step instead of per temporal sweep.
             self.world.update_temporal_jointed_bodies(self.model)
         if self._sleeping_enabled:
             # Read live joint rows after runtime commits, including reused slots.

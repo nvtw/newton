@@ -51,6 +51,13 @@ class TestSleepingKinematicContact(unittest.TestCase):
 
     def test_moving_support_wakes_stack(self):
         """Wake the whole sleeping stack when its kinematic support rises."""
+        self._check_moving_support(False)
+
+    def test_temporal_moving_support_wakes_stack(self):
+        """Preserve support-motion and removal waking with temporal contact sweeps."""
+        self._check_moving_support(True)
+
+    def _check_moving_support(self, temporal):
         with wp.ScopedDevice("cpu"):
             builder = newton.ModelBuilder()
             support = builder.add_body(is_kinematic=True)
@@ -64,8 +71,9 @@ class TestSleepingKinematicContact(unittest.TestCase):
             solver = SolverPhoenX(
                 model,
                 step_layout="single_world",
-                substeps=4,
-                solver_iterations=4,
+                substeps=1 if temporal else 4,
+                solver_iterations=24 if temporal else 4,
+                temporal_iterations=temporal,
                 contact_hertz=80,
                 sleeping_velocity_threshold=0.02,
                 sleeping_frames_required=30,
@@ -116,6 +124,120 @@ class TestSleepingKinematicContact(unittest.TestCase):
             duration = 24 / 120
             expected_fall = initial_velocity * duration - 0.5 * 9.81 * duration**2
             np.testing.assert_allclose(state.body_q.numpy()[cargo, 2] - start, expected_fall, atol=0.01)
+
+
+class TestTemporalSleeping(unittest.TestCase):
+    def test_passive_support_and_active_servo_cpu(self):
+        """Sleep a supported passive mechanism while other bodies remain active."""
+        self._check_passive_support("cpu")
+
+    @unittest.skipUnless(wp.is_cuda_available(), "CUDA device required")
+    def test_passive_support_and_active_servo_cuda(self):
+        """Preserve support forces, sleep, and external-force waking during graph replay."""
+        self._check_passive_support("cuda:0")
+
+    def _check_passive_support(self, device):
+        with wp.ScopedDevice(device):
+            builder = newton.ModelBuilder()
+            passive = builder.add_link(xform=wp.transform(wp.vec3(0, 0, 0.1)))
+            builder.add_shape_box(passive, hx=0.1, hy=0.1, hz=0.1)
+            joint = builder.add_joint_prismatic(
+                -1,
+                passive,
+                axis=newton.Axis.Z,
+                parent_xform=wp.transform(wp.vec3(0, 0, 0.1)),
+                target_ke=0,
+                target_kd=0,
+                limit_lower=-1e6,
+                limit_upper=1e6,
+            )
+            builder.add_articulation([joint])
+            servo = builder.add_link(xform=wp.transform(wp.vec3(3, 0, 0.1)))
+            builder.add_shape_box(servo, hx=0.1, hy=0.1, hz=0.1)
+            joint = builder.add_joint_prismatic(
+                -1,
+                servo,
+                axis=newton.Axis.X,
+                parent_xform=wp.transform(wp.vec3(3, 0, 0.1)),
+                target_ke=1000,
+                target_kd=100,
+            )
+            builder.add_articulation([joint])
+            falling = builder.add_body(xform=wp.transform(wp.vec3(5, 0, 100)))
+            builder.add_shape_sphere(falling, radius=0.1)
+            builder.add_ground_plane()
+            model = builder.finalize()
+            solver = SolverPhoenX(
+                model,
+                step_layout="single_world",
+                joint_mode="maximal_direct",
+                substeps=1,
+                solver_iterations=24,
+                temporal_iterations=True,
+                contact_hertz=80,
+                sleeping_velocity_threshold=0.02,
+                sleeping_frames_required=60,
+            )
+            state, control = model.state(), model.control()
+            newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+            contacts = model._collision_pipeline.contacts()
+            observables = solver.observables({solver.ObservableKind.CONTACT_F}, contacts=contacts)
+            dt = 1 / 120
+            mass = float(model.body_mass.numpy()[passive])
+            shape_body = model.shape_body.numpy()
+
+            def step():
+                solver.wake_on_external_input(state)
+                solver.collide(state, contacts, dt=dt)
+                solver.step(state, state, control, contacts, dt, observables=observables)
+
+            step()
+            graph = None
+            if model.device.is_cuda:
+                with wp.ScopedCapture() as capture:
+                    step()
+                graph = capture.graph
+
+            def advance():
+                if graph is None:
+                    step()
+                else:
+                    wp.capture_launch(graph)
+
+            def support_force():
+                count = int(contacts.rigid_contact_count.numpy()[0])
+                a = shape_body[contacts.rigid_contact_shape0.numpy()[:count]]
+                b = shape_body[contacts.rigid_contact_shape1.numpy()[:count]]
+                forces = observables.contact_f.numpy()[:count, 2]
+                return float(forces[a == passive].sum() - forces[b == passive].sum())
+
+            sleeping_pose = None
+            for frame in range(100):
+                advance()
+                roots = solver.bodies.island_root.numpy()
+                self.assertLess(roots[servo + 1], 0)
+                self.assertLess(roots[falling + 1], 0)
+                if 30 <= frame < 45:
+                    self.assertAlmostEqual(support_force(), mass * 9.81, delta=0.01)
+                if frame == 75:
+                    self.assertGreaterEqual(roots[passive + 1], 0)
+                    sleeping_pose = state.body_q.numpy()[passive].copy()
+                if frame > 75:
+                    np.testing.assert_array_equal(state.body_q.numpy()[passive], sleeping_pose)
+            self.assertAlmostEqual(float(sleeping_pose[2]), 0.1, delta=0.001)
+            targets = control.joint_target_q.numpy()
+            targets[1] = 0.3
+            control.joint_target_q.assign(targets)
+            force = np.zeros((model.body_count, 6), dtype=np.float32)
+            force[passive, 2] = 2 * mass * 9.81
+            state.body_f.assign(force)
+            previous_z = float(state.body_q.numpy()[passive, 2])
+            for _ in range(60):
+                advance()
+                self.assertLess(solver.bodies.island_root.numpy()[passive + 1], 0)
+            self.assertGreater(float(state.body_q.numpy()[passive, 2]), previous_z + 1.0)
+            self.assertAlmostEqual(support_force(), 0.0, delta=0.01)
+            self.assertAlmostEqual(float(state.body_q.numpy()[servo, 0]), 3.3, delta=0.02)
 
 
 if __name__ == "__main__":
