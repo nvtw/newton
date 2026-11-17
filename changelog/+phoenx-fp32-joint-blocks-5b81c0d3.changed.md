@@ -1,0 +1,1 @@
+PhoenX bilateral joint blocks now factor and solve in single precision instead of double precision. Consumer GPUs run double precision at a small fraction of the single-precision rate; joint accuracy is unchanged in the joint, drive and near-singular weld checks.

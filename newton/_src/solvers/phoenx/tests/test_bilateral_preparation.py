@@ -19,9 +19,9 @@ from newton._src.solvers.phoenx.constraints.bilateral_joint import (
     BodyContainer,
     ConstraintContainer,
     CopyStateContainer,
-    Mat66d,
-    Vec6d,
-    _dot_double,
+    Mat66,
+    Vec6,
+    _dot6,
     _prepare_bilateral_joint_blocks_cooperative,
     _response,
     constraint_get_body1,
@@ -57,29 +57,29 @@ def _prepare_dynamic_reference(constraints: ConstraintContainer, bodies: BodyCon
         data.response0[cid, i] = factor0 * _response(bodies, body0, data.wrench0[structural, local])
         data.response1[cid, i] = factor1 * _response(bodies, body1, data.wrench1[structural, local])
 
-    matrix = Mat66d()
+    matrix = Mat66()
     for i in range(count):
         row = data.row_indices[cid, i]
         local = data.row_local[row]
         j0 = data.wrench0[structural, local]
         j1 = data.wrench1[structural, local]
         for j in range(i + 1):
-            value = _dot_double(j0, data.response0[cid, j]) + _dot_double(j1, data.response1[cid, j])
+            value = _dot6(j0, data.response0[cid, j]) + _dot6(j1, data.response1[cid, j])
             if i == j and data.row_dynamic[row]:
-                value += wp.float64(1.0) / wp.float64(data.dynamic_mass[row])
+                value += wp.float32(1.0) / wp.float32(data.dynamic_mass[row])
             matrix[i, j] = value
             matrix[j, i] = value
 
-    lower = Mat66d()
-    diagonal = Vec6d()
+    lower = Mat66()
+    diagonal = Vec6()
     valid = wp.bool(True)
     for i in range(count):
         pivot = matrix[i, i]
         for j in range(i):
             pivot -= lower[i, j] * lower[i, j] * diagonal[j]
         diagonal[i] = pivot
-        lower[i, i] = wp.float64(1.0)
-        if pivot <= wp.float64(0.0):
+        lower[i, i] = wp.float32(1.0)
+        if pivot <= wp.float32(0.0):
             valid = False
         if valid:
             for j in range(i + 1, count):
@@ -328,8 +328,8 @@ class TestBilateralPreparation(unittest.TestCase):
         for name, dtype, shape, scalar in (
             ("response0", wp.spatial_vector, (count, 6, 6), np.float32),
             ("response1", wp.spatial_vector, (count, 6, 6), np.float32),
-            ("lower", Mat66d, (count, 6, 6), np.float64),
-            ("diagonal", Vec6d, (count, 6), np.float64),
+            ("lower", Mat66, (count, 6, 6), np.float32),
+            ("diagonal", Vec6, (count, 6), np.float32),
             ("valid", wp.int32, (count,), np.int32),
         ):
             setattr(data, name, wp.array(np.full(shape, 17, dtype=scalar), dtype=dtype, device=model.device))

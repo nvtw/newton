@@ -14,20 +14,20 @@ from ..constraints.bilateral_joint import (
     invert_prepared_bilateral_joint_blocks_cooperative,
     prepare_bilateral_joint_blocks,
 )
-from ..constraints.bilateral_joint_data import BilateralJointData, Mat66d, Vec6d
+from ..constraints.bilateral_joint_data import BilateralJointData, Mat66, Vec6
 from ..constraints.constraint_container import ConstraintContainer
 from ..sleeping_kernels import _phoenx_apply_island_wake_kernel
 from .direct_equality import DirectEqualitySystem, _body_com_twist, _direct_wrench_response
 
-_Vec6d = wp.types.vector(length=6, dtype=wp.float64)
-_Mat66d = wp.types.matrix(shape=(6, 6), dtype=wp.float64)
+_Vec6 = wp.types.vector(length=6, dtype=wp.float32)
+_Mat66 = wp.types.matrix(shape=(6, 6), dtype=wp.float32)
 
 
 @wp.func
-def _dot_double(a: wp.spatial_vector, b: wp.spatial_vector) -> wp.float64:
-    result = wp.float64(0.0)
+def _dot6(a: wp.spatial_vector, b: wp.spatial_vector) -> wp.float32:
+    result = wp.float32(0.0)
     for component in range(6):
-        result += wp.float64(a[component]) * wp.float64(b[component])
+        result += wp.float32(a[component]) * wp.float32(b[component])
     return result
 
 
@@ -89,8 +89,8 @@ def _block_sweep(
     block_rows: wp.array2d[wp.int32],
     block_count: wp.array[wp.int32],
     block_cid: wp.array[wp.int32],
-    prepared_lower: wp.array[Mat66d],
-    prepared_diagonal: wp.array[Vec6d],
+    prepared_lower: wp.array[Mat66],
+    prepared_diagonal: wp.array[Vec6],
     prepared_valid: wp.array[wp.int32],
     active_count: wp.array[wp.int32],
     copy_highest: wp.array[wp.int32],
@@ -125,20 +125,20 @@ def _block_sweep(
         twist0 = _body_com_twist(bodies, b0)
         twist1 = _body_com_twist(bodies, b1)
         # Fixed bounds keep six-row temporaries statically indexed.
-        matrix = _Mat66d()
-        rhs = _Vec6d()
+        matrix = _Mat66()
+        rhs = _Vec6()
         for i in range(6):
             if i < count:
                 row = block_rows[block, i]
                 local = row_local[row]
                 j0 = wrench0[structural, local]
                 j1 = wrench1[structural, local]
-                residual = _dot_double(j0, twist0) + _dot_double(j1, twist1)
+                residual = _dot6(j0, twist0) + _dot6(j1, twist1)
                 if row_dynamic[row]:
-                    residual += wp.float64(accumulated[row]) / wp.float64(dynamic_mass[row])
-                    residual -= wp.float64(reference[row])
+                    residual += wp.float32(accumulated[row]) / wp.float32(dynamic_mass[row])
+                    residual -= wp.float32(reference[row])
                 elif use_bias:
-                    residual += wp.float64(bias[structural, local])
+                    residual += wp.float32(bias[structural, local])
                 rhs[i] = -residual
                 if not reuse_factor:
                     for j in range(6):
@@ -149,15 +149,15 @@ def _block_sweep(
                             k1 = wrench1[structural, other_local]
                             response0 = _direct_wrench_response(k0, bodies.inverse_mass[b0], inertia0)
                             response1 = _direct_wrench_response(k1, bodies.inverse_mass[b1], inertia1)
-                            value = _dot_double(j0, response0) + _dot_double(j1, response1)
+                            value = _dot6(j0, response0) + _dot6(j1, response1)
                             if i == j and row_dynamic[row]:
-                                value += wp.float64(1.0) / wp.float64(dynamic_mass[row])
+                                value += wp.float32(1.0) / wp.float32(dynamic_mass[row])
                             matrix[i, j] = value
                             matrix[j, i] = value
         # Physical joint block LDL^T, without mass scaling or added compliance.
         # Valid independent joint rows have strictly positive pivots.
-        lower = _Mat66d()
-        diagonal = _Vec6d()
+        lower = _Mat66()
+        diagonal = _Vec6()
         valid = wp.bool(True)
         if reuse_factor:
             # With no mass-splitting copies, the ordinary block preparation
@@ -174,8 +174,8 @@ def _block_sweep(
                         if j < i:
                             pivot -= lower[i, j] * lower[i, j] * diagonal[j]
                     diagonal[i] = pivot
-                    lower[i, i] = wp.float64(1.0)
-                    if pivot <= wp.float64(0.0):
+                    lower[i, i] = wp.float32(1.0)
+                    if pivot <= wp.float32(0.0):
                         valid = False
                     if valid:
                         for j in range(6):
@@ -186,7 +186,7 @@ def _block_sweep(
                                         value -= lower[j, k] * lower[i, k] * diagonal[k]
                                 lower[j, i] = value / pivot
         if valid:
-            solution = _Vec6d()
+            solution = _Vec6()
             for i in range(6):
                 if i < count:
                     value = rhs[i]
@@ -348,9 +348,9 @@ class BlockJointSystem(DirectEqualitySystem):
         data.accumulated = self.accumulated_impulse
         data.response0 = wp.zeros((count, 6), dtype=wp.spatial_vector, device=device)
         data.response1 = wp.zeros((count, 6), dtype=wp.spatial_vector, device=device)
-        data.lower = wp.zeros(count, dtype=Mat66d, device=device)
-        data.diagonal = wp.zeros(count, dtype=Vec6d, device=device)
-        data.inverse = wp.zeros(count, dtype=Mat66d, device=device)
+        data.lower = wp.zeros(count, dtype=Mat66, device=device)
+        data.diagonal = wp.zeros(count, dtype=Vec6, device=device)
+        data.inverse = wp.zeros(count, dtype=Mat66, device=device)
         data.valid = wp.zeros(count, dtype=wp.int32, device=device)
         world.constraints.bilateral = data
         if np.count_nonzero(counts) >= world._fuse_threshold:

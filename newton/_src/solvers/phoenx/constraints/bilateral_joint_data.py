@@ -5,8 +5,8 @@
 
 import warp as wp
 
-Vec6d = wp.types.vector(length=6, dtype=wp.float64)
-Mat66d = wp.types.matrix(shape=(6, 6), dtype=wp.float64)
+Vec6 = wp.types.vector(length=6, dtype=wp.float32)
+Mat66 = wp.types.matrix(shape=(6, 6), dtype=wp.float32)
 
 
 @wp.struct
@@ -26,7 +26,7 @@ class BilateralJointData:
     accumulated: wp.array[wp.float32]
     response0: wp.array2d[wp.spatial_vector]
     response1: wp.array2d[wp.spatial_vector]
-    lower: wp.array[Mat66d]
-    diagonal: wp.array[Vec6d]
-    inverse: wp.array[Mat66d]
+    lower: wp.array[Mat66]
+    diagonal: wp.array[Vec6]
+    inverse: wp.array[Mat66]
     valid: wp.array[wp.int32]
