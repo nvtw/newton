@@ -15,6 +15,23 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
 
 
 @wp.kernel
+def _snapshot_active_columns(
+    columns: ContactColumnContainer,
+    pair: wp.array[wp.int32],
+    active: wp.array[wp.int32],
+    source: ContactColumnContainer,
+    source_pair: wp.array[wp.int32],
+):
+    i = wp.tid()
+    if i >= active[0]:
+        return
+    for row in range(columns.data.shape[0]):
+        source.data[row, i] = columns.data[row, i]
+    source.articulation_owner[i] = columns.articulation_owner[i]
+    source_pair[i] = pair[i]
+
+
+@wp.kernel
 def _count_chunks(
     columns: ContactColumnContainer,
     active: wp.array[wp.int32],
@@ -116,9 +133,13 @@ def split_contact_columns(
     device,
 ) -> None:
     """Split columns without changing point order, history indices or endpoints."""
-    wp.copy(scratch.source_pair, source_pair)
-    wp.copy(scratch.source.data, columns.data)
-    wp.copy(scratch.source.articulation_owner, columns.articulation_owner)
+    # Only active columns are read below; copying the full capacity moved tens of MB per substep.
+    wp.launch(
+        _snapshot_active_columns,
+        scratch.capacity,
+        [columns, source_pair, active, scratch.source, scratch.source_pair],
+        device=device,
+    )
     wp.launch(_count_chunks, scratch.capacity, [scratch.source, active, chunk_size, scratch.counts], device=device)
     wp.utils.array_scan(scratch.counts, scratch.offsets, inclusive=False)
     wp.launch(
