@@ -10,9 +10,13 @@ from typing import Literal
 import warp as wp
 
 #: Contact-matching mode for :class:`newton.CollisionPipeline`.
-#: ``"sticky"`` (default) overwrites matched contacts' anchors with previous-frame
-#: values to prevent geometry jitter; ``"latest"`` keeps this frame's geometry
-#: (diagnostic). ``"disabled"`` is unsupported — the ingest path requires the match index.
+#: ``"sticky"`` (default) matches contacts in body frames, so contacts on moving,
+#: sliding or transported bodies keep their warm start and friction anchors, and
+#: replays the previous witness geometry while it stays within the match threshold.
+#: ``"latest"`` keeps this frame's geometry but matches world-space midpoints
+#: within ``contact_matching_pos_threshold`` per collision pass, so contacts moving faster
+#: than that (3 cm/s at 60 Hz with the 0.5 mm default) start cold on every pass.
+#: ``"disabled"`` is unsupported — the ingest path requires the match index.
 PHOENX_CONTACT_MATCHING: Literal["sticky", "latest"] = "sticky"
 
 #: Fixed-count inner unroll inside every ``wp.capture_while`` body. Amortises

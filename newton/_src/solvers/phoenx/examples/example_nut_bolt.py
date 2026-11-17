@@ -46,10 +46,8 @@ from newton._src.solvers.phoenx.simulation import (
 )
 
 # Contact matching mode. ``"latest"`` uses fresh narrow-phase
-# normals each frame so the helical-thread torque drives nut
-# rotation; ``"sticky"`` pins frame-1 normals and produces no
-# rotation about +Z but is more numerically stable under low
-# friction.
+# geometry each frame. ``"sticky"`` threads the nuts as well: over
+# 240 frames both modes lower the nuts by about 5.4 mm.
 _CONTACT_MATCHING = "latest"
 
 # Default for ``--bolt-static``. ``False`` exercises the dynamic-bolt
