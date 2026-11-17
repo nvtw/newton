@@ -157,11 +157,11 @@ def _run_schedule(sizes, reverse, overflow, batch, candidate):
         cursor_next = wp.zeros(1, dtype=int, device="cuda:0")
         cursor_slot = next(i for i, value in enumerate(common) if value is cursor)
 
-        def head_sweep(**_kwargs):
+        def head_sweep(launches=8, **_kwargs):
             wp.launch(_count_dispatch, dim=1, inputs=[0, dispatch_counts, cursor, head_active], device="cuda:0")
             # Each launch reads one cursor array and publishes into the other;
             # the even launch count ends in the array the tail reads.
-            for launch in range(8):
+            for launch in range(launches):
                 source, target = (cursor_next, cursor) if launch % 2 else (cursor, cursor_next)
                 inputs = [
                     *common,
@@ -195,6 +195,7 @@ def _run_schedule(sizes, reverse, overflow, batch, candidate):
             _partitioner=SimpleNamespace(color_cursor=cursor),
             _capture_singleworld_sweep=head_sweep,
             _capture_singleworld_tail_sweep=tail_sweep,
+            _singleworld_kernels=tuple,
         )
         with wp.ScopedCapture(device="cuda:0") as capture:
             simulation.PhoenXWorld._singleworld_head_plus_tail_sweep(world, head, tail, wp.float32(120))
@@ -229,6 +230,17 @@ class TestTailFirstDispatch(unittest.TestCase):
             self.assertGreater(old_counts[0], 0)
             self.assertEqual(counts[0], 0)
             self.assertEqual(counts[1], 1)
+
+    def test_more_head_colors_than_fixed_launches(self):
+        """Continue past the fixed head launches without reordering colors."""
+        sizes = [8] * (simulation.FIXED_HEAD_LAUNCHES + 3) + [2, 3, 8, 2]
+        for reverse in (False, True):
+            with self.subTest(reverse=reverse):
+                baseline, _ = _run_schedule(sizes, reverse, -1, 1, False)
+                candidate, counts = _run_schedule(sizes, reverse, -1, 1, True)
+                np.testing.assert_array_equal(candidate, baseline)
+                # The guarded loop ran head launches after the fixed phase.
+                self.assertGreater(counts[0], 1)
 
     def test_mass_split_overflow_preserves_batch_order(self):
         """Keep overflow last and preserve serial operations inside each copy."""

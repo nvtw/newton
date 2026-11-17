@@ -24,6 +24,13 @@ PHOENX_CONTACT_MATCHING: Literal["sticky", "latest"] = "sticky"
 #: termination predicate hits zero.
 NUM_INNER_WHILE_ITERATIONS: int = 8
 
+#: Head launches of a sweep's first head phase, issued under one conditional
+#: instead of a ``capture_while`` loop. An empty launch costs about a third
+#: of a conditional evaluation, so the count covers typical greedy colorings
+#: (about 10 large colors); larger sweeps continue in the guarded loop. Even,
+#: because consecutive head launches alternate between two cursor arrays.
+FIXED_HEAD_LAUNCHES: int = 12
+
 #: Max colour size eligible for the single-block fused-tail path. Once a sweep's
 #: remaining colours are all <= this, control hands off from the persistent
 #: multi-block grid to a single 1D-block kernel that walks the rest with
@@ -65,6 +72,7 @@ PHOENX_FRICTION_SLIP_VELOCITY = wp.constant(wp.float32(1.0e-3))
 
 
 __all__ = [
+    "FIXED_HEAD_LAUNCHES",
     "FUSE_TAIL_BLOCK_DIM",
     "FUSE_TAIL_MAX_COLOR_SIZE",
     "NUM_INNER_WHILE_ITERATIONS",

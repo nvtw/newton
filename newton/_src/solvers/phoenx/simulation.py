@@ -272,6 +272,7 @@ from newton._src.solvers.phoenx.sleeping_kernels import (
     _phoenx_surface_activity_kernel,
 )
 from newton._src.solvers.phoenx.solver_config import (
+    FIXED_HEAD_LAUNCHES,
     FUSE_TAIL_BLOCK_DIM,
     FUSE_TAIL_MAX_COLOR_SIZE,
     NUM_INNER_WHILE_ITERATIONS,
@@ -5356,10 +5357,10 @@ class PhoenXWorld:
             device=self.device,
         )
 
-    def _capture_singleworld_sweep(self, kernel, **kw) -> None:
-        """capture_while body: head-path sweep on the persistent grid, unrolled
-        NUM_INNER_WHILE_ITERATIONS times. Extra head launches no-op once head_active
-        clears within the same outer iter."""
+    def _capture_singleworld_sweep(self, kernel, launches: int = NUM_INNER_WHILE_ITERATIONS, **kw) -> None:
+        """Head-path sweep on the persistent grid: ``launches`` dynamic head
+        launches (a ``capture_while`` body unrolls NUM_INNER_WHILE_ITERATIONS).
+        Extra head launches no-op once the sweep reaches a tail color."""
         idt = kw.get("idt", wp.float32(0.0))
         contact_container = kw.get("contact_container", self._contact_container)
         if contact_container is None:
@@ -5367,8 +5368,8 @@ class PhoenXWorld:
         fuse_threshold = wp.int32(self._fuse_threshold)
         # An even launch count returns the cursor to the partitioner's array,
         # which the fused tail and both loop conditions read.
-        assert NUM_INNER_WHILE_ITERATIONS % 2 == 0
-        for launch in range(NUM_INNER_WHILE_ITERATIONS):
+        assert launches % 2 == 0
+        for launch in range(launches):
             self._launch_singleworld_head(kernel, idt, fuse_threshold, contact_container, cursor_parity=launch % 2)
 
     def _capture_singleworld_tail_sweep(self, kernel, **kw) -> None:
@@ -5562,6 +5563,11 @@ class PhoenXWorld:
         head. The head drains large colours until it reaches a small one.
         Repeating this pair preserves colour order in both sweep directions
         while avoiding idle head launches when every colour fits the tail.
+
+        The first head phase runs FIXED_HEAD_LAUNCHES launches under a single
+        conditional instead of a ``capture_while`` loop, followed by the tail.
+        Sweeps with more large colors continue in the guarded round loop from
+        the same cursor, so the color order is unchanged.
         """
         heads = self._singleworld_kernels()[::2]
         if head_kernel in heads:
@@ -5595,12 +5601,24 @@ class PhoenXWorld:
                 )
             head_kernel, tail_kernel = self._singleworld_cached_prepare_kernels()
 
-        def _round() -> None:
+        def _tail() -> None:
             self._capture_singleworld_tail_sweep(
                 kernel=tail_kernel,
                 idt=idt,
                 contact_container=contact_container,
             )
+
+        def _fixed_heads_then_tail() -> None:
+            self._capture_singleworld_sweep(
+                kernel=head_kernel,
+                launches=FIXED_HEAD_LAUNCHES,
+                idt=idt,
+                contact_container=contact_container,
+            )
+            _tail()
+
+        def _round() -> None:
+            _tail()
             wp.capture_while(
                 self._head_active,
                 self._capture_singleworld_sweep,
@@ -5609,6 +5627,8 @@ class PhoenXWorld:
                 contact_container=contact_container,
             )
 
+        _tail()
+        wp.capture_if(self._head_active, on_true=_fixed_heads_then_tail)
         wp.capture_while(self._partitioner.color_cursor, _round)
 
     def _gathered_warm_start_supported(self) -> bool:
