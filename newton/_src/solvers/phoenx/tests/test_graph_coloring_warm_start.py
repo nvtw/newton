@@ -439,8 +439,9 @@ class TestWarmStartCacheStructure(unittest.TestCase):
 
         # Reconstruct the host-side body-pair key (matches
         # ``warm_start_key_func`` -- two smallest non-negative bodies,
-        # sentinel = INT32_MAX).
-        BODY_INF = 0x7FFFFFFF
+        # missing slots map to the all-ones body field).
+        body_bits = p._ws_body_bits
+        BODY_INF = (1 << body_bits) - 1 if body_bits < 32 else 0x7FFFFFFF
 
         def host_key(bodies_row: np.ndarray) -> int:
             b_min = BODY_INF
@@ -454,6 +455,8 @@ class TestWarmStartCacheStructure(unittest.TestCase):
                     b_min = b
                 elif b < b_second:
                     b_second = b
+            if body_bits < 32:
+                return (min(b_second, BODY_INF) << body_bits) | min(b_min, BODY_INF)
             return (b_second << 32) | (b_min & 0xFFFFFFFF)
 
         host_keys = np.array([host_key(bodies_np[i]) for i in range(n)], dtype=np.int64)

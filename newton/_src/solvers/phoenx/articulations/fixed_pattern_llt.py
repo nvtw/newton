@@ -1048,6 +1048,26 @@ def _use_task_queue(ready_width: int, mechanism_count: int, device: wp.Device) -
     return ready_width > mechanism_count and mechanism_count < _QUEUE_MAX_MECHANISMS_PER_SM * device.sm_count
 
 
+#: Bit pattern of a signalling NaN, which no arithmetic produces: an unfactored
+#: matrix never compares equal to it.
+_UNFACTORED_BITS = 0x7F800001
+
+
+@wp.kernel(enable_backward=False)
+def _mark_changed_panels_kernel(
+    matrix_bits: wp.array[wp.int32],
+    factored_bits: wp.array[wp.int32],
+    panel_mechanism: wp.array[wp.int32],
+    panel_entries: wp.int32,
+    mechanism_dirty: wp.array[wp.int32],
+):
+    entry = wp.tid()
+    if matrix_bits[entry] != factored_bits[entry]:
+        mechanism = panel_mechanism[entry / panel_entries]
+        if mechanism >= 0:
+            mechanism_dirty[mechanism] = wp.int32(1)
+
+
 class FixedPatternPanelLLT:
     """Factor and solve fixed-topology mechanism matrices in compact panels."""
 
@@ -1115,6 +1135,14 @@ class FixedPatternPanelLLT:
             size = tile_count * tile_count
             panel_tables.append(self.symbolic.panel_index[offset : offset + size].reshape(tile_count, tile_count))
             offset += size
+
+        panel_mechanism = np.full(self.symbolic.panel_count, -1, dtype=np.int32)
+        for mechanism, table in enumerate(panel_tables):
+            panel_mechanism[table[table >= 0]] = mechanism
+        self._panel_mechanism = wp.array(panel_mechanism, dtype=wp.int32, device=self.device)
+        # Bits of the matrix each mechanism was last factored from; see compute_changed().
+        self._factored_matrix_bits = wp.full(storage_size, _UNFACTORED_BITS, dtype=wp.int32, device=self.device)
+        self._matrix_bits = wp.array(ptr=self.matrix.ptr, dtype=wp.int32, shape=self.matrix.shape, device=self.device)
 
         pcr_mechanisms = _find_block_tridiagonal_mechanisms(panel_tables, block_size)
         self._pcr = (
@@ -1367,6 +1395,30 @@ class FixedPatternPanelLLT:
         other paths factor are refactored on every :meth:`compute`, as before.
         """
         return self._persistent_schedule is not None
+
+    def compute_changed(self) -> None:
+        """Refactor only mechanisms whose matrix bits differ from their last factorization.
+
+        The factor is a deterministic function of the matrix, so an unchanged
+        mechanism keeps a bitwise-identical factor. Requires
+        :attr:`supports_partial_factor`; leaves :attr:`mechanism_dirty` all ones.
+        """
+        self.mechanism_dirty.zero_()
+        wp.launch(
+            _mark_changed_panels_kernel,
+            dim=self.matrix.shape[0],
+            inputs=[
+                self._matrix_bits,
+                self._factored_matrix_bits,
+                self._panel_mechanism,
+                wp.int32(self.block_size * self.block_size),
+                self.mechanism_dirty,
+            ],
+            device=self.device,
+        )
+        self.compute()
+        wp.copy(self._factored_matrix_bits, self._matrix_bits)
+        self.mechanism_dirty.fill_(1)
 
     def compute(self) -> None:
         """Factor narrow mechanisms cooperatively or use the ready queue."""

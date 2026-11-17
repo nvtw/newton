@@ -145,6 +145,55 @@ def _refresh_cached_warm_start_kernel(
                     store_row_warm_start(cc, k, linear, angular0, angular1)
 
 
+@wp.func
+def gathered_contact_impulse(
+    tid: wp.int32,
+    columns: ContactColumnContainer,
+    body_entry_start: wp.array[wp.int32],
+    entries: wp.array[wp.int32],
+    row_linear: wp.array[wp.vec3f],
+    row_angular0: wp.array[wp.vec3f],
+    row_angular1: wp.array[wp.vec3f],
+):
+    """Sum the cached impulses on body ``tid >> 3``; all eight lanes of the body must call this.
+
+    Lane 0 receives the total; see :func:`_gathered_contact_warm_start_kernel`.
+    """
+    body = tid >> wp.int32(3)
+    lane = tid & wp.int32(7)
+    linear = wp.vec3f(0.0)
+    angular = wp.vec3f(0.0)
+    for entry in range(body_entry_start[body] + lane, body_entry_start[body + 1], 8):
+        code = entries[entry]
+        slot = code >> wp.int32(1)
+        first = contact_get_contact_first(columns, slot)
+        end = first + contact_get_contact_count(columns, slot)
+        if (code & wp.int32(1)) == wp.int32(0):
+            for k in range(first, end):
+                linear -= row_linear[k]
+                angular -= row_angular0[k]
+        else:
+            for k in range(first, end):
+                linear += row_linear[k]
+                angular += row_angular1[k]
+    mask = wp.uint32(255) << wp.uint32(tid & wp.int32(24))
+    linear = subgroup_accumulate8_vec3(wp.vec3f(0.0), linear, mask)
+    angular = subgroup_accumulate8_vec3(wp.vec3f(0.0), angular, mask)
+    return linear, angular
+
+
+@wp.func
+def apply_gathered_contact_impulse(
+    bodies: BodyContainer, body: wp.int32, inverse_mass: wp.float32, linear: wp.vec3f, angular: wp.vec3f
+):
+    """Apply a summed contact impulse from :func:`gathered_contact_impulse` to ``body``."""
+    v, w = body_load_vw(bodies, body)
+    v, w = apply_body_spatial_impulse(
+        v, w, inverse_mass, mat33_from_sym6(body_load_inv_inertia_sym6(bodies, body)), linear, angular
+    )
+    body_store_vw(bodies, body, v, w)
+
+
 @wp.kernel(enable_backward=False)
 def _gathered_contact_warm_start_kernel(
     columns: ContactColumnContainer,
@@ -168,31 +217,12 @@ def _gathered_contact_warm_start_kernel(
     inverse_mass = bodies.inverse_mass[body]
     if inverse_mass <= wp.float32(0.0):
         return
-    linear = wp.vec3f(0.0)
-    angular = wp.vec3f(0.0)
-    for entry in range(body_entry_start[body] + lane, body_entry_start[body + 1], 8):
-        code = entries[entry]
-        slot = code >> wp.int32(1)
-        first = contact_get_contact_first(columns, slot)
-        end = first + contact_get_contact_count(columns, slot)
-        if (code & wp.int32(1)) == wp.int32(0):
-            for k in range(first, end):
-                linear -= row_linear[k]
-                angular -= row_angular0[k]
-        else:
-            for k in range(first, end):
-                linear += row_linear[k]
-                angular += row_angular1[k]
-    mask = wp.uint32(255) << wp.uint32(tid & wp.int32(24))
-    linear = subgroup_accumulate8_vec3(wp.vec3f(0.0), linear, mask)
-    angular = subgroup_accumulate8_vec3(wp.vec3f(0.0), angular, mask)
+    linear, angular = gathered_contact_impulse(
+        tid, columns, body_entry_start, entries, row_linear, row_angular0, row_angular1
+    )
     if lane != wp.int32(0):
         return
-    v, w = body_load_vw(bodies, body)
-    v, w = apply_body_spatial_impulse(
-        v, w, inverse_mass, mat33_from_sym6(body_load_inv_inertia_sym6(bodies, body)), linear, angular
-    )
-    body_store_vw(bodies, body, v, w)
+    apply_gathered_contact_impulse(bodies, body, inverse_mass, linear, angular)
 
 
 class ContactBodyEntries:
@@ -262,6 +292,18 @@ class ContactBodyEntries:
         contact_offset: int,
     ) -> None:
         """Replay current canonical-row impulses using the existing endpoint list."""
+        self.refresh_cached_warm_start(columns, cc, element_ids_by_color, num_active_constraints, contact_offset)
+        self.apply_warm_start(columns, bodies)
+
+    def refresh_cached_warm_start(
+        self,
+        columns: ContactColumnContainer,
+        cc: ContactContainer,
+        element_ids_by_color: wp.array[wp.int32],
+        num_active_constraints: wp.array[wp.int32],
+        contact_offset: int,
+    ) -> None:
+        """Rebuild the per-row impulses that :meth:`apply_warm_start` replays."""
         device = wp.get_device(self.device)
         row_lanes = 8 if device.is_cuda else 1
         column_stride = self.keys.shape[0] // 4
@@ -286,7 +328,6 @@ class ContactBodyEntries:
             ],
             device=self.device,
         )
-        self.apply_warm_start(columns, bodies)
 
     def apply_warm_start(self, columns: ContactColumnContainer, bodies: BodyContainer) -> None:
         """Add the stored row impulses of every live column to body velocities."""
@@ -298,4 +339,9 @@ class ContactBodyEntries:
         )
 
 
-__all__ = ["ContactBodyEntries", "store_row_warm_start"]
+__all__ = [
+    "ContactBodyEntries",
+    "apply_gathered_contact_impulse",
+    "gathered_contact_impulse",
+    "store_row_warm_start",
+]

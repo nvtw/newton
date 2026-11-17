@@ -56,6 +56,9 @@ def _bottle_ray(
     return closest
 
 
+_PHOTOEYE_BATCH_SIZE = 256
+
+
 @wp.kernel
 def _photoeyes(
     body_q: wp.array[wp.transform],
@@ -69,9 +72,13 @@ def _photoeyes(
     stride: int,
     observation: wp.array2d[float],
 ):
-    sensor, lane = wp.tid()
+    # Each warp tests one batch of bottles, so a sensor's scan spreads over
+    # many blocks instead of serializing every bottle on 32 lanes.
+    sensor, batch, lane = wp.tid()
     origin, direction, distance = origins[sensor], directions[sensor], distances[sensor]
-    for i in range(lane, bottles.shape[0], 32):
+    begin = batch * wp.static(_PHOTOEYE_BATCH_SIZE)
+    end = wp.min(begin + wp.static(_PHOTOEYE_BATCH_SIZE), bottles.shape[0])
+    for i in range(begin + lane, end, 32):
         if _bottle_ray(body_q[bottles[i]], origin, direction, distance, hull_mesh, hull_xform, hull_scale) <= distance:
             wp.atomic_max(observation, sensor / stride, sensor % stride, 1.0)
             break

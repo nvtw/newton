@@ -360,6 +360,14 @@ class BlockJointSystem(DirectEqualitySystem):
             for key, blocks in components.items()
             if any(self.bounded_drive_joint_mask[joints[block]] for block in blocks)
         }
+        # Bodies a bound correction sweep may write; see MixedJointSystem.bind_world.
+        self._correction_bodies = frozenset(
+            body
+            for group in components.values()
+            for block in group
+            for body in (int(parents[joints[block]]) + 1, int(children[joints[block]]) + 1)
+            if body > 0
+        )
         starts = np.cumsum([0, *(len(blocks) for blocks in components.values())], dtype=np.int32)
         blocks = np.asarray([block for group in components.values() for block in group], dtype=np.int32)
         device = self.model.device
@@ -495,6 +503,18 @@ class BlockJointSystem(DirectEqualitySystem):
                 self.bodies,
             ],
             device=self.model.device,
+        )
+
+    def warm_start_temporal_iteration_inputs(self):
+        """Body count and arrays of :meth:`warm_start_temporal_iteration`, for a fused per-body launch."""
+        return (
+            int(self.model.body_count) + 1,
+            self._microstep_body_row_start,
+            self._microstep_descriptors,
+            self._apply_wrench0,
+            self._apply_wrench1,
+            self._microstep_seed,
+            self.row_scale,
         )
 
     def finish_temporal_iterations(self):
@@ -642,10 +662,10 @@ class BlockJointSystem(DirectEqualitySystem):
             block_dim=32 if self.model.device.is_cuda else 256,
         )
 
-    def resolve_bounded_drives(self, idt, *, use_bias):
+    def _correct_new_bounds(self, idt, *, use_bias):
         self._resolving_bounds = True
         try:
-            super().resolve_bounded_drives(idt, use_bias=use_bias)
+            super()._correct_new_bounds(idt, use_bias=use_bias)
         finally:
             self._resolving_bounds = False
 
@@ -673,6 +693,7 @@ class MixedJointSystem:
         self.exact = DirectEqualitySystem(model, bodies, excluded_joint_mask=~exact, **exact_options)
         self._parts = tuple(part for part in (self.blocks, self.exact) if part.enabled)
         self.d6_inequality_count = None
+        self._joint_bound_scan = False
 
     @property
     def enabled(self) -> bool:
@@ -701,6 +722,25 @@ class MixedJointSystem:
     def bind_world(self, world, joint_idx_to_cid):
         if self.blocks.enabled:
             self.blocks.bind_world(world, joint_idx_to_cid)
+        self._joint_bound_scan = False
+        if self.blocks.enabled and self.blocks.has_bounded_drives and self.exact.has_bounded_drives:
+            # The exact bound scan reads only its bounded rows' endpoint
+            # velocities. When the block correction sweep cannot write those
+            # bodies, both scans commute with the block correction, so one
+            # combined flag and conditional guard both corrections.
+            parents = self.exact.model.joint_parent.numpy()
+            children = self.exact.model.joint_child.numpy()
+            bounded = self.exact.row_bounded_drive.numpy()
+            exact_bodies = {
+                body
+                for row, joint in enumerate(self.exact.topology.row_joint)
+                if bounded[row]
+                for body in (int(parents[joint]) + 1, int(children[joint]) + 1)
+                if body > 0
+            }
+            if exact_bodies.isdisjoint(self.blocks._correction_bodies):
+                self._joint_bound_scan = True
+                self._any_bound_flag = wp.zeros(1, dtype=wp.int32, device=self.exact.model.device)
 
     def _forward(self, name, *args, **kwargs):
         for part in self._parts:
@@ -759,4 +799,15 @@ class MixedJointSystem:
         return bool(self.exact.enabled and self.exact.fuses_copy_average)
 
     def resolve_bounded_drives(self, idt, *, use_bias):
-        self._forward("resolve_bounded_drives", idt, use_bias=use_bias)
+        if not self._joint_bound_scan:
+            self._forward("resolve_bounded_drives", idt, use_bias=use_bias)
+            return
+        self._any_bound_flag.zero_()
+        self.blocks._find_new_bounds(idt, self._any_bound_flag)
+        self.exact._find_new_bounds(idt, self._any_bound_flag)
+
+        def correct():
+            self.blocks._correct_new_bounds(idt, use_bias=use_bias)
+            self.exact._correct_new_bounds(idt, use_bias=use_bias)
+
+        wp.capture_if(self._any_bound_flag, on_true=correct, on_false=None)

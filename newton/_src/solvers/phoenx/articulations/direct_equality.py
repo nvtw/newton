@@ -1725,6 +1725,7 @@ def _activate_bounded_direct_drives_kernel(
     microstep_count: int,
     row_mechanism: wp.array[wp.int32],
     changed_mechanism: wp.array[wp.int32],
+    any_active_flag: wp.array[wp.int32],
 ):
     row = wp.tid()
     if not row_bounded_drive[row]:
@@ -1778,6 +1779,7 @@ def _activate_bounded_direct_drives_kernel(
         velocity_reference[row] = momentum / mass
         drive_saturated[row] = False
         wp.atomic_max(active_set_flag, wp.int32(0), wp.int32(1))
+        wp.atomic_max(any_active_flag, wp.int32(0), wp.int32(1))
         if row_mechanism.shape[0] > row:
             changed_mechanism[row_mechanism[row]] = wp.int32(1)
         return
@@ -1795,6 +1797,7 @@ def _activate_bounded_direct_drives_kernel(
     velocity_reference[row] = momentum / mass
     drive_saturated[row] = True
     wp.atomic_max(active_set_flag, wp.int32(0), wp.int32(1))
+    wp.atomic_max(any_active_flag, wp.int32(0), wp.int32(1))
     if row_mechanism.shape[0] > row:
         changed_mechanism[row_mechanism[row]] = wp.int32(1)
 
@@ -2841,66 +2844,72 @@ class DirectEqualitySystem:
         """Activate finite effort bounds and correct the direct solution."""
         if not self.enabled or not self.has_bounded_drives:
             return
-        dt = wp.float32(1.0) / idt
+        # A newly clamped drive can expose another bound in a coupled
+        # mechanism. Nested conditionals keep the common unsaturated path to
+        # one row scan and only perform extra scans after an actual refactor.
+        self._find_new_bounds(idt, self.drive_active_set_flag)
+        self._correct_new_bounds(idt, use_bias=use_bias)
 
-        def find_new_bounds() -> None:
-            self.drive_active_set_flag.zero_()
-            if self._bound_row_mechanism.shape[0] > 0:
-                self._bound_changed_mechanism.zero_()
-            wp.launch(
-                _activate_bounded_direct_drives_kernel,
-                dim=len(self.topology.row_joint),
-                inputs=[
-                    self.row_joint,
-                    self.row_local,
-                    self.row_dof,
-                    self.row_target_q,
-                    self.row_bounded_drive,
-                    self.drive_saturated,
-                    self.joint_to_structural,
-                    self.model.joint_parent,
-                    self.model.joint_child,
-                    self.row_wrench0,
-                    self.row_wrench1,
-                    self.model.joint_armature,
-                    self.joint_damping,
-                    self.model.joint_gear,
-                    self.model.joint_target_mode,
-                    self.joint_target_ke,
-                    self.joint_target_kd,
-                    self.model.joint_effort_limit,
-                    self.control_target_q,
-                    self.control_target_qd,
-                    dt,
-                    self.bodies,
-                    self.dynamic_old_velocity,
-                    self.dynamic_coordinate,
-                    self.dynamic_mass,
-                    self.velocity_reference,
-                    self.drive_active_set_flag,
-                    self._microstep_joint,
-                    self._microstep_count,
-                    self._bound_row_mechanism,
-                    self._bound_changed_mechanism,
-                ],
-                device=self.model.device,
-            )
+    def _find_new_bounds(self, idt: wp.float32, any_flag: wp.array) -> None:
+        """Scan bounded drive rows; ``drive_active_set_flag`` and ``any_flag`` mark a change."""
+        dt = wp.float32(1.0) / idt
+        self.drive_active_set_flag.zero_()
+        if self._bound_row_mechanism.shape[0] > 0:
+            self._bound_changed_mechanism.zero_()
+        wp.launch(
+            _activate_bounded_direct_drives_kernel,
+            dim=len(self.topology.row_joint),
+            inputs=[
+                self.row_joint,
+                self.row_local,
+                self.row_dof,
+                self.row_target_q,
+                self.row_bounded_drive,
+                self.drive_saturated,
+                self.joint_to_structural,
+                self.model.joint_parent,
+                self.model.joint_child,
+                self.row_wrench0,
+                self.row_wrench1,
+                self.model.joint_armature,
+                self.joint_damping,
+                self.model.joint_gear,
+                self.model.joint_target_mode,
+                self.joint_target_ke,
+                self.joint_target_kd,
+                self.model.joint_effort_limit,
+                self.control_target_q,
+                self.control_target_qd,
+                dt,
+                self.bodies,
+                self.dynamic_old_velocity,
+                self.dynamic_coordinate,
+                self.dynamic_mass,
+                self.velocity_reference,
+                self.drive_active_set_flag,
+                self._microstep_joint,
+                self._microstep_count,
+                self._bound_row_mechanism,
+                self._bound_changed_mechanism,
+                any_flag,
+            ],
+            device=self.model.device,
+        )
+
+    def _correct_new_bounds(self, idt: wp.float32, *, use_bias: bool) -> None:
+        """Refactor and correct after :meth:`_find_new_bounds` flagged a change."""
 
         def activate_and_correct(remaining_passes: int) -> None:
             self._refactor_changed_bounds(idt)
             self.solve(use_bias=use_bias)
             if remaining_passes > 0:
-                find_new_bounds()
+                self._find_new_bounds(idt, self.drive_active_set_flag)
                 wp.capture_if(
                     self.drive_active_set_flag,
                     on_true=lambda: activate_and_correct(remaining_passes - 1),
                     on_false=None,
                 )
 
-        # A newly clamped drive can expose another bound in a coupled
-        # mechanism. Nested conditionals keep the common unsaturated path to
-        # one row scan and only perform extra scans after an actual refactor.
-        find_new_bounds()
         wp.capture_if(
             self.drive_active_set_flag,
             on_true=lambda: activate_and_correct(3),
@@ -2977,7 +2986,14 @@ class DirectEqualitySystem:
 
     def factor(self) -> None:
         """Factor the prepared equality matrix on the current stream."""
-        if self.enabled:
+        if not self.enabled:
+            return
+        if self.solver.supports_partial_factor:
+            # Mechanisms whose matrix is unchanged since their last factor
+            # (for example at rest, or between a relax and the next substep)
+            # keep their factor.
+            self.solver.compute_changed()
+        else:
             self.solver.compute()
 
     def prepare_and_factor(self, idt: wp.float32) -> None:

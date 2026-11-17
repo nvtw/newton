@@ -17,6 +17,7 @@ from newton.examples.phoenx._bottling_control import _Belt, _belt_speeds, _seal_
 from newton.examples.phoenx._bottling_fleet import FleetController, _Transfer
 from newton.examples.phoenx._bottling_io import (
     _CASE_PHOTOEYE_BATCH_SIZE,
+    _PHOTOEYE_BATCH_SIZE,
     _case_drives,
     _case_photoeyes,
     _photoeyes,
@@ -791,8 +792,9 @@ def Xform "Plant" {
         """Acquisition requires a real surface hit within the authored 6 mm."""
         mesh = newton.Mesh.create_box(0.03, 0.03, 0.115, compute_inertia=False)
         mesh_id = mesh.finalize()
-        # Exercise partial warps and products assigned to different ray lanes.
-        product_count, sensor_count = 37, 77
+        # Exercise partial warps, several bottle batches, and products
+        # assigned to different ray lanes.
+        product_count, sensor_count = 37 + _PHOTOEYE_BATCH_SIZE, 77
         origins = np.asarray(
             [(0.1 * ((i * 7) % product_count), 0.0, 0.2305) for i in range(sensor_count)], dtype=np.float32
         )
@@ -801,7 +803,7 @@ def Xform "Plant" {
         hits = wp.zeros((sensor_count // 7, 7), dtype=float)
         wp.launch(
             _photoeyes,
-            dim=(sensor_count, 32),
+            dim=(sensor_count, (product_count + _PHOTOEYE_BATCH_SIZE - 1) // _PHOTOEYE_BATCH_SIZE, 32),
             block_dim=32,
             inputs=[
                 wp.array(

@@ -24,6 +24,7 @@ from newton.examples.phoenx._bottling_fleet import FleetController
 from newton.examples.phoenx._bottling_infeed import InfeedController
 from newton.examples.phoenx._bottling_io import (
     _CASE_PHOTOEYE_BATCH_SIZE,
+    _PHOTOEYE_BATCH_SIZE,
     _actuator_observations,
     _bottle_ray,
     _case_drives,
@@ -951,7 +952,7 @@ class PlantController:
         self.case_hits.zero_()
         wp.launch(
             _photoeyes,
-            dim=(len(self.origins), 32),
+            dim=(len(self.origins), (len(self.bottles) + _PHOTOEYE_BATCH_SIZE - 1) // _PHOTOEYE_BATCH_SIZE, 32),
             block_dim=32,
             inputs=[
                 self.state.body_q,

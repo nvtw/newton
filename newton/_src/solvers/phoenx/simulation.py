@@ -291,6 +291,7 @@ from newton._src.solvers.phoenx.temporal_contacts import (
     temporal_scatter_jointed_kernel,
     temporal_select_local_joints,
     temporal_swap_average_velocity_kernel,
+    temporal_sweep_entry_kernel,
     temporal_sweep_relaxation_kernel,
     temporal_union_contact_components,
     temporal_union_weld_components_kernel,
@@ -752,6 +753,8 @@ class PhoenXWorld:
         #: ``(substep_coefficients, sweep_coefficients, sweep_bias_rate, sweep_idt)``.
         self._temporal_contact_coefficients = None
         self._temporal_sweep_index = 0
+        #: Velocity-sum reset flag of a sweep close deferred into the next sweep's fused entry.
+        self._temporal_deferred_accumulate = None
         self._temporal_record_contacts = None
         self._temporal_joint_enabled = None
         if contact_hertz is not None and not (math.isfinite(contact_hertz) and contact_hertz > 0.0):
@@ -2804,10 +2807,29 @@ class PhoenXWorld:
             self._temporal_sweep_relaxation()
             self._apply_contact_coefficients(self._temporal_contact_coefficients[1])
 
+    def _temporal_fused_sweep_entry(self) -> bool:
+        """Whether one per-body launch can close a contact substep and enter the next.
+
+        Requires the cached contact warm start, whose per-body replay hosts the
+        velocity sum, the force share and the local joint warm start.
+        """
+        entries = self._temporal_contact_body_entries
+        if entries is None or not self._temporal_contacts_active() or self._temporal_velocity_sum is None:
+            return False
+        if self.num_bodies > entries.num_nodes:
+            return False
+        local = self._temporal_local_joints
+        return local is None or int(local.model.body_count) + 1 <= entries.num_nodes
+
     def _temporal_next_sweep(self, idt: wp.float32) -> None:
         """Enter the next contact substep: apply its share of forces and re-apply contact impulses."""
         if self._temporal_local_joints is not None:
             self._temporal_local_joints.advance_temporal_iteration()
+        reset = self._temporal_deferred_accumulate
+        self._temporal_deferred_accumulate = None
+        if reset is not None:
+            self._temporal_fused_next_sweep(reset)
+            return
         self._temporal_apply_forces()
         if self._temporal_contacts_active():
             self._partitioner.begin_sweep()
@@ -2826,6 +2848,67 @@ class PhoenXWorld:
 
         if self._temporal_local_joints is not None:
             self._temporal_local_joints.warm_start_temporal_iteration()
+
+    def _temporal_fused_next_sweep(self, reset: bool) -> None:
+        """Fused :meth:`_temporal_next_sweep` after a deferred velocity accumulation.
+
+        The local drive snapshot and the impulse refresh read no velocity the
+        fused kernel writes, so they run first. The sweep's own
+        ``begin_sweep`` resets the colour cursor; another one here is needed
+        only to advance a symmetric sweep direction.
+        """
+        entries = self._temporal_contact_body_entries
+        if self._partitioner._symmetric_sweep:
+            self._partitioner.begin_sweep()
+        entries.refresh_cached_warm_start(
+            self._contact_cols,
+            self._contact_container,
+            self._partitioner.element_ids_by_color,
+            self._num_active_constraints,
+            self._contact_offset,
+        )
+        apply_forces = self.num_bodies > 0 and self._has_maximal_dynamic_bodies
+        local = self._temporal_local_joints
+        if local is not None:
+            local_inputs = local.warm_start_temporal_iteration_inputs()
+        else:
+            empty_int = wp.empty(0, dtype=wp.int32, device=self.device)
+            empty_float = wp.empty(0, dtype=wp.float32, device=self.device)
+            empty_wrench = wp.empty(0, dtype=wp.spatial_vector, device=self.device)
+            local_inputs = (
+                0,
+                empty_int,
+                wp.empty(0, dtype=wp.vec2i, device=self.device),
+                empty_wrench,
+                empty_wrench,
+                empty_float,
+                empty_float,
+            )
+        wp.launch(
+            temporal_sweep_entry_kernel,
+            dim=8 * entries.num_nodes,
+            inputs=[
+                self.bodies,
+                wp.int32(self.num_bodies),
+                wp.int32(1 if reset else 0),
+                self._temporal_velocity_sum,
+                self._temporal_angular_velocity_sum,
+                wp.int32(1 if apply_forces else 0),
+                self.gravity,
+                self._temporal_jointed,
+                wp.float32(self.substep_dt / self.solver_iterations),
+                wp.float32(0.0),
+                self._contact_cols,
+                entries.starts,
+                entries.values,
+                entries.row_linear,
+                entries.row_angular0,
+                entries.row_angular1,
+                wp.int32(local_inputs[0]),
+                *local_inputs[1:],
+            ],
+            device=self.device,
+        )
 
     def _project_temporal_joints(self) -> None:
         """Project the integration-average motion without changing physical reactions."""
@@ -2865,7 +2948,11 @@ class PhoenXWorld:
                 if self._temporal_record_contacts is not None:
                     self._accumulate_contact_impulses(self._temporal_record_contacts, temporal_only=True)
         if not last:
-            self._temporal_accumulate_velocity(reset=self._temporal_sweep_index == 0)
+            if self._temporal_fused_sweep_entry():
+                # The next sweep's fused entry accumulates before it changes any velocity.
+                self._temporal_deferred_accumulate = self._temporal_sweep_index == 0
+            else:
+                self._temporal_accumulate_velocity(reset=self._temporal_sweep_index == 0)
             self._temporal_sweep_index += 1
 
     def _temporal_apply_forces(self, shares: int = 1, jointed_dt: float = 0.0) -> None:

@@ -519,6 +519,8 @@ class FixedIterationLubyPartitioner:
                 self._num_elements,
                 self._locality_keys,
                 self._locality_values,
+                wp.int32(0),
+                wp.int32(0),
             ],
             device=self._device,
         )

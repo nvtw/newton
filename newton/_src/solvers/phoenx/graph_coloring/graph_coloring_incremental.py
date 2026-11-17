@@ -66,6 +66,8 @@ from newton._src.solvers.phoenx.graph_coloring.warm_start import (
     warm_start_emit_pairs_kernel,
     warm_start_invalidate_apply_kernel,
     warm_start_invalidate_mark_kernel,
+    warm_start_key_body_bits,
+    warm_start_key_end_bit,
     warm_start_mark_boundaries_kernel,
     warm_start_reset_count_kernel,
 )
@@ -108,7 +110,25 @@ _LOCALITY_FAMILY_MASK = wp.constant(wp.int64((1 << 4) - 1))
 _LOCALITY_BODY_MIN_MASK = wp.constant(wp.int64((1 << 24) - 1))
 _LOCALITY_EID_MASK = wp.constant(wp.int64((1 << 25) - 1))
 _LOCALITY_FAMILY_COUNT_HOST = 6
+_LOCALITY_FAMILY_BITS_HOST = 4
+_LOCALITY_COLOR_BITS_HOST = 10  # colours stay below MAX_COLORS = 1024
 _LOCALITY_FAMILY_COUNT = wp.constant(_LOCALITY_FAMILY_COUNT_HOST)
+
+
+def _locality_compact_layout(max_num_interactions: int, max_num_nodes: int) -> tuple[int, int, int | None]:
+    """Return ``(body_bits, eid_bits, end_bit)`` of the compact locality key, or ``(0, 0, None)``.
+
+    The compact key has the field order of the 64-bit layout: an element
+    without bodies maps to the all-ones body field, above every node index,
+    as the 64-bit layout's ``0x7FFFFF`` sentinel is. ``end_bit`` keeps the
+    ``INT64_MAX`` tail sentinel above every active key.
+    """
+    body_bits = max(1, int(max_num_nodes).bit_length())
+    eid_bits = max(1, int(max_num_interactions).bit_length())
+    end_bit = _LOCALITY_COLOR_BITS_HOST + _LOCALITY_FAMILY_BITS_HOST + body_bits + eid_bits + 1
+    if body_bits > 23 or eid_bits > 25 or end_bit > 63:
+        return 0, 0, None
+    return body_bits, eid_bits, end_bit
 
 
 @wp.func
@@ -144,6 +164,8 @@ def _locality_combined_keys_kernel(
     num_elements: wp.array[wp.int32],
     keys: wp.array[wp.int64],
     values: wp.array[wp.int32],
+    body_bits: wp.int32,
+    eid_bits: wp.int32,
 ):
     """Pack ``(colour, family, body_min, eid)`` into one int64 key so a single
     radix sort preserves colour slices while grouping same-family rows.
@@ -151,9 +173,12 @@ def _locality_combined_keys_kernel(
     ``family_sort_cutoff`` disables the family bits for overflow colours,
     preserving their original body-local solve order.
 
-    Bit layout: colour (bits 53..63) | family (49..52, 4b) |
-    body_min (25..48, 24b) | eid (0..24, 25b). Slots past
-    ``num_elements[0]`` get ``INT64_MAX`` and sort to the tail.
+    Bit layout with ``body_bits == 0``: colour (bits 53..63) | family
+    (49..52, 4b) | body_min (25..48, 24b) | eid (0..24, 25b). Otherwise
+    the body and eid fields take ``body_bits`` and ``eid_bits`` from
+    :func:`_locality_compact_layout`, which keeps the key order and
+    lets the sort stop at its ``end_bit``. Slots past ``num_elements[0]``
+    get ``INT64_MAX`` and sort to the tail.
     """
     tid = wp.tid()
     if tid >= keys.shape[0]:
@@ -168,7 +193,17 @@ def _locality_combined_keys_kernel(
     if family_sort_cutoff >= wp.int32(0) and color >= family_sort_cutoff:
         family = wp.int32(0)
     body_min = _locality_min_body(elements, eid)
-    key = _locality_unbucketed_key(color, family, body_min, eid)
+    if body_bits > wp.int32(0):
+        # Elements without bodies keep their place after every real body.
+        body_min = wp.min(body_min, (wp.int32(1) << body_bits) - wp.int32(1))
+        key = (
+            (wp.int64(color) << (_LOCALITY_FAMILY_BITS + wp.int64(body_bits + eid_bits)))
+            | ((wp.int64(family) & _LOCALITY_FAMILY_MASK) << wp.int64(body_bits + eid_bits))
+            | (wp.int64(body_min) << wp.int64(eid_bits))
+            | wp.int64(eid)
+        )
+    else:
+        key = _locality_unbucketed_key(color, family, body_min, eid)
     keys[tid] = key
     values[tid] = eid
 
@@ -417,6 +452,10 @@ class IncrementalContactPartitioner:
         # whose previous-frame colour is still legal skip the MIS
         # entirely. See :mod:`warm_start` for the design.
         self.enable_warm_start: bool = bool(enable_warm_start)
+        # Body-pair keys use the narrowest fields that hold every node index,
+        # so the persist sort needs few radix passes.
+        self._ws_body_bits = warm_start_key_body_bits(max_num_nodes)
+        self._ws_sort_end_bit = warm_start_key_end_bit(self._ws_body_bits)
         if self.enable_warm_start:
             self._warm_start_cache = warm_start_cache_zeros(max_num_interactions, device=device)
             # Per-frame scratch for the validation pass. ``mark`` is
@@ -494,6 +533,9 @@ class IncrementalContactPartitioner:
         # element-by-colour array in one call with a packed
         # ``(colour | body_min)`` key. Colour is the high 32 bits so
         # the CSR colour ordering is preserved.
+        self._locality_body_bits, self._locality_eid_bits, self._locality_end_bit = _locality_compact_layout(
+            max_num_interactions, max_num_nodes
+        )
         self._locality_keys = wp.zeros(2 * max_num_interactions, dtype=wp.int64, device=device)
         self._locality_values = wp.zeros(2 * max_num_interactions, dtype=wp.int32, device=device)
         self._locality_prefix_flags = wp.zeros(
@@ -1080,6 +1122,7 @@ class IncrementalContactPartitioner:
                     self._partition_data_concat,
                     self._warm_start_skip_color_start_plus_one,
                     self._warm_start_skip_color_end_plus_one,
+                    wp.int32(self._ws_body_bits),
                 ],
                 device=self._overflow_flag.device,
             )
@@ -1232,13 +1275,18 @@ class IncrementalContactPartitioner:
                 self._num_elements,
                 self._ws_pair_keys,
                 self._ws_pair_values,
+                wp.int32(self._ws_body_bits),
             ],
             device=self._overflow_flag.device,
         )
         # Step 2: radix sort of the active prefix; the tail already holds
         # the sentinel. The sort needs 2*N buffers (ping-pong).
         radix_sort_active_prefix(
-            self._ws_pair_keys, self._ws_pair_values, self._num_elements, self._locality_prefix_flags
+            self._ws_pair_keys,
+            self._ws_pair_values,
+            self._num_elements,
+            self._locality_prefix_flags,
+            end_bit=self._ws_sort_end_bit,
         )
         # Step 3: mark boundaries.
         wp.launch(
@@ -1295,6 +1343,7 @@ class IncrementalContactPartitioner:
             self._interaction_id_to_partition,
             self._locality_family,
         ]
+        end_bit = None
         if self._sort_regular_contacts_by_point_count:
             locality_inputs.append(self._packed_priorities)
         locality_inputs.extend(
@@ -1305,6 +1354,9 @@ class IncrementalContactPartitioner:
                 self._locality_values,
             ]
         )
+        if not self._sort_regular_contacts_by_point_count:
+            locality_inputs.extend([wp.int32(self._locality_body_bits), wp.int32(self._locality_eid_bits)])
+            end_bit = self._locality_end_bit
         wp.launch(
             _locality_contact_count_keys_kernel
             if self._sort_regular_contacts_by_point_count
@@ -1314,7 +1366,11 @@ class IncrementalContactPartitioner:
             device=self._overflow_flag.device,
         )
         radix_sort_active_prefix(
-            self._locality_keys, self._locality_values, self._num_elements, self._locality_prefix_flags
+            self._locality_keys,
+            self._locality_values,
+            self._num_elements,
+            self._locality_prefix_flags,
+            end_bit=end_bit,
         )
         wp.launch(
             _locality_writeback_kernel,

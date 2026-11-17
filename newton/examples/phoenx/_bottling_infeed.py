@@ -8,7 +8,7 @@ import json
 import numpy as np
 import warp as wp
 
-from newton.examples.phoenx._bottling_io import _case_drives, _load_controller, _photoeyes
+from newton.examples.phoenx._bottling_io import _PHOTOEYE_BATCH_SIZE, _case_drives, _load_controller, _photoeyes
 
 
 class InfeedController:
@@ -67,7 +67,7 @@ class InfeedController:
         self.observation.zero_()
         wp.launch(
             _photoeyes,
-            dim=(len(self.origins), 32),
+            dim=(len(self.origins), (len(plant.bottles) + _PHOTOEYE_BATCH_SIZE - 1) // _PHOTOEYE_BATCH_SIZE, 32),
             block_dim=32,
             inputs=[
                 plant.state.body_q,

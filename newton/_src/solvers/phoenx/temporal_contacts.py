@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import warp as wp
 
+from newton._src.solvers.phoenx.articulations.direct_equality import _apply_direct_equality_body
 from newton._src.solvers.phoenx.body import MOTION_DYNAMIC, BodyContainer, mat33_from_sym6
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
     ContactColumnContainer,
@@ -52,6 +53,10 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_set_pd_bias,
     cc_set_pd_eff_soft,
     cc_set_pd_gamma,
+)
+from newton._src.solvers.phoenx.constraints.contact_warm_start import (
+    apply_gathered_contact_impulse,
+    gathered_contact_impulse,
 )
 from newton._src.solvers.phoenx.islands.island_builder import _find, _pack_entry, _unite
 from newton._src.solvers.phoenx.solver_config import PHOENX_BOOST_CONTACT_NORMAL
@@ -266,19 +271,15 @@ def temporal_scatter_jointed_kernel(
     result[b] = marked[_find(entries, b)]
 
 
-@wp.kernel(enable_backward=False)
-def temporal_apply_forces_kernel(
+@wp.func
+def _temporal_apply_body_forces(
     bodies: BodyContainer,
     gravity: wp.array[wp.vec3f],
     jointed: wp.array[wp.int32],
     free_dt: wp.float32,
     jointed_dt: wp.float32,
+    i: wp.int32,
 ):
-    """Apply external forces and gravity over ``free_dt`` or, for ``jointed`` bodies, ``jointed_dt``.
-
-    Mirrors the force part of the substep-entry kernel for awake dynamic bodies.
-    """
-    i = wp.tid()
     if bodies.motion_type[i] != MOTION_DYNAMIC or bodies.inverse_mass[i] == 0.0 or bodies.island_root[i] >= 0:
         return
     dt = free_dt
@@ -294,17 +295,104 @@ def temporal_apply_forces_kernel(
     bodies.angular_velocity[i] = w
 
 
+@wp.kernel(enable_backward=False)
+def temporal_apply_forces_kernel(
+    bodies: BodyContainer,
+    gravity: wp.array[wp.vec3f],
+    jointed: wp.array[wp.int32],
+    free_dt: wp.float32,
+    jointed_dt: wp.float32,
+):
+    """Apply external forces and gravity over ``free_dt`` or, for ``jointed`` bodies, ``jointed_dt``.
+
+    Mirrors the force part of the substep-entry kernel for awake dynamic bodies.
+    """
+    _temporal_apply_body_forces(bodies, gravity, jointed, free_dt, jointed_dt, wp.tid())
+
+
+@wp.kernel(enable_backward=False)
+def temporal_sweep_entry_kernel(
+    bodies: BodyContainer,
+    num_bodies: wp.int32,
+    reset: wp.int32,
+    velocity_sum: wp.array[wp.vec3f],
+    angular_velocity_sum: wp.array[wp.vec3f],
+    apply_forces: wp.int32,
+    gravity: wp.array[wp.vec3f],
+    jointed: wp.array[wp.int32],
+    free_dt: wp.float32,
+    jointed_dt: wp.float32,
+    columns: ContactColumnContainer,
+    body_entry_start: wp.array[wp.int32],
+    entries: wp.array[wp.int32],
+    row_linear: wp.array[wp.vec3f],
+    row_angular0: wp.array[wp.vec3f],
+    row_angular1: wp.array[wp.vec3f],
+    local_body_count: wp.int32,
+    local_body_row_start: wp.array[wp.int32],
+    local_descriptor: wp.array[wp.vec2i],
+    local_wrench0: wp.array[wp.spatial_vector],
+    local_wrench1: wp.array[wp.spatial_vector],
+    local_seed: wp.array[wp.float32],
+    local_scale: wp.array[wp.float32],
+):
+    """Close one contact substep and enter the next for one body, eight lanes per body.
+
+    Performs, in order, :func:`temporal_accumulate_velocity_kernel`,
+    :func:`temporal_apply_forces_kernel` (when ``apply_forces``), the
+    cached contact warm start of :class:`ContactBodyEntries`, and the local
+    joint microstep warm start for bodies below ``local_body_count``. Each
+    step touches only its own body, so the fused result matches the
+    separate launches.
+    """
+    tid = wp.tid()
+    body = tid >> wp.int32(3)
+    lane = tid & wp.int32(7)
+    inverse_mass = bodies.inverse_mass[body]
+    linear = wp.vec3f(0.0)
+    angular = wp.vec3f(0.0)
+    if inverse_mass > wp.float32(0.0):
+        linear, angular = gathered_contact_impulse(
+            tid, columns, body_entry_start, entries, row_linear, row_angular0, row_angular1
+        )
+    if lane != wp.int32(0):
+        return
+    if body < num_bodies:
+        if reset != wp.int32(0):
+            velocity_sum[body] = bodies.velocity[body]
+            angular_velocity_sum[body] = bodies.angular_velocity[body]
+        else:
+            velocity_sum[body] = velocity_sum[body] + bodies.velocity[body]
+            angular_velocity_sum[body] = angular_velocity_sum[body] + bodies.angular_velocity[body]
+        if apply_forces != wp.int32(0):
+            _temporal_apply_body_forces(bodies, gravity, jointed, free_dt, jointed_dt, body)
+    if inverse_mass > wp.float32(0.0):
+        apply_gathered_contact_impulse(bodies, body, inverse_mass, linear, angular)
+    if body < local_body_count and bodies.island_root[body] < 0:
+        _apply_direct_equality_body(
+            body,
+            local_body_row_start,
+            local_descriptor,
+            local_wrench0,
+            local_wrench1,
+            local_seed,
+            local_scale,
+            bodies,
+        )
+
+
 __all__ = [
     "temporal_accumulate_velocity_kernel",
     "temporal_apply_forces_kernel",
     "temporal_contact_gap_kernel",
     "temporal_count_body_rows_kernel",
     "temporal_initialize_weld_components_kernel",
+    "temporal_mark_free_axis_bodies_kernel",
     "temporal_mark_jointed_components_kernel",
     "temporal_restore_velocity_kernel",
     "temporal_scatter_jointed_kernel",
     "temporal_swap_average_velocity_kernel",
-    "temporal_mark_free_axis_bodies_kernel",
+    "temporal_sweep_entry_kernel",
     "temporal_sweep_relaxation_kernel",
     "temporal_union_weld_components_kernel",
 ]

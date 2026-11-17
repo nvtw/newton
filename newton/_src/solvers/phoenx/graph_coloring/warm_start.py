@@ -33,6 +33,8 @@ __all__ = [
     "warm_start_emit_pairs_kernel",
     "warm_start_invalidate_apply_kernel",
     "warm_start_invalidate_mark_kernel",
+    "warm_start_key_body_bits",
+    "warm_start_key_end_bit",
     "warm_start_key_func",
     "warm_start_mark_boundaries_kernel",
     "warm_start_reset_count_kernel",
@@ -47,7 +49,7 @@ class WarmStartCache:
     kernel's binary search is well-defined.
     """
 
-    #: Packed body-pair keys: ``(body_second_min << 32) | body_min``.
+    #: Packed body-pair keys, see :func:`warm_start_key_func`.
     keys: wp.array[wp.int64]
     #: Per-key cached colour, encoded ``c + 1`` to match ``color_tags``.
     colors: wp.array[wp.int32]
@@ -74,11 +76,33 @@ def warm_start_cache_zeros(
 _BODY_INF = wp.constant(wp.int32(0x7FFFFFFF))
 
 
+def warm_start_key_body_bits(max_num_nodes: int) -> int:
+    """Bits per body field of :func:`warm_start_key_func` for ``max_num_nodes`` nodes.
+
+    Returns 32 (the uncompacted layout) when the compact keys would not fit
+    in 31 bits per field.
+    """
+    bits = max(1, int(max_num_nodes).bit_length())
+    return bits if bits <= 30 else 32
+
+
+def warm_start_key_end_bit(body_bits: int) -> int | None:
+    """Radix-sort ``end_bit`` that orders every compact key before the ``INT64_MAX`` sentinel."""
+    return 2 * body_bits + 1 if body_bits < 32 else None
+
+
 @wp.func
-def warm_start_key_func(el: ElementInteractionData) -> wp.int64:
-    """Pack ``(body_second_min << 32) | body_min`` from the two smallest
-    non-negative body endpoints. Missing slots use ``INT32_MAX`` so
-    the key stays unique per body-pair signature."""
+def warm_start_key_func(el: ElementInteractionData, body_bits: wp.int32) -> wp.int64:
+    """Pack ``(body_second_min << body_bits) | body_min`` from the two
+    smallest non-negative body endpoints.
+
+    With ``body_bits == 32``, missing slots use ``INT32_MAX``. Narrower
+    fields map a missing slot to the all-ones field value, which exceeds
+    every body index for ``body_bits`` from
+    :func:`warm_start_key_body_bits`. Both layouts order keys the same, so
+    sorted caches match entry for entry while the compact one sorts in fewer
+    radix passes.
+    """
     b_min = _BODY_INF
     b_second = _BODY_INF
     for j in range(MAX_BODIES):
@@ -90,6 +114,11 @@ def warm_start_key_func(el: ElementInteractionData) -> wp.int64:
             b_min = b
         elif b < b_second:
             b_second = b
+    if body_bits < wp.int32(32):
+        missing = (wp.int32(1) << body_bits) - wp.int32(1)
+        b_min = wp.min(b_min, missing)
+        b_second = wp.min(b_second, missing)
+        return (wp.int64(b_second) << wp.int64(body_bits)) | wp.int64(b_min)
     return (wp.int64(b_second) << wp.int64(32)) | (wp.int64(b_min) & wp.int64(0xFFFFFFFF))
 
 
@@ -126,6 +155,7 @@ def seed_warm_start_kernel(
     partition_data_concat: wp.array[wp.int64],
     skip_color_start_plus_one: wp.array[wp.int32],
     skip_color_end_plus_one: wp.array[wp.int32],
+    body_bits: wp.int32,
 ):
     """Seed ``color_tags[tid]`` from the cache via body-pair key
     lookup. Empty cache (``cache_num_entries[0] == 0``) is a no-op
@@ -145,7 +175,7 @@ def seed_warm_start_kernel(
         # (adjacency_store_kernel already wrote them for the cold path).
         return
     el = elements[tid]
-    key = warm_start_key_func(el)
+    key = warm_start_key_func(el, body_bits)
     idx = binary_search_warm_start_func(cache_keys, n, key)
     if idx < wp.int32(0):
         return  # not in cache -> cold path (color_tags[tid] stays 0)
@@ -217,6 +247,7 @@ def warm_start_emit_pairs_kernel(
     num_elements: wp.array[wp.int32],
     keys_out: wp.array[wp.int64],
     values_out: wp.array[wp.int32],
+    body_bits: wp.int32,
 ):
     """Emit ``(body_pair_key, cid)`` per active coloured constraint;
     inactive slots get ``INT64_MAX`` keys (sort pushes them to tail).
@@ -236,7 +267,7 @@ def warm_start_emit_pairs_kernel(
         keys_out[tid] = wp.int64(_PERSIST_TAIL_KEY)
         values_out[tid] = wp.int32(0)
         return
-    keys_out[tid] = warm_start_key_func(elements[tid])
+    keys_out[tid] = warm_start_key_func(elements[tid], body_bits)
     values_out[tid] = tid
 
 
