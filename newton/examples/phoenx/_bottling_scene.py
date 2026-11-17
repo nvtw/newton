@@ -50,6 +50,9 @@ class PlantScene:
     articulations: list = field(default_factory=list)
     frames: dict = field(default_factory=dict)
     collision_groups: list = field(default_factory=list)
+    #: Reconstructed moving shapes that join the source's dynamic line group.
+    line_dynamic_shapes: set = field(default_factory=set)
+    line_dynamic_group: int = -1
 
     def collision_masks(self, labels):
         """Map the source collections to compact per-shape collision masks."""
@@ -63,6 +66,13 @@ class PlantScene:
             included = np.fromiter((query.IsPathIncluded(path) for path in paths), dtype=bool, count=len(paths))
             membership[included] |= np.uint64(1 << index)
             filtered[included] |= np.uint64(excluded)
+        if self.line_dynamic_group >= 0 and self.line_dynamic_shapes:
+            # The source wrapper is static, so its collections never list the
+            # driven reconstruction; vehicle keep-outs must ignore it like
+            # every other dynamic machine.
+            moving = np.fromiter((label in self.line_dynamic_shapes for label in labels), dtype=bool, count=len(labels))
+            membership[moving] |= np.uint64(1 << self.line_dynamic_group)
+            filtered[moving] |= np.uint64(self.collision_groups[self.line_dynamic_group][1])
         return membership, filtered
 
 
@@ -219,6 +229,8 @@ def load_plant(asset_root: Path, *, cutaway=True, visuals=True, motor_off=False,
             1 << i for i, other in enumerate(collision_groups) if not collision_table.IsCollisionEnabled(group, other)
         )
         scene.collision_groups.append((query, excluded))
+        if group.name == "line_dynamic":
+            scene.line_dynamic_group = len(scene.collision_groups) - 1
     for prim in prims:
         if _value(prim, "physxArticulation:enabledSelfCollisions", None) is False:
             root = prim
@@ -885,6 +897,12 @@ def load_plant(asset_root: Path, *, cutaway=True, visuals=True, motor_off=False,
     for label, components in wrappers.items():
         corrected, correction = correct_wrapper_frame(components, label=label)
         bodies, joints, _ = build_wrapper(builder, corrected, label=label, visuals=visuals)
+        scene.line_dynamic_shapes.update(
+            builder.shape_label[shape]
+            for shape in range(builder.shape_count)
+            if builder.shape_body[shape] in bodies
+            and builder.shape_flags[shape] & int(newton.ShapeFlags.COLLIDE_SHAPES)
+        )
         correction["replaced_collision_proxies"] = [
             str(prim.GetPath()) for prim, _, _ in wrapper_proxies.get(label, [])
         ]
