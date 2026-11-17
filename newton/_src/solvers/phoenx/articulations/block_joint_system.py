@@ -5,6 +5,8 @@
 import numpy as np
 import warp as wp
 
+from newton._src.sim import JointType
+
 from ..body import BodyContainer, mat33_from_sym6
 from ..constraints.bilateral_joint import (
     EXPERIMENTAL_COOPERATIVE_JOINT_INVERSE,
@@ -17,7 +19,12 @@ from ..constraints.bilateral_joint import (
 from ..constraints.bilateral_joint_data import BilateralJointData, Mat66, Vec6
 from ..constraints.constraint_container import ConstraintContainer
 from ..sleeping_kernels import _phoenx_apply_island_wake_kernel
-from .direct_equality import DirectEqualitySystem, _body_com_twist, _direct_wrench_response
+from .direct_equality import (
+    DirectEqualitySystem,
+    _apply_direct_equality_body,
+    _body_com_twist,
+    _direct_wrench_response,
+)
 
 _Vec6 = wp.types.vector(length=6, dtype=wp.float32)
 _Mat66 = wp.types.matrix(shape=(6, 6), dtype=wp.float32)
@@ -227,6 +234,37 @@ def _block_sweep(
                 bodies.angular_velocity[b1] += wp.spatial_bottom(response1)
 
 
+@wp.kernel(enable_backward=False)
+def _finish_local_microstep(
+    row_joint: wp.array[wp.int32],
+    selected: wp.array[wp.bool],
+    impulse: wp.array[wp.float32],
+    total: wp.array[wp.float32],
+    seed: wp.array[wp.float32],
+):
+    row = wp.tid()
+    if selected[row_joint[row]]:
+        seed[row] = impulse[row]
+        impulse[row] += total[row]
+    else:
+        seed[row] = 0.0
+
+
+@wp.kernel(enable_backward=False)
+def _warm_start_local_microstep(
+    body_row_start: wp.array[wp.int32],
+    descriptor: wp.array[wp.vec2i],
+    wrench0: wp.array[wp.spatial_vector],
+    wrench1: wp.array[wp.spatial_vector],
+    seed: wp.array[wp.float32],
+    scale: wp.array[wp.float32],
+    bodies: BodyContainer,
+):
+    body = wp.tid()
+    if bodies.island_root[body] < 0:
+        _apply_direct_equality_body(body, body_row_start, descriptor, wrench0, wrench1, seed, scale, bodies)
+
+
 class BlockJointSystem(DirectEqualitySystem):
     """Reuse physical joint rows, with local blocks instead of a global solve.
 
@@ -387,6 +425,93 @@ class BlockJointSystem(DirectEqualitySystem):
         self._enabled_flags = wp.array(flags, dtype=wp.int32, device=device)
         self._enabled_wake = wp.zeros(len(self.bodies.island_root), dtype=wp.int32, device=device)
 
+    def configure_temporal_iterations(self):
+        """Microstep authored scalar local drives, retaining outer schedules for coupled exact mechanisms."""
+        world, model = self._block_world, self.model
+        world._temporal_local_joints = None
+        self._microstep_count = 1
+        self._microstep_joint.zero_()
+        self._microstep_sum.zero_()
+        self._microstep_seed.zero_()
+        self._microstep_previous.zero_()
+        self._microstep_body_row_start = None
+        self._microstep_descriptors = None
+        if world.solver_iterations <= 1:
+            return
+        local = np.zeros(model.joint_count, dtype=bool)
+        local[self._enabled_joints.numpy()] = True
+        types = model.joint_type.numpy()
+        # Fixed companions and unsupported rows retain the outer schedule for
+        # their whole connected component; unrelated fixed joints are untouched.
+        local &= np.isin(types, (JointType.REVOLUTE, JointType.PRISMATIC))
+        local &= model.joint_enabled.numpy()
+        friction = model.joint_friction.numpy()
+        starts, dims = model.joint_qd_start.numpy(), model.joint_dof_dim.numpy()
+        for joint in np.flatnonzero(local):
+            if np.any(friction[starts[joint] : starts[joint] + sum(dims[joint])] > 0):
+                local[joint] = False
+        if self.has_direct_friction or not np.any(local[self.row_joint.numpy()] & self.row_dynamic.numpy()):
+            return
+        self._microstep_count = world.solver_iterations
+        self._microstep_joint = wp.zeros(model.joint_count, dtype=wp.bool, device=model.device)
+        self._microstep_local = wp.array(local, dtype=wp.bool, device=model.device)
+        self._microstep_outer = wp.array(~local & (types != JointType.FREE), dtype=wp.bool, device=model.device)
+        self._microstep_sum = wp.zeros_like(self.accumulated_impulse)
+        self._microstep_seed = wp.zeros_like(self.accumulated_impulse)
+        self._microstep_previous = wp.zeros(self.accumulated_impulse.size, dtype=wp.bool, device=model.device)
+        # Reserved rows share placeholder endpoints and can otherwise create a
+        # huge serial gather on one body. Keep authored incidence order intact.
+        descriptors = self._body_row_wrench_descriptors.numpy()
+        keep = local[self.row_joint.numpy()[descriptors[:, 0]]]
+        prefix = np.concatenate((np.zeros(1, dtype=np.int32), np.cumsum(keep, dtype=np.int32)))
+        self._microstep_body_row_start = wp.array(
+            prefix[self.body_row_start.numpy()], dtype=wp.int32, device=model.device
+        )
+        self._microstep_descriptors = wp.array(descriptors[keep], dtype=wp.vec2i, device=model.device)
+        world._temporal_local_joints = self
+
+    def begin_substep(self, idt, *, reuse_geometry=False):
+        if self._microstep_count > 1:
+            self._block_world.update_temporal_jointed_bodies(self.model, local=True)
+            self._microstep_sum.zero_()
+        super().begin_substep(idt, reuse_geometry=reuse_geometry)
+
+    def advance_temporal_iteration(self):
+        """Advance drive coordinates and sum physical microstep reactions."""
+        self._snapshot_dynamic_rows(wp.float32(1.0 / self._block_world.substep_dt), advance=True)
+
+    def warm_start_temporal_iteration(self):
+        """Balance contact and joint warm starts before broadcasting physical velocities to copies."""
+        wp.launch(
+            _warm_start_local_microstep,
+            dim=self.model.body_count + 1,
+            inputs=[
+                self._microstep_body_row_start,
+                self._microstep_descriptors,
+                self._apply_wrench0,
+                self._apply_wrench1,
+                self._microstep_seed,
+                self.row_scale,
+                self.bodies,
+            ],
+            device=self.model.device,
+        )
+
+    def finish_temporal_iterations(self):
+        """Export summed physical reactions and retain only the last microstep as a warm start."""
+        wp.launch(
+            _finish_local_microstep,
+            dim=self.accumulated_impulse.size,
+            inputs=[
+                self.row_joint,
+                self._microstep_joint,
+                self.accumulated_impulse,
+                self._microstep_sum,
+                self._microstep_seed,
+            ],
+            device=self.model.device,
+        )
+
     def update_enabled(self):
         """Apply live toggles of existing authored local columns without recapture."""
         if not self.enabled or not self._enabled_joints.size or self.model.joint_enabled is None:
@@ -424,10 +549,13 @@ class BlockJointSystem(DirectEqualitySystem):
             )
 
     def refresh_joint_properties(self):
+        temporal = self._block_world.temporal_iterations and not self._block_world._temporal_joint_springs
         previous_rows = self.row_joint
         super().refresh_joint_properties()
         if self.row_joint is not previous_rows:
             self.bind_world(self._block_world, self._block_mapping)
+        if temporal:
+            self.configure_temporal_iterations()
 
     def prepare_and_factor(self, idt):
         if self.enabled:

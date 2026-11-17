@@ -1530,6 +1530,26 @@ def _apply_direct_joint_friction_kernel(
         wp.atomic_add(bodies.angular_velocity, child, impulse * wp.spatial_bottom(response1))
 
 
+@wp.func
+def _direct_drive_response(
+    dt: wp.float32,
+    mode: wp.int32,
+    stiffness: wp.float32,
+    damping: wp.float32,
+    error: wp.float32,
+    target_velocity: wp.float32,
+) -> wp.vec2:
+    if mode == JointTargetMode.POSITION:
+        target_velocity = wp.float32(0.0)
+    elif mode == JointTargetMode.VELOCITY:
+        stiffness = wp.float32(0.0)
+    elif mode == JointTargetMode.NONE or mode == JointTargetMode.EFFORT:
+        stiffness = wp.float32(0.0)
+        damping = wp.float32(0.0)
+        target_velocity = wp.float32(0.0)
+    return wp.vec2(dt * damping + dt * dt * stiffness, dt * (stiffness * error + damping * target_velocity))
+
+
 @wp.kernel(enable_backward=False)
 def _snapshot_direct_dynamic_velocity_kernel(
     row_joint: wp.array[wp.int32],
@@ -1567,10 +1587,30 @@ def _snapshot_direct_dynamic_velocity_kernel(
     velocity_reference: wp.array[wp.float32],
     accumulated_impulse: wp.array[wp.float32],
     drive_saturated: wp.array[wp.bool],
+    microstep_joint: wp.array[wp.bool],
+    microstep_count: int,
+    advance: wp.bool,
+    total: wp.array[wp.float32],
+    seed: wp.array[wp.float32],
+    microstep_previous: wp.array[wp.bool],
+    effort_limit: wp.array[wp.float32],
 ):
     row = wp.tid()
-    accumulated_impulse[row] = wp.float32(0.0)
-    drive_saturated[row] = False
+    selected = microstep_joint.shape[0] > row_joint[row] and microstep_joint[row_joint[row]]
+    if advance:
+        if not selected:
+            return
+        total[row] += accumulated_impulse[row]
+        seed[row] = accumulated_impulse[row]
+    else:
+        accumulated_impulse[row] = wp.float32(0.0)
+        drive_saturated[row] = False
+        if seed.shape[0] > row:
+            if not selected or not microstep_previous[row]:
+                seed[row] = wp.float32(0.0)
+            if selected:
+                accumulated_impulse[row] = seed[row]
+            microstep_previous[row] = selected
     if not row_dynamic[row]:
         dynamic_mass[row] = wp.float32(0.0)
         dynamic_old_velocity[row] = wp.float32(0.0)
@@ -1578,6 +1618,8 @@ def _snapshot_direct_dynamic_velocity_kernel(
         velocity_reference[row] = wp.float32(0.0)
         return
     joint = row_joint[row]
+    if microstep_joint.shape[0] > joint and microstep_joint[joint]:
+        dt /= wp.float32(microstep_count)
     structural_index = joint_to_structural[joint]
     local_row = row_local[row]
     body0 = joint_parent[joint] + wp.int32(1)
@@ -1587,62 +1629,64 @@ def _snapshot_direct_dynamic_velocity_kernel(
         relative_velocity += wp.dot(row_wrench0[structural_index, local_row], _body_com_twist(bodies, body0))
     if body1 > wp.int32(0):
         relative_velocity += wp.dot(row_wrench1[structural_index, local_row], _body_com_twist(bodies, body1))
-    dynamic_old_velocity[row] = relative_velocity
     dof = row_dof[row]
     gear = joint_gear[dof]
     armature = joint_armature[dof] * gear * gear
+    bound = dynamic_mass[row] * velocity_reference[row] - armature * dynamic_old_velocity[row]
+    dynamic_old_velocity[row] = relative_velocity
     passive_damping = joint_damping[dof]
     mass = armature + dt * passive_damping
     momentum = armature * relative_velocity
 
     if row_direct_drive[row]:
-        target_mode = joint_target_mode[dof]
-        stiffness = joint_target_ke[dof]
-        drive_damping = joint_target_kd[dof]
-        target_position = control_target_q[row_target_q[row]]
-        target_velocity = control_target_qd[dof]
-        if target_mode == JointTargetMode.POSITION:
-            target_velocity = wp.float32(0.0)
-        elif target_mode == JointTargetMode.VELOCITY:
-            stiffness = wp.float32(0.0)
-        elif target_mode == JointTargetMode.NONE or target_mode == JointTargetMode.EFFORT:
-            stiffness = wp.float32(0.0)
-            drive_damping = wp.float32(0.0)
-            target_velocity = wp.float32(0.0)
-
-        x_wpj = _body_origin_transform(bodies, body0) * joint_x_p[joint]
-        x_wcj = _body_origin_transform(bodies, body1) * joint_x_c[joint]
-        point0 = wp.transform_get_translation(x_wpj)
-        point1 = wp.transform_get_translation(x_wcj)
-        q0 = wp.transform_get_rotation(x_wpj)
-        q1 = wp.transform_get_rotation(x_wcj)
-        axis = wp.normalize(wp.quat_rotate(q0, effective_joint_axis[joint]))
         coordinate = dynamic_coordinate[row]
-        qd_start = joint_qd_start[joint]
-        linear_count = joint_dof_dim[joint, 0]
-        angular_count = joint_dof_dim[joint, 1]
-        is_single_d6_angular = (
-            joint_type[joint] == JointType.D6 and angular_count == wp.int32(1) and dof >= qd_start + linear_count
-        )
-        if joint_type[joint] == JointType.REVOLUTE or is_single_d6_angular:
-            coordinate_axis = axis
-            if is_single_d6_angular:
-                coordinate_axis = wp.normalize(wp.spatial_bottom(row_wrench1[structural_index, local_row]))
-            wrapped = extract_rotation_angle(q1 * wp.quat_inverse(q0), coordinate_axis)
-            counter, previous = revolution_tracker_update(
-                wrapped,
-                coordinate_revolutions[row],
-                previous_coordinate[row],
+        if advance:
+            coordinate += dt * relative_velocity
+        else:
+            x_wpj = _body_origin_transform(bodies, body0) * joint_x_p[joint]
+            x_wcj = _body_origin_transform(bodies, body1) * joint_x_c[joint]
+            point0 = wp.transform_get_translation(x_wpj)
+            point1 = wp.transform_get_translation(x_wcj)
+            q0 = wp.transform_get_rotation(x_wpj)
+            q1 = wp.transform_get_rotation(x_wcj)
+            axis = wp.normalize(wp.quat_rotate(q0, effective_joint_axis[joint]))
+            qd_start = joint_qd_start[joint]
+            linear_count = joint_dof_dim[joint, 0]
+            angular_count = joint_dof_dim[joint, 1]
+            is_single_d6_angular = (
+                joint_type[joint] == JointType.D6 and angular_count == wp.int32(1) and dof >= qd_start + linear_count
             )
-            coordinate_revolutions[row] = counter
-            previous_coordinate[row] = previous
-            coordinate = revolution_tracker_angle(counter, previous)
-        elif joint_type[joint] == JointType.PRISMATIC:
-            coordinate = wp.dot(axis, point1 - point0)
+            if joint_type[joint] == JointType.REVOLUTE or is_single_d6_angular:
+                coordinate_axis = axis
+                if is_single_d6_angular:
+                    coordinate_axis = wp.normalize(wp.spatial_bottom(row_wrench1[structural_index, local_row]))
+                wrapped = extract_rotation_angle(q1 * wp.quat_inverse(q0), coordinate_axis)
+                counter, previous = revolution_tracker_update(
+                    wrapped,
+                    coordinate_revolutions[row],
+                    previous_coordinate[row],
+                )
+                coordinate_revolutions[row] = counter
+                previous_coordinate[row] = previous
+                coordinate = revolution_tracker_angle(counter, previous)
+            elif joint_type[joint] == JointType.PRISMATIC:
+                coordinate = wp.dot(axis, point1 - point0)
         dynamic_coordinate[row] = coordinate
 
-        mass += dt * drive_damping + dt * dt * stiffness
-        momentum += dt * (stiffness * (target_position - coordinate) + drive_damping * target_velocity)
+        if advance and drive_saturated[row]:
+            cap = wp.abs(gear * effort_limit[dof])
+            momentum += dt * wp.where(bound >= wp.float32(0.0), cap, -cap)
+        else:
+            response = _direct_drive_response(
+                dt,
+                joint_target_mode[dof],
+                joint_target_ke[dof],
+                joint_target_kd[dof],
+                control_target_q[row_target_q[row]] - coordinate,
+                control_target_qd[dof],
+            )
+            mass += response[0]
+            momentum += response[1]
 
     dynamic_mass[row] = wp.max(mass, wp.float32(1.0e-10))
     velocity_reference[row] = momentum / dynamic_mass[row]
@@ -1677,6 +1721,8 @@ def _activate_bounded_direct_drives_kernel(
     dynamic_mass: wp.array[wp.float32],
     velocity_reference: wp.array[wp.float32],
     active_set_flag: wp.array[wp.int32],
+    microstep_joint: wp.array[wp.bool],
+    microstep_count: int,
     row_mechanism: wp.array[wp.int32],
     changed_mechanism: wp.array[wp.int32],
 ):
@@ -1685,6 +1731,8 @@ def _activate_bounded_direct_drives_kernel(
         return
 
     joint = row_joint[row]
+    if microstep_joint.shape[0] > joint and microstep_joint[joint]:
+        dt /= wp.float32(microstep_count)
     structural_index = joint_to_structural[joint]
     local_row = row_local[row]
     body0 = joint_parent[joint] + wp.int32(1)
@@ -2148,6 +2196,11 @@ class DirectEqualitySystem:
         fixed_joint_rows: bool = False,
     ):
         self.model = model
+        self._microstep_joint = wp.empty(0, dtype=wp.bool, device=model.device)
+        self._microstep_count = 1
+        self._microstep_sum = wp.empty(0, dtype=wp.float32, device=model.device)
+        self._microstep_seed = wp.empty(0, dtype=wp.float32, device=model.device)
+        self._microstep_previous = wp.empty(0, dtype=wp.bool, device=model.device)
         self.fixed_joint_rows = bool(fixed_joint_rows)
         self._direct_joint_friction = bool(direct_joint_friction)
         self.bodies = bodies
@@ -2709,6 +2762,31 @@ class DirectEqualitySystem:
             return
         if not reuse_geometry:
             self.refresh_geometry(idt)
+        self._snapshot_dynamic_rows(idt)
+
+        if self.has_direct_friction:
+            wp.launch(
+                _apply_direct_joint_friction_kernel,
+                dim=len(self.friction_joints),
+                inputs=[
+                    self.friction_joints,
+                    self.friction_dofs,
+                    self.effective_joint_axis,
+                    self.model.joint_type,
+                    self.model.joint_parent,
+                    self.model.joint_child,
+                    self.model.joint_X_p,
+                    self.model.joint_X_c,
+                    self.joint_friction,
+                    wp.float32(1.0) / idt,
+                    self.bodies,
+                ],
+                outputs=[self.friction_impulse],
+                device=self.model.device,
+            )
+
+    def _snapshot_dynamic_rows(self, idt, *, advance=False):
+        """Snapshot an outer step or advance selected local drive coordinates by one microstep."""
         wp.launch(
             _snapshot_direct_dynamic_velocity_kernel,
             dim=len(self.topology.row_joint),
@@ -2748,30 +2826,16 @@ class DirectEqualitySystem:
                 self.velocity_reference,
                 self.accumulated_impulse,
                 self.drive_saturated,
+                self._microstep_joint,
+                self._microstep_count,
+                wp.bool(advance),
+                self._microstep_sum,
+                self._microstep_seed,
+                self._microstep_previous,
+                self.model.joint_effort_limit,
             ],
             device=self.model.device,
         )
-
-        if self.has_direct_friction:
-            wp.launch(
-                _apply_direct_joint_friction_kernel,
-                dim=len(self.friction_joints),
-                inputs=[
-                    self.friction_joints,
-                    self.friction_dofs,
-                    self.effective_joint_axis,
-                    self.model.joint_type,
-                    self.model.joint_parent,
-                    self.model.joint_child,
-                    self.model.joint_X_p,
-                    self.model.joint_X_c,
-                    self.joint_friction,
-                    wp.float32(1.0) / idt,
-                    self.bodies,
-                ],
-                outputs=[self.friction_impulse],
-                device=self.model.device,
-            )
 
     def resolve_bounded_drives(self, idt: wp.float32, *, use_bias: bool) -> None:
         """Activate finite effort bounds and correct the direct solution."""
@@ -2814,6 +2878,8 @@ class DirectEqualitySystem:
                     self.dynamic_mass,
                     self.velocity_reference,
                     self.drive_active_set_flag,
+                    self._microstep_joint,
+                    self._microstep_count,
                     self._bound_row_mechanism,
                     self._bound_changed_mechanism,
                 ],

@@ -7,7 +7,7 @@ Smaller contact steps can reduce oscillation when heavy bodies rest on a
 light movable support, such as bottles in a carton. A full solver
 substep reruns joint factorization, direct-contact responses, and row
 preparation. Temporal iterations keep that work once per substep and advance
-only the contact rows between sweeps:
+contact rows and eligible authored local scalar drives between sweeps:
 
 * each sweep applies ``1/n`` of the substep's gravity and external forces
   (bodies on joints with free axes receive them at the substep start, see
@@ -21,7 +21,10 @@ only the contact rows between sweeps:
 * contact columns that press on a light body shared by many rows take half of
   each sweep update (:func:`temporal_sweep_relaxation_kernel`).
 
-Joint rows and exact joint projections run after every sweep as before. With
+Local scalar-drive components use the same microstep for gravity, spring damping,
+and bounded motor impulses. Components touching exact mechanisms, fixed companions,
+or unsupported joint features retain their outer-step drive schedule. Joint rows
+and exact joint projections run after every sweep as before. With
 ``n = 1`` nothing changes.
 """
 
@@ -193,12 +196,19 @@ def temporal_union_weld_components_kernel(
     dims: wp.array2d[wp.int32],
     free_kind: int,
     entries: wp.array[wp.int64],
+    bodies: BodyContainer,
+    include_free_axes: wp.bool,
 ):
     """Join bodies connected by enabled joints with no free axes."""
     j = wp.tid()
     if not enabled[j] or kinds[j] == free_kind:
         return
-    if dims[j, 0] + dims[j, 1] == 0 and parents[j] >= 0 and children[j] >= 0:
+    if (include_free_axes or dims[j, 0] + dims[j, 1] == 0) and parents[j] >= 0 and children[j] >= 0:
+        if include_free_axes and (
+            bodies.motion_type[parents[j] + 1] != MOTION_DYNAMIC
+            or bodies.motion_type[children[j] + 1] != MOTION_DYNAMIC
+        ):
+            return
         _unite(entries, parents[j] + 1, children[j] + 1)
 
 
@@ -212,15 +222,39 @@ def temporal_mark_jointed_components_kernel(
     free_kind: int,
     entries: wp.array[wp.int64],
     marked: wp.array[wp.int32],
+    outer: wp.array[wp.bool],
 ):
     """Mark entire weld components that touch an enabled free-axis joint."""
     j = wp.tid()
     if not enabled[j] or kinds[j] == free_kind or children[j] < 0:
         return
-    if dims[j, 0] + dims[j, 1] > 0:
+    mark = dims[j, 0] + dims[j, 1] > 0
+    if outer.shape[0] > 0:
+        mark = outer[j]
+    if mark:
         wp.atomic_max(marked, _find(entries, children[j] + 1), 1)
         if parents[j] >= 0:
             wp.atomic_max(marked, _find(entries, parents[j] + 1), 1)
+
+
+@wp.kernel(enable_backward=False)
+def temporal_mark_free_axis_bodies_kernel(
+    enabled: wp.array[wp.bool],
+    kinds: wp.array[wp.int32],
+    parents: wp.array[wp.int32],
+    children: wp.array[wp.int32],
+    dims: wp.array2d[wp.int32],
+    free_kind: int,
+    marked: wp.array[wp.int32],
+):
+    """Mark the PhoenX body slots of both bodies of every enabled free-axis joint."""
+    j = wp.tid()
+    if not enabled[j] or kinds[j] == free_kind or dims[j, 0] + dims[j, 1] == 0:
+        return
+    if children[j] >= 0:
+        marked[children[j] + 1] = 1
+    if parents[j] >= 0:
+        marked[parents[j] + 1] = 1
 
 
 @wp.kernel(enable_backward=False)
@@ -266,14 +300,73 @@ __all__ = [
     "temporal_contact_gap_kernel",
     "temporal_count_body_rows_kernel",
     "temporal_initialize_weld_components_kernel",
-    "temporal_mark_free_axis_bodies_kernel",
     "temporal_mark_jointed_components_kernel",
     "temporal_restore_velocity_kernel",
     "temporal_scatter_jointed_kernel",
     "temporal_swap_average_velocity_kernel",
+    "temporal_mark_free_axis_bodies_kernel",
     "temporal_sweep_relaxation_kernel",
     "temporal_union_weld_components_kernel",
 ]
+
+
+@wp.kernel(enable_backward=False)
+def temporal_select_local_joints(
+    enabled: wp.array[wp.bool],
+    local: wp.array[wp.bool],
+    parent: wp.array[wp.int32],
+    child: wp.array[wp.int32],
+    entries: wp.array[wp.int64],
+    marked: wp.array[wp.int32],
+    selected: wp.array[wp.bool],
+    bodies: BodyContainer,
+):
+    joint = wp.tid()
+    use_micro = enabled[joint] and local[joint]
+    awake = wp.bool(False)
+    for side in range(2):
+        body = wp.where(side == 0, parent[joint], child[joint]) + 1
+        if body > 0 and bodies.motion_type[body] == MOTION_DYNAMIC and bodies.island_root[body] < 0:
+            awake = True
+        if body > 0 and marked[_find(entries, body)] != 0:
+            use_micro = False
+    selected[joint] = use_micro and awake
+
+
+@wp.kernel(enable_backward=False)
+def temporal_clear_local_force_flags(
+    entries: wp.array[wp.int64],
+    marked: wp.array[wp.int32],
+    jointed: wp.array[wp.int32],
+):
+    body = wp.tid()
+    if marked[_find(entries, body)] == 0:
+        jointed[body] = 0
+
+
+@wp.kernel(enable_backward=False)
+def temporal_union_contact_components(
+    bodies: BodyContainer,
+    cols: ContactColumnContainer,
+    ids: wp.array[wp.int32],
+    active: wp.array[wp.int32],
+    offset: int,
+    entries: wp.array[wp.int64],
+):
+    slot = wp.tid()
+    if slot >= active[0]:
+        return
+    cid = ids[slot] - offset
+    if cid < 0:
+        return
+    first, second = contact_get_body1(cols, cid), contact_get_body2(cols, cid)
+    if (
+        first > 0
+        and second > 0
+        and bodies.motion_type[first] == MOTION_DYNAMIC
+        and bodies.motion_type[second] == MOTION_DYNAMIC
+    ):
+        _unite(entries, first, second)
 
 
 @wp.kernel(enable_backward=False)
@@ -354,23 +447,3 @@ def temporal_sweep_relaxation_kernel(
                 w = wp.float32(0.5)
     for k in range(first, first + count):
         relaxation[k] = w
-
-
-@wp.kernel(enable_backward=False)
-def temporal_mark_free_axis_bodies_kernel(
-    enabled: wp.array[wp.bool],
-    kinds: wp.array[wp.int32],
-    parents: wp.array[wp.int32],
-    children: wp.array[wp.int32],
-    dims: wp.array2d[wp.int32],
-    free_kind: int,
-    marked: wp.array[wp.int32],
-):
-    """Mark the PhoenX body slots of both bodies of every enabled free-axis joint."""
-    j = wp.tid()
-    if not enabled[j] or kinds[j] == free_kind or dims[j, 0] + dims[j, 1] == 0:
-        return
-    if children[j] >= 0:
-        marked[children[j] + 1] = 1
-    if parents[j] >= 0:
-        marked[parents[j] + 1] = 1

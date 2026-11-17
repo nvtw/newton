@@ -281,6 +281,7 @@ from newton._src.solvers.phoenx.solver_config import (
 from newton._src.solvers.phoenx.temporal_contacts import (
     temporal_accumulate_velocity_kernel,
     temporal_apply_forces_kernel,
+    temporal_clear_local_force_flags,
     temporal_contact_gap_kernel,
     temporal_count_body_rows_kernel,
     temporal_initialize_weld_components_kernel,
@@ -288,8 +289,10 @@ from newton._src.solvers.phoenx.temporal_contacts import (
     temporal_mark_jointed_components_kernel,
     temporal_restore_velocity_kernel,
     temporal_scatter_jointed_kernel,
+    temporal_select_local_joints,
     temporal_swap_average_velocity_kernel,
     temporal_sweep_relaxation_kernel,
+    temporal_union_contact_components,
     temporal_union_weld_components_kernel,
 )
 
@@ -733,6 +736,8 @@ class PhoenXWorld:
             raise ValueError(
                 "temporal_iterations requires step_layout='single_world' with no mass splitting or overflow-only splitting"
             )
+        self._temporal_local_joints = None
+        self._temporal_outer_joint_placeholder = wp.empty(0, dtype=wp.bool, device=self.device)
         self._temporal_velocity_sum = None
         if self.temporal_iterations and self.num_bodies > 0:
             self._temporal_velocity_sum = wp.zeros(self.num_bodies, dtype=wp.vec3f, device=self.device)
@@ -2801,6 +2806,8 @@ class PhoenXWorld:
 
     def _temporal_next_sweep(self, idt: wp.float32) -> None:
         """Enter the next contact substep: apply its share of forces and re-apply contact impulses."""
+        if self._temporal_local_joints is not None:
+            self._temporal_local_joints.advance_temporal_iteration()
         self._temporal_apply_forces()
         if self._temporal_contacts_active():
             self._partitioner.begin_sweep()
@@ -2816,6 +2823,9 @@ class PhoenXWorld:
             else:
                 head, fused = self._singleworld_contact_warm_start_kernels()
                 self._singleworld_head_plus_tail_sweep(head, fused, idt)
+
+        if self._temporal_local_joints is not None:
+            self._temporal_local_joints.warm_start_temporal_iteration()
 
     def _project_temporal_joints(self) -> None:
         """Project the integration-average motion without changing physical reactions."""
@@ -2908,7 +2918,7 @@ class PhoenXWorld:
             device=self.device,
         )
 
-    def update_temporal_jointed_bodies(self, model) -> None:
+    def update_temporal_jointed_bodies(self, model, *, local=False) -> None:
         """Mark weld components attached to free-axis joints for the outer force schedule.
 
         Rebuild from live enabled joints so grasps and releases take effect during
@@ -2916,9 +2926,10 @@ class PhoenXWorld:
         """
         if self._temporal_velocity_sum is None:
             return
-        self._temporal_jointed.zero_()
-        if self._temporal_body_rows is not None:
-            self._temporal_joint_body.zero_()
+        if not local:
+            self._temporal_jointed.zero_()
+            if self._temporal_body_rows is not None:
+                self._temporal_joint_body.zero_()
         count = int(model.joint_count)
         if count == 0:
             return
@@ -2944,26 +2955,74 @@ class PhoenXWorld:
             int(JointType.FREE),
             entries,
         ]
-        wp.launch(temporal_union_weld_components_kernel, dim=count, inputs=joint_inputs, device=self.device)
         wp.launch(
-            temporal_mark_jointed_components_kernel, dim=count, inputs=[*joint_inputs, marked], device=self.device
-        )
-        wp.launch(
-            temporal_scatter_jointed_kernel,
-            dim=self.num_bodies,
-            inputs=[entries, marked, self._temporal_jointed],
+            temporal_union_weld_components_kernel,
+            dim=count,
+            inputs=[*joint_inputs, self.bodies, wp.bool(local)],
             device=self.device,
         )
-        if self._temporal_body_rows is not None:
-            # Sweep relaxation skips weld components with a free-axis joint and
-            # the bodies of any other joint; see :func:`temporal_sweep_relaxation_kernel`.
-            wp.copy(self._temporal_joint_body, self._temporal_jointed)
+        outer = self._temporal_outer_joint_placeholder
+        if local:
+            outer = self._temporal_local_joints._microstep_outer
             wp.launch(
-                temporal_mark_free_axis_bodies_kernel,
-                dim=count,
-                inputs=[*joint_inputs[:5], int(JointType.FREE), self._temporal_joint_body],
+                temporal_union_contact_components,
+                dim=self.max_contact_columns + self.num_joints,
+                inputs=[
+                    self.bodies,
+                    self._contact_cols,
+                    self._partitioner.element_ids_by_color,
+                    self._num_active_constraints,
+                    self._contact_offset,
+                    entries,
+                ],
                 device=self.device,
             )
+        wp.launch(
+            temporal_mark_jointed_components_kernel,
+            dim=count,
+            inputs=[*joint_inputs, marked, outer],
+            device=self.device,
+        )
+        if local:
+            blocks = self._temporal_local_joints
+            wp.launch(
+                temporal_select_local_joints,
+                dim=count,
+                inputs=[
+                    model.joint_enabled,
+                    blocks._microstep_local,
+                    model.joint_parent,
+                    model.joint_child,
+                    entries,
+                    marked,
+                    blocks._microstep_joint,
+                    self.bodies,
+                ],
+                device=self.device,
+            )
+            wp.launch(
+                temporal_clear_local_force_flags,
+                dim=self.num_bodies,
+                inputs=[entries, marked, self._temporal_jointed],
+                device=self.device,
+            )
+        else:
+            wp.launch(
+                temporal_scatter_jointed_kernel,
+                dim=self.num_bodies,
+                inputs=[entries, marked, self._temporal_jointed],
+                device=self.device,
+            )
+            if self._temporal_body_rows is not None:
+                # Sweep relaxation skips bodies on free-axis joints, however their
+                # drives are scheduled; see :func:`temporal_sweep_relaxation_kernel`.
+                wp.copy(self._temporal_joint_body, self._temporal_jointed)
+                wp.launch(
+                    temporal_mark_free_axis_bodies_kernel,
+                    dim=count,
+                    inputs=[*joint_inputs[:5], int(JointType.FREE), self._temporal_joint_body],
+                    device=self.device,
+                )
 
     def _singleworld_contact_warm_start_kernels(self):
         """Return contact-only cached warm-start head/fused kernels (joint rows untouched)."""
@@ -3266,6 +3325,8 @@ class PhoenXWorld:
             if direct is not None and direct.enabled:
                 direct.begin_substep(wp.float32(1.0 / self.substep_dt), reuse_geometry=reuse_direct_factor)
             self._integrate_forces_and_gravity()
+            if self._temporal_local_joints is not None:
+                self._temporal_local_joints.warm_start_temporal_iteration()
             # TGS-soft (Box2D-v3) substep order: solve-with-bias ->
             # integrate -> relax (bias=False). Reversing regresses
             # stacking / friction tests. Dispatcher owns:
@@ -3302,6 +3363,8 @@ class PhoenXWorld:
                 )
             self._refresh_owned_relax_geometry(idt)
             self._dispatcher.relax(idt)
+            if self._temporal_local_joints is not None:
+                self._temporal_local_joints.finish_temporal_iterations()
             if (
                 self._reduced_articulation is not None
                 and self._active_velocity_iterations > 0
