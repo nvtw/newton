@@ -214,6 +214,7 @@ from newton._src.solvers.phoenx.simulation_kernels import (
     _PER_WORLD_COLORING_BLOCK_DIM,
     _PER_WORLD_FAST_FAMILIES,
     _STRAGGLER_BLOCK_DIM,
+    ONE_LAUNCH_BLOCK_DIM,
     _add_scan_block_offsets_kernel,
     _collapse_direct_equality_elements_kernel,
     _constraints_to_elements_kernel,
@@ -240,6 +241,7 @@ from newton._src.solvers.phoenx.simulation_kernels import (
     get_multiworld_mass_splitting_overflow_kernel,
     get_per_world_greedy_coloring_kernel,
     get_singleworld_kernel,
+    get_singleworld_one_launch_kernel,
     pack_body_xforms_kernel,
 )
 from newton._src.solvers.phoenx.sleeping_filter import (
@@ -272,10 +274,8 @@ from newton._src.solvers.phoenx.sleeping_kernels import (
     _phoenx_surface_activity_kernel,
 )
 from newton._src.solvers.phoenx.solver_config import (
-    FIXED_HEAD_LAUNCHES,
     FUSE_TAIL_BLOCK_DIM,
     FUSE_TAIL_MAX_COLOR_SIZE,
-    NUM_INNER_WHILE_ITERATIONS,
     PHOENX_USE_GREEDY_COLORING,
 )
 from newton._src.solvers.phoenx.temporal_contacts import (
@@ -977,13 +977,12 @@ class PhoenXWorld:
             cuda_blocks_per_sm=12 if self._colored_contact_headers else 4,
         )
 
-        # Head capture-while predicate. Persistent-grid sweep zeroes it on
-        # hand-off to the fused tail kernel.
-        self._head_active: wp.array[wp.int32] = wp.ones(1, dtype=wp.int32, device=self.device)
-        # Second cursor of the dynamic head launches; see ``_launch_singleworld_head``.
-        self._color_cursor_next: wp.array[wp.int32] = wp.zeros(1, dtype=wp.int32, device=self.device)
         self._fuse_threshold: int = int(FUSE_TAIL_MAX_COLOR_SIZE)
         self._fuse_tail_block_dim: int = int(FUSE_TAIL_BLOCK_DIM)
+        # One-launch sweep: grid-barrier state (arrivals, generation, exits)
+        # and the co-resident block count per kernel.
+        self._one_launch_barrier: wp.array[wp.int32] = wp.zeros(4, dtype=wp.int32, device=self.device)
+        self._one_launch_blocks: dict = {}
 
         # ----- Partitioner + per-world CSR buffers -----
         self._elements: wp.array[ElementInteractionData] = wp.zeros(
@@ -1576,11 +1575,7 @@ class PhoenXWorld:
 
         kernels: list = []
         if self.step_layout == "single_world":
-            # Six head/fused prepare + iterate + relax variants for the
-            # current cloth / soft-tet / joint specialisation.
-            kernels.extend(self._singleworld_kernels())
-            if self.prepare_refresh_stride > 1:
-                kernels.extend(self._singleworld_cached_prepare_kernels())
+            kernels.extend(self._singleworld_precompile_kernels())
         else:
             include_cached_prepare = self.prepare_refresh_stride > 1
             direct = getattr(self, "_direct_equality_system", None)
@@ -1614,6 +1609,28 @@ class PhoenXWorld:
             return
 
         wp.force_load(device=self.device, modules=modules, max_workers=max_workers)
+
+    def _singleworld_precompile_kernels(self) -> list:
+        """Single-world sweep kernels the active dispatcher launches.
+
+        CUDA sweeps run the one-launch kernel built from each prepare /
+        iterate / relax head-tail pair, plus the fused tail where the head
+        uses fast math; the unrolled mass-splitting dispatcher launches the
+        heads. CPU sweeps launch the heads.
+        """
+        pairs = list(zip(*[iter(self._singleworld_kernels())] * 2, strict=True))
+        if self.prepare_refresh_stride > 1:
+            pairs.append(self._singleworld_cached_prepare_kernels())
+        kernels = []
+        for head, tail in pairs:
+            if not self.device.is_cuda or self.mass_splitting_unrolled:
+                kernels.append(head)
+            if self.device.is_cuda:
+                one_launch, drain_tail = get_singleworld_one_launch_kernel(head, tail)
+                kernels.append(one_launch)
+                if not drain_tail:
+                    kernels.append(tail)
+        return kernels
 
     def _assert_invariants(self) -> None:
         """Validate per-step buffer shapes against the documented schema."""
@@ -5285,7 +5302,7 @@ class PhoenXWorld:
         if direct_enabled and solve_direct:
             direct.solve(use_bias=False)
 
-    # Single-world dispatch (wp.capture_while over the global colour CSR).
+    # Single-world dispatch over the global colour CSR.
 
     def _launch_singleworld_head(
         self,
@@ -5293,22 +5310,10 @@ class PhoenXWorld:
         idt: wp.float32,
         fuse_threshold: wp.int32,
         contact_container: ContactContainer | None = None,
-        fixed_step_idx: int = -1,
-        cursor_parity: int = 0,
+        fixed_step_idx: int = 0,
     ) -> None:
-        """Launch the persistent-grid single-world head kernel.
-
-        A dynamic launch (``fixed_step_idx < 0``) reads the color cursor from
-        one array and publishes the next cursor in another, so every CTA sees
-        the same color. ``cursor_parity`` selects which of the two arrays is
-        read; consecutive dynamic launches alternate it.
-        """
+        """Launch the persistent-grid kernel for the colour of sweep step ``fixed_step_idx``."""
         cursor = self._partitioner.color_cursor
-        cursor_next = cursor
-        if fixed_step_idx < 0:
-            cursor_next = self._color_cursor_next
-            if cursor_parity:
-                cursor, cursor_next = cursor_next, cursor
         contact_views = self._active_contact_views()
         if contact_container is None:
             contact_container = self._contact_container
@@ -5345,36 +5350,19 @@ class PhoenXWorld:
                 wp.int32(self.num_bodies),
                 wp.int32(self._singleworld_total_threads),
                 fuse_threshold,
-                self._head_active,
                 self._copy_state,
                 ms_cap,
                 ms_batch,
                 self._partitioner.sweep_direction,
                 wp.int32(fixed_step_idx),
-                cursor_next,
             ],
             block_dim=_SINGLEWORLD_BLOCK_DIM,
             device=self.device,
         )
 
-    def _capture_singleworld_sweep(self, kernel, launches: int = NUM_INNER_WHILE_ITERATIONS, **kw) -> None:
-        """Head-path sweep on the persistent grid: ``launches`` dynamic head
-        launches (a ``capture_while`` body unrolls NUM_INNER_WHILE_ITERATIONS).
-        Extra head launches no-op once the sweep reaches a tail color."""
-        idt = kw.get("idt", wp.float32(0.0))
-        contact_container = kw.get("contact_container", self._contact_container)
-        if contact_container is None:
-            contact_container = self._contact_container
-        fuse_threshold = wp.int32(self._fuse_threshold)
-        # An even launch count returns the cursor to the partitioner's array,
-        # which the fused tail and both loop conditions read.
-        assert launches % 2 == 0
-        for launch in range(launches):
-            self._launch_singleworld_head(kernel, idt, fuse_threshold, contact_container, cursor_parity=launch % 2)
-
     def _capture_singleworld_tail_sweep(self, kernel, **kw) -> None:
-        """capture_while body: drain remaining small colours in one block via
-        wp.launch_tiled. Hands back to the head path on a colour > fuse_threshold."""
+        """Drain small colours from the cursor in one block via wp.launch_tiled,
+        stopping at the first colour above ``fuse_threshold``."""
         contact_views = self._active_contact_views()
         idt = kw.get("idt", wp.float32(0.0))
         contact_container = kw.get("contact_container", self._contact_container)
@@ -5416,7 +5404,6 @@ class PhoenXWorld:
                 ms_cap,
                 ms_batch,
                 self._partitioner.sweep_direction,
-                self._head_active,
             ],
             block_dim=self._fuse_tail_block_dim,
             device=self.device,
@@ -5557,17 +5544,17 @@ class PhoenXWorld:
         reverse_colors: bool = False,
         structural_projection: bool = False,
     ) -> None:
-        """Drain small colours before launching the persistent grid.
+        """Run one colour sweep from the partitioner's cursor.
 
-        The fused tail stops at a colour above its threshold and arms the
-        head. The head drains large colours until it reaches a small one.
-        Repeating this pair preserves colour order in both sweep directions
-        while avoiding idle head launches when every colour fits the tail.
-
-        The first head phase runs FIXED_HEAD_LAUNCHES launches under a single
-        conditional instead of a ``capture_while`` loop, followed by the tail.
-        Sweeps with more large colors continue in the guarded round loop from
-        the same cursor, so the color order is unchanged.
+        On CUDA the sweep is one co-resident launch: every block solves the
+        large colours (more than ``fuse_threshold`` work units), a grid barrier
+        separates colours, and block 0 solves the small ones with
+        ``__syncthreads``. The iterate head is compiled with fast math and the
+        fused tail is not, so that phase runs the leading small colours, the
+        large ones up to the next small colour, and the trailing small ones in
+        three launches; only small colours between large ones enter the
+        guarded loop. On CPU, launch threads run serially, so each colour gets
+        its own launch.
         """
         heads = self._singleworld_kernels()[::2]
         if head_kernel in heads:
@@ -5601,35 +5588,112 @@ class PhoenXWorld:
                 )
             head_kernel, tail_kernel = self._singleworld_cached_prepare_kernels()
 
-        def _tail() -> None:
-            self._capture_singleworld_tail_sweep(
-                kernel=tail_kernel,
-                idt=idt,
-                contact_container=contact_container,
-            )
+        if not self.device.is_cuda:
+            num_colors = int(self._partitioner.num_colors.numpy()[0])
+            cursor = int(self._partitioner.color_cursor.numpy()[0])
+            for step in range(num_colors - cursor, num_colors):
+                self._launch_singleworld_head(head_kernel, idt, wp.int32(-1), contact_container, step)
+            return
 
-        def _fixed_heads_then_tail() -> None:
-            self._capture_singleworld_sweep(
-                kernel=head_kernel,
-                launches=FIXED_HEAD_LAUNCHES,
-                idt=idt,
-                contact_container=contact_container,
-            )
-            _tail()
+        kernel, drain_tail = get_singleworld_one_launch_kernel(head_kernel, tail_kernel)
+        if drain_tail:
+            self._launch_one_launch_sweep(kernel, idt, contact_container)
+            return
+
+        def _tail() -> None:
+            self._capture_singleworld_tail_sweep(kernel=tail_kernel, idt=idt, contact_container=contact_container)
 
         def _round() -> None:
+            self._launch_one_launch_sweep(kernel, idt, contact_container)
             _tail()
-            wp.capture_while(
-                self._head_active,
-                self._capture_singleworld_sweep,
-                kernel=head_kernel,
-                idt=idt,
-                contact_container=contact_container,
-            )
 
         _tail()
-        wp.capture_if(self._head_active, on_true=_fixed_heads_then_tail)
+        _round()
         wp.capture_while(self._partitioner.color_cursor, _round)
+
+    def _one_launch_grid_blocks(self, kernel) -> int:
+        """Blocks of the one-launch sweep; all of them must be co-resident.
+
+        The grid barrier needs every block resident at once (Warp has no
+        cooperative launch). One block of ``ONE_LAUNCH_BLOCK_DIM`` = 256
+        threads always fits an SM by itself: 255 registers x 256 threads is
+        below the 64K register file, and the kernel uses 2 KB of static
+        shared memory.
+        So ``sm_count`` blocks are co-resident on an otherwise idle GPU. Work
+        from other streams (OptiX) only delays block placement: those kernels
+        terminate without waiting on this one, so every block of the sweep is
+        eventually resident while the placed blocks spin. More than one block
+        per SM is used only when the head grid has more warps than one block
+        per SM provides and the kernel's registers allow it, capped to keep a
+        margin of one block per SM below the register limit.
+        """
+        blocks = self._one_launch_blocks.get(kernel)
+        if blocks is not None:
+            return blocks
+        block_dim = ONE_LAUNCH_BLOCK_DIM
+        virtual_warps = max(1, self._singleworld_total_threads // 32)
+        sm_count = max(1, int(self.device.sm_count))
+        per_sm = 1
+        needed = -(-virtual_warps // (sm_count * (block_dim // 32)))
+        if needed > 1:
+            try:
+                regs = int(wp.get_cuda_kernel_properties(kernel, self.device, block_dim=block_dim)["register_count"])
+            except Exception:
+                regs = 255
+            regs_per_block = (-(-max(regs, 1) // 8) * 8) * block_dim
+            fit = min(65536 // regs_per_block, 1024 // block_dim)
+            per_sm = max(1, min(needed, fit - 1))
+        blocks = max(1, min(virtual_warps, sm_count * per_sm))
+        self._one_launch_blocks[kernel] = blocks
+        return blocks
+
+    def _launch_one_launch_sweep(self, kernel, idt, contact_container=None) -> None:
+        """Launch the one-launch sweep from the partitioner's colour cursor."""
+        if contact_container is None:
+            contact_container = self._contact_container
+        ms_cap = wp.int32(-1 if self.max_colored_partitions is None else int(self.max_colored_partitions))
+        blocks = self._one_launch_grid_blocks(kernel)
+        wp.launch(
+            kernel,
+            dim=blocks * ONE_LAUNCH_BLOCK_DIM,
+            inputs=[
+                self.constraints,
+                self._contact_cols_packed if self._colored_contact_headers else self._contact_cols,
+                self.bodies,
+                self._particles_or_sentinel(),
+                idt,
+                wp.float32(self.sor_boost),
+                self._partitioner.element_ids_by_color,
+                self._partitioner.color_starts,
+                self._partitioner.color_family_starts,
+                (
+                    self._partitioner.color_singleton_end
+                    if self._colored_singleton_contact_lanes
+                    else self._partitioner.color_starts
+                ),
+                self._partitioner.num_colors,
+                self._partitioner.color_cursor,
+                contact_container,
+                self._active_contact_views(),
+                wp.int32(self.num_joints),
+                self._joint_pgs_enabled,
+                wp.int32(self.num_cloth_triangles),
+                wp.int32(self.num_cloth_bending),
+                wp.int32(self.num_soft_tetrahedra),
+                wp.int32(self.num_soft_hexahedra),
+                wp.int32(self.num_bodies),
+                wp.int32(self._singleworld_total_threads),
+                wp.int32(self._fuse_threshold),
+                self._copy_state,
+                ms_cap,
+                wp.int32(int(self.mass_splitting_batch_size)),
+                self._partitioner.sweep_direction,
+                self._one_launch_barrier,
+                wp.int32(blocks),
+            ],
+            block_dim=ONE_LAUNCH_BLOCK_DIM,
+            device=self.device,
+        )
 
     def _gathered_warm_start_supported(self) -> bool:
         """Whether contact preparation can run row-parallel with a per-body warm start.

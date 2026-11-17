@@ -131,7 +131,7 @@ class TestPreCompileDispatchKernelsFires(unittest.TestCase):
     """When workers > 1 the hook must call wp.force_load with the modules
     backing the kernels the active dispatcher will launch."""
 
-    def test_single_world_loads_six_singleworld_kernels(self):
+    def test_single_world_loads_its_sweep_kernels(self):
         with _RestoreLoadModuleMaxWorkers(4), mock.patch("warp.force_load") as force_load:
             world = _build_minimal_scene(step_layout="single_world").world
             force_load.assert_called_once()
@@ -140,11 +140,13 @@ class TestPreCompileDispatchKernelsFires(unittest.TestCase):
             self.assertIs(kwargs["device"], world.device)
             self.assertEqual(kwargs["max_workers"], 4)
             loaded_modules = {module.get_module_identifier() for module in kwargs["modules"]}
-            expected_modules = {kernel.module.get_module_identifier() for kernel in world._singleworld_kernels()}
-            # The six head/fused kernels share a module pair-wise (one
-            # warp Module per ``module="unique"`` kernel) so the set
-            # should contain every distinct module the factory produced.
+            expected = world._singleworld_precompile_kernels()
+            expected_modules = {kernel.module.get_module_identifier() for kernel in expected}
             self.assertEqual(loaded_modules, expected_modules)
+            if world.device.is_cuda:
+                # One-launch prepare, iterate and relax sweeps plus the iterate tail.
+                self.assertEqual(sum(kernel.key.startswith("phoenx_singleworld_one_launch") for kernel in expected), 3)
+                self.assertIn(world._singleworld_kernels()[3], expected)
 
     def test_multi_world_loads_active_scheduler_kernels(self):
         with _RestoreLoadModuleMaxWorkers(4), mock.patch("warp.force_load") as force_load:
@@ -159,11 +161,13 @@ class TestPreCompileDispatchKernelsFires(unittest.TestCase):
             world = _build_minimal_scene(step_layout="single_world", prepare_refresh_stride=2).world
             force_load.assert_called_once()
             loaded_modules = {module.get_module_identifier() for module in force_load.call_args.kwargs["modules"]}
-            expected_modules = {kernel.module.get_module_identifier() for kernel in world._singleworld_kernels()}
-            expected_modules.update(
-                kernel.module.get_module_identifier() for kernel in world._singleworld_cached_prepare_kernels()
-            )
+            expected = world._singleworld_precompile_kernels()
+            expected_modules = {kernel.module.get_module_identifier() for kernel in expected}
             self.assertEqual(loaded_modules, expected_modules)
+            if world.device.is_cuda:
+                self.assertTrue(
+                    any(kernel.key == "phoenx_singleworld_one_launch_cached_prepare" for kernel in expected)
+                )
 
     def test_multi_world_loads_cached_prepare_when_stride_reuses_prepare(self):
         with _RestoreLoadModuleMaxWorkers(4), mock.patch("warp.force_load") as force_load:

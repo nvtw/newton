@@ -149,6 +149,7 @@ from newton._src.solvers.phoenx.helpers.math_helpers import rotate_inertia
 from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
 from newton._src.solvers.phoenx.mass_splitting.kernels import initialize_rigid_overflow_copy
 from newton._src.solvers.phoenx.particle import ParticleContainer
+from newton._src.solvers.phoenx.solver_config import FUSE_TAIL_BLOCK_DIM
 from newton._src.solvers.phoenx.timer import elapsed_us, read_global_timer_ns
 
 # A PGS iteration is one complete traversal of all colors. Repeating a local
@@ -3259,26 +3260,14 @@ def _phoenx_apply_global_damping_kernel(
         bodies.angular_velocity[i] = bodies.angular_velocity[i] * ang
 
 
-# Single-world step path: per-colour grid launches via wp.capture_while on
-# head_active. Persistent grid sized once at construction.
-# few big worlds; the multi-world fast-tail path leaves SMs idle there.
-#
-# Head capture-while termination -- ``head_active[0]`` starts at 1 and
-# the kernel clears it in two cases:
-#
-#   (a) ``color_cursor[0] <= 0``  -- sweep drained every colour.
-#   (b) ``count <= fuse_threshold`` -- hand off to the fused tail
-#       kernel, which resumes at the same cursor.
-#
-# Neither case advances ``color_cursor``; the dedicated ``head_active``
-# flag is what lets the tail kernel pick up where (b) stopped. A separate
-# one-thread kernel advances dynamic heads after every CTA completes. Fixed
-# unrolled heads receive their immutable step index and update the cursor
-# only for bookkeeping.
-# ``fuse_threshold = 0`` disables (b) and preserves the original
-# one-kernel-per-colour behaviour.
-# Tail launches after head_active clears stay cheap (early-exit no-ops) until
-# the outer capture_while observes head_active[0] == 0.
+# Single-world step path. On CUDA a sweep is one co-resident launch of
+# :func:`_make_singleworld_one_launch_kernel`: all blocks solve the colours
+# above ``fuse_threshold`` work units, separated by a grid barrier, and block 0
+# solves the smaller ones with ``__syncthreads`` between colours. The iterate
+# phase compiles its large colours with fast math and keeps the small ones in
+# the separate IEEE :func:`_make_singleworld_fused_kernel`. The unrolled
+# mass-splitting dispatcher and the CPU sweep launch
+# :func:`_make_singleworld_persistent_kernel` once per colour.
 
 
 @wp.func
@@ -4319,7 +4308,7 @@ def _make_structural_projection_color(cooperative: bool, row_capacity: int):
 
 
 @functools.cache
-def _make_singleworld_persistent_kernel(
+def _make_singleworld_head_color_func(
     *,
     phase: str,
     cloth_support: bool,
@@ -4342,24 +4331,14 @@ def _make_singleworld_persistent_kernel(
     adaptive_singleton_contacts: bool = False,
     spread_contact_lanes: bool = False,
 ):
-    """Persistent-grid PGS kernel for the requested phase.
-
-    Per-cid dispatch uses fixed constraint family ranges. The static
-    ``cloth_support`` flag keeps deformable code out of rigid-only binaries;
-    ``soft_tet_neohookean`` chooses the soft-tet block variant.
-
-    ``spread_contact_lanes`` distributes the unpacked contact columns of a
-    rigid color over the warps of the grid.
-
-    ``enable_column_timers`` brackets each per-cid dispatch with
-    ``%globaltimer`` and atomic-adds elapsed microseconds to ``time_us``.
-    """
+    """One large colour of :func:`_make_singleworld_persistent_kernel` as a function of
+    the (virtual) thread id and grid size; same code path, same lane decomposition."""
     is_prepare = phase == "prepare"
     is_cached_prepare = phase == "cached_prepare"
     is_iterate = phase == "iterate"
     projection = phase == "joint_project"
     project_color = _make_structural_projection_color(cooperative_joints, joint_row_capacity)
-    use_bias = is_iterate or projection  # iterate ON, relax OFF (prepare ignores)
+    use_bias = is_iterate or projection
 
     _dispatch_one_cid, _ = _make_singleworld_dispatch_func(
         cloth_support=cloth_support,
@@ -4420,17 +4399,8 @@ def _make_singleworld_persistent_kernel(
             spread_contact_lanes=spread_contact_lanes,
         )
 
-    # Approximate float32 division and square roots shorten the latency-bound
-    # contact chain of the iterate sweep (+4% Kapla). Prepare stays IEEE: its
-    # mesh-manifold effective masses degrade the bicycle drivetrain.
-    @wp.kernel(
-        name=f"phoenx_singleworld_{phase}",
-        enable_backward=False,
-        module="unique",
-        grid_stride=False,
-        module_options={"fast_math": phase == "iterate"},
-    )
-    def kernel(
+    @wp.func
+    def head_color(
         constraints: ConstraintContainer,
         contact_cols: ContactColumnContainer,
         bodies: BodyContainer,
@@ -4438,11 +4408,8 @@ def _make_singleworld_persistent_kernel(
         idt: wp.float32,
         sor_boost: wp.float32,
         element_ids_by_color: wp.array[wp.int32],
-        color_starts: wp.array[wp.int32],
         color_family_starts: wp.array[wp.int32],
         color_singleton_end: wp.array[wp.int32],
-        num_colors: wp.array[wp.int32],
-        color_cursor: wp.array[wp.int32],
         cc: ContactContainer,
         contacts: ContactViews,
         num_joints: wp.int32,
@@ -4452,72 +4419,15 @@ def _make_singleworld_persistent_kernel(
         num_soft_tetrahedra: wp.int32,
         num_soft_hexahedra: wp.int32,
         num_bodies: wp.int32,
-        total_num_threads: wp.int32,
-        fuse_threshold: wp.int32,
-        head_active: wp.array[wp.int32],
         copy_state: CopyStateContainer,
-        max_colored_partitions: wp.int32,
         ms_batch_size: wp.int32,
-        sweep_direction: wp.array[wp.int32],
-        fixed_step_idx: wp.int32,
-        color_cursor_next: wp.array[wp.int32],
+        start: wp.int32,
+        count: wp.int32,
+        c: wp.int32,
+        is_overflow_color: wp.bool,
+        tid: wp.int32,
+        total_num_threads: wp.int32,
     ):
-        tid = wp.tid()
-        if fixed_step_idx >= wp.int32(0):
-            # The unrolled dispatcher knows this launch's color index. Every
-            # CTA must use the same immutable value: thread 0 may update the
-            # cursor before a later CTA starts.
-            n_colors = num_colors[0]
-            if fixed_step_idx >= n_colors:
-                if tid == 0:
-                    head_active[0] = 0
-                    color_cursor[0] = 0
-                return
-            cursor = n_colors - fixed_step_idx
-            c = _color_for_step(fixed_step_idx, n_colors, sweep_direction[0], max_colored_partitions)
-            start = color_starts[c]
-            count = color_starts[c + wp.int32(1)] - start
-        else:
-            # A dynamic launch reads ``color_cursor`` and thread 0 publishes
-            # the cursor of the following launch in ``color_cursor_next``, a
-            # different array. No CTA of this launch can observe the update.
-            cursor = color_cursor[0]
-            if cursor <= 0:
-                if tid == 0:
-                    head_active[0] = 0
-                    color_cursor_next[0] = cursor
-                return
-            start, count, c = _singleworld_color_range_from_cursor(
-                color_starts, num_colors, cursor, sweep_direction, max_colored_partitions
-            )
-
-        num_units = count
-        if max_colored_partitions >= wp.int32(0) and c == max_colored_partitions:
-            num_units = (count + ms_batch_size - wp.int32(1)) / ms_batch_size
-        if num_units <= fuse_threshold:
-            if tid == 0:
-                head_active[0] = 0
-                if fixed_step_idx < wp.int32(0):
-                    color_cursor_next[0] = cursor
-            return
-
-        # Overflow detection. ``c`` is the direction-remapped colour
-        # index returned by ``_singleworld_color_range``; the overflow
-        # bucket lives at ``max_colored_partitions`` and stays there
-        # regardless of sweep direction (see ``_color_for_step``).
-        # Overflow constraints are grouped into batches of
-        # ``ms_batch_size`` consecutive CSR slots; one thread processes
-        # a whole batch sequentially (Gauss-Seidel within the batch on
-        # a shared slot) while across batches processing is parallel
-        # (Jacobi via distinct slots). Regular colours stay at
-        # ``parallel_id=0`` with one thread per constraint (independent
-        # set, no need for splitting).
-        is_overflow_color = max_colored_partitions >= wp.int32(0) and c == max_colored_partitions
-
-        # For overflow: each thread covers ``ms_batch_size`` consecutive
-        # CSR slots starting at ``tid * ms_batch_size``, grid-stride
-        # by ``total_num_threads * ms_batch_size``. For regular:
-        # one slot per thread, grid-stride by total_num_threads.
         thread_start = tid
         stride = total_num_threads
         if is_overflow_color:
@@ -4540,8 +4450,6 @@ def _make_singleworld_persistent_kernel(
                 tid,
                 total_num_threads,
             )
-            if tid == 0:
-                color_cursor_next[0] = cursor - 1
             return
 
         if wp.static(rigid_direct):
@@ -4568,8 +4476,6 @@ def _make_singleworld_persistent_kernel(
                     tid,
                     total_num_threads,
                 )
-                if tid == 0:
-                    color_cursor_next[0] = cursor - 1
                 return
 
         for t in range(thread_start, count, stride):
@@ -4582,7 +4488,6 @@ def _make_singleworld_persistent_kernel(
                     break
                 parallel_id = wp.int32(0)
                 if is_overflow_color:
-                    # Batch index = partition_key stamped by emit.
                     parallel_id = t_slot / ms_batch_size
                 cid = read1d_i32(element_ids_by_color, start + t_slot)
                 if wp.static(direct_regular_colors):
@@ -4623,14 +4528,11 @@ def _make_singleworld_persistent_kernel(
                     parallel_id,
                 )
 
-        if tid == 0:
-            color_cursor_next[0] = cursor - 1
-
-    return kernel
+    return head_color
 
 
 @functools.cache
-def _make_singleworld_fused_kernel(
+def _make_singleworld_tail_color_func(
     *,
     phase: str,
     cloth_support: bool,
@@ -4651,8 +4553,9 @@ def _make_singleworld_fused_kernel(
     joint_row_capacity: int = 6,
     spread_contact_lanes: bool = False,
 ):
-    """Single-block tail-fused PGS kernel; same axes as
-    :func:`_make_singleworld_persistent_kernel`."""
+    """One small colour of :func:`_make_singleworld_fused_kernel` (without the trailing
+    ``__syncthreads``); same code path, same lane decomposition."""
+    del direct_regular_colors  # the fused tail ignores it as well
     is_prepare = phase == "prepare"
     is_cached_prepare = phase == "cached_prepare"
     is_iterate = phase == "iterate"
@@ -4694,6 +4597,311 @@ def _make_singleworld_fused_kernel(
         spread_contact_lanes=spread_contact_lanes,
     )
 
+    @wp.func
+    def tail_color(
+        constraints: ConstraintContainer,
+        contact_cols: ContactColumnContainer,
+        bodies: BodyContainer,
+        particles: ParticleContainer,
+        idt: wp.float32,
+        sor_boost: wp.float32,
+        element_ids_by_color: wp.array[wp.int32],
+        color_family_starts: wp.array[wp.int32],
+        color_singleton_end: wp.array[wp.int32],
+        cc: ContactContainer,
+        contacts: ContactViews,
+        num_joints: wp.int32,
+        joint_pgs_enabled: wp.array[wp.int32],
+        num_cloth_triangles: wp.int32,
+        num_cloth_bending: wp.int32,
+        num_soft_tetrahedra: wp.int32,
+        num_soft_hexahedra: wp.int32,
+        num_bodies: wp.int32,
+        copy_state: CopyStateContainer,
+        ms_batch_size: wp.int32,
+        start: wp.int32,
+        count: wp.int32,
+        c: wp.int32,
+        is_overflow_color: wp.bool,
+        num_units: wp.int32,
+        lane: wp.int32,
+        block_dim: wp.int32,
+    ):
+        inner_steps = wp.int32(1)
+        if is_overflow_color:
+            inner_steps = ms_batch_size
+        if wp.static(projection):
+            project_color(
+                constraints,
+                bodies,
+                particles,
+                copy_state,
+                element_ids_by_color,
+                joint_pgs_enabled,
+                start,
+                count,
+                num_joints,
+                num_bodies,
+                is_overflow_color,
+                lane,
+                block_dim,
+            )
+            return
+        if wp.static(rigid_direct):
+            if not is_overflow_color:
+                _dispatch_rigid_direct_color(
+                    constraints,
+                    contact_cols,
+                    bodies,
+                    particles,
+                    cc,
+                    contacts,
+                    copy_state,
+                    element_ids_by_color,
+                    color_family_starts,
+                    color_singleton_end,
+                    start,
+                    count,
+                    c,
+                    num_joints,
+                    joint_pgs_enabled,
+                    num_bodies,
+                    idt,
+                    sor_boost,
+                    lane,
+                    block_dim,
+                )
+                return
+        if lane < num_units:
+            parallel_id = wp.int32(0)
+            if is_overflow_color:
+                parallel_id = lane
+            t_slot_base = lane * inner_steps
+            for inner in range(inner_steps):
+                t_slot = t_slot_base + inner
+                if t_slot >= count:
+                    break
+                cid = read1d_i32(element_ids_by_color, start + t_slot)
+                _dispatch_one_cid(
+                    constraints,
+                    contact_cols,
+                    bodies,
+                    particles,
+                    cc,
+                    contacts,
+                    copy_state,
+                    num_joints,
+                    joint_pgs_enabled,
+                    num_cloth_triangles,
+                    num_cloth_bending,
+                    num_soft_tetrahedra,
+                    num_soft_hexahedra,
+                    num_bodies,
+                    idt,
+                    sor_boost,
+                    cid,
+                    start + t_slot,
+                    parallel_id,
+                )
+
+    return tail_color
+
+
+@functools.cache
+def _make_singleworld_persistent_kernel(
+    *,
+    phase: str,
+    cloth_support: bool,
+    enable_column_timers: bool = False,
+    soft_tet_neohookean: bool = False,
+    has_joints: bool = True,
+    has_contacts: bool = True,
+    skip_joint_pgs: bool = False,
+    has_mass_splitting: bool = True,
+    packed_contact_headers: bool = False,
+    has_sleeping: bool = True,
+    has_soft_contact_pd: bool = True,
+    rigid_direct: bool = False,
+    direct_regular_colors: bool = False,
+    patch_friction: bool = False,
+    bilateral_joint_blocks: bool = False,
+    cooperative_joints: bool = False,
+    joint_row_capacity: int = 6,
+    cooperative_contacts: bool = False,
+    adaptive_singleton_contacts: bool = False,
+    spread_contact_lanes: bool = False,
+):
+    """Persistent-grid PGS kernel that solves the colour of one fixed sweep step.
+
+    Used by the unrolled mass-splitting dispatcher and by the CPU sweep; CUDA
+    sweeps run the same per-colour code inside
+    :func:`_make_singleworld_one_launch_kernel`. A colour with at most
+    ``fuse_threshold`` work units is skipped (pass ``-1`` to solve every colour).
+
+    ``enable_column_timers`` brackets each per-cid dispatch with
+    ``%globaltimer`` and atomic-adds elapsed microseconds to ``time_us``.
+    """
+    head_color = _make_singleworld_head_color_func(
+        phase=phase,
+        cloth_support=cloth_support,
+        enable_column_timers=enable_column_timers,
+        soft_tet_neohookean=soft_tet_neohookean,
+        has_joints=has_joints,
+        has_contacts=has_contacts,
+        skip_joint_pgs=skip_joint_pgs,
+        has_mass_splitting=has_mass_splitting,
+        packed_contact_headers=packed_contact_headers,
+        has_sleeping=has_sleeping,
+        has_soft_contact_pd=has_soft_contact_pd,
+        rigid_direct=rigid_direct,
+        direct_regular_colors=direct_regular_colors,
+        patch_friction=patch_friction,
+        bilateral_joint_blocks=bilateral_joint_blocks,
+        cooperative_joints=cooperative_joints,
+        joint_row_capacity=joint_row_capacity,
+        cooperative_contacts=cooperative_contacts,
+        adaptive_singleton_contacts=adaptive_singleton_contacts,
+        spread_contact_lanes=spread_contact_lanes,
+    )
+
+    # Approximate float32 division and square roots shorten the latency-bound
+    # contact chain of the iterate sweep (+4% Kapla). Prepare stays IEEE: its
+    # mesh-manifold effective masses degrade the bicycle drivetrain.
+    @wp.kernel(
+        name=f"phoenx_singleworld_{phase}",
+        enable_backward=False,
+        module="unique",
+        grid_stride=False,
+        module_options={"fast_math": phase == "iterate"},
+    )
+    def kernel(
+        constraints: ConstraintContainer,
+        contact_cols: ContactColumnContainer,
+        bodies: BodyContainer,
+        particles: ParticleContainer,
+        idt: wp.float32,
+        sor_boost: wp.float32,
+        element_ids_by_color: wp.array[wp.int32],
+        color_starts: wp.array[wp.int32],
+        color_family_starts: wp.array[wp.int32],
+        color_singleton_end: wp.array[wp.int32],
+        num_colors: wp.array[wp.int32],
+        color_cursor: wp.array[wp.int32],
+        cc: ContactContainer,
+        contacts: ContactViews,
+        num_joints: wp.int32,
+        joint_pgs_enabled: wp.array[wp.int32],
+        num_cloth_triangles: wp.int32,
+        num_cloth_bending: wp.int32,
+        num_soft_tetrahedra: wp.int32,
+        num_soft_hexahedra: wp.int32,
+        num_bodies: wp.int32,
+        total_num_threads: wp.int32,
+        fuse_threshold: wp.int32,
+        copy_state: CopyStateContainer,
+        max_colored_partitions: wp.int32,
+        ms_batch_size: wp.int32,
+        sweep_direction: wp.array[wp.int32],
+        fixed_step_idx: wp.int32,
+    ):
+        tid = wp.tid()
+        # The dispatcher knows this launch's colour index. No CTA reads the
+        # cursor, so thread 0 may publish it while others still run.
+        n_colors = num_colors[0]
+        if fixed_step_idx >= n_colors:
+            if tid == 0:
+                color_cursor[0] = 0
+            return
+        cursor = n_colors - fixed_step_idx
+        c = _color_for_step(fixed_step_idx, n_colors, sweep_direction[0], max_colored_partitions)
+        start = color_starts[c]
+        count = color_starts[c + wp.int32(1)] - start
+        is_overflow_color = max_colored_partitions >= wp.int32(0) and c == max_colored_partitions
+        num_units = count
+        if is_overflow_color:
+            num_units = (count + ms_batch_size - wp.int32(1)) / ms_batch_size
+        if num_units <= fuse_threshold:
+            return
+        head_color(
+            constraints,
+            contact_cols,
+            bodies,
+            particles,
+            idt,
+            sor_boost,
+            element_ids_by_color,
+            color_family_starts,
+            color_singleton_end,
+            cc,
+            contacts,
+            num_joints,
+            joint_pgs_enabled,
+            num_cloth_triangles,
+            num_cloth_bending,
+            num_soft_tetrahedra,
+            num_soft_hexahedra,
+            num_bodies,
+            copy_state,
+            ms_batch_size,
+            start,
+            count,
+            c,
+            is_overflow_color,
+            tid,
+            total_num_threads,
+        )
+        if tid == 0:
+            color_cursor[0] = cursor - 1
+
+    return kernel
+
+
+@functools.cache
+def _make_singleworld_fused_kernel(
+    *,
+    phase: str,
+    cloth_support: bool,
+    enable_column_timers: bool = False,
+    soft_tet_neohookean: bool = False,
+    has_joints: bool = True,
+    has_contacts: bool = True,
+    skip_joint_pgs: bool = False,
+    has_mass_splitting: bool = True,
+    packed_contact_headers: bool = False,
+    has_sleeping: bool = True,
+    has_soft_contact_pd: bool = True,
+    rigid_direct: bool = False,
+    direct_regular_colors: bool = False,
+    patch_friction: bool = False,
+    bilateral_joint_blocks: bool = False,
+    cooperative_joints: bool = False,
+    joint_row_capacity: int = 6,
+    spread_contact_lanes: bool = False,
+):
+    """Single-block kernel that drains small colours from the cursor with
+    ``__syncthreads`` between colours, stopping at the first colour above
+    ``fuse_threshold``; same axes as :func:`_make_singleworld_persistent_kernel`."""
+    tail_color = _make_singleworld_tail_color_func(
+        phase=phase,
+        cloth_support=cloth_support,
+        enable_column_timers=enable_column_timers,
+        soft_tet_neohookean=soft_tet_neohookean,
+        has_joints=has_joints,
+        has_contacts=has_contacts,
+        skip_joint_pgs=skip_joint_pgs,
+        has_mass_splitting=has_mass_splitting,
+        packed_contact_headers=packed_contact_headers,
+        has_sleeping=has_sleeping,
+        has_soft_contact_pd=has_soft_contact_pd,
+        rigid_direct=rigid_direct,
+        direct_regular_colors=direct_regular_colors,
+        patch_friction=patch_friction,
+        bilateral_joint_blocks=bilateral_joint_blocks,
+        cooperative_joints=cooperative_joints,
+        joint_row_capacity=joint_row_capacity,
+        spread_contact_lanes=spread_contact_lanes,
+    )
+
     @wp.kernel(enable_backward=False, module="unique")
     def kernel(
         constraints: ConstraintContainer,
@@ -4722,8 +4930,6 @@ def _make_singleworld_fused_kernel(
         max_colored_partitions: wp.int32,
         ms_batch_size: wp.int32,
         sweep_direction: wp.array[wp.int32],
-        # Request the persistent head only if a large colour remains.
-        head_active: wp.array[wp.int32],
     ):
         _block, lane = wp.tid()
         cursor = color_cursor[0]
@@ -4732,108 +4938,44 @@ def _make_singleworld_fused_kernel(
                 color_starts, num_colors, cursor, sweep_direction, max_colored_partitions
             )
             is_overflow_color = max_colored_partitions >= wp.int32(0) and c == max_colored_partitions
-            # Overflow handling mirrors the head kernel's batched
-            # dispatch (see ``_make_singleworld_persistent_kernel``):
-            # one lane covers ``ms_batch_size`` consecutive CSR slots
-            # sequentially (Gauss-Seidel within the batch on a shared
-            # ``parallel_id``), and different lanes own different
-            # batches in parallel (Jacobi). ``parallel_id == lane``
-            # matches the ``partition_key = overflow_offset /
-            # batch_size`` the emit stamped, so each lane reads /
-            # writes its own ``copy_state`` slot -- no intra-block
-            # race. The earlier shortcut bailed back to the head on
-            # overflow + ``batch_size > 1`` and deadlocked when the
-            # head also bailed to the tail on the same small overflow
-            # colour.
-            inner_steps = wp.int32(1)
             num_units = count
             if is_overflow_color:
-                inner_steps = ms_batch_size
                 num_units = (count + ms_batch_size - wp.int32(1)) / ms_batch_size
             if num_units > fuse_threshold:
                 break
-            if wp.static(projection):
-                project_color(
-                    constraints,
-                    bodies,
-                    particles,
-                    copy_state,
-                    element_ids_by_color,
-                    joint_pgs_enabled,
-                    start,
-                    count,
-                    num_joints,
-                    num_bodies,
-                    is_overflow_color,
-                    lane,
-                    wp.block_dim(),
-                )
-                _sync_threads()
-                cursor -= 1
-                continue
-            if wp.static(rigid_direct):
-                if not is_overflow_color:
-                    _dispatch_rigid_direct_color(
-                        constraints,
-                        contact_cols,
-                        bodies,
-                        particles,
-                        cc,
-                        contacts,
-                        copy_state,
-                        element_ids_by_color,
-                        color_family_starts,
-                        color_singleton_end,
-                        start,
-                        count,
-                        c,
-                        num_joints,
-                        joint_pgs_enabled,
-                        num_bodies,
-                        idt,
-                        sor_boost,
-                        lane,
-                        wp.block_dim(),
-                    )
-                    _sync_threads()
-                    cursor = cursor - 1
-                    continue
-            if lane < num_units:
-                parallel_id = wp.int32(0)
-                if is_overflow_color:
-                    parallel_id = lane
-                t_slot_base = lane * inner_steps
-                for inner in range(inner_steps):
-                    t_slot = t_slot_base + inner
-                    if t_slot >= count:
-                        break
-                    cid = read1d_i32(element_ids_by_color, start + t_slot)
-                    _dispatch_one_cid(
-                        constraints,
-                        contact_cols,
-                        bodies,
-                        particles,
-                        cc,
-                        contacts,
-                        copy_state,
-                        num_joints,
-                        joint_pgs_enabled,
-                        num_cloth_triangles,
-                        num_cloth_bending,
-                        num_soft_tetrahedra,
-                        num_soft_hexahedra,
-                        num_bodies,
-                        idt,
-                        sor_boost,
-                        cid,
-                        start + t_slot,
-                        parallel_id,
-                    )
+            tail_color(
+                constraints,
+                contact_cols,
+                bodies,
+                particles,
+                idt,
+                sor_boost,
+                element_ids_by_color,
+                color_family_starts,
+                color_singleton_end,
+                cc,
+                contacts,
+                num_joints,
+                joint_pgs_enabled,
+                num_cloth_triangles,
+                num_cloth_bending,
+                num_soft_tetrahedra,
+                num_soft_hexahedra,
+                num_bodies,
+                copy_state,
+                ms_batch_size,
+                start,
+                count,
+                c,
+                is_overflow_color,
+                num_units,
+                lane,
+                wp.block_dim(),
+            )
             _sync_threads()
             cursor = cursor - 1
         if lane == 0:
             color_cursor[0] = cursor
-            head_active[0] = wp.int32(cursor > 0)
 
     return kernel
 
@@ -4881,24 +5023,324 @@ def get_singleworld_kernel(
             "spread_contact_lanes": spread_contact_lanes,
         }
     )
-    return factory(
+    axes = {
         **extra,
-        phase=phase,
-        cloth_support=cloth_support,
-        enable_column_timers=enable_column_timers,
-        soft_tet_neohookean=soft_tet_neohookean,
-        has_joints=has_joints,
-        has_contacts=has_contacts,
-        skip_joint_pgs=skip_joint_pgs,
-        has_mass_splitting=has_mass_splitting,
-        packed_contact_headers=packed_contact_headers,
-        has_sleeping=has_sleeping,
-        has_soft_contact_pd=has_soft_contact_pd,
-        rigid_direct=rigid_direct,
-        direct_regular_colors=direct_regular_colors,
-        patch_friction=patch_friction,
-        bilateral_joint_blocks=bilateral_joint_blocks,
+        "phase": phase,
+        "cloth_support": cloth_support,
+        "enable_column_timers": enable_column_timers,
+        "soft_tet_neohookean": soft_tet_neohookean,
+        "has_joints": has_joints,
+        "has_contacts": has_contacts,
+        "skip_joint_pgs": skip_joint_pgs,
+        "has_mass_splitting": has_mass_splitting,
+        "packed_contact_headers": packed_contact_headers,
+        "has_sleeping": has_sleeping,
+        "has_soft_contact_pd": has_soft_contact_pd,
+        "rigid_direct": rigid_direct,
+        "direct_regular_colors": direct_regular_colors,
+        "patch_friction": patch_friction,
+        "bilateral_joint_blocks": bilateral_joint_blocks,
+    }
+    kernel = factory(**axes)
+    # Lets the one-launch sweep rebuild the same per-colour code paths.
+    kernel.phoenx_axes = tuple(sorted(axes.items()))
+    return kernel
+
+
+# ---------------------------------------------------------------------------
+# One-launch single-world sweep: a co-resident persistent grid walks the
+# large colours with a software grid barrier between colours and block 0
+# drains the small colours with ``__syncthreads``, exactly like the fused
+# tail. See ``PhoenXWorld._singleworld_head_plus_tail_sweep``.
+# ---------------------------------------------------------------------------
+
+#: Threads per block of the one-launch sweep. Equal to the fused tail's block
+#: so block 0 runs the small colours with the tail's lane decomposition.
+ONE_LAUNCH_BLOCK_DIM: int = FUSE_TAIL_BLOCK_DIM
+_ONE_LAUNCH_WARPS_PER_BLOCK: int = ONE_LAUNCH_BLOCK_DIM // 32
+
+
+# Grid barrier for co-resident blocks. ``state[0]`` counts arrivals,
+# ``state[1]`` is the generation. The fences around the arrival give the
+# barrier release/acquire semantics at GPU scope (the pattern of
+# cooperative_groups::grid_group::sync), so plain loads after the barrier
+# observe every store issued before it by any block.
+_GRID_SYNC_SNIPPET = """
+#if defined(__CUDA_ARCH__)
+__syncthreads();
+if (threadIdx.x == 0) {
+    int* count = (int*)state.data;
+    volatile int* generation = count + 1;
+    const int seen = *generation;
+    __threadfence();
+    if (atomicAdd(count, 1) == num_blocks - 1) {
+        atomicExch(count, 0);
+        __threadfence();
+        atomicAdd((int*)generation, 1);
+    } else {
+        unsigned int backoff = 8;
+        while (*generation == seen) {
+#if __CUDA_ARCH__ >= 700
+            __nanosleep(backoff);
+#endif
+            backoff = backoff < 128 ? 2 * backoff : 128;
+        }
+    }
+    __threadfence();
+}
+__syncthreads();
+#endif
+"""
+
+# Exit counter in ``state[2]``: returns 1 on thread 0 of the last block to
+# finish, after every block has passed its reads of the sweep cursor.
+_GRID_LAST_BLOCK_SNIPPET = """
+#if defined(__CUDA_ARCH__)
+__syncthreads();
+int last = 0;
+if (threadIdx.x == 0) {
+    int* exits = (int*)state.data + 2;
+    __threadfence();
+    if (atomicAdd(exits, 1) == num_blocks - 1) {
+        atomicExch(exits, 0);
+        __threadfence();
+        last = 1;
+    }
+}
+return last;
+#else
+return 1;
+#endif
+"""
+
+
+@wp.func_native(_GRID_SYNC_SNIPPET)
+def _grid_sync(state: wp.array[wp.int32], num_blocks: wp.int32): ...
+
+
+@wp.func_native(_GRID_LAST_BLOCK_SNIPPET)
+def _grid_last_block(state: wp.array[wp.int32], num_blocks: wp.int32) -> wp.int32: ...
+
+
+@wp.func
+def _singleworld_color_units(
+    color_starts: wp.array[wp.int32],
+    num_colors: wp.array[wp.int32],
+    cursor: wp.int32,
+    sweep_direction: wp.array[wp.int32],
+    max_colored_partitions: wp.int32,
+    ms_batch_size: wp.int32,
+) -> wp.int32:
+    """Work units of the colour at ``cursor``, as the head and the fused tail count them."""
+    _start, count, c = _singleworld_color_range_from_cursor(
+        color_starts, num_colors, cursor, sweep_direction, max_colored_partitions
     )
+    if max_colored_partitions >= wp.int32(0) and c == max_colored_partitions:
+        return (count + ms_batch_size - wp.int32(1)) / ms_batch_size
+    return count
+
+
+@functools.cache
+def _make_singleworld_one_launch_kernel(head_axes: tuple, tail_axes: tuple, drain_tail: bool, fast_math: bool):
+    """Persistent single-world sweep in one launch.
+
+    Every block walks the colour cursor. A large colour (more work units than
+    ``fuse_threshold``) runs on all blocks with the head's code path; each
+    physical warp plays one or more of the head's virtual 32-lane blocks
+    (virtual thread id ``vw * 32 + lane``, grid ``total_num_threads``), so the
+    lane decomposition matches the persistent head launch exactly. A run of
+    small colours runs on block 0 with the fused tail's code path and lane
+    decomposition (``ONE_LAUNCH_BLOCK_DIM`` lanes, ``__syncthreads`` between
+    colours). A grid barrier separates consecutive phases. Blocks other than
+    block 0 leave once no large colour remains.
+
+    With ``drain_tail`` false the kernel stops at the first small colour and
+    leaves the cursor there for the fused tail kernel. The iterate head is
+    compiled with fast math and the fused tail is not; one module cannot hold
+    both, so that phase keeps the small colours in the separate tail kernel.
+
+    The launch must be fully co-resident; see
+    ``PhoenXWorld._one_launch_grid_blocks``.
+    """
+    head_color = _make_singleworld_head_color_func(**dict(head_axes))
+    tail_color = _make_singleworld_tail_color_func(**dict(tail_axes))
+    phase = dict(head_axes)["phase"]
+    block_dim = ONE_LAUNCH_BLOCK_DIM
+    warps_per_block = _ONE_LAUNCH_WARPS_PER_BLOCK
+
+    @wp.kernel(
+        name=f"phoenx_singleworld_one_launch_{phase}",
+        enable_backward=False,
+        module="unique",
+        grid_stride=False,
+        module_options={"fast_math": fast_math},
+    )
+    def kernel(
+        constraints: ConstraintContainer,
+        contact_cols: ContactColumnContainer,
+        bodies: BodyContainer,
+        particles: ParticleContainer,
+        idt: wp.float32,
+        sor_boost: wp.float32,
+        element_ids_by_color: wp.array[wp.int32],
+        color_starts: wp.array[wp.int32],
+        color_family_starts: wp.array[wp.int32],
+        color_singleton_end: wp.array[wp.int32],
+        num_colors: wp.array[wp.int32],
+        color_cursor: wp.array[wp.int32],
+        cc: ContactContainer,
+        contacts: ContactViews,
+        num_joints: wp.int32,
+        joint_pgs_enabled: wp.array[wp.int32],
+        num_cloth_triangles: wp.int32,
+        num_cloth_bending: wp.int32,
+        num_soft_tetrahedra: wp.int32,
+        num_soft_hexahedra: wp.int32,
+        num_bodies: wp.int32,
+        total_num_threads: wp.int32,
+        fuse_threshold: wp.int32,
+        copy_state: CopyStateContainer,
+        max_colored_partitions: wp.int32,
+        ms_batch_size: wp.int32,
+        sweep_direction: wp.array[wp.int32],
+        barrier: wp.array[wp.int32],
+        num_blocks: wp.int32,
+    ):
+        tid = wp.tid()
+        block = tid / wp.static(block_dim)
+        lane = tid - block * wp.static(block_dim)
+        warp_lane = lane % wp.int32(32)
+        first_virtual_warp = block + num_blocks * (lane / wp.int32(32))
+        virtual_warp_step = num_blocks * wp.static(warps_per_block)
+        num_virtual_warps = total_num_threads / wp.int32(32)
+
+        cursor = color_cursor[0]
+        # Whether any block may have written since the last barrier.
+        pending = wp.int32(0)
+        while cursor > 0:
+            units = _singleworld_color_units(
+                color_starts, num_colors, cursor, sweep_direction, max_colored_partitions, ms_batch_size
+            )
+            if units > fuse_threshold:
+                if pending != 0:
+                    _grid_sync(barrier, num_blocks)
+                start, count, c = _singleworld_color_range_from_cursor(
+                    color_starts, num_colors, cursor, sweep_direction, max_colored_partitions
+                )
+                is_overflow_color = max_colored_partitions >= wp.int32(0) and c == max_colored_partitions
+                vw = first_virtual_warp
+                while vw < num_virtual_warps:
+                    head_color(
+                        constraints,
+                        contact_cols,
+                        bodies,
+                        particles,
+                        idt,
+                        sor_boost,
+                        element_ids_by_color,
+                        color_family_starts,
+                        color_singleton_end,
+                        cc,
+                        contacts,
+                        num_joints,
+                        joint_pgs_enabled,
+                        num_cloth_triangles,
+                        num_cloth_bending,
+                        num_soft_tetrahedra,
+                        num_soft_hexahedra,
+                        num_bodies,
+                        copy_state,
+                        ms_batch_size,
+                        start,
+                        count,
+                        c,
+                        is_overflow_color,
+                        vw * wp.int32(32) + warp_lane,
+                        total_num_threads,
+                    )
+                    vw += virtual_warp_step
+                pending = wp.int32(1)
+                cursor -= 1
+            else:
+                if wp.static(not drain_tail):
+                    break
+                # The small run ends at the next large colour, or ends the sweep.
+                run_end = cursor - 1
+                while run_end > 0:
+                    if (
+                        _singleworld_color_units(
+                            color_starts, num_colors, run_end, sweep_direction, max_colored_partitions, ms_batch_size
+                        )
+                        > fuse_threshold
+                    ):
+                        break
+                    run_end -= 1
+                if pending != 0:
+                    _grid_sync(barrier, num_blocks)
+                if block == 0:
+                    while cursor > run_end:
+                        start, count, c = _singleworld_color_range_from_cursor(
+                            color_starts, num_colors, cursor, sweep_direction, max_colored_partitions
+                        )
+                        is_overflow_color = max_colored_partitions >= wp.int32(0) and c == max_colored_partitions
+                        units = count
+                        if is_overflow_color:
+                            units = (count + ms_batch_size - wp.int32(1)) / ms_batch_size
+                        tail_color(
+                            constraints,
+                            contact_cols,
+                            bodies,
+                            particles,
+                            idt,
+                            sor_boost,
+                            element_ids_by_color,
+                            color_family_starts,
+                            color_singleton_end,
+                            cc,
+                            contacts,
+                            num_joints,
+                            joint_pgs_enabled,
+                            num_cloth_triangles,
+                            num_cloth_bending,
+                            num_soft_tetrahedra,
+                            num_soft_hexahedra,
+                            num_bodies,
+                            copy_state,
+                            ms_batch_size,
+                            start,
+                            count,
+                            c,
+                            is_overflow_color,
+                            units,
+                            lane,
+                            wp.static(block_dim),
+                        )
+                        _sync_threads()
+                        cursor -= 1
+                cursor = run_end
+                pending = wp.int32(1)
+
+        # Publish the cursor only after every block has read it.
+        if _grid_last_block(barrier, num_blocks) != 0:
+            color_cursor[0] = cursor
+
+    return kernel
+
+
+def get_singleworld_one_launch_kernel(head_kernel, tail_kernel):
+    """One-launch sweep for a head/fused-tail kernel pair from :func:`get_singleworld_kernel`.
+
+    Returns ``(kernel, drain_tail)``, or ``None`` when the pair has no recorded axes.
+    """
+    head_axes = getattr(head_kernel, "phoenx_axes", None)
+    tail_axes = getattr(tail_kernel, "phoenx_axes", None)
+    if head_axes is None or tail_axes is None:
+        return None
+    head_fast = dict(head_axes)["phase"] == "iterate"
+    # The fused tail is compiled without fast math; it can share a module
+    # with the head only when the head is too.
+    drain_tail = not head_fast
+    return _make_singleworld_one_launch_kernel(head_axes, tail_axes, drain_tail, head_fast), drain_tail
 
 
 @functools.cache

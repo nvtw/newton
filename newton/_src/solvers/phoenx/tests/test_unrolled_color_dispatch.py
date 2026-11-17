@@ -12,7 +12,6 @@ import warp as wp
 from newton._src.solvers.phoenx.dispatch.single_world_mass_splitting_unrolled import (
     SingleWorldMassSplittingUnrolledDispatcher,
 )
-from newton._src.solvers.phoenx.simulation import PhoenXWorld
 
 
 class TestUnrolledColorDispatch(unittest.TestCase):
@@ -93,64 +92,6 @@ class TestUnrolledColorDispatch(unittest.TestCase):
 
         self.assertEqual([call.args[4] for call in launch.call_args_list], [0, 1, 2, 3])
         average.assert_called_once_with()
-
-    def test_dynamic_head_publishes_cursor_in_other_array(self):
-        """A dynamic launch must never write the cursor array its CTAs read."""
-        kernel = object()
-        cursor = object()
-        cursor_next = object()
-        partitioner = SimpleNamespace(
-            element_ids_by_color=object(),
-            color_starts=object(),
-            color_family_starts=object(),
-            num_colors=object(),
-            color_cursor=cursor,
-            sweep_direction=object(),
-        )
-        world = SimpleNamespace(
-            _active_contact_views=Mock(return_value=object()),
-            _contact_container=object(),
-            max_colored_partitions=None,
-            mass_splitting_batch_size=1,
-            sor_boost=1.0,
-            constraints=object(),
-            _contact_cols=object(),
-            _colored_contact_headers=False,
-            _colored_singleton_contact_lanes=False,
-            bodies=object(),
-            _particles_or_sentinel=Mock(return_value=object()),
-            _partitioner=partitioner,
-            _color_cursor_next=cursor_next,
-            num_joints=0,
-            _joint_pgs_enabled=object(),
-            num_cloth_triangles=0,
-            num_cloth_bending=0,
-            num_soft_tetrahedra=0,
-            num_soft_hexahedra=0,
-            num_bodies=2,
-            _singleworld_total_threads=256,
-            _head_active=object(),
-            _copy_state=object(),
-            device=object(),
-        )
-
-        def cursor_arrays(**kwargs):
-            with patch("newton._src.solvers.phoenx.simulation.wp.launch") as launch:
-                PhoenXWorld._launch_singleworld_head(world, kernel, wp.float32(120.0), wp.int32(16), **kwargs)
-            # One launch: no separate cursor kernel follows the grid.
-            self.assertEqual(launch.call_count, 1)
-            self.assertIs(launch.call_args.args[0], kernel)
-            inputs = launch.call_args.kwargs["inputs"]
-            return inputs[11], inputs[-1]
-
-        self.assertEqual([x is y for x, y in zip(cursor_arrays(), (cursor, cursor_next), strict=True)], [True, True])
-        self.assertEqual(
-            [x is y for x, y in zip(cursor_arrays(cursor_parity=1), (cursor_next, cursor), strict=True)], [True, True]
-        )
-        # A fixed-step launch does not read the cursor and keeps one array.
-        self.assertEqual(
-            [x is y for x, y in zip(cursor_arrays(fixed_step_idx=2), (cursor, cursor), strict=True)], [True, True]
-        )
 
 
 if __name__ == "__main__":

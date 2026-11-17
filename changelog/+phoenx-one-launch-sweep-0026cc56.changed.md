@@ -1,0 +1,1 @@
+Run each CUDA single-world PhoenX colour sweep as one co-resident launch with a grid barrier between colours, removing the per-sweep head/tail graph conditionals; the iterate phase keeps its separate small-colour tail launch. Results are bit-identical.
