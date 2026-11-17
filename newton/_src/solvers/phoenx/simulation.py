@@ -281,11 +281,14 @@ from newton._src.solvers.phoenx.temporal_contacts import (
     temporal_accumulate_velocity_kernel,
     temporal_apply_forces_kernel,
     temporal_contact_gap_kernel,
+    temporal_count_body_rows_kernel,
     temporal_initialize_weld_components_kernel,
+    temporal_mark_free_axis_bodies_kernel,
     temporal_mark_jointed_components_kernel,
     temporal_restore_velocity_kernel,
     temporal_scatter_jointed_kernel,
     temporal_swap_average_velocity_kernel,
+    temporal_sweep_relaxation_kernel,
     temporal_union_weld_components_kernel,
 )
 
@@ -358,6 +361,12 @@ def _build_gravity_array(gravity, num_worlds: int, device) -> wp.array[wp.vec3f]
 
 #: Minimum solver blocks that the islands of one world are spread over.
 _ISLAND_ROW_GROUPS = 64
+
+
+#: Largest product of the sweep's soft mass coefficient and a contact column's coupling
+#: that a single biased sweep corrects without overshooting; see
+#: :func:`temporal_sweep_relaxation_kernel`.
+_TEMPORAL_SWEEP_COUPLING_BUDGET = 6.0
 
 
 class PhoenXWorld:
@@ -1249,6 +1258,7 @@ class PhoenXWorld:
         # ContactContainer: keyed by contact index k (warm-start, prev lambdas).
         # ContactColumnContainer: keyed by local cid (column header).
         self._contact_body_entries = None  # gathered warm start, allocated last when eligible
+        self._temporal_body_rows = None
         if self.max_contact_columns > 0:
             # Substeps that reuse prepared rows advance each row's gap by the
             # substep's rigid motion, so its normal bias stays physical.
@@ -1290,6 +1300,14 @@ class PhoenXWorld:
                 self._contact_container.normal_compliance_scale = wp.empty(
                     self.rigid_contact_max, dtype=wp.float32, device=self.device
                 )
+            if self.temporal_iterations and self._contact_container_solve is self._contact_container:
+                self._contact_container.sweep_relaxation = wp.ones(
+                    self.rigid_contact_max, dtype=wp.float32, device=self.device
+                )
+                self._temporal_body_rows = wp.zeros(self.bodies.velocity.shape[0], dtype=wp.int32, device=self.device)
+                #: Nonzero for body slots in weld components with an enabled free-axis
+                #: joint; see :meth:`update_temporal_jointed_bodies`.
+                self._temporal_joint_body = wp.zeros(self.num_bodies, dtype=wp.int32, device=self.device)
             if self._colored_contact_rows:
                 self._contact_row_counts = wp.zeros(self._constraint_capacity, dtype=wp.int32, device=self.device)
                 self._contact_row_offsets = wp.zeros(self._constraint_capacity, dtype=wp.int32, device=self.device)
@@ -2711,6 +2729,42 @@ class PhoenXWorld:
             device=self.device,
         )
 
+    def _temporal_sweep_relaxation(self) -> None:
+        """Relax the sweep update of strongly coupled contact columns; see :func:`temporal_sweep_relaxation_kernel`."""
+        if self._temporal_body_rows is None:
+            return
+        mass_coeff = float(self._temporal_contact_coefficients[1][2])
+        budget = _TEMPORAL_SWEEP_COUPLING_BUDGET / max(mass_coeff, 1.0e-6)
+        self._temporal_body_rows.zero_()
+        wp.launch(
+            temporal_count_body_rows_kernel,
+            dim=self.max_contact_columns,
+            inputs=[
+                self._contact_cols,
+                self._contact_container,
+                self.bodies,
+                self._ingest_scratch.num_contact_columns,
+                self._contact_cols.articulation_owner,
+                self._temporal_body_rows,
+            ],
+            device=self.device,
+        )
+        wp.launch(
+            temporal_sweep_relaxation_kernel,
+            dim=self.max_contact_columns,
+            inputs=[
+                self._contact_cols,
+                self.bodies,
+                self._ingest_scratch.num_contact_columns,
+                self._contact_cols.articulation_owner,
+                self._temporal_body_rows,
+                self._temporal_joint_body,
+                wp.float32(budget),
+                self._contact_container.sweep_relaxation,
+            ],
+            device=self.device,
+        )
+
     def _temporal_accumulate_velocity(self, reset: bool) -> None:
         wp.launch(
             temporal_accumulate_velocity_kernel,
@@ -2724,6 +2778,7 @@ class PhoenXWorld:
         """Start the substep's contact substeps after preparation and warm start."""
         if self._temporal_contacts_active():
             self._temporal_contact_rows(0.0)
+            self._temporal_sweep_relaxation()
             self._apply_contact_coefficients(self._temporal_contact_coefficients[1])
 
     def _temporal_next_sweep(self, idt: wp.float32) -> None:
@@ -2844,6 +2899,8 @@ class PhoenXWorld:
         if self._temporal_velocity_sum is None:
             return
         self._temporal_jointed.zero_()
+        if self._temporal_body_rows is not None:
+            self._temporal_joint_body.zero_()
         count = int(model.joint_count)
         if count == 0:
             return
@@ -2879,6 +2936,16 @@ class PhoenXWorld:
             inputs=[entries, marked, self._temporal_jointed],
             device=self.device,
         )
+        if self._temporal_body_rows is not None:
+            # Sweep relaxation skips weld components with a free-axis joint and
+            # the bodies of any other joint; see :func:`temporal_sweep_relaxation_kernel`.
+            wp.copy(self._temporal_joint_body, self._temporal_jointed)
+            wp.launch(
+                temporal_mark_free_axis_bodies_kernel,
+                dim=count,
+                inputs=[*joint_inputs[:5], int(JointType.FREE), self._temporal_joint_body],
+                device=self.device,
+            )
 
     def _singleworld_contact_warm_start_kernels(self):
         """Return contact-only cached warm-start head/fused kernels (joint rows untouched)."""

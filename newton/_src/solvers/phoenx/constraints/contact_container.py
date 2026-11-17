@@ -183,6 +183,10 @@ class ContactContainer:
     #: overflow contacts retain physical spring compliance while splitting
     #: inertia for the solve. Empty for other schedules; rebuilt by prepare.
     normal_compliance_scale: wp.array[wp.float32]
+    #: Relaxation factor of each row in biased temporal sweeps, see
+    #: :func:`~newton._src.solvers.phoenx.temporal_contacts.temporal_sweep_relaxation_kernel`.
+    #: Empty for other schedules.
+    sweep_relaxation: wp.array[wp.float32]
     #: Nonzero when the sweep schedule or a requested contact frequency caps
     #: the maximal contact spring below the Nyquist limit
     #: (:func:`contact_container_set_sweeps`). The capped
@@ -726,6 +730,7 @@ def contact_container_zeros(
     cc.surface_target = wp.zeros(n if surface_velocity else 0, dtype=wp.vec3f, device=device)
     cc.gap = wp.zeros(n if track_gap else 0, dtype=wp.float32, device=device)
     cc.normal_compliance_scale = wp.empty(0, dtype=wp.float32, device=device)
+    cc.sweep_relaxation = wp.empty(0, dtype=wp.float32, device=device)
     contact_container_set_sweeps(cc, solver_iterations, velocity_iterations)
     return cc
 
@@ -753,6 +758,7 @@ def contact_solve_container_zeros(
     cc.surface_target = wp.empty(0, dtype=wp.vec3f, device=device)
     cc.gap = wp.zeros(n if track_gap else 0, dtype=wp.float32, device=device)
     cc.normal_compliance_scale = wp.empty(0, dtype=wp.float32, device=device)
+    cc.sweep_relaxation = wp.empty(0, dtype=wp.float32, device=device)
     contact_container_set_sweeps(cc, solver_iterations, velocity_iterations)
     return cc
 

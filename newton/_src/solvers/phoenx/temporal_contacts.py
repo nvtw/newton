@@ -17,7 +17,9 @@ only the contact rows between sweeps:
 * each row's gap advances by its relative normal motion over ``dt/n`` and its
   bias follows the gap, as when a substep reuses prepared rows,
 * positions integrate the average of the sweeps' velocities, which is the
-  motion the contact gaps tracked; bodies keep the last sweep's velocity.
+  motion the contact gaps tracked; bodies keep the last sweep's velocity,
+* contact columns that press on a light body shared by many rows take half of
+  each sweep update (:func:`temporal_sweep_relaxation_kernel`).
 
 Joint rows and exact joint projections run after every sweep as before. With
 ``n = 1`` nothing changes.
@@ -262,10 +264,113 @@ __all__ = [
     "temporal_accumulate_velocity_kernel",
     "temporal_apply_forces_kernel",
     "temporal_contact_gap_kernel",
+    "temporal_count_body_rows_kernel",
     "temporal_initialize_weld_components_kernel",
+    "temporal_mark_free_axis_bodies_kernel",
     "temporal_mark_jointed_components_kernel",
     "temporal_restore_velocity_kernel",
     "temporal_scatter_jointed_kernel",
     "temporal_swap_average_velocity_kernel",
+    "temporal_sweep_relaxation_kernel",
     "temporal_union_weld_components_kernel",
 ]
+
+
+@wp.kernel(enable_backward=False)
+def temporal_count_body_rows_kernel(
+    columns: ContactColumnContainer,
+    cc: ContactContainer,
+    bodies: BodyContainer,
+    column_count: wp.array[wp.int32],
+    owner: wp.array[wp.int32],
+    body_rows: wp.array[wp.int32],
+):
+    """Count every dynamic body's penetrating ordinary contact rows."""
+    cid = wp.tid()
+    if cid >= column_count[0] or owner[cid] >= wp.int32(0):
+        return
+    b1 = contact_get_body1(columns, cid)
+    b2 = contact_get_body2(columns, cid)
+    first = contact_get_contact_first(columns, cid)
+    count = contact_get_contact_count(columns, cid)
+    rows = wp.int32(0)
+    for k in range(first, first + count):
+        if cc.gap[k] <= wp.float32(0.0):
+            rows += wp.int32(1)
+    if rows > wp.int32(0):
+        if bodies.inverse_mass[b1] > wp.float32(0.0):
+            wp.atomic_add(body_rows, b1, rows)
+        if bodies.inverse_mass[b2] > wp.float32(0.0):
+            wp.atomic_add(body_rows, b2, rows)
+
+
+@wp.kernel(enable_backward=False)
+def temporal_sweep_relaxation_kernel(
+    columns: ContactColumnContainer,
+    bodies: BodyContainer,
+    column_count: wp.array[wp.int32],
+    owner: wp.array[wp.int32],
+    body_rows: wp.array[wp.int32],
+    joint_body: wp.array[wp.int32],
+    budget: wp.float32,
+    relaxation: wp.array[wp.float32],
+):
+    """Halve the sweep update of rows that load a light body shared by many contact rows.
+
+    A biased sweep of a contact substep corrects the fraction ``m`` (the soft
+    mass coefficient) of each row's velocity error, assuming the row's bodies
+    respond to it alone. Rows that press on one body all correct it within the
+    same Gauss-Seidel sweep. Weighted by each body's share of the row's inverse
+    mass, a column's coupling ``d`` counts the penetrating rows that share its
+    bodies; ``d`` is large for heavy contents on a light support. While
+    ``m * d`` exceeds ``budget`` the single sweep overshoots that support and
+    feeds a mode that turns by about 0.9 rad per contact substep, so such
+    columns take half of each update (Gauss-Seidel under-relaxation with
+    weight 1/2). The weight scales the whole update, so a converged sweep, and
+    with it the contact spring, is unchanged; weakly coupled rows keep the
+    exact soft step. Both bodies receive the same scaled impulse, so momentum
+    is conserved.
+
+    The coupling uses each body's free inverse mass, which describes a free body
+    and, conservatively, a part of a welded composite. A body on a free-axis
+    joint or in a weld component with one (``joint_body``, e.g. a driven
+    actuator) moves as the joint and drive solves between the sweeps dictate;
+    the estimate does not describe it, and its columns keep the full update.
+    """
+    cid = wp.tid()
+    if cid >= column_count[0]:
+        return
+    first = contact_get_contact_first(columns, cid)
+    count = contact_get_contact_count(columns, cid)
+    w = wp.float32(1.0)
+    b1 = contact_get_body1(columns, cid)
+    b2 = contact_get_body2(columns, cid)
+    if owner[cid] < wp.int32(0) and joint_body[b1] == 0 and joint_body[b2] == 0:
+        a1 = bodies.inverse_mass[b1]
+        a2 = bodies.inverse_mass[b2]
+        if a1 + a2 > wp.float32(0.0):
+            coupling = (wp.float32(body_rows[b1]) * a1 + wp.float32(body_rows[b2]) * a2) / (a1 + a2)
+            if coupling > budget:
+                w = wp.float32(0.5)
+    for k in range(first, first + count):
+        relaxation[k] = w
+
+
+@wp.kernel(enable_backward=False)
+def temporal_mark_free_axis_bodies_kernel(
+    enabled: wp.array[wp.bool],
+    kinds: wp.array[wp.int32],
+    parents: wp.array[wp.int32],
+    children: wp.array[wp.int32],
+    dims: wp.array2d[wp.int32],
+    free_kind: int,
+    marked: wp.array[wp.int32],
+):
+    """Mark the PhoenX body slots of both bodies of every enabled free-axis joint."""
+    j = wp.tid()
+    if not enabled[j] or kinds[j] == free_kind or dims[j, 0] + dims[j, 1] == 0:
+        return
+    if children[j] >= 0:
+        marked[children[j] + 1] = 1
+    if parents[j] >= 0:
+        marked[parents[j] + 1] = 1

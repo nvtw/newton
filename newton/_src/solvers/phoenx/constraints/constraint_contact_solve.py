@@ -1584,6 +1584,10 @@ def _make_contact_iterate_at(
                 active_point = parallel_id == i % wp.static(cooperative_lanes)
             if active_point:
                 k = contact_first + i
+                row_sor = sor_boost
+                if wp.static(use_bias):
+                    if cc.sweep_relaxation.shape[0] > k:
+                        row_sor = sor_boost * cc.sweep_relaxation[k]
 
                 n = cc_get_normal(cc, k)
                 normal_only = False
@@ -1765,7 +1769,7 @@ def _make_contact_iterate_at(
                             bias_val,
                             mass_coeff_n,
                             impulse_coeff_n,
-                            sor_boost,
+                            row_sor,
                             pd_eff_soft_n,
                             pd_gamma_n,
                             pd_bias_n,
@@ -1780,7 +1784,7 @@ def _make_contact_iterate_at(
                             bias_val,
                             mass_coeff_n,
                             impulse_coeff_n,
-                            sor_boost,
+                            row_sor,
                             pd_eff_soft_n,
                             pd_gamma_n,
                             pd_bias_n,
@@ -1804,7 +1808,7 @@ def _make_contact_iterate_at(
                                         bias_val,
                                         mass_coeff_n,
                                         impulse_coeff_n,
-                                        sor_boost,
+                                        row_sor,
                                         pd_eff_soft_n,
                                         pd_gamma_n,
                                         pd_bias_n,
@@ -1818,7 +1822,7 @@ def _make_contact_iterate_at(
                                         bias_val,
                                         mass_coeff_n,
                                         impulse_coeff_n,
-                                        sor_boost,
+                                        row_sor,
                                         pd_eff_soft_n,
                                         pd_gamma_n,
                                         pd_bias_n,
@@ -1853,7 +1857,7 @@ def _make_contact_iterate_at(
                                         bias_t2_val,
                                         mu_s_eff,
                                         mu_k_eff,
-                                        sor_boost,
+                                        row_sor,
                                         mobility_nt1,
                                         mobility_nt2,
                                         mobility_t1t2,
@@ -1882,7 +1886,7 @@ def _make_contact_iterate_at(
                                     mu_k_eff,
                                     mass_coeff_n,
                                     impulse_coeff_n,
-                                    sor_boost,
+                                    row_sor,
                                     pd_eff_soft_n,
                                     pd_gamma_n,
                                     pd_bias_n,
@@ -1903,7 +1907,7 @@ def _make_contact_iterate_at(
                                         bias_val,
                                         mass_coeff_n,
                                         impulse_coeff_n,
-                                        sor_boost,
+                                        row_sor,
                                         pd_eff_soft_n,
                                         pd_gamma_n,
                                         pd_bias_n,
@@ -1918,7 +1922,7 @@ def _make_contact_iterate_at(
                                         bias_val,
                                         mass_coeff_n,
                                         impulse_coeff_n,
-                                        sor_boost,
+                                        row_sor,
                                         wp.float32(0.0),
                                         wp.float32(0.0),
                                         wp.float32(0.0),
@@ -1945,7 +1949,7 @@ def _make_contact_iterate_at(
                                         mu_k_eff,
                                         mass_coeff_n,
                                         impulse_coeff_n,
-                                        sor_boost,
+                                        row_sor,
                                         pd_eff_soft_n,
                                         pd_gamma_n,
                                         pd_bias_n,
@@ -1970,7 +1974,7 @@ def _make_contact_iterate_at(
                                         mu_k_eff,
                                         mass_coeff_n,
                                         impulse_coeff_n,
-                                        sor_boost,
+                                        row_sor,
                                         wp.float32(0.0),
                                         wp.float32(0.0),
                                         wp.float32(0.0),
@@ -1996,7 +2000,7 @@ def _make_contact_iterate_at(
                                     mu_k_eff,
                                     mass_coeff_n,
                                     impulse_coeff_n,
-                                    sor_boost,
+                                    row_sor,
                                     pd_eff_soft_n,
                                     pd_gamma_n,
                                     pd_bias_n,
@@ -2021,7 +2025,7 @@ def _make_contact_iterate_at(
                                     mu_k_eff,
                                     mass_coeff_n,
                                     impulse_coeff_n,
-                                    sor_boost,
+                                    row_sor,
                                     wp.float32(0.0),
                                     wp.float32(0.0),
                                     wp.float32(0.0),
@@ -2110,7 +2114,7 @@ def _make_contact_iterate_at(
                     patch_normal_load,
                     mu_s,
                     mu_k,
-                    sor_boost,
+                    row_sor,
                 )
                 patch_impulse_delta = patch_update.delta[0] * patch_tangent1 + patch_update.delta[1] * patch_tangent2
                 v1, v2, w1, w2 = apply_pair_velocity_impulse(
