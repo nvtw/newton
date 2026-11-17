@@ -5218,15 +5218,17 @@ def _make_singleworld_one_launch_kernel(head_axes: tuple, tail_axes: tuple, drai
         # Whether any block may have written since the last barrier.
         pending = wp.int32(0)
         while cursor > 0:
-            units = _singleworld_color_units(
-                color_starts, num_colors, cursor, sweep_direction, max_colored_partitions, ms_batch_size
+            # Colour ranges do not change during the sweep: decode the next one
+            # before the barrier so its loads overlap the wait for other blocks.
+            start, count, c = _singleworld_color_range_from_cursor(
+                color_starts, num_colors, cursor, sweep_direction, max_colored_partitions
             )
+            units = count
+            if max_colored_partitions >= wp.int32(0) and c == max_colored_partitions:
+                units = (count + ms_batch_size - wp.int32(1)) / ms_batch_size
             if units > fuse_threshold:
                 if pending != 0:
                     _grid_sync(barrier, num_blocks)
-                start, count, c = _singleworld_color_range_from_cursor(
-                    color_starts, num_colors, cursor, sweep_direction, max_colored_partitions
-                )
                 is_overflow_color = max_colored_partitions >= wp.int32(0) and c == max_colored_partitions
                 vw = first_virtual_warp
                 while vw < num_virtual_warps:
