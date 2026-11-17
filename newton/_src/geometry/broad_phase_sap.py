@@ -1054,7 +1054,6 @@ class BroadPhaseSAP:
         self.direction_best_index = wp.zeros(1, dtype=wp.int32, device=device)
 
     def _sort_projected_intervals(self, device: Devicelike | None) -> None:
-        device_obj = wp.get_device(device)
         if self.sort_type == "tile" and self.tile_sort_kernel is not None:
             wp.launch_tiled(
                 kernel=self.tile_sort_kernel,
@@ -1068,7 +1067,7 @@ class BroadPhaseSAP:
                 device=device,
                 record_tape=False,
             )
-        elif self.world_count == 1 and not device_obj.is_capturing:
+        elif self.world_count == 1:
             wp.utils.radix_sort_pairs(
                 keys=self.sap_projection_lower,
                 values=self.sap_sort_index,
