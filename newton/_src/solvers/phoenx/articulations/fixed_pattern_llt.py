@@ -569,8 +569,11 @@ def _make_subgroup_solve_kernel(width: int, packed: bool = False):
         factor: wp.array[wp.float32],
         rhs: wp.array[wp.float32],
         solution: wp.array[wp.float32],
+        solve_active: wp.array[wp.int32],
     ):
         task, lane = wp.tid()
+        if solve_active[0] == wp.int32(0):
+            return
         mechanism = mechanisms[task]
         dimension = dimensions[mechanism]
         start = offsets[mechanism]
@@ -612,8 +615,12 @@ def _make_cooperative_solve_kernel(block_size: int):
         intermediate: wp.array[wp.float32],
         solution_permuted: wp.array[wp.float32],
         solution: wp.array[wp.float32],
+        solve_active: wp.array[wp.int32],
     ):
         task, lane = wp.tid()
+        # Uniform across the block, so no tile operation is left half-entered.
+        if solve_active[0] == wp.int32(0):
+            return
         mechanism = mechanisms[task]
         dimension = dimensions[mechanism]
         vector_offset = vector_offsets[mechanism]
@@ -1215,6 +1222,7 @@ class FixedPatternPanelLLT:
         #: Per-mechanism refactor mask of the persistent schedule. All ones
         #: refactors every mechanism; see :attr:`supports_partial_factor`.
         self.mechanism_dirty = wp.ones(len(dimensions), dtype=wp.int32, device=self.device)
+        self._always_active = wp.ones(1, dtype=wp.int32, device=self.device)
         if not self._use_product_factor and not use_cooperative_factor:
             self._persistent_schedule = PersistentFactorSchedule(
                 panel_tables,
@@ -1346,6 +1354,12 @@ class FixedPatternPanelLLT:
         return FixedPatternGroupedRHSBatch(self, item_capacity, task_capacity)
 
     @property
+    def supports_active_flag(self) -> bool:
+        """Whether :meth:`solve` can be gated by a device flag instead of a
+        graph conditional: only subgroup and cooperative mechanism solves."""
+        return not self._use_push_solve and self._pcr is None
+
+    @property
     def supports_partial_factor(self) -> bool:
         """Whether :attr:`mechanism_dirty` can skip unchanged mechanisms.
 
@@ -1436,12 +1450,21 @@ class FixedPatternPanelLLT:
         solution: wp.array[wp.float32],
         *,
         refine: bool = True,
+        active: wp.array[wp.int32] | None = None,
     ) -> None:
         """Solve all mechanism blocks and unpermute the result.
 
         The refine option affects only long block-tridiagonal mechanisms using
         PCR; all other factor paths retain their existing solve.
+
+        ``active`` is an optional one-element device flag; when it holds zero
+        the solve kernels return without reading or writing anything. It
+        requires :attr:`supports_active_flag`.
         """
+        if active is None:
+            active = self._always_active
+        elif not self.supports_active_flag:
+            raise ValueError("an active flag requires a subgroup or cooperative mechanism solve")
         if self._pcr_stream is not None:
             with wp.ScopedStream(self._pcr_stream):
                 self._pcr.reduce(rhs, refine=refine)
@@ -1459,6 +1482,7 @@ class FixedPatternPanelLLT:
                     self.subgroup_factor,
                     rhs,
                     solution,
+                    active,
                 ],
                 block_dim=128,
                 device=self.device,
@@ -1489,6 +1513,7 @@ class FixedPatternPanelLLT:
                     self.intermediate,
                     self.solution_permuted,
                     solution,
+                    active,
                 ],
                 device=self.device,
             )

@@ -1756,8 +1756,11 @@ def _accumulate_direct_impulse_kernel(
     delta: wp.array[wp.float32],
     row_scale: wp.array[wp.float32],
     accumulated_impulse: wp.array[wp.float32],
+    active: wp.array[wp.int32],
 ):
     row = wp.tid()
+    if active[0] == wp.int32(0):
+        return
     accumulated_impulse[row] += row_scale[row] * delta[row]
 
 
@@ -1852,6 +1855,7 @@ def _apply_direct_equality_descriptor_tiled_kernel(
     delta: wp.array[wp.float32],
     row_scale: wp.array[wp.float32],
     bodies: BodyContainer,
+    active: wp.array[wp.int32],
 ):
     """Apply :func:`_apply_direct_equality_body` with one warp per body.
 
@@ -1860,6 +1864,9 @@ def _apply_direct_equality_descriptor_tiled_kernel(
     fixed-order tile reduction keeps the result deterministic.
     """
     body, lane = wp.tid()
+    # Uniform per block: skip before the tile reduction.
+    if active[0] == wp.int32(0):
+        return
     partial = wp.spatial_vector()
     for incidence in range(body_row_start[body] + lane, body_row_start[body + wp.int32(1)], wp.block_dim()):
         metadata = descriptor[incidence]
@@ -2427,6 +2434,7 @@ class DirectEqualitySystem:
         self.bias_delta = wp.zeros(row_count, dtype=wp.float32, device=device)
         self.bias_velocity = wp.zeros(int(model.body_count) + 1, dtype=wp.spatial_vector, device=device)
         self.solve_active = wp.zeros(1, dtype=wp.int32, device=device)
+        self._always_active = wp.ones(1, dtype=wp.int32, device=device)
         self.row_scale = wp.ones(row_count, dtype=wp.float32, device=device)
         self._fused_projection = None
         self._fused_covers_dynamic_bodies = False
@@ -3075,12 +3083,18 @@ class DirectEqualitySystem:
             device=self.model.device,
         )
 
+        # Kernels that read ``solve_active`` return at once when the right-hand
+        # side vanished; that replaces a graph conditional where the factor's
+        # solve kernels support the flag.
+        gate = self.solver.supports_active_flag
+        active = self.solve_active if gate else self._always_active
+
         def solve_active_system() -> None:
-            self.solver.solve(self.rhs, self.delta, refine=refine)
+            self.solver.solve(self.rhs, self.delta, refine=refine, active=active if gate else None)
             wp.launch(
                 _accumulate_direct_impulse_kernel,
                 dim=len(self.topology.row_joint),
-                inputs=[self.delta, self.row_scale, self.accumulated_impulse],
+                inputs=[self.delta, self.row_scale, self.accumulated_impulse, active],
                 device=self.model.device,
             )
             wp.launch_tiled(
@@ -3094,12 +3108,16 @@ class DirectEqualitySystem:
                     self.delta,
                     self.row_scale,
                     self.bodies,
+                    active,
                 ],
                 block_dim=_APPLY_LANES,
                 device=self.model.device,
             )
 
-        wp.capture_if(self.solve_active, on_true=solve_active_system)
+        if gate:
+            solve_active_system()
+        else:
+            wp.capture_if(self.solve_active, on_true=solve_active_system)
 
 
 __all__ = ["DirectEqualitySystem", "DirectEqualityTopology", "build_direct_equality_topology"]
