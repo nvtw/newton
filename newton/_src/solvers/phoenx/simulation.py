@@ -905,12 +905,11 @@ class PhoenXWorld:
             or colored_contact_headers
             or colored_contact_rows
             or contact_friction_model != "point"
-            or sleeping_velocity_threshold > 0.0
             or mass_splitting_unrolled
         ):
             raise ValueError(
                 "parallel_contact_prepare requires CUDA single-world rigid point contacts "
-                "without packed rows, deformables, sleeping, or unrolled mass splitting"
+                "without packed rows, deformables, or unrolled mass splitting"
             )
 
         if self.prepare_refresh_stride != 1 and cached_prepare_unsupported:
@@ -6244,7 +6243,11 @@ class PhoenXWorld:
         return self.device.is_cuda and not self._colored_contact_headers
 
     def _singleworld_cached_prepare_kernels(self):
-        """Return cached-contact-warm-start head/fused kernels."""
+        """Return cached-contact-warm-start head/fused kernels.
+
+        Sleeping keeps frozen joint rows unsolved. Rows of frozen contacts may
+        be prepared in parallel; the color CSR omits them from the sweep.
+        """
         return (
             get_singleworld_kernel(
                 phase="cached_prepare",
@@ -6257,7 +6260,7 @@ class PhoenXWorld:
                 skip_joint_pgs=self._skip_all_joint_pgs(),
                 has_mass_splitting=self.mass_splitting_enabled,
                 packed_contact_headers=False,
-                has_sleeping=False,
+                has_sleeping=self._sleeping_enabled,
                 has_soft_contact_pd=False,
                 rigid_direct=self._singleworld_rigid_direct(),
                 bilateral_joint_blocks=bool(self.constraints.bilateral.enabled),
@@ -6274,7 +6277,7 @@ class PhoenXWorld:
                 skip_joint_pgs=self._skip_all_joint_pgs(),
                 has_mass_splitting=self.mass_splitting_enabled,
                 packed_contact_headers=False,
-                has_sleeping=False,
+                has_sleeping=self._sleeping_enabled,
                 has_soft_contact_pd=False,
                 rigid_direct=self._singleworld_rigid_direct(),
                 bilateral_joint_blocks=bool(self.constraints.bilateral.enabled),

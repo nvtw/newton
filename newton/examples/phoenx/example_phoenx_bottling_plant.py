@@ -215,9 +215,7 @@ class Example:
                 ),
                 velocity_iterations=1,
                 enable_body_pair_grouping=True,
-                parallel_contact_prepare=(
-                    self.model.device.is_cuda and not args.mass_splitting and args.sleeping_velocity_threshold == 0.0
-                ),
+                parallel_contact_prepare=self.model.device.is_cuda and not args.mass_splitting,
                 mass_splitting=args.mass_splitting,
                 mass_splitting_overflow_only=args.mass_splitting,
                 max_colored_partitions=args.max_colored_partitions,

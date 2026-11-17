@@ -499,7 +499,7 @@ class SolverPhoenX(SolverBase):
             parallel_contact_prepare: Experimental parallel geometry preparation
                 for CUDA single-world maximal rigid point contacts. Preserves
                 ordered contact warm starts, including mass-split copy states.
-                Requires no deformables, sleeping, patch friction, or unrolled
+                Requires no deformables, patch friction, or unrolled
                 mass splitting. Defaults to False. Independent kernels may
                 change floating-point rounding relative to serial preparation.
             contact_chunk_size: Experimental maximum contacts per solver column.

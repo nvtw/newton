@@ -153,7 +153,6 @@ class TestParallelPrepareSplit(unittest.TestCase):
             {"step_layout": "multi_world"},
             {"step_layout": "single_world", "contact_friction_model": "patch"},
             {"step_layout": "single_world", "joint_mode": "reduced"},
-            {"step_layout": "single_world", "sleeping_velocity_threshold": 0.01},
             {"step_layout": "single_world", "mass_splitting_unrolled": True},
         ):
             with self.subTest(options=options), self.assertRaises(ValueError):
