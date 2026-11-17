@@ -829,6 +829,39 @@ class TestD6DirectDispatch(unittest.TestCase):
         np.testing.assert_allclose(np.sum(0.01 * velocity[:, 3:], axis=0), 0.0, rtol=0.0, atol=2.0e-6)
         self.assertAlmostEqual(abs(float(velocity[1, 0] - velocity[0, 0])), 1.75, delta=2.0e-3)
 
+    def test_offset_hinge_limit_converges_under_impact(self) -> None:
+        """Keep a two-sided hinge limit convergent when the pivot carries most of the inertia."""
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
+        # With the center of mass off the hinge, the pivot reaction more than
+        # doubles the inertia a bare torque would see.
+        body = builder.add_link(
+            xform=wp.transform_identity(),
+            mass=0.35,
+            com=wp.vec3(0.1, 0.0, 0.0),
+            inertia=((0.0005, 0.0, 0.0), (0.0, 0.0025, 0.0), (0.0, 0.0, 0.002)),
+        )
+        joint = builder.add_joint_revolute(
+            parent=-1, child=body, axis=(0.0, 0.0, 1.0), limit_lower=-0.09, limit_upper=0.09
+        )
+        builder.add_articulation([joint])
+        model = builder.finalize(device=wp.get_preferred_device())
+        solver = newton.solvers.SolverPhoenX(
+            model, joint_mode="maximal_direct", solver_iterations=8, velocity_iterations=1
+        )
+        state = model.state()
+        for step in range(10):
+            state.clear_forces()
+            if step == 0:
+                # An impact drives the hinge through the narrow limit window.
+                forces = state.body_f.numpy()
+                forces[body, 5] = 50.0
+                state.body_f.assign(forces)
+            solver.step(state, state, model.control(), None, 1.0 / 120.0)
+            self.assertLess(float(np.abs(state.body_qd.numpy()[body, 3:]).max()), 50.0)
+        orientation = state.body_q.numpy()[body, 3:]
+        angle = 2.0 * np.arctan2(orientation[2], orientation[3])
+        self.assertLessEqual(abs(float(angle)), 0.09 + 1.0e-3)
+
     def test_fully_free_d6_limit_conserves_pair_momentum(self) -> None:
         """Resolve a limit-only six-axis D6 joint with paired linear and angular momentum."""
         builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))

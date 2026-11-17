@@ -212,8 +212,6 @@ def prepare_d6_inequalities(
                     coordinate = angular_coordinates[angular_axis]
                 wrench0 = wp.spatial_vector(wp.vec3f(0.0), -direction)
                 wrench1 = wp.spatial_vector(wp.vec3f(0.0), direction)
-            data.wrench0[cid, row] = wrench0
-            data.wrench1[cid, row] = wrench1
             data.coordinate[cid, row] = coordinate
             response0 = wp.spatial_vector(
                 inverse_mass0 * wp.spatial_top(wrench0),
@@ -230,24 +228,30 @@ def prepare_d6_inequalities(
                 + wp.dot(wp.spatial_bottom(wrench1), wp.spatial_bottom(response1))
             )
             if data.condense_translation[cid, row] != wp.int32(0):
+                # The hinge's translation rows are solved elsewhere, after this
+                # row. Its condensed mass describes a torque together with the
+                # pivot reaction it induces, so the row applies that reaction
+                # too: equal and opposite at the shared pivot. A bare torque
+                # would move the free body by the uncondensed response and
+                # over-relax every following row on it before the pivot is
+                # restored.
                 eye = wp.identity(3, dtype=wp.float32)
-                lever0 = point0 - bodies.position[body0]
-                lever1 = point1 - bodies.position[body1]
-                cross0 = wp.skew(lever0)
-                cross1 = wp.skew(lever1)
+                cross0 = wp.skew(parent_lever)
+                cross1 = wp.skew(child_lever)
                 metric = (
                     (inverse_mass0 + inverse_mass1) * eye
                     + cross0 @ (inverse_inertia0 @ wp.transpose(cross0))
                     + cross1 @ (inverse_inertia1 @ wp.transpose(cross1))
                 )
-                coupling = wp.cross(lever0, inverse_inertia0 @ direction) + wp.cross(
-                    lever1, inverse_inertia1 @ direction
+                coupling = wp.cross(parent_lever, inverse_inertia0 @ direction) + wp.cross(
+                    child_lever, inverse_inertia1 @ direction
                 )
-                effective_mass_inverse = wp.max(
-                    wp.float32(0.0),
-                    effective_mass_inverse
-                    - wp.dot(coupling, mul_sym3(inv_sym3(sym6_from_mat33_upper(metric)), coupling)),
-                )
+                reaction = mul_sym3(inv_sym3(sym6_from_mat33_upper(metric)), coupling)
+                wrench0 = wrench0 - wp.spatial_vector(reaction, wp.cross(parent_lever, reaction))
+                wrench1 = wrench1 + wp.spatial_vector(reaction, wp.cross(child_lever, reaction))
+                effective_mass_inverse = wp.max(wp.float32(0.0), effective_mass_inverse - wp.dot(coupling, reaction))
+            data.wrench0[cid, row] = wrench0
+            data.wrench1[cid, row] = wrench1
             data.effective_mass_inverse[cid, row] = effective_mass_inverse
             warm_start = data.lower_impulse[cid, row] + data.upper_impulse[cid, row] + data.friction_impulse[cid, row]
             v0, w0, v1, w1 = _d6_apply_row_impulse(

@@ -1,0 +1,1 @@
+Fix divergence of PhoenX hinge limits whose translation rows are solved by the exact direct solver when the body's center of mass is off the hinge axis. The limit row now applies the pivot reaction its condensed effective mass assumes, so repeated limit updates no longer over-correct.
