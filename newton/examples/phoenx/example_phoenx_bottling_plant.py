@@ -541,8 +541,8 @@ class Example:
         parser.add_argument(
             "--correct-inertia", action="store_true", help="Balance source actuator inertia approximations."
         )
-        parser.add_argument("--substeps", type=int, default=4, help="Collision and solver steps per 60 Hz frame.")
-        parser.add_argument("--iterations", type=int, default=4)
+        parser.add_argument("--substeps", type=int, default=2, help="Collision and solver steps per 60 Hz frame.")
+        parser.add_argument("--iterations", type=int, default=24)
         parser.add_argument(
             "--sleeping-velocity-threshold",
             type=float,
@@ -552,14 +552,14 @@ class Example:
         parser.add_argument(
             "--temporal-iterations",
             action=argparse.BooleanOptionalAction,
-            default=False,
+            default=True,
             help="Use experimental contact timesteps within solver sweeps.",
         )
         parser.add_argument(
             "--contact-hertz",
             type=float,
-            default=None,
-            help="Contact spring frequency [Hz]; omitted uses the solver schedule-dependent default.",
+            default=80.0,
+            help="Contact spring frequency [Hz].",
         )
         parser.add_argument("--joint-mode", choices=("reduced", "maximal_pgs", "maximal_direct"), default="maximal_pgs")
         parser.add_argument("--timing-frames", type=int, default=0)

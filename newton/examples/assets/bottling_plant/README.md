@@ -82,8 +82,10 @@ roughness/metallic fallbacks where texture channels are unsupported.
 
 The default solver uses exact maximal-coordinate solves for the authored
 scalar-joint mechanisms. General D6 joints and runtime grasp/tape constraints
-remain colored blocks. Each 60 Hz frame runs four collision-and-solver steps
-at 240 Hz, with four solver iterations per step. Control runs once per frame.
+remain colored blocks. Each 60 Hz frame runs two collision-and-solver steps
+at 120 Hz, each with 24 temporal contact sweeps (contact steps of 1/2880 s) and
+an 80 Hz contact spring; heavy bottles in a light carton only come to rest with
+such short contact steps. Control runs once per frame.
 `--substeps` sets this collision-and-solver step count. Refreshing contacts only
 at 60 Hz allowed bottles to penetrate thin case floors during lifting, even
 with four internal solver substeps. Sealed cases must retain all twelve bottles;
