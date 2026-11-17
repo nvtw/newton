@@ -83,7 +83,7 @@ roughness/metallic fallbacks where texture channels are unsupported.
 The default solver uses exact maximal-coordinate solves for the authored
 scalar-joint mechanisms. General D6 joints and runtime grasp/tape constraints
 remain colored blocks. Each 60 Hz frame runs two collision-and-solver steps
-at 120 Hz, each with 14 temporal contact sweeps (contact steps of 1/1680 s) and
+at 120 Hz, each with 12 temporal contact sweeps (contact steps of 1/1440 s) and
 an 80 Hz contact spring; heavy bottles in a light carton only come to rest with
 such short contact steps. Contact columns that press on a light body shared by
 many contact rows, such as a packed carton, take half of each sweep update;
@@ -110,7 +110,7 @@ No 60 rendered FPS result has been validated for sustained end-to-end production
 Color-cap experiments are available through `--mass-splitting` and
 `--max-colored-partitions`. With temporal iterations, this uses CUDA unrolled
 overflow-only mass splitting. The default keeps mass splitting disabled.
-For a controlled comparison, retain `--substeps 2 --iterations 14
+For a controlled comparison, retain `--substeps 2 --iterations 12
 --temporal-iterations --contact-hertz 80` in both runs; add
 `--mass-splitting --max-colored-partitions 12` only to the candidate.
 Timing output includes the actual partition count and overflow size.
