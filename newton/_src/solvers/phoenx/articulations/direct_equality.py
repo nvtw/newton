@@ -1855,7 +1855,7 @@ def _apply_direct_equality_descriptor_tiled_kernel(
     """
     body, lane = wp.tid()
     partial = wp.spatial_vector()
-    for incidence in range(body_row_start[body] + lane, body_row_start[body + wp.int32(1)], _APPLY_LANES):
+    for incidence in range(body_row_start[body] + lane, body_row_start[body + wp.int32(1)], wp.block_dim()):
         metadata = descriptor[incidence]
         row = metadata[0]
         source = metadata[1] >> wp.int32(1)
