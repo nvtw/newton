@@ -1212,6 +1212,9 @@ class FixedPatternPanelLLT:
 
         self._persistent_schedule = None
         self._persistent_schedule_without_pcr = None
+        #: Per-mechanism refactor mask of the persistent schedule. All ones
+        #: refactors every mechanism; see :attr:`supports_partial_factor`.
+        self.mechanism_dirty = wp.ones(len(dimensions), dtype=wp.int32, device=self.device)
         if not self._use_product_factor and not use_cooperative_factor:
             self._persistent_schedule = PersistentFactorSchedule(
                 panel_tables,
@@ -1219,6 +1222,7 @@ class FixedPatternPanelLLT:
                 self.symbolic.panel_count,
                 block_size,
                 self.device,
+                mechanism_dirty=self.mechanism_dirty,
             )
             # PCR solves its block-tridiagonal mechanisms from its own factor;
             # their panel LLT is needed only by the grouped contact response.
@@ -1231,6 +1235,8 @@ class FixedPatternPanelLLT:
                     sum(int(np.count_nonzero(table >= 0)) for table in other_tables),
                     block_size,
                     self.device,
+                    mechanism_ids=[int(mechanism) for mechanism in other_mechanisms],
+                    mechanism_dirty=self.mechanism_dirty,
                 )
 
         remaining_large_mechanisms = np.setdiff1d(large_mechanisms, pcr_mechanisms, assume_unique=True)
@@ -1338,6 +1344,15 @@ class FixedPatternPanelLLT:
         """Allocate runtime-selected groups of narrow RHS items."""
         self._grouped_rhs_factor_required = True
         return FixedPatternGroupedRHSBatch(self, item_capacity, task_capacity)
+
+    @property
+    def supports_partial_factor(self) -> bool:
+        """Whether :attr:`mechanism_dirty` can skip unchanged mechanisms.
+
+        Only the persistent ready queue honours the mask. Mechanisms that the
+        other paths factor are refactored on every :meth:`compute`, as before.
+        """
+        return self._persistent_schedule is not None
 
     def compute(self) -> None:
         """Factor narrow mechanisms cooperatively or use the ready queue."""

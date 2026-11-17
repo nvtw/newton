@@ -28,8 +28,13 @@ class PersistentFactorSchedule:
         panel_count: int,
         block_size: int,
         device: wp.Device,
+        mechanism_ids: list[int] | None = None,
+        mechanism_dirty: wp.array[wp.int32] | None = None,
     ):
+        if mechanism_ids is None:
+            mechanism_ids = list(range(len(panel_tables)))
         task_panel: list[int] = []
+        task_mechanism: list[int] = []
         task_diagonal_panel: list[int] = []
         task_active_rows: list[int] = []
         task_panel_count: list[int] = []
@@ -52,6 +57,7 @@ class PersistentFactorSchedule:
             task_update_start.append(len(update_left_panel))
 
         for mechanism, table in enumerate(panel_tables):
+            mechanism_id = int(mechanism_ids[mechanism])
             previous_diagonal = -1
             for tile_k in range(table.shape[0]):
                 panel_rows = [tile_i for tile_i in range(tile_k + 1, table.shape[0]) if table[tile_i, tile_k] >= 0]
@@ -61,6 +67,7 @@ class PersistentFactorSchedule:
                 else:
                     task_next_diagonal[previous_diagonal] = diagonal_task
                 task_panel.append(int(table[tile_k, tile_k]))
+                task_mechanism.append(mechanism_id)
                 task_diagonal_panel.append(int(table[tile_k, tile_k]))
                 task_active_rows.append(min(block_size, dimensions[mechanism] - tile_k * block_size))
                 task_panel_count.append(len(panel_rows))
@@ -70,6 +77,7 @@ class PersistentFactorSchedule:
                 append_symbolic_updates(table, tile_k, tile_k)
                 for tile_i in panel_rows:
                     task_panel.append(int(table[tile_i, tile_k]))
+                    task_mechanism.append(mechanism_id)
                     task_diagonal_panel.append(int(table[tile_k, tile_k]))
                     task_active_rows.append(min(block_size, dimensions[mechanism] - tile_i * block_size))
                     task_panel_count.append(0)
@@ -86,6 +94,12 @@ class PersistentFactorSchedule:
             return wp.array(values, dtype=wp.int32, device=device)
 
         self.task_panel = task_array(task_panel)
+        self.task_mechanism = task_array(task_mechanism)
+        # Nonzero entries select the mechanisms to refactor; tasks of the other
+        # mechanisms keep their stored factor and only release dependents.
+        if mechanism_dirty is None:
+            mechanism_dirty = wp.ones(max(mechanism_ids, default=-1) + 1, dtype=wp.int32, device=device)
+        self.mechanism_dirty = mechanism_dirty
         self.task_diagonal_panel = task_array(task_diagonal_panel)
         self.task_active_rows = task_array(task_active_rows)
         self.task_panel_count = task_array(task_panel_count)
@@ -146,6 +160,8 @@ class PersistentFactorSchedule:
                 self.tail,
                 self.remaining,
                 self.worker_task,
+                self.task_mechanism,
+                self.mechanism_dirty,
             ],
             device=self.device,
         )

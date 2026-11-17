@@ -1677,6 +1677,8 @@ def _activate_bounded_direct_drives_kernel(
     dynamic_mass: wp.array[wp.float32],
     velocity_reference: wp.array[wp.float32],
     active_set_flag: wp.array[wp.int32],
+    row_mechanism: wp.array[wp.int32],
+    changed_mechanism: wp.array[wp.int32],
 ):
     row = wp.tid()
     if not row_bounded_drive[row]:
@@ -1728,6 +1730,8 @@ def _activate_bounded_direct_drives_kernel(
         velocity_reference[row] = momentum / mass
         drive_saturated[row] = False
         wp.atomic_max(active_set_flag, wp.int32(0), wp.int32(1))
+        if row_mechanism.shape[0] > row:
+            changed_mechanism[row_mechanism[row]] = wp.int32(1)
         return
     if wp.abs(effort) <= effort_limit:
         return
@@ -1743,6 +1747,8 @@ def _activate_bounded_direct_drives_kernel(
     velocity_reference[row] = momentum / mass
     drive_saturated[row] = True
     wp.atomic_max(active_set_flag, wp.int32(0), wp.int32(1))
+    if row_mechanism.shape[0] > row:
+        changed_mechanism[row_mechanism[row]] = wp.int32(1)
 
 
 @wp.kernel(enable_backward=False)
@@ -2424,6 +2430,10 @@ class DirectEqualitySystem:
         self.row_scale = wp.ones(row_count, dtype=wp.float32, device=device)
         self._fused_projection = None
         self._fused_covers_dynamic_bodies = False
+        # Bound activations refactor only the changed mechanisms when the
+        # mechanism factor supports a refactor mask; empty means refactor all.
+        self._bound_row_mechanism = wp.empty(0, dtype=wp.int32, device=device)
+        self._bound_changed_mechanism = wp.empty(0, dtype=wp.int32, device=device)
         if self.fixed_joint_rows:
             # Fixed rows are solved as local blocks; there is no mechanism factor.
             self.solver = None
@@ -2454,6 +2464,12 @@ class DirectEqualitySystem:
             device=device,
         )
         symbolic = self.solver.symbolic
+        if self.has_bounded_drives and self.solver.supports_partial_factor:
+            row_mechanism = (
+                np.searchsorted(np.asarray(self.topology.mechanism_row_start), np.arange(row_count), side="right") - 1
+            )
+            self._bound_row_mechanism = wp.array(row_mechanism.astype(np.int32), dtype=wp.int32, device=device)
+            self._bound_changed_mechanism = wp.zeros(len(self.topology.dimensions), dtype=wp.int32, device=device)
         self.matrix_row = wp.array(symbolic.matrix_row, dtype=wp.int32, device=device)
         self.matrix_column = wp.array(symbolic.matrix_column, dtype=wp.int32, device=device)
         self.matrix_storage = wp.array(symbolic.matrix_storage, dtype=wp.int32, device=device)
@@ -2757,6 +2773,8 @@ class DirectEqualitySystem:
 
         def find_new_bounds() -> None:
             self.drive_active_set_flag.zero_()
+            if self._bound_row_mechanism.shape[0] > 0:
+                self._bound_changed_mechanism.zero_()
             wp.launch(
                 _activate_bounded_direct_drives_kernel,
                 dim=len(self.topology.row_joint),
@@ -2788,12 +2806,14 @@ class DirectEqualitySystem:
                     self.dynamic_mass,
                     self.velocity_reference,
                     self.drive_active_set_flag,
+                    self._bound_row_mechanism,
+                    self._bound_changed_mechanism,
                 ],
                 device=self.model.device,
             )
 
         def activate_and_correct(remaining_passes: int) -> None:
-            self.prepare_and_factor(idt)
+            self._refactor_changed_bounds(idt)
             self.solve(use_bias=use_bias)
             if remaining_passes > 0:
                 find_new_bounds()
@@ -2812,6 +2832,22 @@ class DirectEqualitySystem:
             on_true=lambda: activate_and_correct(3),
             on_false=None,
         )
+
+    def _refactor_changed_bounds(self, idt: wp.float32) -> None:
+        """Refactor after a bound activation, limited to the changed mechanisms.
+
+        A drive bound changes only its own row's diagonal. Every other
+        mechanism reassembles a bitwise-identical matrix within the substep,
+        so its stored factor is kept. The refactor mask is restored to all
+        mechanisms afterwards, so every other factorization stays complete.
+        """
+        if self._bound_row_mechanism.shape[0] == 0:
+            self.prepare_and_factor(idt)
+            return
+        self.prepare_matrix(idt)
+        wp.copy(self.solver.mechanism_dirty, self._bound_changed_mechanism)
+        self.factor()
+        self.solver.mechanism_dirty.fill_(1)
 
     def prepare_matrix(self, idt: wp.float32) -> None:
         if not self.enabled:

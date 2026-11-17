@@ -183,6 +183,8 @@ def make_persistent_factor_kernel(block_size: int):
         tail: wp.array[wp.int32],
         remaining: wp.array[wp.int32],
         worker_task: wp.array[wp.int32],
+        task_mechanism: wp.array[wp.int32],
+        mechanism_dirty: wp.array[wp.int32],
     ):
         worker, lane = wp.tid()
         task_count = task_panel.shape[0]
@@ -205,8 +207,13 @@ def make_persistent_factor_kernel(block_size: int):
             panel_id = task_panel[task]
             diagonal_panel = task_diagonal_panel[task]
             active_rows = task_active_rows[task]
+            # Uniform per worker block. A clean mechanism keeps its stored
+            # factor; its task only releases the dependent tasks below.
+            refactor = mechanism_dirty[task_mechanism[task]] != wp.int32(0)
 
-            if panel_id == diagonal_panel:
+            if not refactor:
+                pass
+            elif panel_id == diagonal_panel:
                 diagonal_matrix = wp.array(
                     ptr=_get_float_array_offset_ptr(matrix, diagonal_panel * tile_elements),
                     shape=(block_size, block_size),
