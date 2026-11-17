@@ -8,6 +8,7 @@ scripts, or change the source layers. OpenUSD resolves references and variants;
 Newton receives shared meshes, primitive colliders, rigid bodies, and joints.
 """
 
+import itertools
 import json
 import math
 import time
@@ -31,6 +32,14 @@ def _value(prim, name, default):
 
 def _quat(value):
     return wp.quat(*value.GetImaginary(), value.GetReal())
+
+
+#: Bottle lanes and packer inlets carry bottles on belts whose top is at this height [m].
+_BELT_TOP = 0.95
+#: Underside of the lower guide-rail band above the belt; the bottle base ring is 16 mm high.
+_RAIL_CLEARANCE = 0.022
+#: Belt-to-belt transfer gaps up to this length [m] receive a static dead plate.
+_MAX_TRANSFER_GAP = 0.05
 
 
 @dataclass
@@ -552,6 +561,16 @@ def load_plant(asset_root: Path, *, cutaway=True, visuals=True, motor_off=False,
                 builder.add_shape_mesh(body, mesh=mesh, scale=scale, **kw)
             else:
                 half = half * np.abs(scale)
+                label = kw["label"]
+                if collision and ("/Inlet/Colliders/" in label or ("/BottleLanes/" in label and "/Guides" in label)):
+                    pose = kw["xform"]
+                    if float(pose.p[2]) - half[2] - _BELT_TOP < _RAIL_CLEARANCE:
+                        # The source's lower rail band starts 18 mm above the belt, 2 mm
+                        # above the bottle's 16 mm base ring. A rocking bottle's rim slid
+                        # under it and was levered over; raise the band to clear the ring.
+                        lift = _RAIL_CLEARANCE - (float(pose.p[2]) - half[2] - _BELT_TOP)
+                        kw["xform"] = wp.transform(wp.vec3(pose.p[0], pose.p[1], pose.p[2] + lift), pose.q)
+                        scene.metadata.setdefault("rail_band_lift_m", lift)
                 builder.add_shape_box(body, hx=half[0], hy=half[1], hz=half[2], **kw)
         elif kind == "Sphere":
             builder.add_shape_sphere(body, radius=float(_value(prim, "radius", 1.0)) * max(abs(scale)), **kw)
@@ -937,6 +956,7 @@ def load_plant(asset_root: Path, *, cutaway=True, visuals=True, motor_off=False,
             "source_has_authored_wrapper_dynamics": False,
         }
 
+    _bridge_transfers(builder, scene)
     if decomposed:
         # Case walls touch neighbouring cases on pallets. As triangle meshes
         # those pairs need costly mesh-mesh contact; seven convex slabs per
@@ -964,3 +984,47 @@ def load_plant(asset_root: Path, *, cutaway=True, visuals=True, motor_off=False,
         f"loaded in {time.perf_counter() - started:.1f} s"
     )
     return scene
+
+
+def _bridge_transfers(builder, scene):
+    """Add static dead plates across the bottle path's belt-to-belt transfer gaps.
+
+    Each lane chain hands bottles to the packer's IN_A belt, which hands them to IN_B,
+    across 20 mm gaps. A real transfer bridges such a gap with a dead plate; without one,
+    a slow bottle's base rim dropped into the gap at the next belt's square end and tipped.
+    """
+    plates = []
+    for name in ("PU1", "PU2", "PU3", "PU4", "PD1", "PD2", "PD3", "PD4"):
+        prefixes = (f"/Plant/Line/BottleLanes/{name}/Physics/Chain", f"/Plant/Line/Packers/{name}/Inlet/Belts/")
+        spans = []
+        for shape, label in enumerate(builder.shape_label):
+            if not label.startswith(prefixes) or not builder.shape_flags[shape] & int(newton.ShapeFlags.COLLIDE_SHAPES):
+                continue
+            mesh = builder.shape_source[shape]
+            if mesh is None:
+                continue
+            body = builder.shape_body[shape]
+            pose = builder.shape_transform[shape]
+            if body >= 0:
+                pose = wp.transform_multiply(builder.body_q[body], pose)
+            points = np.asarray(mesh.vertices) * np.asarray(builder.shape_scale[shape])
+            rotation = np.asarray(wp.quat_to_matrix(pose.q)).reshape(3, 3)
+            points = points @ rotation.T + np.asarray(pose.p)
+            spans.append((points.min(axis=0), points.max(axis=0)))
+        spans.sort(key=lambda span: span[0][1])
+        for (lo0, hi0), (lo1, hi1) in itertools.pairwise(spans):
+            gap = lo1[1] - hi0[1]
+            if 0.0 < gap <= _MAX_TRANSFER_GAP and abs(hi0[2] - hi1[2]) < 1e-3:
+                lo, hi = np.maximum(lo0[0], lo1[0]), np.minimum(hi0[0], hi1[0])
+                center = ((lo + hi) / 2, (hi0[1] + lo1[1]) / 2, hi0[2] - 0.005)
+                builder.add_shape_box(
+                    -1,
+                    xform=wp.transform(center, wp.quat_identity()),
+                    hx=(hi - lo) / 2,
+                    hy=gap / 2,
+                    hz=0.005,
+                    cfg=newton.ModelBuilder.ShapeConfig(density=0.0, mu=0.15, mu_static=0.18, gap=0.002, margin=0.0),
+                    label=f"/Plant/Line/Packers/{name}/Inlet/DeadPlate_{len(plates)}/collision",
+                )
+                plates.append((name, float(gap)))
+    scene.metadata["transfer_dead_plates"] = plates
