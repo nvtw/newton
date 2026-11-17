@@ -340,6 +340,31 @@ def _shuffle_bilateral_rhs(value: wp.float32, source_lane: wp.int32) -> wp.float
 def _shuffle_bilateral_rhs_width(value: wp.float32, source_lane: wp.int32, width: wp.int32) -> wp.float32: ...
 
 
+@wp.func_native(
+    """
+    wp::vec_t<6, float> row;
+    if (lane < 6) {
+        const float* p = (const float*)(lower.data + cid) + 6 * lane;
+        for (int k = 0; k < 6; ++k) row.c[k] = p[k];
+    } else {
+        for (int k = 0; k < 6; ++k) row.c[k] = 0.0f;
+    }
+    return row;
+"""
+)
+def _bilateral_lower_row(lower: wp.array[Mat66], cid: wp.int32, lane: wp.int32) -> Vec6:
+    """Row ``lane`` of joint ``cid``'s stored lower factor, or zeros past the six rows."""
+    ...
+
+
+@wp.func_native("""
+    return ((const float*)(diagonal.data + cid))[lane];
+""")
+def _bilateral_diagonal(diagonal: wp.array[Vec6], cid: wp.int32, lane: wp.int32) -> wp.float32:
+    """Entry ``lane`` of joint ``cid``'s stored factor diagonal."""
+    ...
+
+
 @wp.kernel(enable_backward=False)
 def invert_prepared_bilateral_joint_blocks_cooperative(constraints: ConstraintContainer):
     """Invert independent D6 columns with eight CUDA lanes per joint."""
@@ -574,15 +599,16 @@ def get_iterate_bilateral_joint_block(
             if wp.static(not dense_inverse):
                 # Each row subtracts solved earlier rows in the same ascending
                 # order as the scalar forward solve. Scaling follows all rows.
-                lower = data.lower[cid]
+                # Each lane needs only its own row; a whole-matrix copy indexed by
+                # the lane would live in local memory.
+                lower_row = _bilateral_lower_row(data.lower, cid, tile_lane)
                 for forward_row in range(wp.static(row_capacity)):
                     if forward_row < count:
                         solved = _shuffle_bilateral_rhs_width(rhs_value, forward_row, wp.static(tile_width))
                         if tile_lane > forward_row and tile_lane < count:
-                            rhs_value -= lower[tile_lane, forward_row] * solved
+                            rhs_value -= lower_row[forward_row] * solved
                 if tile_lane < count:
-                    diagonal = data.diagonal[cid]
-                    rhs_value /= diagonal[tile_lane]
+                    rhs_value /= _bilateral_diagonal(data.diagonal, cid, tile_lane)
             rhs = Vector()
             for row_lane in range(wp.static(row_capacity)):
                 if row_lane < count:
