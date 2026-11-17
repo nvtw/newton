@@ -21,6 +21,25 @@ from newton.solvers import phoenx
 
 
 @wp.kernel
+def _arm_targets(
+    offset: int,
+    target_coordinates: wp.array[int],
+    arm_coordinates: wp.array[int],
+    joint_q: wp.array[float],
+    positions: wp.array[float],
+    integral: wp.array[float],
+    target_q: wp.array[float],
+):
+    """Add the palletizer arms' integral tracking correction from the current joint positions."""
+    i = wp.tid()
+    target = positions[offset + i]
+    actual = joint_q[arm_coordinates[i]]
+    actual += 2.0 * wp.pi * wp.round((target - actual) / (2.0 * wp.pi))
+    integral[i] += 4.0 * (target - actual) / 60.0
+    target_q[target_coordinates[offset + i]] = target + integral[i]
+
+
+@wp.kernel
 def _vacuum(
     dynamics: phoenx.DynamicsData,
     poses: wp.array[wp.transform],
@@ -154,7 +173,6 @@ class TransportController:
         self.held = wp.full(4, -1, dtype=int)
         self.joints = wp.full(4, -1, dtype=int)
         self.commands = wp.zeros(4, dtype=int)
-        self.integral = np.zeros((4, 4))
         self.closing_until = np.zeros(4)
         ownership = {}
         for key, index in plant.case_index.items():
@@ -197,6 +215,10 @@ class TransportController:
             ]
             for name in self.names
         ]
+        self.arm_coordinate_array = wp.array(np.ravel(self.arm_coordinates), dtype=int)
+        # The arms' integral tracking term must see the current joint positions;
+        # on the one-frame-late host snapshot it winds up and pushes placed cases.
+        self.integral = wp.zeros(len(self.arm_coordinate_array), dtype=float)
         plant.link.watch("transport_hits", self.hits)
         plant.link.watch("transport_held", self.held)
         plant.link.watch("body_q", plant.state.body_q, np.r_[self.pallet_bodies, self.case_roots])
@@ -316,10 +338,7 @@ class TransportController:
             elif result["cmd"] == "open":
                 self.closing_until[i] = 0.0
             commands[i] = -1 if result["cmd"] == "open" else int(held[i] < 0 and time < self.closing_until[i])
-            actual = coordinates[self.arm_coordinates[i]]
-            actual += 2.0 * np.pi * np.round((result["q"] - actual) / (2.0 * np.pi))
-            self.integral[i] += 4.0 * (result["q"] - actual) / 60.0
-            q.extend(result["q"] + self.integral[i])
+            q.extend(result["q"])
             qd.extend(result["qd"])
             palletizer.events.clear()
         plant.link.write(self.commands, commands)
@@ -344,6 +363,19 @@ class TransportController:
                 self.velocities,
                 plant.control.joint_target_q,
                 plant.control.joint_target_qd,
+            ],
+        )
+        wp.launch(
+            _arm_targets,
+            dim=len(self.arm_coordinate_array),
+            inputs=[
+                len(self.mechanisms),
+                self.coordinates,
+                self.arm_coordinate_array,
+                plant.state.joint_q,
+                self.positions,
+                self.integral,
+                plant.control.joint_target_q,
             ],
         )
         wp.launch(
