@@ -577,6 +577,10 @@ class BlockJointSystem(DirectEqualitySystem):
         if temporal:
             self.configure_temporal_iterations()
 
+    def prefactor_async(self, idt) -> bool:
+        """Local blocks are prepared from the colouring, which is not ready before the substeps."""
+        return False
+
     def prepare_and_factor(self, idt):
         if self.enabled:
             world = self._block_world
@@ -782,6 +786,13 @@ class MixedJointSystem:
 
     def prepare_and_factor(self, idt):
         self._forward("prepare_and_factor", idt)
+
+    def prefactor_async(self, idt) -> bool:
+        """Start the exact first-substep factor on its private stream; see :meth:`wait_factor`."""
+        return self.exact.prefactor_async(idt)
+
+    def wait_factor(self):
+        self.exact.wait_factor()
 
     def solve(self, *, use_bias, refine=True, copy_state=None, average_copies=False):
         if average_copies:

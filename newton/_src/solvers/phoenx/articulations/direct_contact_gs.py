@@ -823,6 +823,10 @@ class DirectContactRunSchedule:
         self.solve_kernel = make_solve_direct_contact_columns_kernel(
             response.body_capacity, response.max_mechanism_bodies, is_cuda=device.is_cuda
         )
+        # The schedule after the candidate pass runs on a private stream.
+        self._stream = wp.Stream(device) if device.is_cuda else None
+        self._fork_event = wp.Event(device) if device.is_cuda else None
+        self._join_event = wp.Event(device) if device.is_cuda else None
 
     def warm_start(self, bodies: BodyContainer, contacts: ContactContainer) -> None:
         """Apply cached contact impulses through the exact mechanism responses.
@@ -914,7 +918,13 @@ class DirectContactRunSchedule:
         *,
         reset_owner: bool,
     ) -> None:
-        """Group immutable contacts without changing another response owner's columns."""
+        """Group immutable contacts without changing another response owner's columns.
+
+        On CUDA everything after the candidate pass runs on a private stream.
+        The caller must call :meth:`join` before the schedule is read, before a
+        graph conditional, and before any change to the contact columns, the
+        response topology or the bodies' inverse mass or motion type.
+        """
         self.section_end.zero_()
         self.response.contact_mechanism.fill_(-1)
         self.response.contact_column.fill_(-1)
@@ -934,6 +944,21 @@ class DirectContactRunSchedule:
             ],
             device=self.response.direct.model.device,
         )
+        if self._stream is None:
+            self._build_schedule(columns, num_columns)
+            return
+        wp.get_stream(self._stream.device).record_event(self._fork_event)
+        self._stream.wait_event(self._fork_event)
+        with wp.ScopedStream(self._stream, sync_enter=False, sync_exit=False):
+            self._build_schedule(columns, num_columns)
+        self._stream.record_event(self._join_event)
+
+    def join(self) -> None:
+        """Make the current stream wait for the schedule issued by :meth:`build`."""
+        if self._stream is not None:
+            wp.get_stream(self._stream.device).wait_event(self._join_event)
+
+    def _build_schedule(self, columns: ContactColumnContainer, num_columns: wp.array[wp.int32]) -> None:
         self.islands.build_islands(
             self.interactions,
             num_columns,

@@ -1365,6 +1365,13 @@ class FixedPatternPanelLLT:
             if self._pcr is not None and self.device.is_cuda and pcr_mechanisms.size < len(dimensions)
             else None
         )
+        # Subgroup and cooperative solves own disjoint mechanisms; a side
+        # stream runs them in parallel graph branches.
+        self._subgroup_stream = (
+            wp.Stream(self.device)
+            if subgroup_mechanisms.size and cooperative_mechanisms.size and self.device.is_cuda
+            else None
+        )
         self._grouped_rhs_block_dim = block_size * GROUPED_RHS_ITEMS_PER_TASK
 
     @property
@@ -1521,24 +1528,25 @@ class FixedPatternPanelLLT:
             with wp.ScopedStream(self._pcr_stream):
                 self._pcr.reduce(rhs, refine=refine)
         if self.subgroup_mechanism.size > 0:
-            wp.launch(
-                self._solve_subgroup,
-                dim=(self.subgroup_mechanism.size, self.block_size),
-                inputs=[
-                    self.subgroup_mechanism,
-                    self.dimension,
-                    self.vector_offset,
-                    self.panel_table_offset,
-                    self.panel_index,
-                    self.permutation,
-                    self.subgroup_factor,
-                    rhs,
-                    solution,
-                    active,
-                ],
-                block_dim=128,
-                device=self.device,
-            )
+            with wp.ScopedStream(self._subgroup_stream):
+                wp.launch(
+                    self._solve_subgroup,
+                    dim=(self.subgroup_mechanism.size, self.block_size),
+                    inputs=[
+                        self.subgroup_mechanism,
+                        self.dimension,
+                        self.vector_offset,
+                        self.panel_table_offset,
+                        self.panel_index,
+                        self.permutation,
+                        self.subgroup_factor,
+                        rhs,
+                        solution,
+                        active,
+                    ],
+                    block_dim=128,
+                    device=self.device,
+                )
         if self.cooperative_mechanism.size > 0:
             wp.launch_tiled(
                 self._solve_cooperative,
@@ -1569,6 +1577,8 @@ class FixedPatternPanelLLT:
                 ],
                 device=self.device,
             )
+        if self._subgroup_stream is not None:
+            wp.wait_stream(self._subgroup_stream)
         if self._use_push_solve:
             assert self._push_forward_schedule is not None
             assert self._push_backward_schedule is not None

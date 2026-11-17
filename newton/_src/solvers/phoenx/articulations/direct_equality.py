@@ -2326,6 +2326,9 @@ class DirectEqualitySystem:
         self.factor_stream = None
         self.factor_ready_event = None
         self.factor_done_event = None
+        # Factor issued by prefactor_async (pending) and consumed by this substep (issued).
+        self._prefactored = False
+        self._factor_issued = False
         if not self.enabled:
             return
 
@@ -2763,9 +2766,12 @@ class DirectEqualitySystem:
         """Prepare rows and snapshot pre-force joint velocities."""
         if not self.enabled:
             return
-        if not reuse_geometry:
-            self.refresh_geometry(idt)
-        self._snapshot_dynamic_rows(idt)
+        # Only the substep right after prefactor_async reuses its work.
+        self._factor_issued, self._prefactored = self._prefactored, False
+        if not self._factor_issued:
+            if not reuse_geometry:
+                self.refresh_geometry(idt)
+            self._snapshot_dynamic_rows(idt)
 
         if self.has_direct_friction:
             wp.launch(
@@ -2933,6 +2939,7 @@ class DirectEqualitySystem:
         self.solver.mechanism_dirty.fill_(1)
 
     def prepare_matrix(self, idt: wp.float32) -> None:
+        self._factor_issued = False
         if not self.enabled:
             return
         # Write already-equilibrated diagonals first so off-diagonal assembly
@@ -2998,6 +3005,10 @@ class DirectEqualitySystem:
 
     def prepare_and_factor(self, idt: wp.float32) -> None:
         """Prepare and factor the equality matrix on the current stream."""
+        if self._factor_issued:
+            # :meth:`prefactor_async` already issued this substep's factor.
+            self._factor_issued = False
+            return
         self.prepare_matrix(idt)
         self.factor()
 
@@ -3011,11 +3022,38 @@ class DirectEqualitySystem:
         if not self.enabled or self.factor_stream is None:
             self.factor()
             return
+        self._fork(self.factor)
+
+    def prefactor_async(self, idt: wp.float32) -> bool:
+        """Issue the next substep's rows, drive snapshot and factor on the private stream.
+
+        The work reads poses, inertia, velocities, joint data and drive targets.
+        The caller must leave them unchanged until it joins with
+        :meth:`wait_factor`. The next :meth:`begin_substep` and
+        :meth:`prepare_and_factor` then skip the issued work.
+
+        Returns:
+            Whether the work was issued; the caller must join only then.
+        """
+        if not self.enabled or not self.supports_async_factor:
+            return False
+
+        def prepare() -> None:
+            self.refresh_geometry(idt)
+            self._snapshot_dynamic_rows(idt)
+            self.prepare_matrix(idt)
+            self.factor()
+
+        self._fork(prepare)
+        self._prefactored = True
+        return True
+
+    def _fork(self, work) -> None:
         main_stream = wp.get_stream(self.model.device)
         main_stream.record_event(self.factor_ready_event)
         self.factor_stream.wait_event(self.factor_ready_event)
         with wp.ScopedStream(self.factor_stream, sync_enter=False, sync_exit=False):
-            self.factor()
+            work()
         self.factor_stream.record_event(self.factor_done_event)
 
     def wait_factor(self) -> None:

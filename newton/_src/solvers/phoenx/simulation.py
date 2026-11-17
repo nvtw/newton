@@ -3261,6 +3261,7 @@ class PhoenXWorld:
         )
         self._partition_active_this_step = self._regular_pgs_active_this_step
 
+        direct_schedule_pending = False
         # Contact ingest + element rebuild + graph colouring all depend only
         # on the (unchanged) contact graph when ``reuse_partition`` is set, so
         # skip them and reuse the previous step's columns / elements / CSR. The
@@ -3282,6 +3283,12 @@ class PhoenXWorld:
                     self._ingest_scratch.num_contact_columns,
                     reset_owner=True,
                 )
+                # Maximal and reduced schedules rewrite the column ownership.
+                direct_schedule_pending = (
+                    self._maximal_contact_schedule is None and not self._reduced_contacts_active_this_step
+                )
+                if not direct_schedule_pending:
+                    self._direct_contact_schedule.join()
             if self._maximal_contact_schedule is not None and self._ingest_scratch is not None:
                 self._maximal_contact_schedule.build(
                     self._contact_cols,
@@ -3328,6 +3335,17 @@ class PhoenXWorld:
         # kinematic body moving into a sleeping island can't lift the
         # score above threshold and the island never wakes.
         self._kinematic_prepare_step()
+        # Factor the first substep's exact joints on a side stream while the
+        # sleeping pass runs. Neither changes the other's inputs; the join
+        # precedes colouring's graph conditionals.
+        direct = getattr(self, "_direct_equality_system", None)
+        prefactor = getattr(direct, "prefactor_async", None)
+        prefactored = bool(
+            prefactor is not None
+            and self._constraint_capacity > 0
+            and self._reduced_articulation is None
+            and prefactor(wp.float32(1.0 / self.substep_dt))
+        )
         if self._sleeping_enabled:
             self._run_sleeping_pass(shape_body, shape_aabb_lower, shape_aabb_upper)
             if self._contact_input_active_this_step:
@@ -3348,6 +3366,10 @@ class PhoenXWorld:
                 )
         elif self._island_builder is not None and self._constraint_capacity > 0:
             self._build_contact_islands()
+        if prefactored:
+            direct.wait_factor()
+        if direct_schedule_pending:
+            self._direct_contact_schedule.join()
         if self._constraint_capacity > 0 and self._partition_active_this_step:
             if not reuse_partition:
                 if self._conditional_world_coloring and self._reuse_rigid_coloring:
