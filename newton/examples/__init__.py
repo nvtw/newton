@@ -37,6 +37,16 @@ def get_asset(filename: str) -> str:
     return os.path.join(get_asset_directory(), filename)
 
 
+def get_local_asset_directory(name: str) -> str:
+    """Return the directory of a locally installed asset set that Newton does not distribute.
+
+    Licensed meshes for some examples must never enter the repository, so they live in
+    ``$NEWTON_LOCAL_ASSETS/<name>``, by default ``~/newton_local_assets/<name>``.
+    """
+    root = os.environ.get("NEWTON_LOCAL_ASSETS") or os.path.join(os.path.expanduser("~"), "newton_local_assets")
+    return os.path.join(root, name)
+
+
 def _enable_example_deprecation_warnings() -> None:
     """Show Newton deprecations during example runs.
 

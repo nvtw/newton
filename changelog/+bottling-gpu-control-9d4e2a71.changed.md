@@ -1,0 +1,1 @@
+The PhoenX bottling-plant example runs its sensors, inlet PLCs, case lines and sealers on the GPU inside the captured frame graph. The remaining Python controllers read small asynchronous snapshots one frame late, so a frame no longer waits for host readbacks.

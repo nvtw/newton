@@ -6,7 +6,9 @@
 import importlib.machinery
 import importlib.util
 import sys
+from typing import Any
 
+import numpy as np
 import warp as wp
 
 import newton
@@ -123,6 +125,9 @@ def _ray_box(origin: wp.vec3, direction: wp.vec3, lo: wp.vec3, hi: wp.vec3, dist
     return far >= near
 
 
+_CASE_PHOTOEYE_BATCH_SIZE = 256
+
+
 @wp.kernel
 def _case_photoeyes(
     body_q: wp.array[wp.transform],
@@ -139,8 +144,10 @@ def _case_photoeyes(
     distances: wp.array[float],
     hits: wp.array[int],
 ):
-    sensor, lane = wp.tid()
-    for i in range(lane, shapes.shape[0], 32):
+    sensor, batch, lane = wp.tid()
+    begin = batch * wp.static(_CASE_PHOTOEYE_BATCH_SIZE)
+    end = wp.min(begin + wp.static(_CASE_PHOTOEYE_BATCH_SIZE), shapes.shape[0])
+    for i in range(begin + lane, end, 32):
         shape = shapes[i]
         world = wp.transform_multiply(body_q[shape_body[shape]], shape_xform[shape])
         inverse = wp.transform_inverse(world)
@@ -174,3 +181,99 @@ def _case_drives(
     i = wp.tid()
     target_q[coordinates[i]] = position[i]
     target_qd[dofs[i]] = velocity[i]
+
+
+@wp.kernel
+def _gather(source: wp.array[Any], indices: wp.array[int], target: wp.array[Any]):
+    i = wp.tid()
+    target[i] = source[indices[i]]
+
+
+class _HostLink:
+    """Exchange host PLC I/O with the device without stalling the GPU.
+
+    After each frame, the watched device arrays are copied into pinned host
+    buffers behind an event. The host PLCs run on the previous frame's copy
+    while the GPU computes the current frame, and their commands are queued as
+    pinned uploads that the next frame consumes. Host PLCs therefore see one
+    frame (one scan cycle) of additional sensor-to-actuator latency. Large
+    arrays are watched as gathered subsets, scattered back on the host into
+    full-size arrays whose unwatched entries stay NaN (or zero for integers).
+    """
+
+    def __init__(self, device):
+        self.device = device
+        self.frame = 0
+        self.snapshot = -1
+        self._sources = {}
+        self._subsets = {}
+        self._watched = None
+        self._writes = {}
+        self._events = tuple(wp.Event(device) for _ in range(2))
+
+    def watch(self, name, array, indices=None):
+        """Copy ``array`` to the host every frame, or only rows ``indices``."""
+        if self._watched is not None:
+            raise RuntimeError("Watch host I/O before the first frame")
+        if indices is None:
+            self._sources[name] = array
+        else:
+            entry = self._subsets.setdefault(name, (array, set()))
+            entry[1].update(int(i) for i in np.ravel(indices))
+
+    def _pinned(self, array):
+        return tuple(wp.empty(array.shape, dtype=array.dtype, device="cpu", pinned=True) for _ in range(2))
+
+    def gather(self):
+        """Gather watched subsets on the device; graph-capturable."""
+        if self._watched is None:
+            self._watched = {name: (array, self._pinned(array), None) for name, array in self._sources.items()}
+            for name, (array, wanted) in self._subsets.items():
+                indices = np.asarray(sorted(wanted), dtype=np.int32)
+                compact = wp.empty(len(indices), dtype=array.dtype, device=self.device)
+                full = np.zeros(
+                    array.numpy().shape, dtype=wp.dtype_to_numpy(getattr(array.dtype, "_wp_scalar_type_", array.dtype))
+                )
+                if np.issubdtype(full.dtype, np.floating):
+                    full[:] = np.nan
+                index_array = wp.array(indices, dtype=int, device=self.device)
+                self._watched[name] = (compact, self._pinned(compact), (array, index_array, indices, full))
+        for compact, _, subset in self._watched.values():
+            if subset is not None:
+                wp.launch(
+                    _gather, dim=len(subset[2]), inputs=[subset[0], subset[1]], outputs=[compact], device=self.device
+                )
+
+    def publish(self):
+        """Queue this frame's host copies behind the frame's device work."""
+        slot = self.frame % 2
+        for array, pinned, _ in self._watched.values():
+            wp.copy(pinned[slot], array)
+        wp.record_event(self._events[slot])
+        self.frame += 1
+
+    def latest(self):
+        """Wait for, and return, the previous frame's copies."""
+        slot = self.frame % 2
+        wp.synchronize_event(self._events[slot])
+        self.snapshot = self.frame - 2
+        values = {}
+        for name, (_, pinned, subset) in self._watched.items():
+            values[name] = pinned[slot].numpy()
+            if subset is not None:
+                subset[3][subset[2]] = values[name]
+                values[name] = subset[3]
+        return values
+
+    def observed(self, stamp):
+        """Whether the latest copy reflects commands written at ``stamp = frame``."""
+        return self.snapshot >= stamp
+
+    def write(self, array, values):
+        """Queue an upload for the next frame; call only after :meth:`latest`."""
+        entry = self._writes.get(id(array))
+        if entry is None:
+            entry = self._writes[id(array)] = (array, self._pinned(array))
+        pinned = entry[1][self.frame % 2]
+        pinned.numpy()[...] = values
+        wp.copy(array, pinned)

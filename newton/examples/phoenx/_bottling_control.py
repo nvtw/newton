@@ -11,13 +11,24 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton.examples.phoenx._bottling_case_plc import (
+    ACTUATOR_NAMES,
+    CASE_STATIONS,
+    SEALER_STATES,
+    ZONE_NAMES,
+    case_drive_targets,
+    case_line_plcs,
+    make_case_lines,
+)
 from newton.examples.phoenx._bottling_fleet import FleetController
 from newton.examples.phoenx._bottling_infeed import InfeedController
 from newton.examples.phoenx._bottling_io import (
+    _CASE_PHOTOEYE_BATCH_SIZE,
     _actuator_observations,
     _bottle_ray,
     _case_drives,
     _case_photoeyes,
+    _HostLink,
     _load_controller,
     _photoeyes,
     _valves,
@@ -269,6 +280,246 @@ def _robots(
     age[cell] += 1.0 / 60.0
 
 
+# Inlet PLC states and fault reasons, in the source controller's names.
+_INLET_STATES = (
+    "SETTLE",
+    "WAIT_QUEUE",
+    "CLAMP",
+    "RELEASE",
+    "GATE_CLOSING",
+    "SETTLE_GROUP",
+    "NESTING",
+    "READY",
+    "ROBOT_UNNEST",
+    "ROBOT_PICK",
+    "FAULT",
+)
+_INLET_FAULTS = (
+    None,
+    "stops_not_closed_at_start",
+    "holdback_did_not_meet_bottle",
+    "holdback_slip",
+    "count_exceeded",
+    "gate_zone_occupied",
+    "release_timeout",
+    "gate_blocked",
+    "group_did_not_reach_end_stop",
+    "nest_not_seated",
+    "comb_did_not_open",
+)
+# Debounced beams: queue_full, gate_seen, five_seen, nest1, nest4, nest_clear.
+_INLET_DEBOUNCES = 6
+
+
+@wp.struct
+class _Inlet:
+    """Per-cell state and interface constants of the source PKI-1 inlet PLC."""
+
+    state: wp.array[int]
+    fault: wp.array[int]
+    running: wp.array[int]
+    count: wp.array[int]
+    picked: wp.array[int]
+    last_count: wp.array[int]
+    t: wp.array[wp.float64]
+    t_state: wp.array[wp.float64]
+    soft_until: wp.array[wp.float64]
+    inb_drive: wp.array[wp.float64]
+    debounce: wp.array2d[int]
+    debounce_t: wp.array2d[wp.float64]
+    debounce_on: wp.array[wp.float64]
+    debounce_off: wp.array[wp.float64]
+    status: wp.array2d[int]
+    dt: wp.float64
+    drive_time: wp.float64
+    soft_advance: wp.float64
+    nesting: wp.float64
+    ina: wp.float64
+    inb: wp.float64
+    n_group: int
+    gate: int
+    holdback: int
+    endstop: int
+    comb: int
+    gate_stroke: float
+    holdback_stroke: float
+    endstop_stroke: float
+    comb_stroke: float
+    gate_closed: float
+    endstop_closed: float
+    holdback_max: float
+    comb_seated: float
+    comb_tol: float
+
+
+@wp.func
+def _debounce(inlet: _Inlet, cell: int, k: int, raw: bool) -> bool:
+    """Source ``Debounce.update``: hold a changed input for its on/off time."""
+    state = inlet.debounce[cell, k] != 0
+    if raw != state:
+        timer = inlet.debounce_t[cell, k] + inlet.dt
+        limit = inlet.debounce_off[k]
+        if raw:
+            limit = inlet.debounce_on[k]
+        if timer >= limit:
+            inlet.debounce[cell, k] = int(raw)
+            timer = wp.float64(0.0)
+        inlet.debounce_t[cell, k] = timer
+    else:
+        inlet.debounce_t[cell, k] = wp.float64(0.0)
+    return inlet.debounce[cell, k] != 0
+
+
+@wp.kernel
+def _inlet_plcs(
+    inlet: _Inlet,
+    observation: wp.array2d[float],
+    line_ready: wp.array[int],
+    targets: wp.array2d[float],
+    ready: wp.array[int],
+    multipliers: wp.array[float],
+):
+    """One source inlet PLC scan per packer cell, in robot mode.
+
+    A line-by-line port of ``Controller.step`` in ``inlet_pki1/controller.py``.
+    The test-bypass states are unreachable in robot mode and are omitted.
+    """
+    cell = wp.tid()
+    dt = inlet.dt
+    t = inlet.t[cell] + dt
+    t_state = inlet.t_state[cell] + dt
+    queue_beam = observation[cell, 1] != 0.0
+    gate_beam = observation[cell, 2] != 0.0
+    five_beam = observation[cell, 3] != 0.0
+    count_beam = observation[cell, 4] != 0.0
+    nest1_beam = observation[cell, 5] != 0.0
+    nest4_beam = observation[cell, 6] != 0.0
+    gate = observation[cell, 7 + inlet.gate]
+    holdback = observation[cell, 7 + inlet.holdback]
+    endstop = observation[cell, 7 + inlet.endstop]
+    comb = observation[cell, 7 + inlet.comb]
+    gripped = observation[cell, 11] != 0.0
+    robot_clear = observation[cell, 12] != 0.0
+    qfull = _debounce(inlet, cell, 0, queue_beam)
+    gate_seen = _debounce(inlet, cell, 1, gate_beam)
+    five_seen = _debounce(inlet, cell, 2, five_beam)
+    n1 = _debounce(inlet, cell, 3, nest1_beam)
+    n4 = _debounce(inlet, cell, 4, nest4_beam)
+    nest_clear = _debounce(inlet, cell, 5, not nest1_beam and not nest4_beam and not count_beam)
+    last = inlet.last_count[cell] != 0
+    rising = count_beam and not last
+    falling = not count_beam and last
+    inlet.last_count[cell] = int(count_beam)
+
+    state = inlet.state[cell]
+    next_state = state
+    fault = int(0)
+    if state == 0:  # SETTLE
+        targets[cell, inlet.gate] = inlet.gate_stroke
+        targets[cell, inlet.endstop] = inlet.endstop_stroke
+        if t_state >= wp.float64(1.0):
+            if gate >= inlet.gate_closed and endstop >= inlet.endstop_closed:
+                inlet.running[cell] = 1
+                next_state = 1
+            else:
+                fault = 1
+    elif state == 1:  # WAIT_QUEUE
+        if gate_seen and five_seen and nest_clear and inlet.inb_drive[cell] >= inlet.drive_time:
+            targets[cell, inlet.holdback] = inlet.holdback_stroke
+            next_state = 2
+    elif state == 2:  # CLAMP
+        if t_state >= wp.float64(0.15):
+            if holdback >= 0.004 and holdback <= inlet.holdback_max:
+                targets[cell, inlet.gate] = 0.0
+                inlet.count[cell] = 0
+                next_state = 3
+            else:
+                fault = 2
+    elif state == 3:  # RELEASE
+        if not five_beam and t_state > wp.float64(0.1):
+            fault = 3
+        else:
+            if rising:
+                inlet.count[cell] += 1
+                if inlet.count[cell] > inlet.n_group:
+                    fault = 4
+            if fault == 0:
+                if inlet.count[cell] == inlet.n_group and falling:
+                    if gate_beam:
+                        fault = 5
+                    else:
+                        targets[cell, inlet.gate] = inlet.gate_stroke
+                        next_state = 4
+                elif t_state > wp.float64(6.0):
+                    fault = 6
+    elif state == 4:  # GATE_CLOSING
+        if gate >= inlet.gate_closed and t_state >= wp.float64(0.25):
+            targets[cell, inlet.holdback] = 0.0
+            # Soft advance: the freed queue closes up on the gate at half speed.
+            inlet.soft_until[cell] = t + inlet.soft_advance
+            next_state = 5
+        elif t_state > wp.float64(1.5):
+            fault = 7
+    elif state == 5:  # SETTLE_GROUP
+        if n1 and n4:
+            targets[cell, inlet.comb] = inlet.comb_stroke
+            next_state = 6
+        elif t_state > wp.float64(6.0):
+            fault = 8
+    elif state == 6:  # NESTING
+        if t_state >= inlet.nesting:
+            if wp.abs(comb - inlet.comb_seated) <= inlet.comb_tol and nest1_beam and nest4_beam:
+                next_state = 7
+            elif t_state >= inlet.nesting + wp.float64(0.4):
+                fault = 9
+    elif state == 7:  # READY
+        if gripped:
+            # Release to the gripper: comb only.
+            targets[cell, inlet.comb] = 0.0
+            next_state = 8
+    elif state == 8:  # ROBOT_UNNEST
+        if comb <= 0.004 and t_state >= wp.float64(0.25):
+            next_state = 9
+        elif t_state > wp.float64(1.5):
+            fault = 10
+    elif state == 9:  # ROBOT_PICK
+        if nest_clear and robot_clear:
+            inlet.picked[cell] += 1
+            next_state = 1
+    else:  # FAULT
+        inlet.running[cell] = 0
+    if fault != 0:
+        inlet.fault[cell] = fault
+        next_state = 10
+    if next_state != state:
+        t_state = wp.float64(0.0)
+    inlet.state[cell] = next_state
+    inlet.t[cell] = t
+    inlet.t_state[cell] = t_state
+
+    # Source ``_outputs``: chain speeds, drive-time proof and port status.
+    run = inlet.running[cell] != 0 and next_state != 10
+    ina = wp.float64(0.0)
+    inb = wp.float64(0.0)
+    if run:
+        if not qfull:
+            ina = inlet.ina
+        inb = inlet.inb
+        if t < inlet.soft_until[cell]:
+            inb = inlet.inb * wp.float64(0.5)
+    if inb >= inlet.inb * wp.float64(0.99):
+        inlet.inb_drive[cell] = inlet.inb_drive[cell] + dt
+    else:
+        inlet.inb_drive[cell] = wp.float64(0.0)
+    multipliers[1 + cell * 2] = float(ina / wp.float64(0.2))
+    multipliers[2 + cell * 2] = float(inb / wp.float64(0.4))
+    ready[cell] = int(next_state == 7 and line_ready[cell] != 0)
+    inlet.status[cell, 0] = next_state
+    inlet.status[cell, 1] = inlet.fault[cell]
+    inlet.status[cell, 2] = inlet.picked[cell]
+    inlet.status[cell, 3] = int(run and qfull)
+
+
 def _load_case_controllers(vendor):
     """Load the simulator-independent source modules without their Kit package."""
     aliases = ("design", "controller", "lines", "lines_l02")
@@ -301,6 +552,20 @@ def _load_case_controllers(vendor):
     return SimpleNamespace(**loaded)
 
 
+class _InletStatus:
+    """Host view of one device inlet PLC, refreshed from the previous frame."""
+
+    state = "SETTLE"
+    fault = None
+    groups_picked = 0
+
+    def update(self, status):
+        self.state = _INLET_STATES[status[0]]
+        self.fault = _INLET_FAULTS[status[1]]
+        self.groups_picked = int(status[2])
+        return {"packer_ready": self.state != "FAULT", "packer_backlog": bool(status[3])}
+
+
 def _target_coordinates(model):
     """Map velocity DOFs to position-target coordinates, including free roots."""
     starts = model.joint_qd_start.numpy()
@@ -318,10 +583,10 @@ class PlantController:
     def __init__(self, scene, model, solver, state, control, asset_root, claimed):
         self.scene, self.model, self.solver, self.state, self.control = scene, model, solver, state, control
         vendor = asset_root / "sim/exts/bottling_plant.runtime/bottling_plant_runtime/vendor"
-        module = _load_controller("_newton_berlin_inlet", vendor / "inlet_pki1/controller.py")
+        self.link = _HostLink(model.device)
         self.interface = json.loads((vendor / "inlet_pki1/interface.json").read_text())
         self.request = json.loads((vendor.parents[3] / "config/requests/packer_l02_plant.json").read_text())
-        self.plcs = [module.Controller(self.interface, 1.0 / 60.0) for _ in range(8)]
+        self.plcs = [_InletStatus() for _ in range(8)]
         self.names = ("PU1", "PU2", "PU3", "PU4", "PD1", "PD2", "PD3", "PD4")
         self.act_names = tuple(self.interface["actuators"])
         self.sensor_names = tuple(self.interface["sensors"])
@@ -393,6 +658,8 @@ class PlantController:
                 )
         self.actuator_zero = wp.array(zeros, dtype=float)
         self.valve_speeds = wp.array([self.interface["actuators"][n]["speed_mps"] for n in self.act_names], dtype=float)
+        self.inlet = self._setup_inlet()
+        self.line_ready = wp.zeros(8, dtype=int)
         self.observation = wp.zeros((8, 15), dtype=float)
         self.valve_targets = wp.zeros((8, 4), dtype=float)
         self.ready = wp.zeros(8, dtype=int)
@@ -428,11 +695,13 @@ class PlantController:
         self._setup_cases(vendor, starts)
         self.transport = TransportController(self, vendor)
         self.infeed = InfeedController(self, vendor, 17 + len(self.transport.zone_channels))
-        self.fleet = FleetController(model, state, control, asset_root, transport=self.transport)
+        self.fleet = FleetController(model, state, control, asset_root, transport=self.transport, link=self.link)
         self.wrapper_channels = {
             label: self.infeed.channel_end + i for i, label in enumerate(scene.metadata.get("wrapper_belt_zones", {}))
         }
-        self.wrapper = WrapperController(model, state, control, asset_root, self.wrapper_channels, self.fleet)
+        self.wrapper = WrapperController(
+            model, state, control, asset_root, self.wrapper_channels, self.fleet, plant=self
+        )
         descriptors = []
         self.nominal_arrays = []
         self.belt_channels = []
@@ -462,6 +731,42 @@ class PlantController:
         # Infeed starts only after measured placement, truck withdrawal and homing.
         multipliers[self.infeed.channel_end :] = 0.0
         self.multipliers = wp.array(multipliers, dtype=float)
+        self._watch()
+
+    def _setup_inlet(self):
+        """Bind the source inlet PLC's interface constants to the device port."""
+        actuators, timers = self.interface["actuators"], self.interface["timers_s"]
+        inlet = _Inlet()
+        for name, dtype in (("state", int), ("fault", int), ("running", int), ("count", int), ("picked", int)):
+            setattr(inlet, name, wp.zeros(8, dtype=dtype))
+        inlet.last_count = wp.zeros(8, dtype=int)
+        for name in ("t", "t_state", "soft_until", "inb_drive"):
+            setattr(inlet, name, wp.zeros(8, dtype=wp.float64))
+        inlet.soft_until.fill_(-1.0)
+        inlet.debounce = wp.zeros((8, _INLET_DEBOUNCES), dtype=int)
+        inlet.debounce_t = wp.zeros((8, _INLET_DEBOUNCES), dtype=wp.float64)
+        steady, beam_on = timers["queue_steady_s"], timers["nest_beam_on_s"]
+        inlet.debounce_on = wp.array(
+            [1.0, steady, steady, beam_on, beam_on, timers["nest_clear_on_s"]], dtype=wp.float64
+        )
+        inlet.debounce_off = wp.array([1.0, 0.05, 0.05, 0.05, 0.05, 0.0], dtype=wp.float64)
+        inlet.status = wp.zeros((8, 4), dtype=int)
+        inlet.dt = 1.0 / 60.0
+        inlet.drive_time, inlet.soft_advance = timers["drive_time_s"], timers["soft_advance_s"]
+        inlet.nesting = timers["nesting_s"]
+        inlet.ina, inlet.inb = self.interface["speeds_mps"]["INA"], self.interface["speeds_mps"]["INB"]
+        inlet.n_group = len(self.interface["nest_x"])
+        for name in ("gate", "holdback", "endstop", "comb"):
+            actuator = {"gate": "Gate", "holdback": "Holdback", "endstop": "EndStop", "comb": "NestComb"}[name]
+            setattr(inlet, name, self.act_names.index(actuator))
+            setattr(inlet, name + "_stroke", actuators[actuator]["stroke"])
+        # The source compares float32 readbacks against these float64 limits.
+        inlet.gate_closed = float(np.float32(actuators["Gate"]["stroke"] - 0.006))
+        inlet.endstop_closed = float(np.float32(actuators["EndStop"]["stroke"] - 0.006))
+        inlet.holdback_max = float(np.float32(actuators["Holdback"]["stroke"] - 0.003))
+        inlet.comb_seated = actuators["NestComb"]["seated_stroke"]
+        inlet.comb_tol = actuators["NestComb"]["seated_tol"]
+        return inlet
 
     def _setup_cases(self, vendor, dof_starts):
         """Bind the source CC01 and sealer PLCs to optical case sensors."""
@@ -469,14 +774,10 @@ class PlantController:
         self.case_modules = _load_case_controllers(vendor)
         design = self.case_modules.design
         self.supply = [[case for case in scene.metadata["case_inventory"][name] if case != "C0"] for name in self.names]
-        self.case_lines = [self.case_modules.lines_l02.CaseLineL02(len(supply)) for supply in self.supply]
-        self.sealers = [self.case_modules.lines.Sealer(process_s=1.5) for _ in self.names]
-        for line in self.case_lines:
-            line.seed("Z2", "C0", holding=True)
-        self.case_ack = [0] * 8
-        self.closed_cases = set()
+        # Host views of the device case-line and sealer PLCs, refreshed each frame.
+        self.case_lines = [SimpleNamespace(station="EMPTY") for _ in self.names]
+        self.sealers = [SimpleNamespace(state="EMPTY") for _ in self.names]
         self.case_clock = 0.0
-        self.zone_velocity = [{} for _ in self.names]
         self.case_sensor_names = [*design.SENSORS, "PE_TS_IN", "PE_TS_SWAP", "PE_TS_OUT", "SPAWN"]
         origins, directions, distances, target, clamps = [], [], [], [], []
         self.case_body_groups = {}
@@ -533,7 +834,6 @@ class PlantController:
             hinges.append(row)
         self.seal_hinges = wp.array(hinges, dtype=int)
         self.seal_requests = wp.zeros(len(self.case_index), dtype=int)
-        self.seal_requested = np.zeros(len(self.case_index), dtype=np.int32)
         self.sealed = wp.zeros(len(self.case_index), dtype=int)
         self.seal_joints = wp.full((len(self.case_index), 4), -1, dtype=int)
         self.case_origins = wp.array(origins, dtype=wp.vec3)
@@ -592,17 +892,61 @@ class PlantController:
                     angle = -2.0 * np.arctan2(np.dot(vector, axes[dof]), w)
                     box = label.split("/Cases/", 1)[1].split("/", 1)[0]
                     self.case_drive_records.append((cell, "flap", box, dof, angle))
+        records = self.case_drive_records
+        self.case_lines_plc = make_case_lines(
+            design,
+            self.case_modules.controller,
+            self.case_modules.lines.Sealer(process_s=1.5),
+            [
+                [self.case_index[f"{name}_{box}"] for box in supply]
+                for name, supply in zip(self.names, self.supply, strict=True)
+            ],
+            [self.case_index[f"{name}_C0"] for name in self.names],
+            model.device,
+        )
+        self.case_local = wp.array(list(self.case_local_groups.values()), dtype=wp.transform)
+        self.case_closed = wp.zeros(len(self.case_index), dtype=int)
+        self.outfeed_ok = wp.zeros(8, dtype=int)
+        self.case_record_cells = wp.array([r[0] for r in records], dtype=int)
+        self.case_record_kinds = wp.array([("roller", "actuator", "flap").index(r[1]) for r in records], dtype=int)
+        self.case_record_items = wp.array(
+            [
+                (ZONE_NAMES.index(r[2]) if r[2] in ZONE_NAMES else -1)
+                if r[1] == "roller"
+                else ACTUATOR_NAMES.index(r[2])
+                if r[1] == "actuator"
+                else self.case_index[r[2]]
+                for r in records
+            ],
+            dtype=int,
+        )
+        self.case_record_closed = wp.array([r[4] for r in records], dtype=float)
         self.case_dofs = wp.array([r[3] for r in self.case_drive_records], dtype=int)
         self.case_coordinates = wp.array(self.target_coordinates[self.case_dofs.numpy()], dtype=int)
         self.case_positions = wp.zeros(len(self.case_drive_records), dtype=float)
         self.case_velocities = wp.zeros(len(self.case_drive_records), dtype=float)
+        self.case_record_initial = wp.array(
+            self.initial_targets[self.target_coordinates[self.case_dofs.numpy()]], dtype=float
+        )
         self.spawn_enabled = wp.zeros(8, dtype=int)
         self.spawn_bodies = wp.zeros((8, 5), dtype=int)
         self.spawn_local = wp.empty((8, 5), dtype=wp.transform)
         self.spawn_target = wp.array(target, dtype=wp.transform)
+        self.case_speeds = wp.zeros((8, len(ZONE_NAMES)), dtype=wp.float64)
 
-    def before_step(self):
-        """Supply physical photo-eyes and cylinder positions to the source PLCs."""
+    def _watch(self):
+        """Declare the device data the host PLCs read each frame."""
+        link = self.link
+        link.watch("sealed", self.sealed)
+        link.watch("inlet", self.inlet.status)
+        link.watch("cases", self.case_lines_plc.status)
+        fleet = self.fleet
+        link.watch("body_q", self.state.body_q, np.r_[fleet.bodies, fleet.pallet_bodies])
+        link.watch("joint_q", self.state.joint_q, fleet.q_indices)
+        link.watch("joint_qd", self.state.joint_qd, fleet.qd_indices)
+
+    def sense(self):
+        """Evaluate photo-eyes and readbacks after the frame's physics; graph-capturable."""
         self.observation.zero_()
         self.case_hits.zero_()
         wp.launch(
@@ -641,7 +985,11 @@ class PlantController:
         )
         wp.launch(
             _case_photoeyes,
-            dim=(len(self.case_origins), 32),
+            dim=(
+                len(self.case_origins),
+                (len(self.case_shapes) + _CASE_PHOTOEYE_BATCH_SIZE - 1) // _CASE_PHOTOEYE_BATCH_SIZE,
+                32,
+            ),
             block_dim=32,
             inputs=[
                 self.state.body_q,
@@ -659,104 +1007,84 @@ class PlantController:
                 self.case_hits,
             ],
         )
-        observations = self.observation.numpy()
-        case_hits = self.case_hits.numpy().reshape(8, -1)
+        self.infeed.sense()
+        self.transport.sense()
+        self.wrapper.sense()
+        self.link.gather()
+
+    def after_step(self):
+        """Run the host PLCs on the previous frame while the GPU steps this one.
+
+        The sensors and the inlet, case-line and sealer PLCs run on the device
+        inside the frame. The transport, infeed, fleet and wrapper PLCs see the
+        previous frame's sensors, and their commands reach the next frame.
+        """
+        self.link.publish()
+        data = self.link.latest()
+        commands = {
+            name: plc.update(status) for name, plc, status in zip(self.names, self.plcs, data["inlet"], strict=True)
+        }
+        for line, sealer, status in zip(self.case_lines, self.sealers, data["cases"], strict=True):
+            line.station, sealer.state = CASE_STATIONS[status[0]], SEALER_STATES[status[1]]
         self.case_clock += 1.0 / 60.0
-        case_outputs, sealer_outputs = [], []
-        sealed = self.sealed.numpy()
-        spawn_flags = np.zeros(8, dtype=np.int32)
-        spawn_ids = np.zeros((8, 5), dtype=np.int32)
-        spawn_local = np.zeros((8, 5, 7), dtype=np.float32)
-        for cell, (line, sealer) in enumerate(zip(self.case_lines, self.sealers, strict=True)):
-            beams = dict(zip(self.case_sensor_names, case_hits[cell] != 0, strict=True))
-            completed = int(observations[cell, 13]) // 12
-            if completed > self.case_ack[cell]:
-                line.robot_done(self.case_clock, line.occ["Z3"])
-                self.case_ack[cell] = completed
-            output = line.step(self.case_clock, beams, observations[cell, 14], sealer_ready=sealer.ready())
-            if line.release_started:
-                sealer.expect(self.case_clock)
-            for box in line.handed_off:
-                sealer.receive(self.case_clock, box)
-            line.handed_off.clear()
-            out_ts = sealer.step(self.case_clock, beams, outfeed_can_accept=self.transport.can_accept(self.names[cell]))
-            if sealer.state == "PROCESS":
-                self.closed_cases.add(f"{self.names[cell]}_{sealer.box}")
-            if sealer.swap_request is not None:
-                box = sealer.swap_request
-                index = self.case_index[f"{self.names[cell]}_{box}"]
-                self.seal_requested[index] = 1
-                if sealed[index] != 0:
-                    sealer.swapped(self.case_clock, box)
-            case_outputs.append(output)
-            sealer_outputs.append(out_ts)
-            if self.supply[cell] and line.can_spawn(self.case_clock, not beams["SPAWN"]):
-                box = self.supply[cell].pop(0)
-                spawn_flags[cell] = 1
-                spawn_ids[cell] = self.case_body_groups[cell, box]
-                spawn_local[cell] = np.asarray(self.case_local_groups[cell, box])
-                line.on_spawn(self.case_clock, box)
-            target_speeds = dict(output["zone_speed"])
-            target_speeds.update(out_ts["speed"])
-            for zone, target in target_speeds.items():
-                current = self.zone_velocity[cell].get(zone, 0.0)
-                ramp_s = (
-                    self.case_modules.design.RAMP_UP_S
-                    if abs(target) > abs(current)
-                    else self.case_modules.design.RAMP_DOWN_S
-                )
-                delta = self.case_modules.design.SPEED["transport"] / (ramp_s * 60.0)
-                self.zone_velocity[cell][zone] = current + np.clip(target - current, -delta, delta)
-        self.seal_requests.assign(self.seal_requested)
-        self.spawn_enabled.assign(spawn_flags)
-        if spawn_flags.any():
-            self.spawn_bodies.assign(spawn_ids)
-            self.spawn_local.assign(spawn_local)
-        positions, velocities = [], []
-        for cell, kind, name, dof, closed in self.case_drive_records:
-            position, velocity = self.initial_targets[self.target_coordinates[dof]], 0.0
-            if kind == "roller":
-                position = 0.0
-                velocity = self.zone_velocity[cell].get(name, 0.0) / self.case_modules.design.ROLLER_R
-            elif kind == "actuator":
-                position = sealer_outputs[cell]["stop"] if name == "SwapStop" else case_outputs[cell]["actuators"][name]
-            elif name in self.closed_cases:
-                position = closed
-            positions.append(position)
-            velocities.append(velocity)
-        self.case_positions.assign(np.asarray(positions, dtype=np.float32))
-        self.case_velocities.assign(np.asarray(velocities, dtype=np.float32))
-        targets, ready = [], []
-        commands = {}
+        # The device inlet PLCs overwrite their own chain channels each frame.
         speed = np.ones(len(self.multipliers), dtype=np.float32)
         speed[self.infeed.channel_end :] = 0.0
-        for cell, plc in enumerate(self.plcs):
-            obs = {
-                "beams": dict(zip(self.sensor_names, observations[cell, :7] != 0, strict=True)),
-                "actuator_pos": dict(zip(self.act_names, observations[cell, 7:11], strict=True)),
-            }
-            command = plc.step(
-                obs, robot_mode=True, robot_gripped=observations[cell, 11] != 0, robot_clear=observations[cell, 12] != 0
-            )
-            commands[self.names[cell]] = command
-            targets.append([command["targets"][name] for name in self.act_names])
-            line = self.case_lines[cell]
-            ready.append(int(command["group_ready"] and line.ready and line.station == "LOCKED"))
-            speed[1 + cell * 2] = command["speeds"]["INA"] / 0.2
-            speed[2 + cell * 2] = command["speeds"]["INB"] / 0.4
-        self.valve_targets.assign(np.asarray(targets, dtype=np.float32))
-        self.ready.assign(np.asarray(ready, dtype=np.int32))
-        # All controllers observe the same physical state before simulation.
-        poses = self.state.body_q.numpy()
-        coordinates = self.state.joint_q.numpy()
-        self.transport.before_step(self.case_clock, speed, poses=poses, coordinates=coordinates)
-        self.infeed.before_step(self.case_clock, commands, speed, coordinates=coordinates)
-        self.fleet.before_step(self.case_clock, poses=poses, coordinates=coordinates)
-        self.wrapper.before_step(self.case_clock, speed, poses=poses, coordinates=coordinates)
-        self.multipliers.assign(speed)
+        # All host controllers observe the same physical state.
+        self.transport.before_step(self.case_clock, speed, data)
+        self.infeed.before_step(self.case_clock, commands, speed, data)
+        self.fleet.before_step(self.case_clock, data)
+        self.wrapper.before_step(self.case_clock, speed, data)
+        link = self.link
+        link.write(self.multipliers, speed)
+        link.write(self.outfeed_ok, [self.transport.can_accept(name) for name in self.names])
 
     def simulate(self):
         """Update belt friction, valve drives, arm targets, and grasp constraints."""
+        lines = self.case_lines_plc
+        wp.launch(
+            case_line_plcs,
+            dim=8,
+            inputs=[
+                lines,
+                self.case_hits.reshape((8, -1)),
+                self.observation,
+                self.sealed,
+                self.outfeed_ok,
+                self.seal_bodies,
+                self.case_local,
+            ],
+            outputs=[
+                self.case_speeds,
+                self.case_closed,
+                self.seal_requests,
+                self.spawn_enabled,
+                self.spawn_bodies,
+                self.spawn_local,
+                self.line_ready,
+            ],
+        )
+        wp.launch(
+            case_drive_targets,
+            dim=len(self.case_dofs),
+            inputs=[
+                lines,
+                self.case_record_cells,
+                self.case_record_kinds,
+                self.case_record_items,
+                self.case_record_closed,
+                self.case_record_initial,
+                self.case_closed,
+                self.case_modules.design.ROLLER_R,
+            ],
+            outputs=[self.case_positions, self.case_velocities],
+        )
+        wp.launch(
+            _inlet_plcs,
+            dim=8,
+            inputs=[self.inlet, self.observation, self.line_ready],
+            outputs=[self.valve_targets, self.ready, self.multipliers],
+        )
         wp.launch(
             _seal_cases,
             dim=1,
@@ -857,6 +1185,8 @@ class PlantController:
 
     def report(self):
         """Return inlet states and the number of physically released bottles."""
+        for plc, status in zip(self.plcs, self.inlet.status.numpy(), strict=True):
+            plc.update(status)
         return {
             "inlets": {
                 name: {"state": plc.state, "fault": plc.fault, "groups": plc.groups_picked}
@@ -865,7 +1195,7 @@ class PlantController:
             "placed_bottles": self.placed.numpy().tolist(),
             "robot_modes": self.mode.numpy().tolist(),
             "case_stations": [line.station for line in self.case_lines],
-            "reserve_cartons": {name: len(supply) for name, supply in zip(self.names, self.supply, strict=True)},
+            "reserve_cartons": dict(zip(self.names, self.case_lines_plc.magazine.numpy().tolist(), strict=True)),
             "sealers": [sealer.state for sealer in self.sealers],
             "palletizers": self.transport.report(),
             "fleet": self.fleet.report(),

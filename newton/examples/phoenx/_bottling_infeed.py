@@ -58,8 +58,11 @@ class InfeedController:
         self.state_coordinates = plant.model.joint_q_start.numpy()[joints]
         self.oscillators = [o["name"] for o in self.interface["oscillators"]]
         self.status = None
+        plant.link.watch("infeed_hits", self.observation)
+        plant.link.watch("joint_q", plant.state.joint_q, self.state_coordinates)
 
-    def before_step(self, time, commands, multipliers, *, coordinates=None):
+    def sense(self):
+        """Evaluate the infeed photo-eyes on the device; graph-capturable."""
         plant = self.plant
         self.observation.zero_()
         wp.launch(
@@ -79,7 +82,10 @@ class InfeedController:
                 self.observation,
             ],
         )
-        hits = self.observation.numpy()[:, 0] != 0
+
+    def before_step(self, time, commands, multipliers, data):
+        """Step the source infeed PLC on a host snapshot."""
+        hits = data["infeed_hits"][:, 0] != 0
         ports = {
             port["port"]: {
                 "PACKER_READY": commands[port["packer"]]["packer_ready"],
@@ -87,9 +93,7 @@ class InfeedController:
             }
             for port in self.interface["ports"]
         }
-        if coordinates is None:
-            coordinates = plant.state.joint_q.numpy()
-        angles = np.degrees(coordinates[self.state_coordinates])
+        angles = np.degrees(data["joint_q"][self.state_coordinates])
         angles = (angles + 180.0) % 360.0 - 180.0
         output = self.plc.step(
             {
@@ -109,9 +113,7 @@ class InfeedController:
                 if self.clear_since[name] is None:
                     self.clear_since[name] = time
                 multipliers[channel] = float(time - self.clear_since[name] >= 0.3)
-        self.positions.assign(
-            np.radians([output["osc"].get(name, 0.0) for name in self.oscillators]).astype(np.float32)
-        )
+        self.plant.link.write(self.positions, np.radians([output["osc"].get(name, 0.0) for name in self.oscillators]))
         self.status = output["state"]
         self.plc.events.clear()
         if len(self.plc.history) > 2000:

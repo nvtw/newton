@@ -121,8 +121,8 @@ class Example:
         )
         if args.controllers and not args.motor_off:
             carton_count = sum(len(cases) for cases in self.scene.metadata["case_inventory"].values())
-            # Four tape bonds per carton, four grasps per packer, and one per palletizer.
-            self.scene.builder.reserve_dynamic_capacity(joints=max(320, 4 * carton_count + 36))
+            # Four tape bonds and one wrap bond per carton, plus packer/palletizer grasps.
+            self.scene.builder.reserve_dynamic_capacity(joints=max(320, 5 * carton_count + 36))
         self.scene.builder.validate_inertia_detailed = args.diagnostics
         # Several source actuator tensors are positive definite but violate
         # the triangle inequality. Keep those authored approximations unless
@@ -268,6 +268,10 @@ class Example:
         self.bottle_bodies = np.asarray(self.scene.bottle_bodies, dtype=np.int32)
         viewer.set_model(self.model)
         viewer.set_camera(wp.vec3(49.0, 48.0, 3.4), pitch=-12.0, yaw=10.0)
+        if self.controller is not None:
+            # Seed the first frame's sensors and host snapshot.
+            self.controller.sense()
+            self.controller.link.publish()
         self.graph = None
         if self.model.device.is_cuda:
             with wp.ScopedCapture() as capture:
@@ -342,14 +346,17 @@ class Example:
             # floors that must keep supporting bottles while being lifted.
             self.pipeline.collide(self.state_0, self.contacts, dt=dt)
             self.solver.step(self.state_0, self.state_0, self.control, self.contacts, dt)
+        if self.controller is not None:
+            self.controller.sense()
 
     def step(self):
-        if self.controller is not None:
-            self.controller.before_step()
         if self.graph is None:
             self.simulate()
         else:
             wp.capture_launch(self.graph)
+        if self.controller is not None:
+            # Host PLCs overlap this frame's GPU work; see PlantController.after_step.
+            self.controller.after_step()
         self.sim_time += self.frame_dt
 
     def render(self):

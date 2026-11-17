@@ -13,6 +13,18 @@ import warp as wp
 from newton.examples.phoenx._bottling_io import _case_drives, _load_controller
 
 
+@wp.kernel
+def _hold_wheels(
+    coordinates: wp.array2d[int],
+    targets: wp.array2d[int],
+    joint_q: wp.array[float],
+    joint_target_q: wp.array[float],
+):
+    # The source velocity-drives each wheel from its current angle.
+    truck = wp.tid()
+    joint_target_q[targets[truck, 0]] = joint_q[coordinates[truck, 0]]
+
+
 @dataclass
 class _PortObservation:
     pallet: int | None
@@ -71,8 +83,9 @@ class _Transfer:
 class FleetController:
     """Apply force-limited wheel, steering, and lift targets to the authored trucks."""
 
-    def __init__(self, model, state, control, asset_root, *, dt=1.0 / 60.0, transport=None):
+    def __init__(self, model, state, control, asset_root, *, dt=1.0 / 60.0, transport=None, link=None):
         self.model, self.state, self.control = model, state, control
+        self.link, self.poses = link, None
         root = asset_root / "scenarios/logistics/palletflow"
         package = "_newton_bottling_fleet"
         _load_controller(package, root / "__init__.py")
@@ -89,14 +102,14 @@ class FleetController:
             [i for i, label in enumerate(model.body_label) if label.endswith("/sm_pallet_block_a08_obj_00")],
             dtype=np.int32,
         )
-        pallet_bodies = self.pallet_bodies
+        fleet = self
 
         class MeasuredFleet(self.source.Fleet):
             def pallets(self):
                 """Read physical pallet poses for the source pickup/place feedback."""
-                return state.body_q.numpy()[pallet_bodies]
+                return fleet.poses[fleet.pallet_bodies]
 
-        self.driver = MeasuredFleet(None, paths, [model.body_label[i] for i in pallet_bodies], 1.0 / dt)
+        self.driver = MeasuredFleet(None, paths, [model.body_label[i] for i in self.pallet_bodies], 1.0 / dt)
         self.trucks = self.driver.by_name
         self.bodies = [model.body_label.index(path + "/body") for path in paths.values()]
         joint_index = {
@@ -113,6 +126,8 @@ class FleetController:
         ).reshape((-1, 3))
         self.q_indices = model.joint_q_start.numpy()[joints]
         self.qd_indices = model.joint_qd_start.numpy()[joints]
+        self.wheel_q = wp.array(self.q_indices, dtype=int, device=model.device)
+        self.wheel_targets = wp.array(model.joint_target_q_start.numpy()[joints], dtype=int, device=model.device)
         self.dofs = wp.array(self.qd_indices.ravel(), dtype=int, device=model.device)
         self.coordinates = wp.array(model.joint_target_q_start.numpy()[joints].ravel(), dtype=int, device=model.device)
         self.positions = wp.array(
@@ -189,7 +204,7 @@ class FleetController:
             cells.update(self.traffic.fp.line_cells(outer, port.ref_at_tips(port.pick_tips_s), port.truck_yaw, True))
         return cells
 
-    def notify_wrapper_ready(self, side, pallet_body):
+    def notify_wrapper_ready(self, side, pallet_body, poses=None):
         """Release a physically seated pallet after wrapping and labelling finish.
 
         The wrapper process must call this only after its physical completion
@@ -204,7 +219,9 @@ class FleetController:
         if len(indices) != 1:
             raise ValueError(f"Unknown wrapper pallet body: {pallet_body}")
         pallet = int(indices[0])
-        if self._port_observation(source, self.state.body_q.numpy()).pallet != pallet:
+        if poses is None:
+            poses = self.state.body_q.numpy()
+        if self._port_observation(source, poses).pallet != pallet:
             raise ValueError(f"Wrapper {side}: completed pallet is not seated at its pickup")
         if any(mission.pallet == pallet for mission in self.missions.values()):
             raise ValueError(f"Wrapper {side}: completed pallet is already reserved")
@@ -342,16 +359,13 @@ class FleetController:
             "waiting": dict(self.waiting),
         }
 
-    def before_step(self, time, *, poses=None, coordinates=None):
-        """Advance queued operations from physical feedback and upload drive targets."""
+    def before_step(self, time, data):
+        """Advance queued operations from a host snapshot and queue drive targets."""
         if not self.driver.trucks:
             return
-        if coordinates is None:
-            coordinates = self.state.joint_q.numpy()
-        if poses is None:
-            poses = self.state.body_q.numpy()
-        q = coordinates[self.q_indices]
-        qd = self.state.joint_qd.numpy()[self.qd_indices]
+        self.poses = poses = data["body_q"]
+        q = data["joint_q"][self.q_indices]
+        qd = data["joint_qd"][self.qd_indices]
         senses = []
         for i, pose in enumerate(poses[self.bodies]):
             sense = self.source.Sense()
@@ -384,8 +398,8 @@ class FleetController:
                 raise RuntimeError(f"Forklift {truck.name}: {truck.failed}")
             position[i] = (q[i, 0], self.source.STEER_SIGN * truck.steer, truck.lift_cmd)
             velocity[i, 0] = truck.v / (self.planner.FK_WHEEL_R * max(math.cos(truck.steer), 0.3))
-        self.positions.assign(position.ravel())
-        self.velocities.assign(velocity.ravel())
+        self.link.write(self.positions, position.ravel())
+        self.link.write(self.velocities, velocity.ravel())
 
     def simulate(self):
         """Apply the current commands using the existing graph-capturable drive I/O."""
@@ -401,5 +415,11 @@ class FleetController:
                     self.control.joint_target_q,
                     self.control.joint_target_qd,
                 ],
+                device=self.model.device,
+            )
+            wp.launch(
+                _hold_wheels,
+                dim=len(self.q_indices),
+                inputs=[self.wheel_q, self.wheel_targets, self.state.joint_q, self.control.joint_target_q],
                 device=self.model.device,
             )

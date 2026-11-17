@@ -10,7 +10,13 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton.examples.phoenx._bottling_io import _case_drives, _case_photoeyes, _load_controller, _ray_box
+from newton.examples.phoenx._bottling_io import (
+    _CASE_PHOTOEYE_BATCH_SIZE,
+    _case_drives,
+    _case_photoeyes,
+    _load_controller,
+    _ray_box,
+)
 from newton.solvers import phoenx
 
 
@@ -184,6 +190,21 @@ class TransportController:
             ]
         )
         self.case_roots = np.asarray([bodies[0] for bodies in plant.case_body_groups.values()], dtype=np.int32)
+        self.arm_coordinates = [
+            [
+                self.q_starts[scene.joints[f"/Plant/Line/Palletizers/{name}/KR40/Joints/{a}"]]
+                for a in ("A1", "A2", "A3", "A6")
+            ]
+            for name in self.names
+        ]
+        plant.link.watch("transport_hits", self.hits)
+        plant.link.watch("transport_held", self.held)
+        plant.link.watch("body_q", plant.state.body_q, np.r_[self.pallet_bodies, self.case_roots])
+        plant.link.watch(
+            "joint_q",
+            plant.state.joint_q,
+            np.r_[[self.q_starts[joint] for _, joint, _ in self.mechanisms.values()], np.ravel(self.arm_coordinates)],
+        )
         self.station_state = ["LOADING"] * len(self.names)
         self.station_ready_since = [None] * len(self.names)
 
@@ -222,13 +243,17 @@ class TransportController:
                 self.station_ready_since[i] = None
             self.station_state[i] = state
 
-    def before_step(self, time, multipliers, *, poses=None, coordinates=None):
+    def sense(self):
+        """Evaluate the conveyor photo-eyes on the device; graph-capturable."""
         plant, model = self.plant, self.plant.model
-        self._observe_stations(time, poses)
         self.hits.zero_()
         wp.launch(
             _case_photoeyes,
-            dim=(len(self.eye_names), 32),
+            dim=(
+                len(self.eye_names),
+                (len(plant.case_shapes) + _CASE_PHOTOEYE_BATCH_SIZE - 1) // _CASE_PHOTOEYE_BATCH_SIZE,
+                32,
+            ),
             block_dim=32,
             inputs=[
                 plant.state.body_q,
@@ -246,10 +271,14 @@ class TransportController:
                 self.hits,
             ],
         )
-        beams = dict(zip(self.eye_names, self.hits.numpy() != 0, strict=True))
+
+    def before_step(self, time, multipliers, data):
+        """Step the source conveyor and palletizer PLCs on a host snapshot."""
+        plant, model = self.plant, self.plant.model
+        coordinates = data["joint_q"]
+        self._observe_stations(time, data["body_q"])
+        beams = dict(zip(self.eye_names, data["transport_hits"] != 0, strict=True))
         self.beams = beams
-        if coordinates is None:
-            coordinates = plant.state.joint_q.numpy()
         position = {name: float(coordinates[self.q_starts[joint]]) for name, (_, joint, _) in self.mechanisms.items()}
         output = self.conveyors.step(time, beams, position)
         for zone, speed in output["speeds"].items():
@@ -263,7 +292,7 @@ class TransportController:
                 velocity = output["pushers"][name] * mechanism["dir"] * mechanism["speed"]
             q.append(target)
             qd.append(velocity)
-        held = self.held.numpy()
+        held = data["transport_held"]
         commands = np.zeros(4, dtype=np.int32)
         for i, (name, palletizer) in enumerate(self.palletizers.items()):
             station = self.conveyors.stations[name]
@@ -287,19 +316,15 @@ class TransportController:
             elif result["cmd"] == "open":
                 self.closing_until[i] = 0.0
             commands[i] = -1 if result["cmd"] == "open" else int(held[i] < 0 and time < self.closing_until[i])
-            actual = [
-                coordinates[self.q_starts[plant.scene.joints[f"/Plant/Line/Palletizers/{name}/KR40/Joints/{a}"]]]
-                for a in ("A1", "A2", "A3", "A6")
-            ]
-            actual = np.asarray(actual)
+            actual = coordinates[self.arm_coordinates[i]]
             actual += 2.0 * np.pi * np.round((result["q"] - actual) / (2.0 * np.pi))
             self.integral[i] += 4.0 * (result["q"] - actual) / 60.0
             q.extend(result["q"] + self.integral[i])
             qd.extend(result["qd"])
             palletizer.events.clear()
-        self.commands.assign(commands)
-        self.positions.assign(np.asarray(q, dtype=np.float32))
-        self.velocities.assign(np.asarray(qd, dtype=np.float32))
+        plant.link.write(self.commands, commands)
+        plant.link.write(self.positions, q)
+        plant.link.write(self.velocities, qd)
         self.conveyors.events.clear()
 
     def can_accept(self, packer):

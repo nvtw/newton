@@ -15,7 +15,13 @@ import warp as wp
 import newton
 from newton.examples.phoenx._bottling_control import _Belt, _belt_speeds, _seal_cases, _target_coordinates
 from newton.examples.phoenx._bottling_fleet import FleetController, _Transfer
-from newton.examples.phoenx._bottling_io import _case_drives, _photoeyes, _valves
+from newton.examples.phoenx._bottling_io import (
+    _CASE_PHOTOEYE_BATCH_SIZE,
+    _case_drives,
+    _case_photoeyes,
+    _photoeyes,
+    _valves,
+)
 from newton.examples.phoenx._bottling_scene import load_plant
 from newton.examples.phoenx._bottling_wrap import (
     WrapperController,
@@ -196,7 +202,7 @@ class TestBottlingPlant(unittest.TestCase):
             folder = root / "plant/lines_1x8/wrapline"
             folder.mkdir(parents=True)
             builder = newton.ModelBuilder()
-            channels, ports, pallets, strands = {}, {}, [], []
+            channels, ports, pallets, strands, rotors = {}, {}, [], [], []
             for line, y, side in (("WL_U", 2.0, 1), ("WL_D", -2.0, -1)):
                 prefix = f"/Plant/WrapLine/Lines/{line}"
                 pallet = builder.add_body(
@@ -220,6 +226,7 @@ class TestBottlingPlant(unittest.TestCase):
                     cfg=builder.ShapeConfig(density=250.0 / (0.9 * 1.1), mu=0.7, gap=0.002),
                 )
                 rotor = builder.add_link(xform=wp.transform(wp.vec3(10, y, 3)), mass=1.0, inertia=wp.mat33(np.eye(3)))
+                rotors.append(rotor)
                 joint = builder.add_joint_revolute(
                     -1,
                     rotor,
@@ -250,9 +257,9 @@ class TestBottlingPlant(unittest.TestCase):
                     "ports": {"drop": {"xy": [0, y], "z": 0.5}},
                     "sensors": {
                         name: {"origin": [x, y + side * 0.615, 0.532], "direction": [0, -side, 0], "distance": 0.5}
-                        for name, x in (("PE_DROP", 0), ("PE_WRAP", 1.0))
+                        for name, x in (("PE_DROP", 0), ("PE_WRAP", 1.0), ("PE_PICK", 1.8))
                     },
-                    "timers_s": {"infeed_timeout_s": 8.0},
+                    "timers_s": {"infeed_timeout_s": 8.0, "settle_s": 0.5},
                 }
                 (folder / f"{line}.json").write_text(json.dumps(spec))
             model = builder.finalize()
@@ -278,13 +285,17 @@ class TestBottlingPlant(unittest.TestCase):
             for frame in range(600):
                 if frame == 60:
                     fleet.missions.clear()
+                if frame == 62:
                     control.joint_target_q.fill_(0.5)
                 if frame == 90:
                     control.joint_target_q.zero_()
                 speed = np.ones(len(channels), dtype=np.float32)
-                wrapper.before_step(frame / 120, speed, poses=state.body_q.numpy(), coordinates=state.joint_q.numpy())
-                if frame < 90:
+                wrapper.before_step(frame / 120, speed, wrapper.observe())
+                if frame < 60:
                     np.testing.assert_array_equal(speed, 0)
+                if frame == 61:
+                    for line in wrapper.report().values():
+                        self.assertEqual(line["state"], "WAIT_DROP", line)
                 for label, channel in channels.items():
                     if label.endswith(("Z4", "Z5")):
                         self.assertEqual(speed[channel], 0)
@@ -293,6 +304,12 @@ class TestBottlingPlant(unittest.TestCase):
                     velocity[:, 0] = 0.2 * speed[channel]
                     mesh.mesh.velocities.assign(velocity)
                 state.clear_forces()
+                if frame == 60:
+                    # The rotor is initially at home but has not established
+                    # quiet support. A real torque exposes premature admission.
+                    forces = np.zeros((model.body_count, 6), dtype=np.float32)
+                    forces[rotors, 5] = 10.0
+                    state.body_f.assign(forces)
                 solver.collide(state, contacts, dt=1 / 120)
                 solver.step(state, state, control, contacts, 1 / 120)
             for line in wrapper.report().values():
@@ -803,6 +820,48 @@ def Xform "Plant" {
             ],
         )
         np.testing.assert_array_equal(hits.numpy().reshape(-1), np.arange(sensor_count) % 3 == 0)
+
+    def test_case_photoeyes_partition_shape_batches(self):
+        """Preserve geometry hits across batches, duplicate hits, and partial warps."""
+        devices = ["cpu"] + (["cuda:0"] if wp.is_cuda_available() else [])
+        for device in devices:
+            with self.subTest(device=device), wp.ScopedDevice(device):
+                count = 517
+                mesh = newton.Mesh.create_box(0.03, 0.03, 0.115, compute_inertia=False)
+                mesh_id = mesh.finalize()
+                centers = [0.2 * i for i in range(count)]
+                centers[257] = centers[513] = centers[1]
+                origins = np.asarray([(centers[i], 0.0, 0.2) for i in (0, 1, 255, 256, 511, 512, 10, 11)])
+                origins[6, 1] = 0.08
+                hits = wp.zeros(8, dtype=int)
+                inputs = [
+                    wp.array([wp.transform((x, 0.0, 0.0), wp.quat_identity()) for x in centers], dtype=wp.transform),
+                    wp.array(np.arange(count), dtype=int),
+                    wp.array([wp.transform_identity()] * count, dtype=wp.transform),
+                    wp.array([(1.0, 1.0, 1.0)] * count, dtype=wp.vec3),
+                    wp.array(
+                        [int(newton.GeoType.BOX if i % 2 == 0 else newton.GeoType.MESH) for i in range(count)],
+                        dtype=int,
+                    ),
+                    wp.full(count, mesh_id, dtype=wp.uint64),
+                    wp.array(np.arange(count), dtype=int),
+                    wp.array([(-0.03, -0.03, -0.115)] * count, dtype=wp.vec3),
+                    wp.array([(0.03, 0.03, 0.115)] * count, dtype=wp.vec3),
+                    wp.array(origins, dtype=wp.vec3),
+                    wp.array([(0.0, 0.0, -1.0)] * 8, dtype=wp.vec3),
+                    wp.array([0.1] * 7 + [0.01], dtype=float),
+                    hits,
+                ]
+                batches = (count + _CASE_PHOTOEYE_BATCH_SIZE - 1) // _CASE_PHOTOEYE_BATCH_SIZE
+                wp.launch(_case_photoeyes, dim=(8, batches, 32), block_dim=32, inputs=inputs)
+                np.testing.assert_array_equal(hits.numpy(), [1, 1, 1, 1, 1, 1, 0, 0])
+                if wp.get_device().is_cuda:
+                    with wp.ScopedCapture() as capture:
+                        hits.zero_()
+                        wp.launch(_case_photoeyes, dim=(8, batches, 32), block_dim=32, inputs=inputs)
+                    for _ in range(3):
+                        wp.capture_launch(capture.graph)
+                        np.testing.assert_array_equal(hits.numpy(), [1, 1, 1, 1, 1, 1, 0, 0])
 
     @unittest.skipUnless(wp.is_cuda_available(), "Runtime sealing requires CUDA")
     def test_tape_bonds_require_closed_flaps(self):

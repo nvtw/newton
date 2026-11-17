@@ -1,0 +1,1 @@
+Add an ideal rigid-wrap process to the PhoenX bottling example: measure the wrapper motion, bond seated sealed cartons to their pallet without moving bodies, and convey the load to a physically verified outbound pickup. Film stresses and label application are not simulated.
