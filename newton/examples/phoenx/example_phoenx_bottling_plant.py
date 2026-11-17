@@ -542,7 +542,7 @@ class Example:
             "--correct-inertia", action="store_true", help="Balance source actuator inertia approximations."
         )
         parser.add_argument("--substeps", type=int, default=2, help="Collision and solver steps per 60 Hz frame.")
-        parser.add_argument("--iterations", type=int, default=20)
+        parser.add_argument("--iterations", type=int, default=16)
         parser.add_argument(
             "--sleeping-velocity-threshold",
             type=float,

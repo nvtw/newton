@@ -1,1 +1,1 @@
-PhoenX temporal contact sweeps now under-relax (weight 1/2) contact columns that press on a light body shared by many contact rows, such as a packed carton. This removes the jitter of packed cartons with fewer sweeps, so the bottling-plant example now runs 20 sweeps per step instead of 24.
+PhoenX temporal contact sweeps now under-relax (weight 1/2) contact columns that press on a light body shared by many contact rows, such as a packed carton. This removes the jitter of packed cartons with fewer sweeps, so the bottling-plant example now runs 16 sweeps per step instead of 24.
