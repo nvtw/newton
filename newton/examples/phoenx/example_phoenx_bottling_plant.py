@@ -184,8 +184,6 @@ class Example:
         self.pipeline.set_broad_phase_filter_data(self.filter_data)
         if args.joint_mode == "maximal_pgs":
             mass_splitting = args.mass_splitting
-            if mass_splitting is None:
-                mass_splitting = self.model.device.is_cuda and args.temporal_iterations
             # Exact solves are faster for these driven scalar-joint mechanisms.
             # D6 closures and runtime grasp/tape joints remain local blocks.
             exact = np.asarray(
@@ -541,8 +539,8 @@ class Example:
         parser.add_argument(
             "--mass-splitting",
             action=argparse.BooleanOptionalAction,
-            default=None,
-            help="Use overflow mass splitting. Defaults to enabled for CUDA maximal PGS with temporal iterations.",
+            default=False,
+            help="Enable experimental overflow-only mass splitting. Off by default for stable pallet placement.",
         )
         parser.add_argument(
             "--max-colored-partitions",

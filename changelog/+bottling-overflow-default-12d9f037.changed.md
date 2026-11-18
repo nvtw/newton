@@ -1,1 +1,1 @@
-Enable twelve-color overflow mass splitting by default for the bottling plant's CUDA temporal PGS solver. Use `--no-mass-splitting` to restore the previous configuration.
+Use regular colored sweeps by default in the PhoenX bottling plant for stable pallet placement. Use `--mass-splitting` to enable the experimental CUDA overflow path.

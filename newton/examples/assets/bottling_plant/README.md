@@ -107,16 +107,18 @@ stock or unlimited operation. Autonomous
 logistics and continuous replenishment remain incomplete as described above.
 No 60 rendered FPS result has been validated for sustained end-to-end production.
 
-The CUDA maximal PGS solver with temporal iterations uses twelve regular
-colors followed by an overflow-only mass-splitting partition. Set the color
-cap with `--max-colored-partitions` or disable mass splitting with
-`--no-mass-splitting` for comparison.
-Timing output includes the actual partition count and overflow size.
+The factory defaults to regular colored sweeps. Use `--mass-splitting` to
+test the CUDA temporal PGS overflow path. It uses twelve regular colors by
+default, with the cap set by `--max-colored-partitions`. Timing output
+includes the actual partition count and overflow size.
 
-With these settings, a 130-second headless CUDA test retained twelve bottles
-in each of 48 sealed cartons, with 4, 3, 3, and 2 deliveries from the four
-palletizers and no controller faults. The two-carton stack with taped flaps
-also passed its rest check with active overflow.
+In a matched pair of 160-second headless CUDA runs, both configurations
+sealed 64 cartons and placed the same 26 cartons in the same slots. With
+overflow enabled, 12 cartons tilted more than 2 degrees. With regular
+colored sweeps, all 26 stayed within 2 degrees. The worst carton excursion
+relative to the pallet from one to five seconds after release dropped from
+9.29 mm to 0.14 mm with regular sweeps. The pre-stacked two-carton rest test
+passes with both configurations.
 
 An initial twelve-color experiment failed the captured real-carton stability
 test because overflow copies changed the effective normal compliance. After
