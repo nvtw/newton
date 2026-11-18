@@ -77,8 +77,8 @@ class TestContactPrepareGrid(unittest.TestCase):
                         solver.step(state, state, model.control(), contacts, 1 / 240)
                     self.assertTrue(checked)
 
-    def test_chunk_bound_reduces_grid_without_changing_state(self):
-        """Preserve contact state and momentum with fewer idle prepare lanes."""
+    def test_bounded_prepare_preserves_contact_state(self):
+        """Prepare all columns and preserve momentum with fewer blocks and row lanes."""
         launch = wp.launch
 
         def run(split, chunk, full_grid):
@@ -88,6 +88,10 @@ class TestContactPrepareGrid(unittest.TestCase):
                 if "_get_parallel_contact_prepare_kernel" in kernel.func.__qualname__:
                     if full_grid:
                         kwargs["dim"] = (kwargs["dim"][0], 128)
+                    else:
+                        # Force multiple column visits per group in the small fixture.
+                        kwargs["dim"] = (1, kwargs["dim"][1])
+                        kwargs["inputs"] = [*kwargs["inputs"][:-1], wp.int32(1)]
                     dimensions.append(kwargs["dim"])
                 return launch(kernel, *args, **kwargs)
 
@@ -96,6 +100,7 @@ class TestContactPrepareGrid(unittest.TestCase):
             self.assertTrue(dimensions)
             expected = 128 if full_grid else min(128, chunk or 128)
             self.assertTrue(all(dim[1] == expected for dim in dimensions))
+            self.assertGreater(int(states[0]["column_count"][0]), 1)
             return states
 
         for split in (False, True):

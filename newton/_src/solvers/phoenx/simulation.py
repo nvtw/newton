@@ -5626,23 +5626,7 @@ class PhoenXWorld:
                     )
             phase = "cached_prepare"
         elif phase == "prepare" and self.parallel_contact_prepare:
-            if self.max_contact_columns:
-                wp.launch(
-                    _get_parallel_contact_prepare_kernel(True, soft_pd),
-                    dim=(self.max_contact_columns, min(128, self.contact_chunk_size or 128)),
-                    inputs=[
-                        self._contact_cols,
-                        self._ingest_scratch.num_contact_columns,
-                        self.bodies,
-                        self._particles_or_sentinel(),
-                        self.num_bodies,
-                        idt,
-                        cc,
-                        self._active_contact_views(),
-                        self._copy_state,
-                    ],
-                    device=self.device,
-                )
+            self._launch_parallel_contact_prepare(idt, cc, True, soft_pd)
             phase = "cached_prepare"
         cooperative_joints = use_cooperative_joint_rhs(
             phase=phase,
@@ -5705,6 +5689,33 @@ class PhoenXWorld:
             device=self.device,
         )
 
+    def _launch_parallel_contact_prepare(
+        self, idt: wp.float32, cc: ContactContainer, mass_splitting: bool, soft_pd: bool
+    ) -> None:
+        if not self.max_contact_columns:
+            return
+        rows_per_column = min(128, self.contact_chunk_size or 128)
+        # The active column count lives on the device. Bound the captured grid
+        # and stride over active columns instead of launching for full capacity.
+        column_stride = min(self.max_contact_columns, self.device.sm_count * 1024 // rows_per_column)
+        wp.launch(
+            _get_parallel_contact_prepare_kernel(mass_splitting, soft_pd),
+            dim=(column_stride, rows_per_column),
+            inputs=[
+                self._contact_cols,
+                self._ingest_scratch.num_contact_columns,
+                self.bodies,
+                self._particles_or_sentinel(),
+                wp.int32(self.num_bodies),
+                idt,
+                cc,
+                self._active_contact_views(),
+                self._copy_state,
+                wp.int32(column_stride),
+            ],
+            device=self.device,
+        )
+
     def _singleworld_head_plus_tail_sweep(
         self,
         head_kernel,
@@ -5736,27 +5747,10 @@ class PhoenXWorld:
             return
 
         if self.parallel_contact_prepare and head_kernel is self._singleworld_kernels()[0]:
-            if self.max_contact_columns:
-                cc = self._contact_container if contact_container is None else contact_container
-                wp.launch(
-                    _get_parallel_contact_prepare_kernel(
-                        self.mass_splitting_enabled,
-                        self._dispatch_specialization_flags()["has_soft_contact_pd"],
-                    ),
-                    dim=(self.max_contact_columns, min(128, self.contact_chunk_size or 128)),
-                    inputs=[
-                        self._contact_cols,
-                        self._ingest_scratch.num_contact_columns,
-                        self.bodies,
-                        self._particles_or_sentinel(),
-                        wp.int32(self.num_bodies),
-                        idt,
-                        cc,
-                        self._active_contact_views(),
-                        self._copy_state,
-                    ],
-                    device=self.device,
-                )
+            cc = self._contact_container if contact_container is None else contact_container
+            self._launch_parallel_contact_prepare(
+                idt, cc, self.mass_splitting_enabled, self._dispatch_specialization_flags()["has_soft_contact_pd"]
+            )
             head_kernel, tail_kernel = self._singleworld_cached_prepare_kernels()
 
         if not self.device.is_cuda:

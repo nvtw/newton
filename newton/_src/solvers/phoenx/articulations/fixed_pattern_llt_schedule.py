@@ -95,8 +95,7 @@ class PersistentFactorSchedule:
 
         self.task_panel = task_array(task_panel)
         self.task_mechanism = task_array(task_mechanism)
-        # Nonzero entries select the mechanisms to refactor; tasks of the other
-        # mechanisms keep their stored factor and only release dependents.
+        # Nonzero entries select the mechanisms whose panel tasks run.
         if mechanism_dirty is None:
             mechanism_dirty = wp.ones(max(mechanism_ids, default=-1) + 1, dtype=wp.int32, device=device)
         self.mechanism_dirty = mechanism_dirty
@@ -113,6 +112,7 @@ class PersistentFactorSchedule:
         self.queue = wp.full(panel_count, -1, dtype=wp.int32, device=device)
         self.head = wp.zeros(1, dtype=wp.int32, device=device)
         self.tail = wp.zeros(1, dtype=wp.int32, device=device)
+        self.work_count = wp.zeros(1, dtype=wp.int32, device=device)
         self.remaining = wp.zeros(panel_count, dtype=wp.int32, device=device)
         worker_count = min(panel_count, max(1, 4 * device.sm_count))
         self.worker_task = wp.full(worker_count, -1, dtype=wp.int32, device=device)
@@ -126,16 +126,20 @@ class PersistentFactorSchedule:
         factor: wp.array[wp.float32],
     ) -> None:
         """Initialize and drain the dependency-ready panel queue."""
+        self.work_count.zero_()
         wp.launch(
             initialize_panel_queue,
             dim=self.task_panel.size,
             inputs=[
                 self.initial_task,
                 self.remaining_initial,
+                self.task_mechanism,
+                self.mechanism_dirty,
                 self.queue,
                 self.head,
                 self.tail,
                 self.remaining,
+                self.work_count,
             ],
             device=self.device,
         )
@@ -162,6 +166,7 @@ class PersistentFactorSchedule:
                 self.worker_task,
                 self.task_mechanism,
                 self.mechanism_dirty,
+                self.work_count,
             ],
             device=self.device,
         )

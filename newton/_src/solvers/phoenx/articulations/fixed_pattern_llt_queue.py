@@ -92,16 +92,29 @@ def factor_partial_panel_row(
 def initialize_panel_queue(
     initial_task: wp.array[wp.int32],
     remaining_initial: wp.array[wp.int32],
+    task_mechanism: wp.array[wp.int32],
+    mechanism_dirty: wp.array[wp.int32],
     queue: wp.array[wp.int32],
     head: wp.array[wp.int32],
     tail: wp.array[wp.int32],
     remaining: wp.array[wp.int32],
+    work_count: wp.array[wp.int32],
 ):
     index = wp.tid()
     queue[index] = wp.int32(-1)
     remaining[index] = remaining_initial[index]
     if index < initial_task.shape[0]:
-        queue[index] = initial_task[index]
+        root = initial_task[index]
+        queue[index] = root
+        # Keep one queue entry for each clean root. Only dirty mechanisms
+        # enqueue the rest of their contiguous panel tasks.
+        count = wp.int32(1)
+        if mechanism_dirty[task_mechanism[root]] != 0:
+            end = queue.shape[0]
+            if index + 1 < initial_task.shape[0]:
+                end = initial_task[index + 1]
+            count = end - root
+        wp.atomic_add(work_count, 0, count)
     if index == 0:
         head[0] = wp.int32(0)
         tail[0] = initial_task.shape[0]
@@ -185,9 +198,12 @@ def make_persistent_factor_kernel(block_size: int):
         worker_task: wp.array[wp.int32],
         task_mechanism: wp.array[wp.int32],
         mechanism_dirty: wp.array[wp.int32],
+        work_count: wp.array[wp.int32],
     ):
         worker, lane = wp.tid()
-        task_count = task_panel.shape[0]
+        task_count = work_count[0]
+        if worker >= task_count:
+            return
 
         while True:
             if lane == 0:
@@ -204,16 +220,15 @@ def make_persistent_factor_kernel(block_size: int):
             if task < 0:
                 break
 
+            # A clean mechanism retains its factor and publishes no descendants.
+            if mechanism_dirty[task_mechanism[task]] == wp.int32(0):
+                _block_sync()
+                continue
+
             panel_id = task_panel[task]
             diagonal_panel = task_diagonal_panel[task]
             active_rows = task_active_rows[task]
-            # Uniform per worker block. A clean mechanism keeps its stored
-            # factor; its task only releases the dependent tasks below.
-            refactor = mechanism_dirty[task_mechanism[task]] != wp.int32(0)
-
-            if not refactor:
-                pass
-            elif panel_id == diagonal_panel:
+            if panel_id == diagonal_panel:
                 diagonal_matrix = wp.array(
                     ptr=_get_float_array_offset_ptr(matrix, diagonal_panel * tile_elements),
                     shape=(block_size, block_size),
