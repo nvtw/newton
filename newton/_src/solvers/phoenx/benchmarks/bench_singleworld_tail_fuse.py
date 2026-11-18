@@ -17,6 +17,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import sys
 import time
 
 import numpy as np
@@ -25,6 +26,7 @@ import warp as wp
 from newton._src.solvers.phoenx.benchmarks.bench_threads_per_world import _extract_solver
 from newton._src.solvers.phoenx.benchmarks.scenarios import dr_legs, g1_flat, h1_flat, tower, tower_grid
 from newton._src.solvers.phoenx.simulation import PhoenXWorld
+from newton._src.solvers.phoenx.simulation_kernels import ONE_LAUNCH_BLOCK_DIM
 
 
 def _parse_csv_ints(value: str) -> tuple[int, ...]:
@@ -64,6 +66,8 @@ def _set_tail_config(world: PhoenXWorld, *, threshold: int, block_dim: int) -> N
         raise ValueError(f"threshold must be >= 0, got {threshold}")
     if threshold > block_dim:
         raise ValueError(f"threshold {threshold} must be <= block_dim {block_dim}")
+    if threshold > ONE_LAUNCH_BLOCK_DIM:
+        raise ValueError(f"threshold {threshold} exceeds the fused sweep's {ONE_LAUNCH_BLOCK_DIM}-thread block")
     world._fuse_threshold = int(threshold)
     world._fuse_tail_block_dim = int(block_dim)
 
@@ -148,7 +152,7 @@ def main() -> None:
         default=["h1", "g1", "dr_legs", "tower"],
     )
     parser.add_argument("--thresholds", type=_parse_csv_ints, default=(0, 64, 128, 256))
-    parser.add_argument("--block-dim", type=int, default=256)
+    parser.add_argument("--block-dim", type=int, default=256, help="Block width of the separate iterate tail kernel.")
     parser.add_argument("--tower-grid-side", type=int, default=2)
     parser.add_argument("--tower-grid-layers", type=int, default=16)
     parser.add_argument("--substeps", type=int, default=1)
@@ -160,12 +164,12 @@ def main() -> None:
     args = parser.parse_args()
 
     wp.init()
-    print(
+    sys.stdout.write(
         f"device={wp.get_device()} thresholds={args.thresholds} block_dim={args.block_dim} "
         f"tower_grid={args.tower_grid_side}x{args.tower_grid_side}x{args.tower_grid_layers} "
-        f"n_runs={args.n_runs} trials={args.trials}"
+        f"n_runs={args.n_runs} trials={args.trials}\n"
     )
-    print("scene threshold min_ms med_ms us_per_solve colors max_color tail_colors tail_rows rel_best")
+    sys.stdout.write("scene threshold min_ms med_ms us_per_solve colors max_color tail_colors tail_rows rel_best\n")
 
     for scene in args.scenes:
         rows = []
@@ -187,10 +191,10 @@ def main() -> None:
         best = min(row[1] for row in rows)
         for threshold, min_ms, med_ms, num_colors, max_color, tail_colors, tail_rows in rows:
             rel_best = min_ms / best if best > 0.0 else float("nan")
-            print(
+            sys.stdout.write(
                 f"{scene:7s} {threshold:9d} {min_ms:8.3f} {med_ms:8.3f} "
                 f"{1000.0 * min_ms / args.n_runs:12.3f} {num_colors:6d} {max_color:9d} "
-                f"{tail_colors:11d} {tail_rows:9d} {rel_best:8.3f}"
+                f"{tail_colors:11d} {tail_rows:9d} {rel_best:8.3f}\n"
             )
 
 
