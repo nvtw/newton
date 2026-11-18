@@ -59,6 +59,7 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
 )
 from newton._src.solvers.phoenx.constraints.constraint_contact_solve import (
     _contact_cached_warmstart_split,
+    _make_contact_iterate_lean,
     contact_cached_warmstart_lean,
     contact_iterate,
     contact_iterate_cloth_aware,
@@ -3343,6 +3344,7 @@ def _make_singleworld_rigid_contact_dispatch_func(
     packed_contact_headers: bool,
     has_sleeping: bool,
     has_soft_contact_pd: bool,
+    moving_surface_only: bool = False,
     is_prepare: bool,
     is_cached_prepare: bool,
     use_bias: bool,
@@ -3471,6 +3473,13 @@ def _make_singleworld_rigid_contact_dispatch_func(
                 iterate_func = contact_iterate if has_soft_contact_pd else contact_iterate_no_soft_pd
             else:
                 iterate_func = contact_iterate_no_sleep if has_soft_contact_pd else contact_iterate_no_sleep_no_soft_pd
+        elif moving_surface_only:
+            iterate_func = _make_contact_iterate_lean(
+                has_sleeping=has_sleeping,
+                has_soft_contact_pd=False,
+                moving_surface_only=True,
+                tangent_mobility_layout=packed_contact_headers,
+            )
         elif has_sleeping:
             if packed_contact_headers:
                 iterate_func = (
@@ -3615,6 +3624,7 @@ def _make_singleworld_dispatch_func(
     packed_contact_headers: bool,
     has_sleeping: bool,
     has_soft_contact_pd: bool,
+    moving_surface_only: bool = False,
     is_prepare: bool,
     is_cached_prepare: bool,
     use_bias: bool,
@@ -3633,6 +3643,7 @@ def _make_singleworld_dispatch_func(
         packed_contact_headers=packed_contact_headers,
         has_sleeping=has_sleeping,
         has_soft_contact_pd=has_soft_contact_pd,
+        moving_surface_only=moving_surface_only,
         is_prepare=is_prepare,
         is_cached_prepare=is_cached_prepare,
         use_bias=use_bias,
@@ -3922,6 +3933,7 @@ def _make_singleworld_rigid_direct_color_func(
     packed_contact_headers: bool,
     has_sleeping: bool,
     has_soft_contact_pd: bool,
+    moving_surface_only: bool = False,
     is_prepare: bool,
     is_cached_prepare: bool,
     use_bias: bool,
@@ -3955,6 +3967,7 @@ def _make_singleworld_rigid_direct_color_func(
         packed_contact_headers=packed_contact_headers,
         has_sleeping=has_sleeping,
         has_soft_contact_pd=has_soft_contact_pd,
+        moving_surface_only=moving_surface_only,
         is_prepare=is_prepare,
         is_cached_prepare=is_cached_prepare,
         use_bias=use_bias,
@@ -4321,6 +4334,7 @@ def _make_singleworld_head_color_func(
     packed_contact_headers: bool = False,
     has_sleeping: bool = True,
     has_soft_contact_pd: bool = True,
+    moving_surface_only: bool = False,
     rigid_direct: bool = False,
     direct_regular_colors: bool = False,
     patch_friction: bool = False,
@@ -4350,6 +4364,7 @@ def _make_singleworld_head_color_func(
         packed_contact_headers=packed_contact_headers,
         has_sleeping=has_sleeping,
         has_soft_contact_pd=has_soft_contact_pd,
+        moving_surface_only=moving_surface_only,
         is_prepare=is_prepare,
         is_cached_prepare=is_cached_prepare,
         use_bias=use_bias,
@@ -4364,6 +4379,7 @@ def _make_singleworld_head_color_func(
         packed_contact_headers=packed_contact_headers,
         has_sleeping=has_sleeping,
         has_soft_contact_pd=has_soft_contact_pd,
+        moving_surface_only=moving_surface_only,
         is_prepare=is_prepare,
         is_cached_prepare=is_cached_prepare,
         use_bias=use_bias,
@@ -4385,6 +4401,7 @@ def _make_singleworld_head_color_func(
             packed_contact_headers=packed_contact_headers,
             has_sleeping=has_sleeping,
             has_soft_contact_pd=has_soft_contact_pd,
+            moving_surface_only=moving_surface_only,
             is_prepare=is_prepare,
             is_cached_prepare=is_cached_prepare,
             use_bias=use_bias,
@@ -4545,6 +4562,7 @@ def _make_singleworld_tail_color_func(
     packed_contact_headers: bool = False,
     has_sleeping: bool = True,
     has_soft_contact_pd: bool = True,
+    moving_surface_only: bool = False,
     rigid_direct: bool = False,
     direct_regular_colors: bool = False,
     patch_friction: bool = False,
@@ -4573,6 +4591,7 @@ def _make_singleworld_tail_color_func(
         packed_contact_headers=packed_contact_headers,
         has_sleeping=has_sleeping,
         has_soft_contact_pd=has_soft_contact_pd,
+        moving_surface_only=moving_surface_only,
         is_prepare=is_prepare,
         is_cached_prepare=is_cached_prepare,
         use_bias=use_bias,
@@ -4587,6 +4606,7 @@ def _make_singleworld_tail_color_func(
         packed_contact_headers=packed_contact_headers,
         has_sleeping=has_sleeping,
         has_soft_contact_pd=has_soft_contact_pd,
+        moving_surface_only=moving_surface_only,
         is_prepare=is_prepare,
         is_cached_prepare=is_cached_prepare,
         use_bias=use_bias,
@@ -4721,6 +4741,7 @@ def _make_singleworld_persistent_kernel(
     packed_contact_headers: bool = False,
     has_sleeping: bool = True,
     has_soft_contact_pd: bool = True,
+    moving_surface_only: bool = False,
     rigid_direct: bool = False,
     direct_regular_colors: bool = False,
     patch_friction: bool = False,
@@ -4753,6 +4774,7 @@ def _make_singleworld_persistent_kernel(
         packed_contact_headers=packed_contact_headers,
         has_sleeping=has_sleeping,
         has_soft_contact_pd=has_soft_contact_pd,
+        moving_surface_only=moving_surface_only,
         rigid_direct=rigid_direct,
         direct_regular_colors=direct_regular_colors,
         patch_friction=patch_friction,
@@ -4870,6 +4892,7 @@ def _make_singleworld_fused_kernel(
     packed_contact_headers: bool = False,
     has_sleeping: bool = True,
     has_soft_contact_pd: bool = True,
+    moving_surface_only: bool = False,
     rigid_direct: bool = False,
     direct_regular_colors: bool = False,
     patch_friction: bool = False,
@@ -4893,6 +4916,7 @@ def _make_singleworld_fused_kernel(
         packed_contact_headers=packed_contact_headers,
         has_sleeping=has_sleeping,
         has_soft_contact_pd=has_soft_contact_pd,
+        moving_surface_only=moving_surface_only,
         rigid_direct=rigid_direct,
         direct_regular_colors=direct_regular_colors,
         patch_friction=patch_friction,
@@ -4994,6 +5018,7 @@ def get_singleworld_kernel(
     packed_contact_headers: bool = False,
     has_sleeping: bool = True,
     has_soft_contact_pd: bool = True,
+    moving_surface_only: bool = False,
     rigid_direct: bool = False,
     direct_regular_colors: bool = False,
     patch_friction: bool = False,
@@ -5041,6 +5066,8 @@ def get_singleworld_kernel(
         "patch_friction": patch_friction,
         "bilateral_joint_blocks": bilateral_joint_blocks,
     }
+    if moving_surface_only:
+        axes["moving_surface_only"] = True
     kernel = factory(**axes)
     # Lets the one-launch sweep rebuild the same per-colour code paths.
     kernel.phoenx_axes = tuple(sorted(axes.items()))

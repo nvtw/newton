@@ -90,6 +90,21 @@ class TestConveyorSurface(unittest.TestCase):
             np.testing.assert_allclose(qd[3:], 0.0, atol=5.0e-2)
             self.assertAlmostEqual(float(state_0.body_q.numpy()[body][2]), 0.1, delta=3.0e-3)
 
+        # A caller can supply per-contact material coefficients on the next step.
+        # Permit the general normal response even when the same belt stays active.
+        conveyor_head = solver.world._singleworld_kernels()[2]
+        material_contacts = newton.Contacts(
+            contacts.rigid_contact_max,
+            contacts.soft_contact_max,
+            device=model.device,
+            contact_matching=True,
+            rigid_contact_surface_velocity=True,
+            per_contact_shape_properties=True,
+        )
+        solver.collide(state_0, material_contacts)
+        solver.step(state_0, state_1, None, material_contacts, 1.0 / 60.0)
+        self.assertIsNot(solver.world._singleworld_kernels()[2], conveyor_head)
+
 
 @unittest.skipUnless(wp.is_cuda_available(), "conveyor tests use CUDA graph capture")
 class TestConveyorContactModes(unittest.TestCase):
@@ -166,7 +181,11 @@ class TestConveyorContactModes(unittest.TestCase):
                             if sleeping:
                                 roots = solver.world.bodies.island_root.numpy()
                                 self.assertGreaterEqual(roots[stationary + 1], 0)
-                                self.assertTrue(np.all(roots[np.asarray(bodies) + 1] < 0))
+                                belt_roots = roots[np.asarray(bodies) + 1]
+                                if scale == 0.0:
+                                    self.assertTrue(np.all(belt_roots >= 0))
+                                else:
+                                    self.assertTrue(np.all(belt_roots < 0))
 
 
 if __name__ == "__main__":

@@ -1436,6 +1436,7 @@ def _make_contact_iterate_at(
     has_mass_splitting: bool = True,
     use_bias: bool = True,
     has_soft_contact_pd: bool = True,
+    moving_surface_only: bool = False,
     patch_friction: bool = False,
     staged_body_properties: bool = False,
     cooperative_lanes: int = 1,
@@ -1444,6 +1445,7 @@ def _make_contact_iterate_at(
     normal_first: bool = False,
     tangent_mobility_layout: bool = False,
 ):
+    has_surface_target = has_soft_contact_pd or moving_surface_only
     if tangent_mobility_layout and normal_first:
         raise ValueError("The normal-first projector requires inverse tangent effective masses")
     if tangent_mobility_layout:
@@ -1668,7 +1670,7 @@ def _make_contact_iterate_at(
                     vel_rel = v2 + wp.cross(w2, r2) - v1 - wp.cross(w1, r1)
 
                 jv_n = wp.dot(vel_rel, n)
-                if wp.static(has_soft_contact_pd):
+                if wp.static(has_surface_target):
                     jv_n += cc_get_surface_target(cc, k)[2]
                 jv_t1 = wp.float32(0.0)
                 jv_t2 = wp.float32(0.0)
@@ -1687,7 +1689,7 @@ def _make_contact_iterate_at(
                         eff_t2 = cc_get_eff_t2(cc, k)
                     # Moving meshes are nonconvex and use point rows even in
                     # patch mode. Preserve their per-contact velocity field.
-                    if wp.static(has_soft_contact_pd):
+                    if wp.static(has_surface_target):
                         if not use_patch and cc.surface_target.shape[0] > 0:
                             target = cc_get_surface_target(cc, k)
                             jv_t1 += target[0]
@@ -3134,8 +3136,21 @@ def contact_iterate_lean_no_sleep(
         )
 
 
-def _make_contact_iterate_lean(*, has_sleeping: bool, has_soft_contact_pd: bool, tangent_mobility_layout: bool):
-    if has_soft_contact_pd:
+@functools.cache
+def _make_contact_iterate_lean(
+    *, has_sleeping: bool, has_soft_contact_pd: bool, tangent_mobility_layout: bool, moving_surface_only: bool = False
+):
+    if moving_surface_only:
+        options = {
+            "cloth_support": False,
+            "has_mass_splitting": False,
+            "has_soft_contact_pd": False,
+            "moving_surface_only": True,
+            "tangent_mobility_layout": tangent_mobility_layout,
+        }
+        iterate_at = _make_contact_iterate_at(use_bias=True, **options)
+        relax_at = _make_contact_iterate_at(use_bias=False, **options)
+    elif has_soft_contact_pd:
         iterate_at = contact_iterate_at_lean_mobility if tangent_mobility_layout else contact_iterate_at_lean
         relax_at = contact_relax_at_lean_mobility if tangent_mobility_layout else contact_relax_at_lean
     else:

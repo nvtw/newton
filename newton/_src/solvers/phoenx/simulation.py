@@ -1391,6 +1391,7 @@ class PhoenXWorld:
 
         self._contact_views: ContactViews | None = None
         self._has_soft_contact_pd: bool = False
+        self._moving_surface_only: bool = False
         self._contact_views_placeholder: ContactViews = self._make_placeholder_contact_views()
 
         # ----- Pairwise contact filter (packed int64 keys) -----
@@ -3545,6 +3546,7 @@ class PhoenXWorld:
             self._num_active_constraints.fill_(self._contact_offset)
             self._contact_views = None
             self._has_soft_contact_pd = False
+            self._moving_surface_only = False
             if self._temporal_contact_state is not None:
                 self._contact_container.impulses.zero_()
                 if self._ingest_scratch is not None:
@@ -3588,13 +3590,13 @@ class PhoenXWorld:
             self._soft_contact_sentinel = wp.zeros(0, dtype=wp.float32, device=self.device)
         contact_stiffness_src = getattr(contacts, "rigid_contact_stiffness", None)
         contact_damping_src = getattr(contacts, "rigid_contact_damping", None)
-        # Conveyor surface velocities are per-contact overrides too and share this compile axis.
         surface_velocity_src = getattr(contacts, "rigid_contact_surface_velocity", None)
-        self._has_soft_contact_pd = (
-            (contact_stiffness_src is not None and int(contact_stiffness_src.shape[0]) > 0)
-            or (contact_damping_src is not None and int(contact_damping_src.shape[0]) > 0)
-            or (surface_velocity_src is not None and int(surface_velocity_src.shape[0]) > 0)
+        has_material_coefficients = (contact_stiffness_src is not None and int(contact_stiffness_src.shape[0]) > 0) or (
+            contact_damping_src is not None and int(contact_damping_src.shape[0]) > 0
         )
+        has_surface_velocity = surface_velocity_src is not None and surface_velocity_src.shape[0] > 0
+        self._has_soft_contact_pd = has_material_coefficients or has_surface_velocity
+        self._moving_surface_only = has_surface_velocity and not has_material_coefficients
         contact_stiffness = contact_stiffness_src if contact_stiffness_src is not None else self._soft_contact_sentinel
         contact_damping = contact_damping_src if contact_damping_src is not None else self._soft_contact_sentinel
         contact_friction = (
@@ -6226,6 +6228,10 @@ class PhoenXWorld:
         }
         cuda = self.device.is_cuda
         cooperative = {
+            "moving_surface_only": self._moving_surface_only
+            and not kw["cloth_support"]
+            and not kw["has_mass_splitting"]
+            and not kw["patch_friction"],
             "cooperative_joints": cuda and kw["bilateral_joint_blocks"],
             "joint_row_capacity": int(self.constraints.bilateral.row_capacity) or 6,
         }
