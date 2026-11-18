@@ -11,6 +11,7 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton._src.solvers.phoenx.articulations.fixed_pattern_llt import FixedPatternPanelLLT
 
 _INERTIA = ((0.01, 0.0, 0.0), (0.0, 0.01, 0.0), (0.0, 0.0, 0.01))
 
@@ -92,6 +93,41 @@ def _simulate(*, partial: bool, steps: int = 12) -> tuple[np.ndarray, np.ndarray
 
 @unittest.skipUnless(_cuda_with_graph_capture(), "Partial direct refactor requires CUDA graph capture")
 class TestDirectPartialRefactor(unittest.TestCase):
+    def test_cooperative_fleet_refactors_only_marked_mechanisms(self) -> None:
+        device = wp.get_preferred_device()
+        if device.sm_count < 2:
+            self.skipTest("Requires at least two CUDA SMs")
+        count = (device.sm_count + 1) // 2
+        # Dense three-panel mechanisms, with a partial final panel.
+        rows = 35
+        factor = FixedPatternPanelLLT(
+            (rows,) * count,
+            tuple(range(0, rows * count + 1, rows)),
+            np.tile(np.arange(rows, dtype=np.int32), count),
+            tuple(frozenset((body,)) for body in range(count) for _ in range(rows)),
+            device=device,
+        )
+        self.assertEqual(factor.cooperative_factor_mechanism.size, count)
+        self.assertTrue(factor.supports_partial_factor)
+        matrix = np.zeros(factor.matrix.shape, dtype=np.float32)
+        diagonal = factor.symbolic.diagonal_storage
+        matrix[diagonal] = 4.0
+        factor.matrix.assign(matrix)
+        factor.compute()
+        reference = factor.factor.numpy()
+        # Change every input. Only the first mechanism may write its factor.
+        matrix[diagonal] = 9.0
+        factor.matrix.assign(matrix)
+        mask = np.zeros(count, dtype=np.int32)
+        mask[0] = 1
+        factor.mechanism_dirty.assign(mask)
+        factor.compute()
+        actual = factor.factor.numpy()
+        active_diagonal = diagonal[:rows]
+        np.testing.assert_allclose(actual[active_diagonal], 3.0, rtol=2.0e-7)
+        reference[active_diagonal] = actual[active_diagonal]
+        np.testing.assert_array_equal(actual, reference)
+
     def test_saturating_drive_matches_full_refactor(self) -> None:
         q_partial, qd_partial, solver = _simulate(partial=True)
         system = solver._direct_equality_system

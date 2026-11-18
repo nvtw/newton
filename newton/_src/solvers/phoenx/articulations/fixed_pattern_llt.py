@@ -247,13 +247,14 @@ def build_fixed_panel_symbolic(
     )
 
 
-def _make_cooperative_factor_kernel(block_size: int):
+def _make_cooperative_factor_kernel(block_size: int, masked: bool):
     """Create a one-block-per-mechanism factor kernel."""
     tile_elements = block_size * block_size
 
     @wp.kernel(enable_backward=False)
     def factor_cooperative(
         mechanisms: wp.array[wp.int32],
+        mechanism_dirty: wp.array[wp.int32],
         dimensions: wp.array[wp.int32],
         panel_table_offset: wp.array[wp.int32],
         tile_counts: wp.array[wp.int32],
@@ -272,6 +273,9 @@ def _make_cooperative_factor_kernel(block_size: int):
     ):
         task, lane = wp.tid()
         mechanism = mechanisms[task]
+        if wp.static(masked):
+            if mechanism_dirty[mechanism] == 0:
+                return
         dimension = dimensions[mechanism]
         tile_count = tile_counts[mechanism]
         table_offset = panel_table_offset[mechanism]
@@ -1206,7 +1210,18 @@ class FixedPatternPanelLLT:
                             offdiag_update_left.append(left_panel)
                             offdiag_update_right.append(right_panel)
                     offdiag_update_start.append(len(offdiag_update_left))
-        use_cooperative_factor = all_narrow or len(dimensions) >= self.device.sm_count
+        # A fleet of short mechanisms can occupy much of the device even with
+        # one block each. On the factory's 151 mechanisms (up to six panels
+        # per axis), the per-panel ready queue costs more than it saves.
+        self._masked_cooperative_factor = (
+            not all_narrow
+            and 0.5 * self.device.sm_count <= len(dimensions) < self.device.sm_count
+            and max(self.symbolic.tile_counts) <= 6
+            and pcr_mechanisms.size == 0
+        )
+        use_cooperative_factor = (
+            all_narrow or len(dimensions) >= self.device.sm_count or self._masked_cooperative_factor
+        )
         all_mechanisms = np.arange(len(dimensions), dtype=np.int32)
         cooperative_factor_mechanisms = (
             np.setdiff1d(all_mechanisms, pcr_mechanisms, assume_unique=True)
@@ -1231,7 +1246,7 @@ class FixedPatternPanelLLT:
 
         self._product_factor_schedule = None
         self._use_product_factor = False
-        if not all_narrow and len(dimensions) < self.device.sm_count:
+        if not use_cooperative_factor:
             product_schedule = PersistentProductFactorSchedule(
                 panel_tables,
                 dimensions,
@@ -1247,8 +1262,7 @@ class FixedPatternPanelLLT:
 
         self._persistent_schedule = None
         self._persistent_schedule_without_pcr = None
-        #: Per-mechanism refactor mask of the persistent schedule. All ones
-        #: refactors every mechanism; see :attr:`supports_partial_factor`.
+        #: Per-mechanism refactor mask. All ones refactors every mechanism.
         self.mechanism_dirty = wp.ones(len(dimensions), dtype=wp.int32, device=self.device)
         self._always_active = wp.ones(1, dtype=wp.int32, device=self.device)
         if not self._use_product_factor and not use_cooperative_factor:
@@ -1325,11 +1339,12 @@ class FixedPatternPanelLLT:
             subgroup_mechanisms = np.intersect1d(cooperative_mechanisms, small_mechanisms, assume_unique=True)
             cooperative_mechanisms = np.setdiff1d(cooperative_mechanisms, subgroup_mechanisms, assume_unique=True)
         self.subgroup_mechanism = wp.array(subgroup_mechanisms, dtype=wp.int32, device=self.device)
-        # One-panel mechanisms factor in registers like their solves; the tile
-        # factor keeps only multi-panel mechanisms.
+        # One-panel mechanisms can factor in registers like their solves.
+        # The masked path keeps full panels so a skipped mechanism retains
+        # the same factor for both scalar and grouped right-hand sides.
         subgroup_factor_mechanisms = (
             np.intersect1d(cooperative_factor_mechanisms, small_mechanisms, assume_unique=True)
-            if use_subgroups
+            if use_subgroups and not self._masked_cooperative_factor
             else np.empty(0, dtype=np.int32)
         )
         self.subgroup_factor_mechanism = wp.array(subgroup_factor_mechanisms, dtype=wp.int32, device=self.device)
@@ -1354,7 +1369,7 @@ class FixedPatternPanelLLT:
             _make_subgroup_solve_kernel(block_size, self.subgroup_packed) if subgroup_mechanisms.size else None
         )
         self.cooperative_mechanism = wp.array(cooperative_mechanisms, dtype=wp.int32, device=self.device)
-        self._factor_cooperative = _make_cooperative_factor_kernel(block_size)
+        self._factor_cooperative = _make_cooperative_factor_kernel(block_size, self._masked_cooperative_factor)
         self._solve_cooperative = _make_cooperative_solve_kernel(block_size)
         self._solve_grouped_rhs_batch = _make_grouped_rhs_batch_solve_kernel(block_size)
         self._cooperative_solve_block_dim = 128 if block_size == 32 else 64
@@ -1398,10 +1413,9 @@ class FixedPatternPanelLLT:
     def supports_partial_factor(self) -> bool:
         """Whether :attr:`mechanism_dirty` can skip unchanged mechanisms.
 
-        Only the persistent ready queue honours the mask. Mechanisms that the
-        other paths factor are refactored on every :meth:`compute`, as before.
+        The persistent ready queue and masked cooperative factor honour the mask.
         """
-        return self._persistent_schedule is not None
+        return self._persistent_schedule is not None or self._masked_cooperative_factor
 
     def compute_changed(self) -> None:
         """Refactor only mechanisms whose matrix bits differ from their last factorization.
@@ -1461,6 +1475,7 @@ class FixedPatternPanelLLT:
                 block_dim=128,
                 inputs=[
                     mechanisms,
+                    self.mechanism_dirty,
                     self.dimension,
                     self.panel_table_offset,
                     self.tile_count,
