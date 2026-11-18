@@ -107,13 +107,16 @@ stock or unlimited operation. Autonomous
 logistics and continuous replenishment remain incomplete as described above.
 No 60 rendered FPS result has been validated for sustained end-to-end production.
 
-Color-cap experiments are available through `--mass-splitting` and
-`--max-colored-partitions`. With temporal iterations, this uses CUDA unrolled
-overflow-only mass splitting. The default keeps mass splitting disabled.
-For a controlled comparison, retain `--substeps 2 --iterations 12
---temporal-iterations --contact-hertz 80` in both runs; add
-`--mass-splitting --max-colored-partitions 12` only to the candidate.
+The CUDA maximal PGS solver with temporal iterations uses twelve regular
+colors followed by an overflow-only mass-splitting partition. Set the color
+cap with `--max-colored-partitions` or disable mass splitting with
+`--no-mass-splitting` for comparison.
 Timing output includes the actual partition count and overflow size.
+
+With these settings, a 130-second headless CUDA test retained twelve bottles
+in each of 48 sealed cartons, with 4, 3, 3, and 2 deliveries from the four
+palletizers and no controller faults. The two-carton stack with taped flaps
+also passed its rest check with active overflow.
 
 An initial twelve-color experiment failed the captured real-carton stability
 test because overflow copies changed the effective normal compliance. After
@@ -129,8 +132,7 @@ bounces, the corresponding measurements were 31.22 and 29.26 ms/frame
 (32.03 and 34.18 FPS). Each measurement used 120 timed frames following 600
 physics warmup frames; rendering added 30 warmup frames. These are single paired
 measurements in the early production window, not sustained production results.
-Both controller reports matched at 12.5 simulated seconds. Keep mass splitting
-disabled by default until filled-carton stacking and later logistics pass.
+Both controller reports matched at 12.5 simulated seconds.
 
 A later support-footprint regression exposed an independent solver-side contact
 cap, which could retain just one approaching support point. Removing that cap

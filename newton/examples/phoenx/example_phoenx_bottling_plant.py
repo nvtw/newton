@@ -183,6 +183,9 @@ class Example:
         )
         self.pipeline.set_broad_phase_filter_data(self.filter_data)
         if args.joint_mode == "maximal_pgs":
+            mass_splitting = args.mass_splitting
+            if mass_splitting is None:
+                mass_splitting = self.model.device.is_cuda and args.temporal_iterations
             # Exact solves are faster for these driven scalar-joint mechanisms.
             # D6 closures and runtime grasp/tape joints remain local blocks.
             exact = np.asarray(
@@ -215,13 +218,13 @@ class Example:
                 ),
                 velocity_iterations=1,
                 enable_body_pair_grouping=True,
-                parallel_contact_prepare=self.model.device.is_cuda and not args.mass_splitting,
-                mass_splitting=args.mass_splitting,
-                mass_splitting_overflow_only=args.mass_splitting,
+                parallel_contact_prepare=self.model.device.is_cuda and not mass_splitting,
+                mass_splitting=mass_splitting,
+                mass_splitting_overflow_only=mass_splitting,
                 max_colored_partitions=args.max_colored_partitions,
                 mass_splitting_batch_size=1,
-                mass_splitting_unrolled=args.mass_splitting,
-                partitioner_algorithm="endpoint_owner" if args.mass_splitting else "greedy",
+                mass_splitting_unrolled=mass_splitting,
+                partitioner_algorithm="endpoint_owner" if mass_splitting else "greedy",
                 sleeping_velocity_threshold=args.sleeping_velocity_threshold,
                 sleeping_frames_required=30 * args.substeps,
             )
@@ -498,7 +501,7 @@ class Example:
             "substeps": self.args.substeps,
             "iterations": self.args.iterations,
             "temporal_iterations": self.args.temporal_iterations,
-            "mass_splitting": self.args.mass_splitting,
+            "mass_splitting": self.solver.world.mass_splitting_enabled,
             "max_colored_partitions": self.args.max_colored_partitions,
             "num_colors": int(self.solver.world._partitioner.num_colors.numpy()[0]),
             "overflow_size": self.solver.step_report().overflow_size,
@@ -535,11 +538,16 @@ class Example:
             default=50,
             help="Total cartons per packer, including the initial carton at the filling station.",
         )
-        parser.add_argument("--mass-splitting", action=argparse.BooleanOptionalAction, default=False)
+        parser.add_argument(
+            "--mass-splitting",
+            action=argparse.BooleanOptionalAction,
+            default=None,
+            help="Use overflow mass splitting. Defaults to enabled for CUDA maximal PGS with temporal iterations.",
+        )
         parser.add_argument(
             "--max-colored-partitions",
             type=int,
-            default=9,
+            default=12,
             help="Regular colors before the overflow partition when --mass-splitting is enabled.",
         )
         parser.add_argument("--diagnostics", action="store_true")
