@@ -391,6 +391,7 @@ class SolverPhoenX(SolverBase):
         sleeping_frames_required: int = 30,
         prepare_refresh_stride: int | str = "auto",
         parallel_contact_prepare: bool = False,
+        island_parallel_iterations: bool = False,
         contact_chunk_size: int = 0,
         enable_body_pair_grouping: bool | None = None,
         solver_flavor: str | None = None,
@@ -502,6 +503,11 @@ class SolverPhoenX(SolverBase):
                 Requires no deformables, patch friction, or unrolled
                 mass splitting. Defaults to False. Independent kernels may
                 change floating-point rounding relative to serial preparation.
+            island_parallel_iterations: Schedule independent rigid islands on separate
+                CUDA blocks during large-color iterations. Preserves the color order
+                within each island. Useful for a single world with many disconnected
+                stacks or mechanisms. Requires maximal rigid point contacts and
+                forward sweeps without mass splitting. Defaults to False.
             contact_chunk_size: Experimental maximum contacts per solver column.
                 Zero preserves existing grouping. Positive values preserve every
                 contact row while splitting long columns for scheduling. Requires
@@ -726,6 +732,11 @@ class SolverPhoenX(SolverBase):
             has_deformables or articulation_mode != "maximal" or contact_friction_model != "point"
         ):
             raise ValueError("parallel_contact_prepare requires maximal rigid point contacts without deformables")
+
+        if island_parallel_iterations and (
+            has_deformables or articulation_mode != "maximal" or contact_friction_model != "point"
+        ):
+            raise ValueError("island_parallel_iterations requires maximal rigid point contacts without deformables")
 
         step_layout = _resolve_auto_step_layout(
             step_layout=step_layout,
@@ -1237,6 +1248,7 @@ class SolverPhoenX(SolverBase):
             sleeping_frames_required=int(sleeping_frames_required),
             prepare_refresh_stride=prepare_refresh_stride,
             parallel_contact_prepare=parallel_contact_prepare,
+            island_parallel_iterations=island_parallel_iterations,
             contact_chunk_size=contact_chunk_size,
             device=self.device,
         )

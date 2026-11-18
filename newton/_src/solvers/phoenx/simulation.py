@@ -441,6 +441,7 @@ class PhoenXWorld:
         sleeping_frames_required: int = 30,
         prepare_refresh_stride: int | str = "auto",
         parallel_contact_prepare: bool = False,
+        island_parallel_iterations: bool = False,
         contact_chunk_size: int = 0,
         contact_friction_model: str = "point",
         combine_direct_prepare_projection: bool = False,
@@ -894,6 +895,25 @@ class PhoenXWorld:
                 "symmetric sweeps, or unrolled mass splitting; sor_boost must be 1.0"
             )
         self.parallel_contact_prepare = bool(parallel_contact_prepare)
+        self.island_parallel_iterations = bool(island_parallel_iterations)
+        if island_parallel_iterations and (
+            step_layout != "single_world"
+            or not self.device.is_cuda
+            or self.num_particles
+            or self.num_cloth_triangles
+            or self.num_cloth_bending
+            or self.num_soft_tetrahedra
+            or self.num_soft_hexahedra
+            or contact_friction_model != "point"
+            or colored_contact_headers
+            or colored_contact_rows
+            or mass_splitting
+            or symmetric_color_sweep
+        ):
+            raise ValueError(
+                "island_parallel_iterations requires CUDA single-world forward rigid point-contact sweeps "
+                "without packed rows, mass splitting, or deformables"
+            )
         if self.parallel_contact_prepare and (
             step_layout != "single_world"
             or not self.device.is_cuda
@@ -1513,7 +1533,7 @@ class PhoenXWorld:
                 else:
                     self._dispatcher = SingleWorldMassSplittingDispatcher(self)
             else:
-                self._dispatcher = SingleWorldDispatcher(self)
+                self._dispatcher = SingleWorldDispatcher(self, island_parallel_iterations=island_parallel_iterations)
         else:
             self._dispatcher = (
                 MultiWorldMassSplittingDispatcher(self) if self.mass_splitting_enabled else MultiWorldDispatcher(self)
@@ -5725,6 +5745,7 @@ class PhoenXWorld:
         *,
         reverse_colors: bool = False,
         structural_projection: bool = False,
+        island_schedule=None,
     ) -> None:
         """Run one colour sweep from the partitioner's cursor.
 
@@ -5769,7 +5790,10 @@ class PhoenXWorld:
             self._capture_singleworld_tail_sweep(kernel=tail_kernel, idt=idt, contact_container=contact_container)
 
         def _round() -> None:
-            self._launch_one_launch_sweep(kernel, idt, contact_container)
+            if island_schedule is None:
+                self._launch_one_launch_sweep(kernel, idt, contact_container)
+            else:
+                island_schedule.iterate(self, head_kernel, idt)
             _tail()
 
         _tail()

@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING
 
 import warp as wp
 
+from newton._src.solvers.phoenx.islands.iteration_schedule import IslandIterationSchedule
+
 if TYPE_CHECKING:
     from newton._src.solvers.phoenx.simulation import PhoenXWorld
 
@@ -19,10 +21,13 @@ if TYPE_CHECKING:
 class SingleWorldDispatcher:
     """Single-world PGS dispatcher (mass splitting OFF)."""
 
-    __slots__ = ("_world",)
+    __slots__ = ("_island_schedule", "_world")
 
-    def __init__(self, world: PhoenXWorld) -> None:
+    def __init__(self, world: PhoenXWorld, *, island_parallel_iterations: bool = False) -> None:
         self._world = world
+        self._island_schedule = (
+            IslandIterationSchedule(world) if island_parallel_iterations and world._constraint_capacity else None
+        )
 
     def begin_step(self) -> None:
         # No-op: only mass splitting rebuilds an interaction graph.
@@ -60,12 +65,16 @@ class SingleWorldDispatcher:
             temporal = w.temporal_iterations
             if temporal:
                 w._temporal_begin_sweeps()
+            if self._island_schedule is not None:
+                self._island_schedule.build(w)
             for iteration in range(w.solver_iterations):
                 last = iteration == w.solver_iterations - 1
                 if temporal and iteration > 0:
                     w._temporal_next_sweep(idt)
                 w._partitioner.begin_sweep()
-                w._singleworld_head_plus_tail_sweep(iterate_head, iterate_fused, idt)
+                w._singleworld_head_plus_tail_sweep(
+                    iterate_head, iterate_fused, idt, island_schedule=self._island_schedule
+                )
                 if direct is not None and direct.enabled:
                     # Every temporal sweep is a contact substep whose motion enters the
                     # integrated positions, so each one carries the joint recovery bias.
