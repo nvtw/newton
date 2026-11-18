@@ -958,17 +958,13 @@ def load_plant(asset_root: Path, *, cutaway=True, visuals=True, motor_off=False,
 
     _bridge_transfers(builder, scene)
     if decomposed:
-        # Case walls touch neighbouring cases on pallets. As triangle meshes
-        # those pairs need costly mesh-mesh contact; seven convex slabs per
-        # wall keep its 3.2 mm thickness (CoACD's remeshing would double it).
-        # Robot links keep their triangle surfaces. Parts add no mass.
-        builder.approximate_meshes(
-            "coacd",
-            shape_indices=decomposed,
-            raise_on_failure=True,
-            cache_dir=newton.config.cache_dir_meshes or Path.home() / ".cache/newton/convex",
-            preprocess_mode="off",
-        )
+        # Case end walls are flat 3.2 mm plates with a hand hole that nothing
+        # reaches through. Their bounding box keeps both faces and the
+        # thickness; a convex decomposition of the hole needs eight slabs per
+        # wall, whose contacts with guides and neighbours lengthen every
+        # filled case's serial contact chain. Robot links keep their
+        # triangle surfaces. Parts add no mass.
+        builder.approximate_meshes("bounding_box", shape_indices=decomposed, raise_on_failure=True)
     for body, mass in scene.body_mass.items():
         if not builder.body_lock_inertia[body] and mass > 0 and builder.body_mass[body] > 0:
             ratio = mass / builder.body_mass[body]
