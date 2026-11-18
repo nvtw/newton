@@ -14,10 +14,9 @@ Drag a card with the right mouse button to pick it. The scene follows the house-
 Architecture for Exact Reduced Coulomb Friction" (2026), also shown as a MuJoCo demo.
 ``--card-thickness 0.3`` uses the thickness of real playing cards.
 
-The solver runs sixteen substeps of six iterations. Compared with eight substeps, they
-halve the penetration that an impact on a light card builds up within one substep and
-quarter the compliance of loaded contacts, which keeps 0.3 mm cards from passing through
-each other; six iterations are the fewest that hold the 0.7 mm house up while it settles.
+The default solver takes sixteen substeps per frame with six iterations each. Refreshing
+contacts every four substeps catches new impacts and changes in contact normals as the
+thin cards fall.
 Contacts are searched within 2 mm of each card, extended by how far moving cards close
 during a frame; a wider fixed search would pair every card with all of its neighbours and
 slow the solve. ``--contact-hertz`` sets a substep-independent contact stiffness, which
@@ -166,11 +165,13 @@ class Example:
             contact_matching="sticky",
             speculative_contact_gap_max=SPECULATIVE_GAP_MAX,
         )
+        # Equal contact intervals preserve the requested substep duration and count.
+        self.contact_updates_per_frame = math.gcd(args.substeps, 4)
         self.solver = SolverPhoenX(
             self.model,
             collision_pipeline=self.pipeline,
             step_layout="single_world",
-            substeps=args.substeps,
+            substeps=args.substeps // self.contact_updates_per_frame,
             solver_iterations=args.iterations,
             contact_hertz=args.contact_hertz,
         )
@@ -197,12 +198,14 @@ class Example:
             self.graph = capture.graph
 
     def simulate(self):
-        self.pipeline.collide(self.state_0, self.contacts, dt=self.frame_dt)
         self.state_0.clear_forces()
         self.viewer.apply_forces(self.state_0)
-        self.solver.step(self.state_0, self.state_1, self.control, self.contacts, self.frame_dt)
-        for name in ("body_q", "body_qd"):
-            wp.copy(getattr(self.state_0, name), getattr(self.state_1, name))
+        dt = self.frame_dt / self.contact_updates_per_frame
+        for _ in range(self.contact_updates_per_frame):
+            self.pipeline.collide(self.state_0, self.contacts, dt=dt)
+            self.solver.step(self.state_0, self.state_1, self.control, self.contacts, dt)
+            for name in ("body_q", "body_qd"):
+                wp.copy(getattr(self.state_0, name), getattr(self.state_1, name))
 
     def step(self):
         if self.frame == self.impact_frame:
