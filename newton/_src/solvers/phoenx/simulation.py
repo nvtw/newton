@@ -5785,7 +5785,10 @@ class PhoenXWorld:
 
         kernel, drain_tail = get_singleworld_one_launch_kernel(head_kernel, tail_kernel)
         if drain_tail:
-            self._launch_one_launch_sweep(kernel, idt, contact_container)
+            if island_schedule is None:
+                self._launch_one_launch_sweep(kernel, idt, contact_container)
+            else:
+                island_schedule.iterate(self, head_kernel, idt, all_colors=True)
             return
 
         def _tail() -> None:

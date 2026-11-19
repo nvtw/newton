@@ -5,7 +5,8 @@
 Only shared writable bodies impose an order between columns. A stable sort of
 the existing color-ordered columns by dynamic component preserves that order
 inside each component. Its block can then advance colors with a block barrier.
-Exact joint projections and the small-color tail still run between sweeps.
+Biased sweeps keep their separate small-color tail. Velocity relaxation
+uses the same arithmetic for all colors and can traverse them in one pass.
 """
 
 from __future__ import annotations
@@ -205,13 +206,15 @@ def _take_large_colors(
 
 @functools.cache
 def _get_island_iteration(axes):
-    solve_color = _make_singleworld_head_color_func(**dict(axes))
+    options = dict(axes)
+    phase = options["phase"]
+    solve_color = _make_singleworld_head_color_func(**options)
 
     @wp.kernel(
-        name="phoenx_iterate_islands",
+        name=f"phoenx_{phase}_islands",
         enable_backward=False,
         module="unique",
-        module_options={"fast_math": True},
+        module_options={"fast_math": phase == "iterate"},
         grid_stride=False,
     )
     def iterate(
@@ -381,8 +384,10 @@ class IslandIterationSchedule:
             device=world.device,
         )
 
-    def iterate(self, world: PhoenXWorld, head, idt: float):
+    def iterate(self, world: PhoenXWorld, head, idt: float, *, all_colors: bool = False):
         partition = world._partitioner
+        # Relaxation uses identical rigid point and joint math for both color sizes.
+        threshold = -1 if all_colors else world._fuse_threshold
         wp.launch(
             _take_large_colors,
             1,
@@ -390,7 +395,7 @@ class IslandIterationSchedule:
                 partition.color_starts,
                 partition.num_colors,
                 partition.color_cursor,
-                world._fuse_threshold,
+                threshold,
                 self.interval,
             ],
             device=world.device,

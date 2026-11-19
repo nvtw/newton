@@ -107,7 +107,7 @@ class SingleWorldDispatcher:
             _, _, _, _, relax_head, relax_fused = w._singleworld_kernels()
             for _ in range(w._active_velocity_iterations):
                 w._partitioner.begin_sweep()
-                w._singleworld_head_plus_tail_sweep(relax_head, relax_fused, idt)
+                w._singleworld_head_plus_tail_sweep(relax_head, relax_fused, idt, island_schedule=self._island_schedule)
                 if direct is not None and direct.enabled:
                     direct.solve(use_bias=False)
                     direct.resolve_bounded_drives(idt, use_bias=False)
