@@ -28,6 +28,7 @@ __all__ = [
     "pack_material_data",
     "resolve_friction_in_kernel",
     "resolve_friction_static_in_kernel",
+    "resolve_restitution_in_kernel",
 ]
 
 
@@ -185,3 +186,14 @@ def resolve_friction_static_in_kernel(
     mb = materials[mat_b]
     mode = wp.max(ma.friction_combine_mode, mb.friction_combine_mode)
     return _combine_values(ma.static_friction, mb.static_friction, mode)
+
+
+@wp.func
+def resolve_restitution_in_kernel(materials: wp.array[MaterialData], a: wp.int32, b: wp.int32) -> wp.float32:
+    if a < 0 or b < 0 or a >= materials.shape[0] or b >= materials.shape[0]:
+        return wp.float32(0.0)
+    ma = materials[a]
+    mb = materials[b]
+    return _combine_values(
+        ma.restitution, mb.restitution, wp.max(ma.restitution_combine_mode, mb.restitution_combine_mode)
+    )

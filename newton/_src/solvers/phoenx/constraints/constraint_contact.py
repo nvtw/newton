@@ -704,6 +704,8 @@ class ContactViews:
     rigid_contact_friction: wp.array[wp.float32]
     #: Surface velocity of shape 1 minus shape 0 [m/s] (conveyor surfaces), or empty.
     rigid_contact_surface_velocity: wp.array[wp.vec3f]
+    #: Terminal normal velocity [m/s] and signed time until impact [s] for each source contact.
+    restitution_target: wp.array[wp.vec2f]
     #: Per contact and side, the witness of a contact on a cylinder's curved side moved onto
     #: the cylinder's axis (xyz, body frame) and its distance to the axis [m] (w, zero for
     #: other contacts), or empty when no body carries a cylinder. See

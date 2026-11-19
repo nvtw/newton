@@ -1685,7 +1685,7 @@ class SolverPhoenX(SolverBase):
             dtype=wp.int32,
             device=self.device,
         )
-        self.world.set_materials(material_data, shape_material_idx)
+        self.world.set_materials(material_data, shape_material_idx, has_restitution=bool(np.any(restitution)))
 
     def _rebuild_direct_contact_response(self) -> None:
         """Rebind general contact mobility after a direct factor rebuild."""

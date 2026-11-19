@@ -117,6 +117,11 @@ from newton._src.solvers.phoenx.constraints.contact_patch_friction import (
     copy_contact_patch_impulses,
     gather_contact_patch_warmstart,
 )
+from newton._src.solvers.phoenx.constraints.contact_restitution import (
+    accumulate_impact_pose_corrections,
+    apply_impact_pose_corrections,
+    prepare_restitution_targets,
+)
 from newton._src.solvers.phoenx.constraints.contact_tgs import advance_contact_tgs_generation, snapshot_contact_tgs
 from newton._src.solvers.phoenx.constraints.contact_tgs_prepare import (
     friction_geometry,
@@ -1402,6 +1407,8 @@ class PhoenXWorld:
 
         # ----- Optional material table -----
         self._shape_material: wp.array[wp.int32] | None = None
+        self._restitution_targets = None
+        self._restitution_pose_corrections = None
         self._materials: wp.array[MaterialData] | None = None
         # Optional shape metadata installed for callers that do not pass it
         # directly to step(). Shape types let the solver keep SDF-specific
@@ -1723,10 +1730,20 @@ class PhoenXWorld:
         self,
         materials: wp.array | None,
         shape_material: wp.array | None,
+        *,
+        has_restitution: bool | None = None,
     ) -> None:
-        """Install per-shape friction materials."""
+        """Install per-shape friction and restitution materials."""
         self._materials = materials
         self._shape_material = shape_material
+        if has_restitution is None:
+            has_restitution = materials is not None and np.any(materials.numpy()["restitution"])
+        if has_restitution and shape_material is not None:
+            self._restitution_targets = wp.empty(self.rigid_contact_max, dtype=wp.vec2f, device=self.device)
+            self._restitution_pose_corrections = wp.zeros(self.num_bodies, dtype=wp.spatial_vector, device=self.device)
+        else:
+            self._restitution_targets = None
+            self._restitution_pose_corrections = None
 
     def set_shape_body(self, shape_body: wp.array | None) -> None:
         """Install the shape->body map used by contact ingest. ``None`` clears."""
@@ -2721,7 +2738,11 @@ class PhoenXWorld:
 
     def _refresh_prepare_this_substep(self) -> bool:
         """Return whether this substep should refresh cached row data."""
-        return self.prepare_refresh_stride <= 1 or self._current_substep_index % self.prepare_refresh_stride == 0
+        return (
+            self.prepare_refresh_stride <= 1
+            or self._restitution_targets is not None
+            or self._current_substep_index % self.prepare_refresh_stride == 0
+        )
 
     def _run_cached_prepare_bookkeeping(self, idt: wp.float32) -> None:
         """Apply cached contact warm-start when prepare data is reused."""
@@ -3491,7 +3512,38 @@ class PhoenXWorld:
             idt = wp.float32(1.0 / self.substep_dt)
             self._temporal_sweep_index = 0
             self._temporal_record_contacts = contacts if record_impulses else None
+            if self._restitution_targets is not None and self._contact_views is not None:
+                wp.launch(
+                    prepare_restitution_targets,
+                    dim=self.rigid_contact_max,
+                    inputs=[
+                        self._contact_views,
+                        self.bodies,
+                        self._materials,
+                        self._shape_material,
+                        self.gravity,
+                        self.substep_dt,
+                        self.substep_dt * self.substeps,
+                    ],
+                    outputs=[self._restitution_targets],
+                    device=self.device,
+                )
             self._dispatcher.solve(idt)
+            if self._restitution_targets is not None and self._contact_views is not None:
+                self._scatter_colored_contact_rows()
+                wp.launch(
+                    accumulate_impact_pose_corrections,
+                    dim=self.rigid_contact_max,
+                    inputs=[self._contact_views, self.bodies, self._contact_container, self._cid_of_contact_cur],
+                    outputs=[self._restitution_pose_corrections],
+                    device=self.device,
+                )
+                wp.launch(
+                    apply_impact_pose_corrections,
+                    dim=self.num_bodies,
+                    inputs=[self.bodies, self._restitution_pose_corrections],
+                    device=self.device,
+                )
             if reduced_after_regular:
                 self._begin_reduced_substep()
             if self._penetration_free_data is not None:
@@ -3619,8 +3671,9 @@ class PhoenXWorld:
             contact_damping_src is not None and int(contact_damping_src.shape[0]) > 0
         )
         has_surface_velocity = surface_velocity_src is not None and surface_velocity_src.shape[0] > 0
-        self._has_soft_contact_pd = has_material_coefficients or has_surface_velocity
-        self._moving_surface_only = has_surface_velocity and not has_material_coefficients
+        has_normal_targets = has_material_coefficients or self._restitution_targets is not None
+        self._has_soft_contact_pd = has_normal_targets or has_surface_velocity
+        self._moving_surface_only = has_surface_velocity and not has_normal_targets
         contact_stiffness = contact_stiffness_src if contact_stiffness_src is not None else self._soft_contact_sentinel
         contact_damping = contact_damping_src if contact_damping_src is not None else self._soft_contact_sentinel
         contact_friction = (
@@ -3738,6 +3791,9 @@ class PhoenXWorld:
                 side_witness0=self._side_witness0,
                 side_witness1=self._side_witness1,
             )
+
+        if self._restitution_targets is not None:
+            self._contact_views.restitution_target = self._restitution_targets
 
         if self._side_witness0 is not None:
             # Classify the contact sides at the pose the collision pass found them.

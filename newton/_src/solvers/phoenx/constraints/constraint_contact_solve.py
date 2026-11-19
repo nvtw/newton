@@ -956,6 +956,16 @@ def _make_contact_prepare_for_iteration_at(
                         cc_set_pd_eff_soft(cc, k, wp.float32(0.0))
                 else:
                     cc_set_pd_eff_soft(cc, k, wp.float32(0.0))
+                if contacts.restitution_target.shape[0] > 0:
+                    impact = contacts.restitution_target[source_k]
+                    if impact[0] > 0.0 or impact[1] != 0.0:
+                        # By the end of this substep the swept witnesses have met.
+                        cc_set_bias(cc, k, 0.0)
+                    if impact[0] != 0.0 or impact[1] != 0.0:
+                        # Impact imposes an outgoing speed independent of the resting contact spring.
+                        cc_set_pd_gamma(cc, k, wp.float32(0.0))
+                        cc_set_pd_bias(cc, k, impact[0])
+                        cc_set_pd_eff_soft(cc, k, eff_n)
 
             if wp.static(pointwise_geometry):
                 # No velocity reads precede this return. The colored cached
