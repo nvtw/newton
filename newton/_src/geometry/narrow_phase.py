@@ -2938,7 +2938,7 @@ class NarrowPhase:
                 shape_count=(
                     self.shape_aabb_lower.shape[0]
                     if self.external_aabb
-                    else (shape_body.shape[0] if shape_body is not None else 1 << CONTACT_SORT_MAX_SHAPE_INDEX_BITS)
+                    else (shape_body.shape[0] if shape_body is not None else 1 << CONTACT_SORT_DEFAULT_SHAPE_INDEX_BITS)
                 ),
                 writer_func=writer_func,
                 texture_sdf_data=texture_sdf_data,

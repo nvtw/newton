@@ -551,6 +551,10 @@ def compute_voxel_index(
     if size[2] > 0.0:
         rel = wp.vec3(rel[0], rel[1], (pos_local[2] - aabb_lower[2]) / size[2])
 
+    # Stabilize cell boundaries against float32 reconstruction of scaled copies.
+    # This is a dimensionless grid, independent of the scene's length units.
+    rel = wp.vec3(wp.round(rel[0] * 1048576.0), wp.round(rel[1] * 1048576.0), wp.round(rel[2] * 1048576.0)) / 1048576.0
+
     # Clamp to [0, 1) and map to voxel indices
     nx = resolution[0]
     ny = resolution[1]

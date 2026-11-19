@@ -25,6 +25,7 @@ import newton
 import newton.examples
 import newton.utils
 from newton import JointTargetMode, JointType
+from newton.examples.kamino.utils.ldl import add_ldl_arguments, configure_ldl
 
 # Set to True for PhoenX reduced coordinates; False uses full-coordinate joint mechanisms.
 PHOENX_USE_REDUCED_COORDINATES = True
@@ -32,6 +33,7 @@ PHOENX_USE_REDUCED_COORDINATES = True
 
 class Example:
     def __init__(self, viewer, args):
+        """Build the H1 robot simulation with the requested solver options."""
         self.fps = 50
         self.frame_dt = 1.0 / self.fps
 
@@ -41,6 +43,8 @@ class Example:
 
         self.world_count = args.world_count
         self.solver_type = args.solver
+        if self.solver_type != "kamino":
+            configure_ldl(None, args)
 
         self.viewer = viewer
 
@@ -113,7 +117,8 @@ class Example:
             solver_config.dynamics.cull_speculative_contacts = False
             solver_config.scc.max_alternating_iterations = 8
             solver_config.scc.bilateral_solve_interval = 8
-            solver_config.scc.bilateral_solver_type = "LLTBRCM"
+            solver_config.scc.bilateral_solver_type = args.bilateral_solver_type or "LLTBRCM"
+            configure_ldl(solver_config, args)
             solver_config.scc.omega = 1.2
             solver_config.scc.contact_warmstart_method = (
                 "key_and_position_with_net_force_backup_and_tangential_net_force"
@@ -236,7 +241,9 @@ class Example:
 
     @staticmethod
     def create_parser():
+        """Create simulation arguments, including optional Kamino LDL backend and ordering selection."""
         parser = newton.examples.create_parser()
+        add_ldl_arguments(parser)
         newton.examples.add_world_count_arg(parser)
         newton.examples.add_mujoco_contacts_arg(parser)
         parser.add_argument(
@@ -246,6 +253,12 @@ class Example:
             help="Rigid-body solver backend. 'mujoco' (default) uses the MuJoCo/Warp solver; 'phoenx' uses SolverPhoenX.",
         )
         parser.set_defaults(viewer="optix", world_count=4)
+        parser.add_argument(
+            "--bilateral-solver-type",
+            choices=("LDL", "LLTB", "LLTBRCM"),
+            default=None,
+            help="SCC bilateral solver (default: LLTBRCM).",
+        )
         return parser
 
 
