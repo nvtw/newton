@@ -154,16 +154,38 @@ def _prepare_warehouse_inventory(stage, asset_root):
     from pxr import Usd, UsdGeom, UsdPhysics  # noqa: PLC0415 - OpenUSD is optional.
 
     restored = []
-    for name in ("W1_InspectionHold", "W4_EmptyPallets"):
-        zone = stage.GetPrimAtPath("/Plant/LivingPlant/Warehouse/" + name)
-        if zone:
-            for prop in zone.GetChildren():
-                asset = _value(prop, "living:asset", "")
-                if asset in ("pallet", "pallet_board_broken"):
-                    prop.GetVariantSet("physics").SetVariantSelection("dynamic")
-                    if asset == "pallet":
-                        prop.GetVariantSet("collision").SetVariantSelection("boxes")
-                    restored.append(str(prop.GetPath()))
+    for name in (
+        "Warehouse/W1_InspectionHold",
+        "Warehouse/W4_EmptyPallets",
+        "PackingHall/P2_CartonSupply",
+        "PackingHall/P4_Cleaning",
+    ):
+        zone = stage.GetPrimAtPath("/Plant/LivingPlant/" + name)
+        if not zone:
+            continue
+        for prop in zone.GetChildren():
+            asset = _value(prop, "living:asset", "")
+            physics = prop.GetVariantSet("physics")
+            if name.startswith("Warehouse/") and asset not in ("pallet", "pallet_board_broken"):
+                continue
+            if "dynamic" in physics.GetVariantNames():
+                physics.SetVariantSelection("dynamic")
+                if asset == "pallet":
+                    prop.GetVariantSet("collision").SetVariantSelection("boxes")
+                elif asset in ("carton_blanks_load", "slip_sheet_load"):
+                    # The strap extends under the deck through the board gaps. The
+                    # solid package starts at local z=0, directly on the pallet.
+                    prop.SetInstanceable(False)
+                    box = prop.GetChild("Collision").GetChild("box_0")
+                    translation = box.GetAttribute("xformOp:translate")
+                    scale = box.GetAttribute("xformOp:scale")
+                    center, size = translation.Get(), scale.Get()
+                    top = center[2] + 0.5 * size[2]
+                    if center[2] < 0.5 * size[2]:
+                        center[2], size[2] = 0.5 * top, top
+                        translation.Set(center)
+                        scale.Set(size)
+                restored.append(str(prop.GetPath()))
     disable_owned_proxies(stage, restored, scope="/Plant/Physics/NavProxies")
 
     instancer = UsdGeom.PointInstancer.Get(stage, "/Plant/Logistics/PalletLoads")

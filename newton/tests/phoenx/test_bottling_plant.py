@@ -455,6 +455,13 @@ class TestBottlingPlant(unittest.TestCase):
                 UsdPhysics.RigidBodyAPI.Apply(direct)
                 box(stage, placed + "/Board", (0, 0, 0.05), (0.1, 1.2, 0.1))
             physics.SetVariantSelection("none")
+            supply = "/Plant/LivingPlant/PackingHall/P2_CartonSupply/slip_sheet_load_pz_u"
+            sheet = UsdGeom.Xform.Define(stage, supply)
+            sheet.GetPrim().GetReferences().AddInternalReference(placed)
+            sheet.GetPrim().GetVariantSet("physics").SetVariantSelection("none")
+            sheet.GetPrim().CreateAttribute("living:asset", Sdf.ValueTypeNames.String).Set("slip_sheet_load")
+            sheet.AddTranslateOp().Set((3, 0, 0.15))
+            box(stage, supply + "/Collision/box_0", (0, 0, 0.3), (1, 1.2, 0.64))
             for name, owners in (("Stock", placed + "/Board"), ("Shared", placed + "/Board;/Plant/Other")):
                 proxy = box(stage, f"/Plant/Physics/NavProxies/{name}", (0, 0, 0.5), (1, 1, 1))
                 proxy.CreateAttribute("plant:owner", Sdf.ValueTypeNames.String).Set(owners)
@@ -463,6 +470,13 @@ class TestBottlingPlant(unittest.TestCase):
             scene = load_plant(root, motor_off=True)
             b = scene.builder
             self.assertIn(placed, scene.bodies)
+            self.assertIn(supply, scene.bodies)
+            sheet_body = scene.bodies[supply]
+            self.assertEqual(b.shape_body[b.shape_label.index(supply + "/Board/collision")], sheet_body)
+            np.testing.assert_allclose(b.body_q[sheet_body].p, (3, 0, 0.15), atol=1e-6)
+            shape = b.shape_label.index(supply + "/Collision/box_0/collision")
+            z, half = b.shape_transform[shape].p[2], b.shape_scale[shape][2]
+            np.testing.assert_allclose((z - half, z + half), (0, 0.62), atol=1e-6)
             self.assertNotIn("/Plant/Physics/Equipment/occupied/collision", b.shape_label)
             self.assertIn("/Plant/Physics/Equipment/unused/collision", b.shape_label)
             self.assertIn("/Plant/Physics/Equipment/fixture/collision", b.shape_label)
