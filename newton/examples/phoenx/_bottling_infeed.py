@@ -93,6 +93,7 @@ class BottleSupply:
         # The source stage can use global colliders in its sole physical world.
         self.desc.world = max(0, builder.body_world[source])
         builder.reserve_dynamic_capacity(bodies=capacity, joints=joints)
+        modes = builder.custom_attributes.get("phoenx:restitution_combine_mode")
         configs = []
         for s in self.shapes:
             cfg = builder.ShapeConfig(
@@ -124,6 +125,7 @@ class BottleSupply:
                     cfg=cfg,
                     color=builder.shape_color[s],
                     opacity=builder.shape_opacity[s],
+                    custom_attributes={modes.key: modes.values[s]} if modes and s in modes.values else None,
                     label=label + builder.shape_label[s].removeprefix(builder.body_label[source]),
                 )
                 builder.shape_world[shape] = builder.shape_world[s]

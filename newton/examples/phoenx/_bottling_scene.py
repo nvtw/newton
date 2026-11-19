@@ -21,8 +21,10 @@ import warp as wp
 
 import newton
 import newton.usd
+from newton._src.solvers.phoenx.materials import CombineMode
 from newton.examples.phoenx._bottling_dispenser import disable_owned_proxies, prepare_dispensers
 from newton.examples.phoenx._bottling_wrap import build_wrapper, correct_wrapper_frame, mesh_components
+from newton.solvers import SolverPhoenX
 
 
 def _value(prim, name, default):
@@ -396,6 +398,7 @@ def load_plant(asset_root: Path, *, cutaway=True, visuals=True, motor_off=False,
     cache = UsdGeom.XformCache()
     scene = PlantScene(newton.ModelBuilder())
     builder = scene.builder
+    SolverPhoenX.register_custom_attributes(builder)
     # Carrier-box walls authored for convex decomposition, as PhysX cooks them.
     decomposed = []
     collision_table = UsdPhysics.CollisionGroup.ComputeCollisionGroupTable(stage)
@@ -665,15 +668,21 @@ def load_plant(asset_root: Path, *, cutaway=True, visuals=True, motor_off=False,
             has_particle_collision=False,
             is_visible=visual,
         )
+        custom_attributes = None
         if collision:
             material = UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial("physics")[0]
             if material:
                 cfg.mu = float(_value(material.GetPrim(), "physics:dynamicFriction", 0.5))
                 cfg.mu_static = max(cfg.mu, float(_value(material.GetPrim(), "physics:staticFriction", cfg.mu)))
                 cfg.restitution = float(_value(material.GetPrim(), "physics:restitution", 0.0))
+                mode = material.GetPrim().GetAttribute("physxMaterial:restitutionCombineMode")
+                if mode and mode.HasAuthoredValueOpinion():
+                    custom_attributes = {"phoenx:restitution_combine_mode": int(CombineMode[mode.Get().upper()])}
                 cfg.density = float(_value(material.GetPrim(), "physics:density", 1000.0)) or 1000.0
         kind = prim.GetTypeName()
         kw = {"xform": pose, "cfg": cfg, "label": str(prim.GetPath()) + ("/visual" if visual else "/collision")}
+        if custom_attributes is not None:
+            kw["custom_attributes"] = custom_attributes
         color = _value(prim, "primvars:displayColor", None)
         if visual and color is not None and len(color):
             kw["color"] = tuple(color[0])

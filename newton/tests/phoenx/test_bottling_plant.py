@@ -87,6 +87,7 @@ class TestBottlingPlant(unittest.TestCase):
         """Admit supported compound bottles only through a clear inlet and stop at the partial final row."""
         with wp.ScopedDevice("cpu"):
             builder = newton.ModelBuilder()
+            newton.solvers.SolverPhoenX.register_custom_attributes(builder)
             builder.add_shape_box(-1, hx=1, hy=1, hz=0.01, xform=wp.transform((0, 0, 0.94), wp.quat_identity()))
             label = "/Plant/Sim/Product/Bottles/B00000"
             source = builder.add_link(label=label, xform=wp.transform((0.12, 0, 0.951), wp.quat_identity()))
@@ -98,6 +99,7 @@ class TestBottlingPlant(unittest.TestCase):
                     xform=wp.transform((0, 0, 0.04 + 0.08 * i), wp.quat_identity()),
                     cfg=builder.ShapeConfig(mu=0.16, mu_static=0.20, gap=0.002, is_visible=False),
                     label=label + f"/Collision/Hull_0{i}/collision",
+                    custom_attributes={"phoenx:restitution_combine_mode": i},
                 )
             scene = PlantScene(builder, bottle_bodies=[source])
             supply = BottleSupply(scene, capacity=9, joints=1)
@@ -154,6 +156,8 @@ class TestBottlingPlant(unittest.TestCase):
             advance(90)
             self.assertEqual(plant.bottle_count.numpy()[0], 8)
             row = plant.bottles.numpy()[1:8]
+            modes = solver.world._materials.numpy()["restitution_combine_mode"]
+            np.testing.assert_array_equal(modes[supply.first_shape :], np.tile([0, 1], 9))
             poses = state.body_q.numpy().copy()
             np.testing.assert_allclose(poses[row, 2], 0.95, atol=0.002)
             np.testing.assert_allclose(model.body_mass.numpy()[row], model.body_mass.numpy()[source])
@@ -1302,6 +1306,10 @@ def Xform "Plant" {
             path.write_text("""#usda 1.0
 (defaultPrim = "Plant"; metersPerUnit = 1; upAxis = "Z")
 def Xform "Plant" {
+ def Material "Acetal" (prepend apiSchemas = ["PhysicsMaterialAPI"]) {
+  float physics:restitution = 0
+  custom token physxMaterial:restitutionCombineMode = "min"
+ }
  def Xform "Line" {
   def Scope "Packers" {
    def Xform "PU1" {
@@ -1310,7 +1318,8 @@ def Xform "Plant" {
       def Xform "IN_A" (prepend apiSchemas = ["PhysicsRigidBodyAPI"]) {
        bool physics:kinematicEnabled = true
        custom bool physxSurfaceVelocity:surfaceVelocityEnabled = true
-       def Mesh "Collider" (prepend apiSchemas = ["PhysicsCollisionAPI"]) {
+       def Mesh "Collider" (prepend apiSchemas = ["PhysicsCollisionAPI", "MaterialBindingAPI"]) {
+        rel material:binding:physics = </Plant/Acetal>
         uniform token physics:approximation = "convexHull"
         point3f[] points = [(-0.5,-0.5,-0.01), (0.5,-0.5,-0.01), (0.5,0.5,-0.01), (-0.5,0.5,-0.01),
                            (-0.5,-0.5,0.01), (0.5,-0.5,0.01), (0.5,0.5,0.01), (-0.5,0.5,0.01)]
@@ -1344,6 +1353,10 @@ def Xform "Plant" {
             body = scene.builder.add_body(xform=wp.transform(wp.vec3(0, 0, 0.02), wp.quat_identity()))
             scene.builder.add_shape_box(body, hx=0.01, hy=0.01, hz=0.01)
             model = scene.builder.finalize()
+            solver = newton.solvers.SolverPhoenX(model)
+            material_modes = solver.world._materials.numpy()["restitution_combine_mode"]
+            self.assertEqual(material_modes[shape], 1, "the belt's minimum restitution combine mode")
+            self.assertEqual(material_modes[-1], 0, "the unbound box's default average combine mode")
             mesh.mesh.velocities.assign(velocities)
             pipeline = newton.CollisionPipeline(model)
             contacts = pipeline.contacts()

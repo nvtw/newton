@@ -349,6 +349,20 @@ class SolverPhoenX(SolverBase):
 
     supports_penetration_free = True
 
+    @classmethod
+    def register_custom_attributes(cls, builder: newton.ModelBuilder) -> None:
+        """Register optional per-shape restitution combine modes (average, min, multiply, max)."""
+        builder.add_custom_attribute(
+            newton.ModelBuilder.CustomAttribute(
+                name="restitution_combine_mode",
+                namespace="phoenx",
+                frequency=Model.AttributeFrequency.SHAPE,
+                assignment=Model.AttributeAssignment.MODEL,
+                dtype=wp.int32,
+                default=int(CombineMode.AVERAGE),
+            )
+        )
+
     def __init__(
         self,
         model: Model,
@@ -1669,13 +1683,17 @@ class SolverPhoenX(SolverBase):
             else np.zeros_like(mu_np)
         )
         combine_mode = _COMBINE_MODES[self.friction_combine_mode]
+        modes = getattr(getattr(self.model, "phoenx", None), "restitution_combine_mode", None)
+        restitution_modes = modes.numpy() if modes is not None else None
         materials = [
             Material(
                 static_friction=float(mu_static_np[i]),
                 dynamic_friction=float(mu_np[i]),
                 restitution=float(restitution[i]),
                 friction_combine_mode=combine_mode,
-                restitution_combine_mode=CombineMode.AVERAGE,
+                restitution_combine_mode=CombineMode.AVERAGE
+                if restitution_modes is None
+                else int(restitution_modes[i]),
             )
             for i in range(self.model.shape_count)
         ]

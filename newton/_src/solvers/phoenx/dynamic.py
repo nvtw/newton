@@ -188,6 +188,8 @@ class ShapeDesc:
     gap: wp.float32
     mu: wp.float32
     restitution: wp.float32
+    #: Per-shape combine mode: average (0), min (1), multiply (2), or max (3).
+    restitution_combine_mode: wp.int32
     collision_group: wp.int32
     #: :class:`~newton.ShapeFlags`, typically ``COLLIDE_SHAPES | VISIBLE``.
     flags: wp.int32
@@ -424,6 +426,7 @@ def add_shape(dyn: DynamicsData, body: wp.int32, desc: ShapeDesc) -> wp.int32:
     proto = desc.prototype
     is_reference = geo == _CONVEX_MESH or geo == _MESH
     valid = (geo >= _PLANE and geo <= _CONE) or (is_reference and proto >= 0)
+    valid = valid and desc.restitution_combine_mode >= 0 and desc.restitution_combine_mode <= 3
     if is_reference and valid:
         valid = dyn.shape_type[proto] == geo
     world = desc.world
@@ -763,6 +766,7 @@ class _ShapeRows:
     is_solid: wp.array[wp.bool]
     mu: wp.array[wp.float32]
     restitution: wp.array[wp.float32]
+    restitution_combine_mode: wp.array[wp.int32]
     collision_radius: wp.array[wp.float32]
     aabb_lower: wp.array[wp.vec3]
     aabb_upper: wp.array[wp.vec3]
@@ -1097,7 +1101,9 @@ def _write_shape(rows: _ShapeRows, shape: wp.int32, body: wp.int32, desc: ShapeD
     material.dynamic_friction = desc.mu
     material.restitution = desc.restitution
     material.friction_combine_mode = rows.friction_combine_mode
-    material.restitution_combine_mode = 0
+    material.restitution_combine_mode = desc.restitution_combine_mode
+    if rows.restitution_combine_mode.shape[0] > 0:
+        rows.restitution_combine_mode[shape] = desc.restitution_combine_mode
     rows.materials[shape] = material
     rows.phoenx_body[shape] = body + 1
     rows.no_response[shape] = wp.where(desc.tracking_volume, 1, 0)
@@ -1828,6 +1834,7 @@ class Dynamics:
         shape_rows.body_world = model.body_world
         shape_rows.mu = model.shape_material_mu
         shape_rows.restitution = model.shape_material_restitution
+        shape_rows.restitution_combine_mode = getattr(getattr(model, "phoenx", None), "restitution_combine_mode", None)
         shape_rows.aabb_lower = model.shape_collision_aabb_lower
         shape_rows.aabb_upper = model.shape_collision_aabb_upper
         shape_rows.phoenx_body = solver._shape_body
@@ -1920,6 +1927,7 @@ class Dynamics:
                 desc = ShapeDesc()
                 for name in ("type", "transform", "scale", "margin", "gap", "mu", "restitution", "flags", "prototype"):
                     setattr(desc, name, s[name])
+                desc.restitution_combine_mode = s.get("restitution_combine_mode", 0)
                 shapes.append(desc)
                 shape_body.append(s["body"])
             for j in template["joints"]:
