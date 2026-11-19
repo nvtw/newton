@@ -785,6 +785,11 @@ Run any compatible example by selecting the ``optix`` viewer:
 
     uv run -m newton.examples basic_shapes --viewer optix
 
+Press **R** to start an MP4 recording, or **Shift+R** to include the current
+viewer FPS in the upper-left corner. Press **T** to save the recording in
+``~/Videos/NewtonRecordings/``. The label shows the measured render rate
+during capture. Videos play back at 60 frames per second in simulation time.
+
 Or construct it directly:
 
 .. code-block:: python

@@ -15,6 +15,7 @@ from ..core.types import override
 from ..geometry.types import GeoType
 from .camera import Camera
 from .kernels import update_shape_xforms
+from .optix_recording import LiveMp4Recorder
 from .picking import Picking
 from .viewer import _DEFAULT_LAYER_ID, Layer, ViewerBase
 from .viewer_gui import ViewerGui
@@ -320,6 +321,8 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
         self._overlay_depth_cuda = None
         self._overlay_depth_size = (0, 0)
         kwargs.setdefault("picking_factory", _make_picking)
+        # Shift+R includes the current viewer FPS in the recording.
+        self._recorder = LiveMp4Recorder()
         super().__init__(
             width=width,
             height=height,
@@ -1409,10 +1412,23 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
             self._copy_backend_camera()
 
     def on_key_press(self, symbol: int, modifiers: int) -> None:
-        """Handle common ViewerGL keys and OptiX debug keys."""
-        if self.gui is not None:
-            if self.gui.should_ignore_keyboard_input():
+        """Handle common ViewerGL keys, recording keys, and OptiX debug keys."""
+        if self.gui is not None and self.gui.should_ignore_keyboard_input():
+            return
+        if self._presenter is not None:
+            key = self._presenter.pyglet.window.key
+            if symbol == key.R:
+                path = self._recorder.start(self.width, self.height, show_fps=bool(modifiers & key.MOD_SHIFT))
+                if path is not None:
+                    print(f"Recording to {path} (press T to stop)")  # noqa: T201
                 return
+            if symbol == key.T:
+                path = self._recorder.stop()
+                if path is not None:
+                    dropped = f" ({self._recorder.dropped} frames dropped)" if self._recorder.dropped else ""
+                    print(f"Recording saved to {path}{dropped}")  # noqa: T201
+                return
+        if self.gui is not None:
             key = self._presenter.pyglet.window.key
             if symbol in (key.SPACE, key.PERIOD, key.H, key.F, key.ESCAPE):
                 self.gui.handle_key_press(symbol, close_fn=self.close)
@@ -1537,6 +1553,11 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
     def end_frame(self) -> None:
         """Render and present a frame, including while simulation is paused."""
         super().end_frame()
+        if self._recorder.is_recording:
+            renderer = self._api._viewer
+            self._recorder.capture(
+                renderer._tonemapper._ldr_output, renderer._render_stream, float(self.time), viewer_fps=self.get_fps()
+            )
 
     @override
     def is_key_down(self, key: str | int) -> bool:
@@ -1580,6 +1601,9 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
     @override
     def close(self) -> None:
         """Release the shared UI and OptiX presentation resources."""
+        path = self._recorder.stop()
+        if path is not None:
+            print(f"Recording saved to {path}")  # noqa: T201
         self._destroy_simulation_stream()
         ui = self.ui
         if ui is not None:
