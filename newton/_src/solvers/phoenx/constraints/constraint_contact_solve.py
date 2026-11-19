@@ -1580,17 +1580,17 @@ def _make_contact_iterate_at(
                     inv_inertia1 = mat33_from_sym6(bodies.inverse_inertia_world[b1]) * inv_factor1_f
                     inv_inertia2 = mat33_from_sym6(bodies.inverse_inertia_world[b2]) * inv_factor2_f
 
+        row_sor = sor_boost
+        if wp.static(use_bias):
+            if cc.sweep_relaxation.shape[0] > contact_first:
+                row_sor = sor_boost * cc.sweep_relaxation[contact_first]
+
         for i in range(contact_count):
             active_point = True
             if wp.static(cooperative_lanes > 1):
                 active_point = parallel_id == i % wp.static(cooperative_lanes)
             if active_point:
                 k = contact_first + i
-                row_sor = sor_boost
-                if wp.static(use_bias):
-                    if cc.sweep_relaxation.shape[0] > k:
-                        row_sor = sor_boost * cc.sweep_relaxation[k]
-
                 n = cc_get_normal(cc, k)
                 normal_only = False
                 if wp.static(frictionless_fast_path and not cloth_support):

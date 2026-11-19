@@ -533,5 +533,5 @@ def temporal_sweep_relaxation_kernel(
             coupling = (wp.float32(body_rows[b1]) * a1 + wp.float32(body_rows[b2]) * a2) / (a1 + a2)
             if coupling > budget:
                 w = wp.float32(0.5)
-    for k in range(first, first + count):
-        relaxation[k] = w
+    if count > 0:
+        relaxation[first] = w

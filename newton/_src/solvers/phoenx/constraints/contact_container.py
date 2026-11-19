@@ -183,7 +183,7 @@ class ContactContainer:
     #: overflow contacts retain physical spring compliance while splitting
     #: inertia for the solve. Empty for other schedules; rebuilt by prepare.
     normal_compliance_scale: wp.array[wp.float32]
-    #: Relaxation factor of each row in biased temporal sweeps, see
+    #: Relaxation factor for all rows of a contact column, indexed by its first row, see
     #: :func:`~newton._src.solvers.phoenx.temporal_contacts.temporal_sweep_relaxation_kernel`.
     #: Empty for other schedules.
     sweep_relaxation: wp.array[wp.float32]
