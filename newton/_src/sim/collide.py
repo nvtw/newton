@@ -4609,6 +4609,8 @@ class CollisionPipeline:
                 model.shape_gap,
                 model.shape_collision_aabb_lower,
                 model.shape_collision_aabb_upper,
+                model.shape_flags,
+                self._shape_variant_row,
                 contacts.contact_counters,
                 contacts.contact_generation,
                 self.broad_phase_pair_count,

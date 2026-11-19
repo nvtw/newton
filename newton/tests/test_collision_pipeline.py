@@ -391,6 +391,27 @@ def test_expert_narrow_phase_empty_voxel_resolution(test, device):
 
 
 class TestCollisionPipeline(unittest.TestCase):
+    def test_external_aabbs_generate_rigid_prefix_contacts(self):
+        builder = newton.ModelBuilder()
+        builder.add_shape_box(builder.add_body(), hx=0.1, hy=0.1, hz=0.1)
+        builder.add_ground_plane()
+        model = builder.finalize(device="cpu")
+        pipeline = newton.CollisionPipeline(
+            model,
+            broad_phase="nxn",
+            extra_shape_count=1,
+            unified_shape_world=wp.array(np.append(model.shape_world.numpy(), 0), dtype=int, device="cpu"),
+            unified_shape_flags=wp.array(np.append(model.shape_flags.numpy(), 0), dtype=int, device="cpu"),
+        )
+        contacts = pipeline.contacts()
+        pipeline.collide_with_external_aabbs(model.state(), contacts)
+        count = int(contacts.rigid_contact_count.numpy()[0])
+        self.assertGreater(count, 0)
+        pairs = np.column_stack(
+            (contacts.rigid_contact_shape0.numpy()[:count], contacts.rigid_contact_shape1.numpy()[:count])
+        )
+        np.testing.assert_array_equal(np.sort(pairs, axis=1), np.tile([0, 1], (count, 1)))
+
     def test_explicit_performance_warning_setup(self):
         """Reuse explicit setup's readback and warn about the configured list."""
         builder = newton.ModelBuilder()
