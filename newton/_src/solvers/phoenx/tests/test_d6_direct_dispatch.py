@@ -478,8 +478,15 @@ class TestD6DirectDispatch(unittest.TestCase):
         wp.capture_launch(capture.graph)
 
         final_qd = state.body_qd.numpy()[0]
-        np.testing.assert_allclose(final_qd[[0, 4, 5]], initial_qd[0, [0, 4, 5]], rtol=1.0e-4, atol=1.0e-4)
-        np.testing.assert_allclose(final_qd[[1, 2, 3]], 0.0, rtol=0.0, atol=2.0e-4)
+        # The first free axis stays on the parent while the second rotates with the child.
+        orientation = wp.quat(*state.body_q.numpy()[0, 3:])
+        child_z = np.asarray(wp.quat_rotate(orientation, wp.vec3(0.0, 0.0, 1.0)))
+        locked = np.cross((0.0, 1.0, 0.0), child_z)
+        omega = final_qd[3:]
+        free_speed = (final_qd[0], omega[1], np.dot(omega, child_z))
+        locked_speed = (final_qd[1], final_qd[2], np.dot(omega, locked))
+        np.testing.assert_allclose(free_speed, initial_qd[0, [0, 4, 5]], rtol=1.0e-4, atol=1.0e-4)
+        np.testing.assert_allclose(locked_speed, 0.0, rtol=0.0, atol=2.0e-4)
 
     def test_sliding_d6_rows_match_rotated_frame_derivative(self) -> None:
         """Match the sliding Jacobian and conserve each floating-pair row's momentum."""
