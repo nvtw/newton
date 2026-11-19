@@ -341,7 +341,7 @@ class TestBottlingPlant(unittest.TestCase):
                     self.assertTrue({path + "/collision" for path in portals}.issubset(builder.shape_label))
 
     def test_rack_inventory(self):
-        """Keep wrapped stock together and open cases independently movable in different rack rows."""
+        """Import wrapped, open and empty stock on the rack rows, floor and in pallet stacks."""
         from pxr import Sdf, Usd, UsdGeom, UsdPhysics
 
         def box(stage, path, center, size):
@@ -367,6 +367,15 @@ class TestBottlingPlant(unittest.TestCase):
                 box(unit, pallet.GetPath().AppendChild(f"Runner{i}"), (x, 0, 0.05), (0.1, 1.2, 0.1))
             box(unit, "/Unit/Collision/LoadBlock", (0, 0, 0.4), (1, 1.2, 0.6))
             unit.GetRootLayer().Save()
+
+            supply_file = root / "assets/living_plant/carton_blanks_load/carton_blanks_load.usda"
+            supply_file.parent.mkdir(parents=True)
+            source = Usd.Stage.CreateNew(str(supply_file))
+            payload = UsdGeom.Xform.Define(source, "/Blanks").GetPrim()
+            source.SetDefaultPrim(payload)
+            UsdPhysics.MassAPI.Apply(payload).CreateMassAttr(120)
+            box(source, "/Blanks/Collision/box_0", (0, 0, 1), (1, 1, 2))
+            source.GetRootLayer().Save()
 
             dimensions = root / "assets/beerbox/dimensions.json"
             dimensions.parent.mkdir()
@@ -394,34 +403,79 @@ class TestBottlingPlant(unittest.TestCase):
             UsdGeom.Cube.Define(stage, case.GetPath().AppendChild("Box")).CreateSizeAttr(0.3)
             empty = UsdGeom.Xform.Define(stage, inventory.GetPath().AppendChild("EmptyPallet"))
             UsdGeom.Xform.Define(stage, empty.GetPath().AppendChild("Pallet"))
-            inventory.GetPrototypesRel().SetTargets([prototype.GetPath(), partial.GetPath(), empty.GetPath()])
-            inventory.CreateIdsAttr([7, 2, 9, 5])
-            inventory.CreateProtoIndicesAttr([0, 0, 1, 2])
-            inventory.CreatePositionsAttr([(5, 3, 1), (9, 3, 1), (5, 7, 1), (6, 7, 1)])
+            blanks = UsdGeom.Xform.Define(stage, inventory.GetPath().AppendChild("CartonBlanks"))
+            UsdGeom.Xform.Define(stage, blanks.GetPath().AppendChild("Pallet"))
+            cargo = UsdGeom.Cube.Define(stage, blanks.GetPath().AppendChild("Geo"))
+            cargo.CreateSizeAttr(1)
+            cargo.AddTranslateOp().Set((0, 0, 0.5))
+            cargo.AddScaleOp().Set((0.8, 0.7, 0.8))
+            inventory.GetPrototypesRel().SetTargets(
+                [prototype.GetPath(), partial.GetPath(), empty.GetPath(), blanks.GetPath()]
+            )
+            inventory.CreateIdsAttr([7, 2, 9, 5, 3])
+            inventory.CreateProtoIndicesAttr([0, 0, 1, 2, 3])
+            inventory.CreatePositionsAttr([(5, 3, 1), (9, 3, 1), (5, 7, 1), (6, 7, 1), (9, 7, 0)])
+            for name, kind, center in (
+                ("occupied", "packaging_store", (9, 7, 1)),
+                ("unused", "packaging_store", (30, 7, 1)),
+                ("fixture", "machine", (9, 7, 1)),
+            ):
+                proxy = box(stage, "/Plant/Physics/Equipment/" + name, center, (2, 2, 2))
+                proxy.CreateAttribute("plant:kind", Sdf.ValueTypeNames.String).Set(kind)
+                UsdGeom.Imageable(proxy).CreatePurposeAttr("guide")
             for identifier, x, y, kind in (
                 (7, 5, 3, "FinishedGoods"),
                 (2, 9, 3, "FinishedGoods"),
                 (9, 5, 7, "LoadPartial"),
                 (5, 6, 7, "EmptyPallet"),
+                (3, 9, 7, "CartonBlanks"),
             ):
                 proxy = box(stage, f"/Plant/Physics/Loads/load_{identifier:05d}", (x, y, 1.4), (1.2, 1, 0.8))
                 proxy.CreateAttribute("plant:kind", Sdf.ValueTypeNames.String).Set(kind)
                 UsdGeom.Imageable(proxy).CreatePurposeAttr("guide")
+            placed = "/Plant/LivingPlant/Warehouse/W4_EmptyPallets/pallet_empty_1_01"
+            direct = UsdGeom.Xform.Define(stage, placed).GetPrim()
+            direct.CreateAttribute("living:asset", Sdf.ValueTypeNames.String).Set("pallet")
+            physics = direct.GetVariantSets().AddVariantSet("physics")
+            for variant in ("none", "dynamic"):
+                physics.AddVariant(variant)
+            physics.SetVariantSelection("dynamic")
+            with physics.GetVariantEditContext():
+                UsdPhysics.RigidBodyAPI.Apply(direct)
+                box(stage, placed + "/Board", (0, 0, 0.05), (0.1, 1.2, 0.1))
+            physics.SetVariantSelection("none")
+            for name, owners in (("Stock", placed + "/Board"), ("Shared", placed + "/Board;/Plant/Other")):
+                proxy = box(stage, f"/Plant/Physics/NavProxies/{name}", (0, 0, 0.5), (1, 1, 1))
+                proxy.CreateAttribute("plant:owner", Sdf.ValueTypeNames.String).Set(owners)
             stage.GetRootLayer().Save()
 
             scene = load_plant(root, motor_off=True)
             b = scene.builder
+            self.assertIn(placed, scene.bodies)
+            self.assertNotIn("/Plant/Physics/Equipment/occupied/collision", b.shape_label)
+            self.assertIn("/Plant/Physics/Equipment/unused/collision", b.shape_label)
+            self.assertIn("/Plant/Physics/Equipment/fixture/collision", b.shape_label)
+            self.assertNotIn("/Plant/Physics/NavProxies/Stock/collision", b.shape_label)
+            self.assertIn("/Plant/Physics/NavProxies/Shared/collision", b.shape_label)
+            payload = scene.bodies["/Plant/Sim/FloorStock/load_00003"]
+            self.assertAlmostEqual(b.body_mass[payload], 180, places=3)
+            cargo_shape = b.shape_label.index("/Plant/Sim/FloorStock/load_00003/Payload/Collision/box_0/collision")
+            np.testing.assert_allclose(b.shape_scale[cargo_shape], (0.4, 0.35, 0.4), atol=1e-6)
+            np.testing.assert_allclose(b.shape_transform[cargo_shape].p, (0, 0, 0.5), atol=1e-6)
             body = scene.bodies["/Plant/Sim/RackStock/load_00007"]
             self.assertAlmostEqual(b.body_mass[body], 300, places=3)
             np.testing.assert_allclose(b.body_com[body], (0, 0, 0.33), atol=1e-5)
             np.testing.assert_allclose(b.body_q[body].p, (5, 3, 1), atol=1e-6)
             self.assertNotIn("/Plant/Physics/Loads/load_00007/collision", b.shape_label)
-            self.assertIn("/Plant/Physics/Loads/load_00002/collision", b.shape_label)
+            floor = scene.bodies["/Plant/Sim/FloorStock/load_00002"]
+            self.assertNotIn("/Plant/Physics/Loads/load_00002/collision", b.shape_label)
+            self.assertAlmostEqual(b.body_mass[floor], 300, places=3)
+            np.testing.assert_allclose(b.body_q[floor].p, (9, 3, 1), atol=1e-6)
             visuals = [i for i, label in enumerate(b.shape_label) if label.endswith("/instance")]
             partial_body = scene.bodies["/Plant/Sim/RackStock/load_00009"]
             empty_body = scene.bodies["/Plant/Sim/RackStock/load_00005"]
             carton = scene.bodies["/Plant/Sim/RackStock/load_00009/Cases/C0"]
-            self.assertCountEqual([b.shape_body[i] for i in visuals], [body, -1, partial_body, carton])
+            self.assertCountEqual([b.shape_body[i] for i in visuals], [body, floor, partial_body, carton, payload])
             self.assertAlmostEqual(b.body_mass[empty_body], 60, places=3)
             self.assertAlmostEqual(b.body_mass[partial_body], 60, places=3)
             self.assertAlmostEqual(b.body_mass[carton], 240 / 34, places=3)

@@ -120,13 +120,54 @@ def _prepare_wrapper_inventory(stage):
     disable_owned_proxies(stage, retired)
 
 
-def _prepare_rack_inventory(stage, asset_root):
-    """Replace stock inside each rack row with forkable pallets."""
+def _warehouse_supply_template(stage, asset_root, name, prototype, empty_path, pallet_mass):
+    """Combine the shipping material with an A08 pallet, preserving their individual masses."""
+    from pxr import Gf, Usd, UsdGeom, UsdPhysics  # noqa: PLC0415 - OpenUSD is optional.
+
+    # The warehouse prototypes use different package dimensions from the
+    # handling assets. Keep the source package mass/material and fit its
+    # box to the visible stack above the forkable pallet.
+    source = asset_root / f"assets/living_plant/{name}/{name}.usda"
+    if not source.is_file():
+        raise FileNotFoundError(f"Missing warehouse payload asset: {source}")
+    path = "/_Warehouse" + prototype.GetName()
+    unit = stage.CreateClassPrim(path)
+    unit.GetReferences().AddInternalReference(empty_path)
+    cargo = stage.OverridePrim(path + "/Payload")
+    cargo.GetReferences().AddReference(str(source.resolve()))
+    cargo.GetVariantSet("physics").SetVariantSelection("static")
+    mass = UsdPhysics.MassAPI(cargo).GetMassAttr().Get()
+    visual_bounds = UsdGeom.BBoxCache(Usd.TimeCode.Default(), ["default", "render"])
+    extent = visual_bounds.ComputeRelativeBound(prototype.GetChild("Geo"), prototype.GetChild("Pallet"))
+    extent = extent.ComputeAlignedRange()
+    size = extent.GetSize()
+    box = stage.GetPrimAtPath(path + "/Payload/Collision/box_0")
+    box.GetAttribute("xformOp:translate").Set(extent.GetMidpoint())
+    box.GetAttribute("xformOp:scale").Set(Gf.Vec3f(size))
+    UsdPhysics.MassAPI.Apply(box).CreateDensityAttr(mass / np.prod(size))
+    UsdPhysics.MassAPI(unit).CreateMassAttr(pallet_mass + mass)
+    return path
+
+
+def _prepare_warehouse_inventory(stage, asset_root):
+    """Recover the authored forkable floor and rack stock without changing its placements."""
     from pxr import Usd, UsdGeom, UsdPhysics  # noqa: PLC0415 - OpenUSD is optional.
 
-    racks = stage.GetPrimAtPath("/Plant/Physics/Racks")
+    restored = []
+    for name in ("W1_InspectionHold", "W4_EmptyPallets"):
+        zone = stage.GetPrimAtPath("/Plant/LivingPlant/Warehouse/" + name)
+        if zone:
+            for prop in zone.GetChildren():
+                asset = _value(prop, "living:asset", "")
+                if asset in ("pallet", "pallet_board_broken"):
+                    prop.GetVariantSet("physics").SetVariantSelection("dynamic")
+                    if asset == "pallet":
+                        prop.GetVariantSet("collision").SetVariantSelection("boxes")
+                    restored.append(str(prop.GetPath()))
+    disable_owned_proxies(stage, restored, scope="/Plant/Physics/NavProxies")
+
     instancer = UsdGeom.PointInstancer.Get(stage, "/Plant/Logistics/PalletLoads")
-    if not racks or not instancer:
+    if not instancer:
         return {}, 0.0
     asset = asset_root / "assets/pallet_load/pallet_load.usda"
     if not asset.is_file():
@@ -162,35 +203,69 @@ def _prepare_rack_inventory(stage, asset_root):
     stage.OverridePrim(empty_path + "/Collision").SetActive(False)
     UsdPhysics.MassAPI(empty).CreateMassAttr(pallet_mass)
     bounds_cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), ["guide"])
-    bounds = [bounds_cache.ComputeWorldBound(row).ComputeAlignedRange() for row in racks.GetChildren()]
+    racks = stage.GetPrimAtPath("/Plant/Physics/Racks")
+    bounds = [bounds_cache.ComputeWorldBound(row).ComputeAlignedRange() for row in racks.GetChildren()] if racks else []
+    supply_assets = {
+        "CartonBlanks": "carton_blanks_load",
+        "CrownCartons": "crown_carton_load",
+        "FilmRolls": "stretch_film_load",
+        "TierSheets": "slip_sheet_load",
+    }
+    templates = {"FinishedGoods": template_path}
+    for kind in (
+        "LoadFullOpen",
+        "LoadPartial",
+        "EmptyPallet",
+        "WeatheredEmptyPallet",
+        "DirtyEmptyPallet",
+        "BrokenEmptyPallet",
+    ):
+        templates[kind] = empty_path
     targets = instancer.GetPrototypesRel().GetTargets()
     transforms = instancer.ComputeInstanceTransformsAtTime(Usd.TimeCode.Default(), Usd.TimeCode.Default())
     world = cache.GetLocalToWorldTransform(instancer.GetPrim())
     stock = {}
+    floor_positions = []
     for index, (identifier, proto, matrix) in enumerate(
         zip(instancer.GetIdsAttr().Get(), instancer.GetProtoIndicesAttr().Get(), transforms, strict=True)
     ):
         target = targets[proto]
         placement = matrix * world
-        if not any(row.Contains(placement.ExtractTranslation()) for row in bounds):
+        rack = any(row.Contains(placement.ExtractTranslation()) for row in bounds)
+        if not rack and target.name not in templates and target.name not in supply_assets:
             continue
         label = f"load_{identifier:05d}"
         proxy = stage.GetPrimAtPath("/Plant/Physics/Loads/" + label)
         if not proxy or _value(proxy, "plant:kind", "") != target.name:
-            raise ValueError(f"No matching static stock collider for rack load {identifier}")
+            raise ValueError(f"No matching static stock collider for warehouse load {identifier}")
         # The unit-load asset uses its pallet frame. Warehouse prototypes rotate
         # that pallet inside their own frame before the instancer places it.
         prototype = stage.GetPrimAtPath(target)
         pallet_frame = cache.ComputeRelativeTransform(prototype.GetChild("Pallet"), prototype)[0]
-        body = UsdGeom.Xform.Define(stage, "/Plant/Sim/RackStock/" + label)
-        if target.name not in ("FinishedGoods", "LoadFullOpen", "LoadPartial", "EmptyPallet", "WeatheredEmptyPallet"):
-            raise ValueError(f"Unsupported warehouse rack stock: {target}")
-        wrapped = target.name == "FinishedGoods"
-        body.GetPrim().GetReferences().AddInternalReference(template_path if wrapped else empty_path)
+        if target.name not in templates:
+            if target.name not in supply_assets:
+                raise ValueError(f"Unsupported warehouse stock: {target}")
+            templates[target.name] = _warehouse_supply_template(
+                stage, asset_root, supply_assets[target.name], prototype, empty_path, pallet_mass
+            )
+        stock_root = "/Plant/Sim/RackStock/" if rack else "/Plant/Sim/FloorStock/"
+        body = UsdGeom.Xform.Define(stage, stock_root + label)
+        body.GetPrim().GetReferences().AddInternalReference(templates[target.name])
         parent_inverse = cache.GetLocalToWorldTransform(body.GetPrim().GetParent()).GetInverse()
         body.AddTransformOp().Set(pallet_frame * placement * parent_inverse)
         proxy.SetActive(False)
         stock[index] = str(body.GetPath())
+        if not rack:
+            floor_positions.append(placement.ExtractTranslation())
+    # Each packaging store has a single solid block representing the whole
+    # stockpile. Its individual packages and pallets now supply that collision.
+    equipment = stage.GetPrimAtPath("/Plant/Physics/Equipment")
+    if equipment:
+        for proxy in equipment.GetChildren():
+            if _value(proxy, "plant:kind", "") == "packaging_store":
+                extent = bounds_cache.ComputeWorldBound(proxy).ComputeAlignedRange()
+                if any(extent.Contains(position) for position in floor_positions):
+                    proxy.SetActive(False)
     # The source forklift unit carries two layers of 17 filled cases.
     return stock, load_mass / 34
 
@@ -292,7 +367,7 @@ def load_plant(asset_root: Path, *, cutaway=True, visuals=True, motor_off=False,
     if cutaway:
         plant.GetVariantSet("view").SetVariantSelection("cutaway")
     _prepare_wrapper_inventory(stage)
-    rack_stock, rack_case_mass = _prepare_rack_inventory(stage, asset_root)
+    stock_instances, rack_case_mass = _prepare_warehouse_inventory(stage, asset_root)
     prepare_dispensers(stage)
     case_inventory, case_staging = _prepare_case_inventory(stage, cartons_per_packer)
     prims = list(Usd.PrimRange.Stage(stage, Usd.TraverseInstanceProxies()))
@@ -327,7 +402,9 @@ def load_plant(asset_root: Path, *, cutaway=True, visuals=True, motor_off=False,
             scene.self_collision_scopes.append(str(root.GetPath()))
     scene.metadata = dict(stage.GetRootLayer().customLayerData)
     scene.metadata["case_inventory"] = case_inventory
-    scene.metadata["dynamic_rack_loads"] = len(rack_stock)
+    scene.metadata["dynamic_rack_loads"] = sum(
+        path.startswith("/Plant/Sim/RackStock/") for path in stock_instances.values()
+    )
     if case_staging:
         scene.metadata["case_staging"] = case_staging
         scene.metadata["case_supply_limitation"] = (
@@ -824,7 +901,7 @@ def load_plant(asset_root: Path, *, cutaway=True, visuals=True, motor_off=False,
     case_dims = None
     case_layouts = {}
     for instancer in instancers:
-        stock = rack_stock if str(instancer.GetPath()) == "/Plant/Logistics/PalletLoads" else {}
+        stock = stock_instances if str(instancer.GetPath()) == "/Plant/Logistics/PalletLoads" else {}
         visible = visuals and instancer.ComputeVisibility() != "invisible"
         if not visible and not stock:
             continue

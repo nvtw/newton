@@ -36,9 +36,16 @@ The 1,063 wrapped pallets use the source 308.068 kg rigid unit load. Each of
 the 5,882 filled cartons on the 98 open and 102 partial pallets is a separate
 rigid box at its source placement. The other 19 pallets are empty. Rack stock
 settles under gravity and uses normal island sleeping and waking. The 376
-stock proxies outside the rack rows retain their source colliders.
-The source models reach-truck storage and retrieval with timers. The Newton
-fleet has no automated high-rack mission.
+floor-stock instances are also independently movable: 188 empty pallets, 104
+wrapped finished-goods loads and 84 packaging-supply loads. The latter fit the
+warehouse cargo geometry to boxes and use the corresponding packaging assets'
+payload masses and friction, with separate mass and collision geometry for the
+wood pallet. The two finished-goods pallets in front of the fleet forklifts
+start free on the floor. W4's eight return stacks and its damaged stack contain
+106 independent A08 pallets and one loose board. The W1 inspection cartons
+rest on their own movable pallet. Parked forklifts and warehouse fixtures
+retain their source colliders. Reach-truck storage and retrieval use timers
+in the source; the Newton fleet has no automated high-rack mission.
 
 Product bodies stored below the floor are inactive supply pools and are omitted.
 The 2,458 bottles already on the line and all 56 open cases remain dynamic. Cases

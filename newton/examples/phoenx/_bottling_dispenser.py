@@ -9,16 +9,16 @@ import newton.usd
 from newton.examples.phoenx._bottling_wrap import mesh_components
 
 
-def disable_owned_proxies(stage, covered_roots):
+def disable_owned_proxies(stage, covered_roots, *, scope="/Plant/Physics/NavProxies/Replaceable"):
     """Retire coarse proxies only when every represented owner is covered."""
     from pxr import Usd  # noqa: PLC0415 - OpenUSD is optional.
 
-    proxies = stage.GetPrimAtPath("/Plant/Physics/NavProxies/Replaceable")
-    if not proxies:
+    proxies = stage.GetPrimAtPath(scope)
+    if not covered_roots or not proxies:
         return
     prefixes = tuple(path.rstrip("/") + "/" for path in covered_roots)
     with Usd.EditContext(stage, stage.GetSessionLayer()):
-        for proxy in proxies.GetChildren():
+        for proxy in Usd.PrimRange(proxies):
             owner = proxy.GetAttribute("plant:owner").Get()
             owners = [path.strip() for path in owner.split(";") if path.strip()] if owner else []
             if owners and all(path.startswith(prefixes) or path in covered_roots for path in owners):

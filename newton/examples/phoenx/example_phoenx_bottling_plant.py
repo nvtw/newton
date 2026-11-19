@@ -557,7 +557,8 @@ class Example:
     @staticmethod
     def create_parser():
         parser = newton.examples.create_parser()
-        parser.set_defaults(viewer="optix", optix_max_instances=262144)
+        # OptiX also allocates instances for hidden collision geometry.
+        parser.set_defaults(viewer="optix", optix_max_instances=300_000)
         parser.add_argument(
             "--asset-root",
             default=newton.examples.get_local_asset_directory("bottling_plant"),
