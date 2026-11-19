@@ -120,6 +120,73 @@ def _prepare_wrapper_inventory(stage):
     disable_owned_proxies(stage, retired)
 
 
+def _prepare_rack_inventory(stage, asset_root):
+    """Replace complete loads in the first pick bay with the source forklift unit load."""
+    from pxr import Usd, UsdGeom, UsdPhysics  # noqa: PLC0415 - OpenUSD is optional.
+
+    bay = stage.GetPrimAtPath("/Plant/Physics/Racks/rack_1_11_0/Bay_00")
+    instancer = UsdGeom.PointInstancer.Get(stage, "/Plant/Logistics/PalletLoads")
+    if not bay or not instancer:
+        return {}
+    asset = asset_root / "assets/pallet_load/pallet_load.usda"
+    if not asset.is_file():
+        raise FileNotFoundError(f"Missing warehouse unit-load asset: {asset}")
+    template_path = "/_RackUnitLoad"
+    template = stage.CreateClassPrim(template_path)
+    template.GetReferences().AddReference(str(asset.resolve()))
+    # Render the original instanced stock on the moving body, including its wrap and labels.
+    stage.OverridePrim(template_path + "/Load").SetActive(False)
+    UsdGeom.Imageable(template).MakeInvisible()
+    pallet = stage.GetPrimAtPath(template_path + "/Pallet/Geometry/sm_pallet_block_a08_obj_00")
+    pallet_mass = UsdPhysics.MassAPI(pallet).GetMassAttr().Get()
+    load_mass = UsdPhysics.MassAPI(template).GetMassAttr().Get() - pallet_mass
+    cache = UsdGeom.XformCache()
+    for root, mass in ((pallet, pallet_mass), (stage.GetPrimAtPath(template_path + "/Collision"), load_mass)):
+        # Distribute the component's authored mass over its solid boxes. Equal density
+        # for wood and cases would put the combined centre of mass about 4 cm too high.
+        boxes = [
+            p
+            for p in Usd.PrimRange(root, Usd.PrimAllPrimsPredicate)
+            if p.IsA(UsdGeom.Cube) and p.HasAPI(UsdPhysics.CollisionAPI) and _value(p, "physics:collisionEnabled", True)
+        ]
+        volume = sum(
+            abs(cache.GetLocalToWorldTransform(p).GetDeterminant()) * UsdGeom.Cube(p).GetSizeAttr().Get() ** 3
+            for p in boxes
+        )
+        for box in boxes:
+            UsdPhysics.MassAPI.Apply(box).CreateDensityAttr(mass / volume)
+
+    bounds = UsdGeom.BBoxCache(Usd.TimeCode.Default(), ["guide"]).ComputeWorldBound(bay).ComputeAlignedRange()
+    targets = instancer.GetPrototypesRel().GetTargets()
+    transforms = instancer.ComputeInstanceTransformsAtTime(Usd.TimeCode.Default(), Usd.TimeCode.Default())
+    world = cache.GetLocalToWorldTransform(instancer.GetPrim())
+    stock = {}
+    for index, (identifier, proto, matrix) in enumerate(
+        zip(instancer.GetIdsAttr().Get(), instancer.GetProtoIndicesAttr().Get(), transforms, strict=True)
+    ):
+        target = targets[proto]
+        if target.name not in ("FinishedGoods", "LoadFullOpen"):
+            continue
+        placement = matrix * world
+        if not bounds.Contains(placement.ExtractTranslation()):
+            continue
+        label = f"load_{identifier:05d}"
+        proxy = stage.GetPrimAtPath("/Plant/Physics/Loads/" + label)
+        if not proxy or _value(proxy, "plant:kind", "") != target.name:
+            raise ValueError(f"No matching static stock collider for rack load {identifier}")
+        # The unit-load asset uses its pallet frame. Warehouse prototypes rotate
+        # that pallet inside their own frame before the instancer places it.
+        prototype = stage.GetPrimAtPath(target)
+        pallet_frame = cache.ComputeRelativeTransform(prototype.GetChild("Pallet"), prototype)[0]
+        body = UsdGeom.Xform.Define(stage, "/Plant/Sim/RackStock/" + label)
+        body.GetPrim().GetReferences().AddInternalReference(template_path)
+        parent_inverse = cache.GetLocalToWorldTransform(body.GetPrim().GetParent()).GetInverse()
+        body.AddTransformOp().Set(pallet_frame * placement * parent_inverse)
+        proxy.SetActive(False)
+        stock[index] = str(body.GetPath())
+    return stock
+
+
 def _prepare_case_inventory(stage, cartons_per_packer):
     """Extend finite carton stock on explicit offsite staging platforms.
 
@@ -217,6 +284,7 @@ def load_plant(asset_root: Path, *, cutaway=True, visuals=True, motor_off=False,
     if cutaway:
         plant.GetVariantSet("view").SetVariantSelection("cutaway")
     _prepare_wrapper_inventory(stage)
+    rack_stock = _prepare_rack_inventory(stage, asset_root)
     prepare_dispensers(stage)
     case_inventory, case_staging = _prepare_case_inventory(stage, cartons_per_packer)
     prims = list(Usd.PrimRange.Stage(stage, Usd.TraverseInstanceProxies()))
@@ -251,6 +319,7 @@ def load_plant(asset_root: Path, *, cutaway=True, visuals=True, motor_off=False,
             scene.self_collision_scopes.append(str(root.GetPath()))
     scene.metadata = dict(stage.GetRootLayer().customLayerData)
     scene.metadata["case_inventory"] = case_inventory
+    scene.metadata["dynamic_rack_loads"] = len(rack_stock)
     if case_staging:
         scene.metadata["case_staging"] = case_staging
         scene.metadata["case_supply_limitation"] = (
@@ -555,6 +624,9 @@ def load_plant(asset_root: Path, *, cutaway=True, visuals=True, motor_off=False,
                 decomposed.append(builder.shape_count)
             add(body, mesh=mesh, scale=scale, **kw)
         elif kind == "Cube":
+            density = _value(prim, "physics:density", 0.0)
+            if collision and density > 0.0:
+                cfg.density = density
             half = float(_value(prim, "size", 2.0)) / 2.0
             if velocity is not None:
                 mesh = moving_mesh(newton.Mesh.create_box(half, compute_inertia=False), velocity)
@@ -741,11 +813,14 @@ def load_plant(asset_root: Path, *, cutaway=True, visuals=True, motor_off=False,
         for path in targets:
             if path not in prototype_cache:
                 prototype_cache[path] = prototype_meshes(stage.GetPrimAtPath(path))
-        for index, matrix in zip(indices, transforms, strict=True):
-            pose, scale = transform(matrix * world)
+        stock = rack_stock if str(instancer.GetPath()) == "/Plant/Logistics/PalletLoads" else {}
+        for instance, (index, matrix) in enumerate(zip(indices, transforms, strict=True)):
+            body = scene.bodies[stock[instance]] if instance in stock else -1
+            placement = matrix * world
+            pose, scale = transform(placement * matrices[body].GetInverse() if body >= 0 else placement)
             for mesh in prototype_cache[targets[index]]:
                 builder.add_shape_mesh(
-                    -1,
+                    body,
                     mesh=mesh,
                     xform=pose,
                     scale=scale,

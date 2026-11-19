@@ -248,6 +248,75 @@ class TestBottlingPlant(unittest.TestCase):
                 else:
                     self.assertTrue({path + "/collision" for path in portals}.issubset(builder.shape_label))
 
+    def test_rack_pick_bay(self):
+        """Give the pick bay's complete stock one moving visual and a forkable compound collider."""
+        from pxr import Sdf, Usd, UsdGeom, UsdPhysics
+
+        def box(stage, path, center, size):
+            cube = UsdGeom.Cube.Define(stage, path)
+            cube.CreateSizeAttr(1.0)
+            cube.AddTranslateOp().Set(center)
+            cube.AddScaleOp().Set(size)
+            UsdPhysics.CollisionAPI.Apply(cube.GetPrim())
+            return cube.GetPrim()
+
+        with tempfile.TemporaryDirectory() as directory, wp.ScopedDevice("cpu"):
+            root = Path(directory)
+            unit_file = root / "assets/pallet_load/pallet_load.usda"
+            unit_file.parent.mkdir(parents=True)
+            unit = Usd.Stage.CreateNew(str(unit_file))
+            unit_root = UsdGeom.Xform.Define(unit, "/Unit").GetPrim()
+            unit.SetDefaultPrim(unit_root)
+            UsdPhysics.RigidBodyAPI.Apply(unit_root)
+            UsdPhysics.MassAPI.Apply(unit_root).CreateMassAttr(300)
+            pallet = UsdGeom.Xform.Define(unit, "/Unit/Pallet/Geometry/sm_pallet_block_a08_obj_00").GetPrim()
+            UsdPhysics.MassAPI.Apply(pallet).CreateMassAttr(60)
+            for i, x in enumerate((-0.4, 0.4)):
+                box(unit, pallet.GetPath().AppendChild(f"Runner{i}"), (x, 0, 0.05), (0.1, 1.2, 0.1))
+            box(unit, "/Unit/Collision/LoadBlock", (0, 0, 0.4), (1, 1.2, 0.6))
+            unit.GetRootLayer().Save()
+
+            stage_file = root / "scenarios/line_sim/line_sim.usda"
+            stage_file.parent.mkdir(parents=True)
+            stage = Usd.Stage.CreateNew(str(stage_file))
+            stage.SetDefaultPrim(UsdGeom.Xform.Define(stage, "/Plant").GetPrim())
+            UsdGeom.SetStageUpAxis(stage, "Z")
+            UsdGeom.SetStageMetersPerUnit(stage, 1.0)
+            beam = box(stage, "/Plant/Physics/Racks/rack_1_11_0/Bay_00/Beam", (5, 3, 0.5), (3, 1.5, 1))
+            UsdGeom.Imageable(beam).CreatePurposeAttr("guide")
+            inventory = UsdGeom.PointInstancer.Define(stage, "/Plant/Logistics/PalletLoads")
+            prototype = UsdGeom.Xform.Define(stage, inventory.GetPath().AppendChild("FinishedGoods"))
+            frame = UsdGeom.Xform.Define(stage, prototype.GetPath().AppendChild("Pallet"))
+            frame.AddRotateZOp().Set(90)
+            UsdGeom.Cube.Define(stage, frame.GetPath().AppendChild("Stock")).CreateSizeAttr(0.4)
+            inventory.GetPrototypesRel().SetTargets([prototype.GetPath()])
+            inventory.CreateIdsAttr([7, 2])
+            inventory.CreateProtoIndicesAttr([0, 0])
+            inventory.CreatePositionsAttr([(5, 3, 1), (9, 3, 1)])
+            for identifier, x in ((7, 5), (2, 9)):
+                proxy = box(stage, f"/Plant/Physics/Loads/load_{identifier:05d}", (x, 3, 1.4), (1.2, 1, 0.8))
+                proxy.CreateAttribute("plant:kind", Sdf.ValueTypeNames.String).Set("FinishedGoods")
+                UsdGeom.Imageable(proxy).CreatePurposeAttr("guide")
+            stage.GetRootLayer().Save()
+
+            scene = load_plant(root, motor_off=True)
+            b = scene.builder
+            body = scene.bodies["/Plant/Sim/RackStock/load_00007"]
+            self.assertAlmostEqual(b.body_mass[body], 300, places=3)
+            np.testing.assert_allclose(b.body_com[body], (0, 0, 0.33), atol=1e-5)
+            np.testing.assert_allclose(b.body_q[body].p, (5, 3, 1), atol=1e-6)
+            self.assertNotIn("/Plant/Physics/Loads/load_00007/collision", b.shape_label)
+            self.assertIn("/Plant/Physics/Loads/load_00002/collision", b.shape_label)
+            visuals = [i for i, label in enumerate(b.shape_label) if label.endswith("/instance")]
+            self.assertEqual([b.shape_body[i] for i in visuals], [body, -1])
+            world = wp.transform_multiply(b.body_q[body], b.shape_transform[visuals[0]])
+            np.testing.assert_allclose(world.p, (5, 3, 1), atol=1e-6)
+            np.testing.assert_allclose(wp.quat_rotate(world.q, wp.vec3(1, 0, 0)), (1, 0, 0), atol=1e-6)
+            self.assertEqual(
+                sum(b.shape_body[i] == body and label.endswith("/collision") for i, label in enumerate(b.shape_label)),
+                3,
+            )
+
     def test_wrapper_infeed_stops_loaded_pallets_after_withdrawal(self):
         """Transport both line orientations using measured rays and stop before wrapping."""
         with tempfile.TemporaryDirectory() as directory, wp.ScopedDevice("cpu"):
