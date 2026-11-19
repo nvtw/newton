@@ -22,6 +22,38 @@ from newton.tests.unittest_utils import import_pyglet_window, patch_sys_module, 
 _Vec3 = namedtuple("_Vec3", ("x", "y", "z"))
 
 
+class TestViewerPhysicsStats(unittest.TestCase):
+    def test_counts_active_rows_and_limits_readbacks(self):
+        device = wp.get_device("cpu")
+        capacity = SimpleNamespace(body_count=4, articulation_coordinates="maximal")
+        model = SimpleNamespace(body_count=6, device=device, _dynamic_capacity=capacity)
+        pool = SimpleNamespace(counts=wp.array([1, 3, 0], dtype=int, device=device))
+        solver = SimpleNamespace(
+            bodies=SimpleNamespace(island_root=wp.array([0, 1, -1, 3, -1, -1, -1], dtype=int, device=device)),
+            dynamics=SimpleNamespace(data=SimpleNamespace(body_pool=pool)),
+        )
+        contacts = SimpleNamespace(rigid_contact_count=wp.array([37], dtype=int, device=device))
+        example = SimpleNamespace(solver=solver, contacts=contacts)
+        gui = ViewerGui.__new__(ViewerGui)
+        gui._viewer = SimpleNamespace(model=model, show_ui=True, _deferred_simulation_in_flight=False)
+        gui.ui = SimpleNamespace(is_available=True)
+        gui._stats_pending = False
+        gui.update_shape_counts(model)
+
+        with mock.patch("newton._src.viewer.viewer_gui.perf_counter", return_value=1.0):
+            gui.sample_physics_stats(example)
+            contacts_count, sleeping, runtime = gui._physics_counts
+            self.assertEqual((contacts_count, sleeping, gui._stats_base + runtime), (37, 2, 3))
+            with mock.patch.object(wp, "copy") as copy:
+                gui.sample_physics_stats(example)
+                copy.assert_not_called()
+
+        gui._viewer.show_ui = False
+        with mock.patch.object(wp, "launch") as launch:
+            gui.sample_physics_stats(example)
+            launch.assert_not_called()
+
+
 @requires("imgui_bundle")
 class TestViewerUI(unittest.TestCase):
     def setUp(self) -> None:

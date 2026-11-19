@@ -21,6 +21,7 @@ from time import perf_counter
 from typing import Any, Literal
 
 import numpy as np
+import warp as wp
 
 import newton as nt
 from newton.selection import ArticulationView
@@ -31,6 +32,33 @@ from .gl.gui import UI
 
 # Width of the left sidebar in logical (96-DPI) pixels.
 _SIDEBAR_WIDTH_PX = 300.0
+
+
+@wp.kernel(enable_backward=False)
+def _count_physics_stats(
+    contacts: wp.array[int],
+    roots: wp.array[int],
+    awake: wp.array[int],
+    runtime_counts: wp.array[int],
+    active_instances: wp.array[int],
+    templates: wp.array[int],
+    template_sizes: wp.array[int],
+    counts: wp.array[int],
+):
+    i = wp.tid()
+    if i == 0:
+        counts[0] = -1
+        if contacts:
+            counts[0] = contacts[0]
+        if runtime_counts:
+            wp.atomic_add(counts, 2, runtime_counts[0])
+    # PhoenX reserves index zero for its world anchor.
+    if roots and i + 1 < roots.shape[0] and roots[i + 1] >= 0:
+        wp.atomic_add(counts, 1, 1)
+    elif awake and i < awake.shape[0] and awake[i] == 0:
+        wp.atomic_add(counts, 1, 1)
+    if active_instances and i < active_instances.shape[0] and active_instances[i] != 0:
+        wp.atomic_add(counts, 2, template_sizes[templates[i]])
 
 
 class ViewerGui:
@@ -72,6 +100,12 @@ class ViewerGui:
         # update_shape_counts() when the viewer is given a model.
         self._shape_visual_count: int | None = None
         self._shape_collision_count: int | None = None
+        self._stats_device = None
+        self._stats_host = None
+        self._stats_event = None
+        self._stats_pending = False
+        self._next_stats_sample = 0.0
+        self._physics_counts = None
 
         # Selection panel state (UI-local, not simulation state).
         self._selection_ui_state = {
@@ -1127,12 +1161,86 @@ class ViewerGui:
         imgui.text(f"Pitch: {cam.pitch:.1f} deg")
         imgui.text(f"Yaw: {cam.yaw:.1f} deg")
 
+    def sample_physics_stats(self, example) -> None:
+        """Sample the latest completed physics step at most four times per second."""
+        if not self.show_ui or not self.is_available:
+            return
+        if self._stats_pending:
+            if not self._stats_event.is_complete:
+                return
+            self._physics_counts = tuple(self._stats_host.numpy().tolist())
+            self._stats_pending = False
+
+        now = perf_counter()
+        if now < self._next_stats_sample:
+            return
+        self._next_stats_sample = now + 0.25
+        model = self._viewer.model
+        if model is None:
+            return
+        solver = getattr(example, "solver", None)
+        roots = getattr(getattr(solver, "bodies", None), "island_root", None)
+        awake = getattr(getattr(solver, "_sleeping", None), "body_awake", None)
+        contacts = getattr(getattr(example, "contacts", None), "rigid_contact_count", None)
+        capacity = model._dynamic_capacity
+        present = model.body_count
+        runtime_counts = active_instances = templates = template_sizes = None
+        if capacity is not None:
+            present -= capacity.body_count
+            dynamics = getattr(solver, "dynamics", None)
+            if dynamics is not None:
+                runtime_counts = dynamics.data.body_pool.counts
+            if capacity.articulation_coordinates == "reduced":
+                present -= capacity.slot_size * capacity.articulation_count + sum(
+                    n * len(t["bodies"])
+                    for n, t in zip(capacity.instance_counts, capacity.articulation_templates, strict=False)
+                )
+                if dynamics is not None and capacity.articulation_count:
+                    active_instances = dynamics.articulations.active
+                    templates = dynamics.data.articulation_template
+                    template_sizes = dynamics.data.template_tree_count
+
+        device = model.device
+        if self._stats_device is None:
+            self._stats_device = wp.empty(3, dtype=int, device=device)
+            self._stats_host = wp.empty(3, dtype=int, device="cpu", pinned=device.is_cuda)
+            self._stats_event = wp.Event(device) if device.is_cuda else None
+
+        # Use the producer's stream so the counter and sleep flags belong to the same step.
+        stream = self._viewer._deferred_simulation_stream if self._viewer._deferred_simulation_in_flight else None
+        with wp.ScopedStream(stream, sync_enter=False, sync_exit=False):
+            self._stats_device.zero_()
+            wp.launch(
+                _count_physics_stats,
+                max(
+                    1,
+                    model.body_count if roots is not None or awake is not None else 0,
+                    active_instances.size if active_instances is not None else 0,
+                ),
+                inputs=[contacts, roots, awake, runtime_counts, active_instances, templates, template_sizes],
+                outputs=[self._stats_device],
+                device=device,
+            )
+            wp.copy(self._stats_host, self._stats_device)
+            if device.is_cuda:
+                wp.get_stream(device).record_event(self._stats_event)
+                self._stats_pending = True
+        self._stats_base = present
+        self._stats_has_sleep = roots is not None or awake is not None
+        if not device.is_cuda:
+            self._physics_counts = tuple(self._stats_host.numpy().tolist())
+
     def update_shape_counts(self, model) -> None:
         """Recompute the visual / collision shape counts shown in the stats overlay.
 
         Called when the viewer is given a model. ``shape_flags`` is a device array, so
         this is done once per model rather than while rendering the overlay.
         """
+        if self._stats_pending:
+            wp.synchronize_event(self._stats_event)
+        self._stats_device = self._stats_host = self._stats_event = self._physics_counts = None
+        self._stats_pending = False
+        self._next_stats_sample = 0.0
         flags_array = getattr(model, "shape_flags", None) if model is not None else None
         if flags_array is None or len(flags_array) == 0:
             self._shape_visual_count = None
@@ -1187,7 +1295,17 @@ class ViewerGui:
             if viewer.model is not None:
                 imgui.separator()
                 imgui.text(f"Worlds: {viewer.model.world_count}")
-                imgui.text(f"Bodies: {viewer.model.body_count}")
+                if self._physics_counts is None:
+                    imgui.text(f"Body slots: {viewer.model.body_count}")
+                else:
+                    contacts, sleeping, active_slots = self._physics_counts
+                    total = self._stats_base + active_slots
+                    if self._stats_has_sleep:
+                        imgui.text(f"Sleeping bodies: {sleeping:,} / {total:,}")
+                    else:
+                        imgui.text(f"Bodies: {total:,}")
+                    if contacts >= 0:
+                        imgui.text(f"Rigid contacts: {contacts:,}")
                 imgui.text(f"Shapes: {viewer.model.shape_count}")
                 if self._shape_visual_count is not None:
                     # Categories overlap when a shape carries both flags.

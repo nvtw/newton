@@ -668,6 +668,8 @@ def run(example, args):
             if test_post_step:
                 example.test_post_step()
 
+            if interactive and (sample_stats := getattr(getattr(viewer, "gui", None), "sample_physics_stats", None)):
+                sample_stats(example)
             with wp.ScopedTimer("render", active=False):
                 example.render()
         except (Exception, SystemExit) as error:
