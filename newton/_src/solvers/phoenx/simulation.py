@@ -5793,7 +5793,8 @@ class PhoenXWorld:
         large ones up to the next small colour, and the trailing small ones in
         three launches; only small colours between large ones enter the
         guarded loop. On CPU, launch threads run serially, so each colour gets
-        its own launch.
+        its own launch. With an island schedule, independent components run in
+        separate blocks across both large and small colors.
         """
         heads = self._singleworld_kernels()[::2]
         if head_kernel in heads:
@@ -5818,21 +5819,18 @@ class PhoenXWorld:
             return
 
         kernel, drain_tail = get_singleworld_one_launch_kernel(head_kernel, tail_kernel)
+        if island_schedule is not None:
+            island_schedule.iterate(self, head_kernel, idt, tail=None if drain_tail else tail_kernel)
+            return
         if drain_tail:
-            if island_schedule is None:
-                self._launch_one_launch_sweep(kernel, idt, contact_container)
-            else:
-                island_schedule.iterate(self, head_kernel, idt, all_colors=True)
+            self._launch_one_launch_sweep(kernel, idt, contact_container)
             return
 
         def _tail() -> None:
             self._capture_singleworld_tail_sweep(kernel=tail_kernel, idt=idt, contact_container=contact_container)
 
         def _round() -> None:
-            if island_schedule is None:
-                self._launch_one_launch_sweep(kernel, idt, contact_container)
-            else:
-                island_schedule.iterate(self, head_kernel, idt)
+            self._launch_one_launch_sweep(kernel, idt, contact_container)
             _tail()
 
         _tail()

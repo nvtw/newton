@@ -1,12 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
-"""Schedule the large colors of a rigid PGS iteration independently per island.
+"""Schedule the colors of a rigid PGS iteration independently per island.
 
 Only shared writable bodies impose an order between columns. A stable sort of
 the existing color-ordered columns by dynamic component preserves that order
 inside each component. Its block can then advance colors with a block barrier.
-Biased sweeps keep their separate small-color tail. Velocity relaxation
-uses the same arithmetic for all colors and can traverse them in one pass.
+Biased sweeps use separate kernels for large and small colors to preserve
+their arithmetic. Velocity relaxation traverses all colors in one pass.
 """
 
 from __future__ import annotations
@@ -188,33 +188,47 @@ def _index_colors(
 
 
 @wp.kernel(enable_backward=False)
-def _take_large_colors(
+def _take_color_runs(
     starts: wp.array[int],
     num_colors: wp.array[int],
     cursor: wp.array[int],
     threshold: int,
-    interval: wp.array[int],
+    large: wp.array[int],
+    small: wp.array[int],
 ):
     count = num_colors[0]
     color = count - cursor[0]
-    interval[0] = color
+    large[0] = color
+    if threshold < 0:
+        large[1] = count
+        small[0] = count
+        small[1] = count
+        cursor[0] = 0
+        return
     while color < count and starts[color + 1] - starts[color] > threshold:
         color += 1
-    interval[1] = color
+    large[1] = color
+    small[0] = color
+    while color < count and starts[color + 1] - starts[color] <= threshold:
+        color += 1
+    small[1] = color
     cursor[0] = count - color
 
 
 @functools.cache
-def _get_island_iteration(axes):
+def _get_island_iteration(axes, *, small_colors: bool = False):
     options = dict(axes)
     phase = options["phase"]
+    if small_colors:
+        # Match the original fused tail's regular contact dispatcher and precision.
+        options["direct_regular_colors"] = False
     solve_color = _make_singleworld_head_color_func(**options)
 
     @wp.kernel(
-        name=f"phoenx_{phase}_islands",
+        name=f"phoenx_{phase}_islands_small" if small_colors else f"phoenx_{phase}_islands",
         enable_backward=False,
         module="unique",
-        module_options={"fast_math": phase == "iterate"},
+        module_options={"fast_math": phase == "iterate" and not small_colors},
         grid_stride=False,
     )
     def iterate(
@@ -307,6 +321,7 @@ class IslandIterationSchedule:
         self.ends = wp.empty_like(self.roots)
         self.count = wp.empty(1, dtype=int, device=device)
         self.interval = wp.empty(2, dtype=int, device=device)
+        self.small_interval = wp.empty_like(self.interval)
         self.blocks = min(self.roots.size, 4 * device.sm_count)
 
     def build(self, world: PhoenXWorld):
@@ -384,24 +399,37 @@ class IslandIterationSchedule:
             device=world.device,
         )
 
-    def iterate(self, world: PhoenXWorld, head, idt: float, *, all_colors: bool = False):
+    def iterate(self, world: PhoenXWorld, head, idt: float, *, tail=None):
+        """Advance both color runs independently per island, in their original order."""
         partition = world._partitioner
         # Relaxation uses identical rigid point and joint math for both color sizes.
-        threshold = -1 if all_colors else world._fuse_threshold
+        threshold = -1 if tail is None else world._fuse_threshold
+
+        def advance():
+            wp.launch(
+                _take_color_runs,
+                1,
+                [
+                    partition.color_starts,
+                    partition.num_colors,
+                    partition.color_cursor,
+                    threshold,
+                    self.interval,
+                    self.small_interval,
+                ],
+                device=world.device,
+            )
+            self._launch_interval(world, head, idt, self.interval)
+            if tail is not None:
+                self._launch_interval(world, tail, idt, self.small_interval, small_colors=True)
+
+        advance()
+        if tail is not None:
+            wp.capture_while(partition.color_cursor, advance)
+
+    def _launch_interval(self, world: PhoenXWorld, kernel, idt: float, interval, *, small_colors: bool = False):
         wp.launch(
-            _take_large_colors,
-            1,
-            [
-                partition.color_starts,
-                partition.num_colors,
-                partition.color_cursor,
-                threshold,
-                self.interval,
-            ],
-            device=world.device,
-        )
-        wp.launch(
-            _get_island_iteration(head.phoenx_axes),
+            _get_island_iteration(kernel.phoenx_axes, small_colors=small_colors),
             (self.blocks, ONE_LAUNCH_BLOCK_DIM),
             [
                 world.constraints,
@@ -416,7 +444,7 @@ class IslandIterationSchedule:
                 world._joint_pgs_enabled,
                 world.num_bodies,
                 world._copy_state,
-                self.interval,
+                interval,
                 self.roots,
                 self.count,
                 self.starts,

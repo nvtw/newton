@@ -1,1 +1,1 @@
-Run large PhoenX contact colors independently on disconnected rigid islands in the bottling plant. Other single-world CUDA scenes can select this schedule with `island_parallel_iterations=True`.
+Run PhoenX contact colors independently on disconnected rigid islands in the bottling plant while preserving the solver's arithmetic for both large and small colors. Other single-world CUDA scenes can select this schedule with `island_parallel_iterations=True`.

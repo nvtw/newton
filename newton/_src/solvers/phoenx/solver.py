@@ -504,7 +504,7 @@ class SolverPhoenX(SolverBase):
                 mass splitting. Defaults to False. Independent kernels may
                 change floating-point rounding relative to serial preparation.
             island_parallel_iterations: Schedule independent rigid islands on separate
-                CUDA blocks during large-color iterations. Preserves the color order
+                CUDA blocks during contact iterations and velocity relaxation. Preserves the color order
                 within each island. Useful for a single world with many disconnected
                 stacks or mechanisms. Requires maximal rigid point contacts and
                 forward sweeps without mass splitting. Defaults to False.
