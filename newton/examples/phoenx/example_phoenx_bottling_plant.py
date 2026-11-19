@@ -42,6 +42,7 @@ from newton._src.solvers.phoenx.sleeping_filter import (
 from newton.examples.phoenx._bottling_control import PlantController
 from newton.examples.phoenx._bottling_infeed import BottleSupply
 from newton.examples.phoenx._bottling_scene import load_plant
+from newton.geometry import BroadPhaseImplicitTree
 from newton.solvers import SolverPhoenX
 
 
@@ -193,6 +194,16 @@ class Example:
             ),
             include_static_kinematic_pairs=False,
         )
+        if self.model.device.is_cuda:
+            # A spatial tree keeps the many sleeping warehouse rows out of distant queries.
+            self.pipeline.broad_phase = BroadPhaseImplicitTree(
+                self.model.shape_world,
+                self.model.shape_flags,
+                dynamic_rows=self.pipeline._dynamic_rows,
+                filter_func=_filter_pair,
+                filter_data_type=_PlantFilter,
+                device=self.model.device,
+            )
         self.pipeline.set_broad_phase_filter_data(self.filter_data)
         if args.joint_mode == "maximal_pgs":
             mass_splitting = args.mass_splitting
