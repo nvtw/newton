@@ -5,6 +5,8 @@
 
 Run `uv run scripts/measure_phoenx_bottling_placements.py --output placements.json` with
 the plant assets installed. The default 330 simulated seconds cover both pallet layers.
+The headless measurement loads the same shapes as the default OptiX scene so contact
+ordering matches the rendered workload. Use `--no-visuals` to measure the smaller model.
 Compare runs by station, slot and carton. The first release frame is the first frame
 with an open gripper after it held that carton. The handoff interval includes the last
 held frame. Distances are measured relative to the pallet for cartons and relative to
@@ -133,7 +135,7 @@ def measure(example, args):
 
 def main():
     parser = Example.create_parser()
-    parser.set_defaults(viewer="null", headless=True, num_frames=19_800)
+    parser.set_defaults(viewer="null", visuals=True, headless=True, num_frames=19_800)
     parser.add_argument("--output", type=Path, required=True)
     viewer, args = newton.examples.init(parser)
     example = Example(viewer, args)
@@ -142,7 +144,8 @@ def main():
     events = measure(example, args)
     if not args.test:
         example.test_final()
-    args.output.write_text(json.dumps({"frame_dt": example.frame_dt, "placements": events}, indent=2) + "\n")
+    report = {"frame_dt": example.frame_dt, "shape_count": example.model.shape_count, "placements": events}
+    args.output.write_text(json.dumps(report, indent=2) + "\n")
     print(f"Measured {len(events)} vacuum releases over {example.sim_time:.2f} simulated seconds")
 
 
