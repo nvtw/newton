@@ -198,13 +198,15 @@ def _sap_project_aabb(
     if shape_gap.shape[0] > 0:
         gap = shape_gap[elementid]
 
-    half_size = 0.5 * (upper - lower)
-    half_size = wp.vec3(half_size[0] + gap, half_size[1] + gap, half_size[2] + gap)
-    abs_direction = wp.vec3(wp.abs(direction[0]), wp.abs(direction[1]), wp.abs(direction[2]))
-    radius = wp.dot(abs_direction, half_size)
-    center = wp.dot(direction, 0.5 * (lower + upper))
-    projection_lower = center - radius
-    projection_upper = center + radius
+    # Project the two supporting corners directly. Reconstructing an endpoint
+    # from center and radius loses a plane's small contact margin when its
+    # opposite bound is far away.
+    positive = wp.max(direction, wp.vec3(0.0))
+    negative = wp.min(direction, wp.vec3(0.0))
+    lower = lower - wp.vec3(gap)
+    upper = upper + wp.vec3(gap)
+    projection_lower = wp.dot(positive, lower) + wp.dot(negative, upper)
+    projection_upper = wp.dot(positive, upper) + wp.dot(negative, lower)
     if shape_displacement.shape[0] > 0:
         projected_displacement = wp.dot(direction, shape_displacement[elementid])
         if sort_axis_displacement_limit >= 0.0:

@@ -2642,6 +2642,20 @@ class TestBroadPhase(unittest.TestCase):
         found = {tuple(pair) for pair in pairs.numpy()[: int(pair_count.numpy()[0])]}
         self.assertIn((0, 1), found)
 
+    def test_sap_keeps_contact_at_end_of_large_plane_bounds(self):
+        # A ground plane extends far below its millimeter-scale contact margin.
+        lower = wp.array([(-1e6, -1e6, -1e6), (1.0, 2.0, 0.001)], dtype=wp.vec3)
+        upper = wp.array([(1e6, 1e6, 0.002), (1.2, 2.2, 0.25)], dtype=wp.vec3)
+        worlds = wp.zeros(2, dtype=int)
+        groups = wp.ones(2, dtype=int)
+        sap = BroadPhaseSAP(worlds)
+        sap.direction_active_index.fill_(3)  # Vertical sweep.
+        pairs = wp.empty(1, dtype=wp.vec2i)
+        count = wp.zeros(1, dtype=int)
+        sap.launch(lower, upper, None, groups, worlds, 2, pairs, count)
+        self.assertEqual(count.numpy()[0], 1)
+        np.testing.assert_array_equal(pairs.numpy()[0], [0, 1])
+
     def test_sap_direction_search_covers_horizontal_15_degree_steps(self):
         sap_bp = BroadPhaseSAP(np.array([0], dtype=np.int32))
         directions = sap_bp.direction_candidates.numpy()
