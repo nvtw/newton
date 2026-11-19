@@ -2164,6 +2164,15 @@ class TestAutoDiscoveredExamples(unittest.TestCase):
     pass
 
 
+add_example_test(
+    TestAutoDiscoveredExamples,
+    name="phoenx.example_phoenx_verification",
+    devices=cuda_test_devices,
+    test_options={"requires": ("newton_verification",)},
+    use_viewer=True,
+)
+
+
 for example_module in newton.examples.get_examples().values():
     example_name = example_module.removeprefix("newton.examples.")
     if example_name not in _registered_examples:

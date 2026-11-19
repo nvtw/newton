@@ -1303,7 +1303,24 @@ contact accuracy are still being investigated.
       <br><code>python -m newton.examples phoenx_bottling_plant</code>
     </td>
   </tr>
+  <tr>
+    <td align="center" width="33%">
+      <img width="320" src="docs/images/examples/example_phoenx_verification.jpg" alt="Newton Verification resting shapes">
+      <br><b>Newton Verification with PhoenX</b>
+      <br><code>python -m newton.examples phoenx_verification --scenario rigid.resting_shapes</code>
+    </td>
+  </tr>
 </table>
+
+The verification example uses scenes and acceptance criteria from the optional
+[Newton Verification repository](https://github.com/NVIDIA-dev/newton-eval)
+(Python 3.12 or newer, repository access required). The suite’s PhoenX candidate
+runs on CUDA. Install the source checkout
+with `uv pip install --python .venv -e /path/to/newton-eval-main`. Browse the source suite with
+`python -m newton_verification list benchmarks` and select a benchmark with
+`--scenario`, for example `articulation.pendulum` or `rigid.impact_restitution`.
+Add `--viewer null --test` to run its full physical duration and check its criteria.
+
 
 ### Example Options
 
