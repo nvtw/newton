@@ -1899,6 +1899,7 @@ _APPLY_LANES = 32
 
 @wp.kernel(enable_backward=False)
 def _apply_direct_equality_descriptor_tiled_kernel(
+    row_bodies: wp.array[wp.int32],
     body_row_start: wp.array[wp.int32],
     descriptor: wp.array[wp.vec2i],
     row_wrench0: wp.array[wp.spatial_vector],
@@ -1914,10 +1915,11 @@ def _apply_direct_equality_descriptor_tiled_kernel(
     bounded the whole launch. Lanes stride over the incidence list and a
     fixed-order tile reduction keeps the result deterministic.
     """
-    body, lane = wp.tid()
+    slot, lane = wp.tid()
     # Uniform per block: skip before the tile reduction.
     if active[0] == wp.int32(0):
         return
+    body = row_bodies[slot]
     partial = wp.spatial_vector()
     for incidence in range(body_row_start[body] + lane, body_row_start[body + wp.int32(1)], wp.block_dim()):
         metadata = descriptor[incidence]
@@ -2568,7 +2570,11 @@ class DirectEqualitySystem:
             # reduce all mass-splitting copies, replacing the separate average.
             self._fused_covers_dynamic_bodies = int(np.count_nonzero(inverse_mass > 0.0)) == int(flat_bodies.size)
             self._mechanism_body_start = wp.array(body_start, dtype=wp.int32, device=device)
-            self._mechanism_bodies = wp.array(flat_bodies, dtype=wp.int32, device=device)
+            self._apply_bodies = wp.array(flat_bodies, dtype=wp.int32, device=device)
+        else:
+            # Free bodies have no equality impulse, even when awake.
+            endpoints = np.flatnonzero(np.diff(self.topology.body_row_start))
+            self._apply_bodies = wp.array(endpoints, dtype=wp.int32, device=device)
 
     @property
     def fuses_copy_average(self) -> bool:
@@ -3162,7 +3168,7 @@ class DirectEqualitySystem:
                     wp.float32(self._fused_relax_tolerance),
                     self.row_scale,
                     self._mechanism_body_start,
-                    self._mechanism_bodies,
+                    self._apply_bodies,
                     self.body_row_start,
                     self._body_row_wrench_descriptors,
                     self._apply_wrench0,
@@ -3219,8 +3225,9 @@ class DirectEqualitySystem:
             )
             wp.launch_tiled(
                 _apply_direct_equality_descriptor_tiled_kernel,
-                dim=[int(self.model.body_count) + 1],
+                dim=[self._apply_bodies.size],
                 inputs=[
+                    self._apply_bodies,
                     self.body_row_start,
                     self._body_row_wrench_descriptors,
                     self._apply_wrench0,
