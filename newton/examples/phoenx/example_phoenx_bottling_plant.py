@@ -40,6 +40,7 @@ from newton._src.solvers.phoenx.sleeping_filter import (
     phoenx_sleeping_filter,
 )
 from newton.examples.phoenx._bottling_control import PlantController
+from newton.examples.phoenx._bottling_infeed import BottleSupply
 from newton.examples.phoenx._bottling_scene import load_plant
 from newton.solvers import SolverPhoenX
 
@@ -104,6 +105,8 @@ class Example:
             raise ValueError("--substeps must be positive")
         if args.cartons_per_packer < 1:
             raise ValueError("--cartons-per-packer must be positive")
+        if args.extra_bottles is not None and args.extra_bottles < 0:
+            raise ValueError("--extra-bottles must be nonnegative")
         if args.max_colored_partitions < 1:
             raise ValueError("--max-colored-partitions must be positive")
         if not np.isfinite(args.sleeping_velocity_threshold) or args.sleeping_velocity_threshold < 0.0:
@@ -119,10 +122,17 @@ class Example:
             motor_off=args.motor_off,
             cartons_per_packer=args.cartons_per_packer,
         )
+        self.supply = None
         if args.controllers and not args.motor_off:
             carton_count = sum(len(cases) for cases in self.scene.metadata["case_inventory"].values())
             # Four tape bonds and one wrap bond per carton, plus packer/palletizer grasps.
-            self.scene.builder.reserve_dynamic_capacity(joints=max(320, 5 * carton_count + 36))
+            joints = max(320, 5 * carton_count + 36)
+            demand = max(0, 12 * carton_count - len(self.scene.bottle_bodies))
+            extra = demand if args.extra_bottles is None else min(demand, args.extra_bottles)
+            if extra:
+                self.supply = BottleSupply(self.scene, extra, joints)
+            else:
+                self.scene.builder.reserve_dynamic_capacity(joints=joints)
         self.scene.builder.validate_inertia_detailed = args.diagnostics
         # Several source actuator tensors are positive definite but violate
         # the triangle inequality. Keep those authored approximations unless
@@ -153,6 +163,8 @@ class Example:
                     groups[shape] = group
         self.filter_data = _PlantFilter()
         membership, filtered = self.scene.collision_masks(self.model.shape_label)
+        if self.supply is not None:
+            self.supply.copy_masks(membership, filtered)
         self.filter_data.collision_membership = wp.array(membership, dtype=wp.uint64, device=self.model.device)
         self.filter_data.collision_filtered = wp.array(filtered, dtype=wp.uint64, device=self.model.device)
         self.filter_data.product = wp.array(product, dtype=wp.int32, device=self.model.device)
@@ -171,7 +183,7 @@ class Example:
             self.model,
             contact_matching="sticky",
             rigid_contact_max=250_000,
-            broad_phase="nxn" if not self.model.device.is_cuda else "sap",
+            broad_phase="sap" if self.model.device.is_cuda or self.supply is not None else "nxn",
             speculative_contact_gap_max=0.005,
             broad_phase_filter=(_filter_pair, _PlantFilter),
             max_triangle_pairs=1_000_000,
@@ -261,6 +273,7 @@ class Example:
                 self.control,
                 Path(args.asset_root).expanduser(),
                 self.filter_data.held_by,
+                self.supply,
             )
         self.joint_axes = self.model.joint_axis.numpy()
         self.joint_dofs = self.model.joint_qd_start.numpy()
@@ -351,6 +364,8 @@ class Example:
             self.controller.sense()
 
     def step(self):
+        if self.supply is not None:
+            self.supply.admit()
         if self.graph is None:
             self.simulate()
         else:
@@ -409,7 +424,11 @@ class Example:
         return maximum
 
     def _check_products(self, poses):
-        bottles = poses[self.bottle_bodies]
+        bodies = self.bottle_bodies
+        if self.supply is not None:
+            bodies = self.controller.bottles.numpy()
+            bodies = bodies[bodies >= 0]
+        bottles = poses[bodies]
         # Even floor-level pallets support the case contents above 0.1 m.
         assert float(bottles[:, 2].min()) > 0.1, "a bottle escaped the line or its case"
         if self.controller is None:
@@ -419,20 +438,20 @@ class Example:
             cross = 2.0 * np.cross(rotation[..., :3], vectors)
             return vectors + rotation[..., 3, None] * cross + np.cross(rotation[..., :3], cross)
 
-        centers = bottles[:, :3] + rotate(bottles[:, 3:], self.model.body_com.numpy()[self.bottle_bodies])
+        centers = bottles[:, :3] + rotate(bottles[:, 3:], self.model.body_com.numpy()[bodies])
         design = self.controller.case_modules.design.CASE
         half_width = np.array([design["L"], design["W"]]) * 0.5
         expected = int(np.prod(design["cells"]))
         sealed = self.controller.sealed.numpy()
-        for index, bodies in enumerate(self.controller.case_body_groups.values()):
+        for index, case_bodies in enumerate(self.controller.case_body_groups.values()):
             if not sealed[index]:
                 continue
-            case = poses[bodies[0]]
+            case = poses[case_bodies[0]]
             inverse = case[3:] * np.array([-1.0, -1.0, -1.0, 1.0])
             local = rotate(inverse, centers - case[:3])
             inside = np.all(np.abs(local[:, :2]) < half_width, axis=1) & (local[:, 2] > 0.0)
             count = np.count_nonzero(inside & (local[:, 2] < design["H"]))
-            label = self.model.body_label[bodies[0]]
+            label = self.model.body_label[case_bodies[0]]
             assert count == expected, f"sealed case {label} contains {count} bottles, expected {expected}"
 
     def test_post_step(self):
@@ -453,8 +472,9 @@ class Example:
         bottles = poses[self.bottle_bodies]
         self._check_products(poses)
         travel = np.linalg.norm(bottles[:, :2] - self.initial_poses[self.bottle_bodies, :2], axis=1)
+        live = int(self.controller.bottle_count.numpy()[0]) if self.controller is not None else len(bottles)
         print(
-            f"PhoenX bottling plant: {len(bottles)} bottles, max travel {travel.max():.3f} m, "
+            f"PhoenX bottling plant: {live} bottles, max initial-stock travel {travel.max():.3f} m, "
             f"minimum base height {bottles[:, 2].min():.3f} m, "
             f"{self.contacts.rigid_contact_count.numpy()[0]} contacts, max anchor error {drift:.4f} m at {self.sim_time:.2f} s"
         )
@@ -492,7 +512,10 @@ class Example:
             "physics_cuda_graph": self.graph is not None,
             "includes_host_controllers": self.controller is not None,
             "bodies": self.model.body_count,
-            "bottles": len(self.bottle_bodies),
+            "bottles": int(self.controller.bottle_count.numpy()[0])
+            if self.controller is not None
+            else len(self.bottle_bodies),
+            "extra_bottle_capacity": self.supply.capacity if self.supply is not None else 0,
             "shapes": self.model.shape_count,
             "joints": self.model.joint_count,
             "frames": self.args.timing_frames,
@@ -532,6 +555,12 @@ class Example:
         parser.add_argument("--visuals", action=argparse.BooleanOptionalAction, default=None)
         parser.add_argument("--cutaway", action=argparse.BooleanOptionalAction, default=True)
         parser.add_argument("--motor-off", action="store_true", help="Leave conveyor surfaces stationary.")
+        parser.add_argument(
+            "--extra-bottles",
+            type=int,
+            default=None,
+            help="Maximum additional bottles admitted at the IFM inlet. Defaults to the remaining carton demand. Set to zero for the authored initial stock only.",
+        )
         parser.add_argument("--controllers", action=argparse.BooleanOptionalAction, default=True)
         parser.add_argument(
             "--cartons-per-packer",

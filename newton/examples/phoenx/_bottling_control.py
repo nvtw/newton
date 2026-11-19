@@ -172,6 +172,7 @@ def _robots(
     dyn: phoenx.DynamicsData,
     body_q: wp.array[wp.transform],
     bottles: wp.array[int],
+    bottle_count: wp.array[int],
     hull_mesh: wp.array[wp.uint64],
     hull_xform: wp.array[wp.transform],
     hull_scale: wp.array[wp.vec3],
@@ -227,7 +228,7 @@ def _robots(
             nearest = int(-1)
             direction = wp.transform_vector(body_q[gripper[cell]], wp.vec3(0.0, 0.0, 1.0))
             closest = float(0.006)
-            for i in range(bottles.shape[0]):
+            for i in range(bottle_count[0]):
                 bottle = bottles[i]
                 if claimed[bottle] != 0:
                     continue
@@ -581,7 +582,7 @@ def _target_coordinates(model):
 class PlantController:
     """Bind the source inlet PLC to real ray tests and force-limited actuators."""
 
-    def __init__(self, scene, model, solver, state, control, asset_root, claimed):
+    def __init__(self, scene, model, solver, state, control, asset_root, claimed, supply=None):
         self.scene, self.model, self.solver, self.state, self.control = scene, model, solver, state, control
         vendor = asset_root / "sim/exts/bottling_plant.runtime/bottling_plant_runtime/vendor"
         self.link = _HostLink(model.device)
@@ -622,7 +623,10 @@ class PlantController:
                 origins.append(np.asarray(sensor["origin"]) @ matrix[:3, :3] + matrix[3, :3])
                 directions.append(np.asarray(sensor["direction"]) @ matrix[:3, :3])
                 distances.append(sensor["distance"])
-        self.bottles = wp.array(scene.bottle_bodies, dtype=int)
+        bottles = np.full(len(scene.bottle_bodies) + (supply.capacity if supply is not None else 0), -1, dtype=np.int32)
+        bottles[: len(scene.bottle_bodies)] = scene.bottle_bodies
+        self.bottles = wp.array(bottles, dtype=int, device=model.device)
+        self.bottle_count = wp.array([len(scene.bottle_bodies)], dtype=int, device=model.device)
         self.origins = wp.array(origins, dtype=wp.vec3)
         self.directions = wp.array(directions, dtype=wp.vec3)
         self.distances = wp.array(distances, dtype=float)
@@ -695,7 +699,7 @@ class PlantController:
         self.lengths = wp.array(lengths, dtype=int)
         self._setup_cases(vendor, starts)
         self.transport = TransportController(self, vendor)
-        self.infeed = InfeedController(self, vendor, 17 + len(self.transport.zone_channels))
+        self.infeed = InfeedController(self, vendor, 17 + len(self.transport.zone_channels), supply)
         self.fleet = FleetController(model, state, control, asset_root, transport=self.transport, link=self.link)
         self.wrapper_channels = {
             label: self.infeed.channel_end + i for i, label in enumerate(scene.metadata.get("wrapper_belt_zones", {}))
@@ -957,6 +961,7 @@ class PlantController:
             inputs=[
                 self.state.body_q,
                 self.bottles,
+                self.bottle_count,
                 self.origins,
                 self.directions,
                 self.distances,
@@ -1161,6 +1166,7 @@ class PlantController:
                 self.solver.dynamics.data,
                 self.state.body_q,
                 self.bottles,
+                self.bottle_count,
                 self.hull_mesh,
                 self.hull_xform,
                 self.hull_scale,
@@ -1202,5 +1208,6 @@ class PlantController:
             "fleet": self.fleet.report(),
             "wrapper": self.wrapper.report(),
             "infeed": self.infeed.status,
+            "bottles_fed": int(self.bottle_count.numpy()[0]) - len(self.scene.bottle_bodies),
             "sealed_cases": int(self.sealed.numpy().sum()),
         }

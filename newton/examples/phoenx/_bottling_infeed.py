@@ -9,12 +9,195 @@ import numpy as np
 import warp as wp
 
 from newton.examples.phoenx._bottling_io import _PHOTOEYE_BATCH_SIZE, _case_drives, _load_controller, _photoeyes
+from newton.solvers import phoenx
+
+_ROW_SIZE = 7
+_BOTTLE_PITCH = 0.0616  # metres, from the IFM supply interface
+
+
+@wp.kernel
+def _check_feed_space(
+    poses: wp.array[wp.transform],
+    bottles: wp.array[int],
+    count: wp.array[int],
+    inlet_inverse: wp.transform,
+    blocked: wp.array[int],
+):
+    index = wp.tid()
+    if index >= count[0] or count[0] == bottles.shape[0]:
+        return
+    body = bottles[index]
+    frame = inlet_inverse * poses[body]
+    # Bound the entire swept bottle, including one tipped across the feed slot.
+    center = wp.transform_point(frame, wp.vec3(0.0, 0.0, 0.115))
+    tip = wp.abs(wp.quat_rotate(wp.transform_get_rotation(frame), wp.vec3(0.0, 0.0, 0.115)))
+    radius = 0.031
+    pitch = wp.static(_BOTTLE_PITCH)
+    if (
+        wp.abs(center[0]) <= pitch * 0.6 + tip[0] + radius
+        and wp.abs(center[1]) <= pitch * wp.static(_ROW_SIZE / 2) + 0.02 + tip[1] + radius
+        and wp.abs(center[2] - 0.12) <= 0.12 + tip[2] + radius
+    ):
+        wp.atomic_max(blocked, 0, 1)
+
+
+@wp.kernel
+def _feed_row(
+    dynamics: phoenx.DynamicsData,
+    inlet: wp.transform,
+    blocked: wp.array[int],
+    count: wp.array[int],
+    bottles: wp.array[int],
+    original: int,
+    yaws: wp.array[float],
+    desc: phoenx.BodyDesc,
+    source_shapes: wp.array[int],
+    first_body: int,
+    first_shape: int,
+    groups: wp.array[int],
+):
+    if blocked[0] != 0:
+        return
+    for lane in range(wp.min(wp.static(_ROW_SIZE), bottles.shape[0] - count[0])):
+        slot = count[0] - original
+        desc.pose = inlet * wp.transform(
+            wp.vec3(0.0, (float(lane) - wp.static((_ROW_SIZE - 1) / 2)) * wp.static(_BOTTLE_PITCH), 0.0),
+            wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), yaws[slot]),
+        )
+        body = phoenx.add_body(dynamics, desc)
+        if body < 0:
+            return
+        start = first_shape + (body - first_body) * source_shapes.shape[0]
+        for shape in range(source_shapes.shape[0]):
+            groups[start + shape] = groups[source_shapes[shape]]
+        bottles[count[0]] = body
+        count[0] += 1
+
+
+class BottleSupply:
+    """Admit finite bottle stock at the source IFM's seven-wide, 425 bottle/min inlet."""
+
+    def __init__(self, scene, capacity, joints):
+        builder = scene.builder
+        source = scene.bottle_bodies[0]
+        self.capacity = capacity
+        self.original = len(scene.bottle_bodies)
+        self.first_body = builder.body_count
+        self.first_shape = builder.shape_count
+        self.shapes = builder.body_shapes[source]
+        self.desc = phoenx.BodyDesc()
+        self.desc.mass = builder.body_mass[source]
+        self.desc.inertia = builder.body_inertia[source]
+        self.desc.com = builder.body_com[source]
+        self.desc.flags = builder.body_flags[source]
+        # The source stage can use global colliders in its sole physical world.
+        self.desc.world = max(0, builder.body_world[source])
+        builder.reserve_dynamic_capacity(bodies=capacity, joints=joints)
+        configs = []
+        for s in self.shapes:
+            cfg = builder.ShapeConfig(
+                margin=builder.shape_margin[s],
+                gap=builder.shape_gap[s],
+                mu=builder.shape_material_mu[s],
+                mu_static=builder.shape_material_mu_static[s],
+                restitution=builder.shape_material_restitution[s],
+            )
+            cfg.flags = builder.shape_flags[s]
+            cfg.density = 0.0
+            cfg.collision_group = 0
+            configs.append(cfg)
+        for slot in range(capacity):
+            body = self.first_body + slot
+            label = f"/Plant/Sim/Product/Bottles/Infeed_{slot:05d}"
+            builder.body_label[body] = label
+            # Separate dormant bounds for SAP. Group zero disables every contact until admission.
+            builder.body_q[body] = wp.transform(
+                (200.0 + slot % 64 * 0.12, 200.0 + slot // 64 * 0.12, -10.0), wp.quat_identity()
+            )
+            for s, cfg in zip(self.shapes, configs, strict=True):
+                shape = builder.add_shape(
+                    body=body,
+                    type=builder.shape_type[s],
+                    src=builder.shape_source[s],
+                    scale=builder.shape_scale[s],
+                    xform=builder.shape_transform[s],
+                    cfg=cfg,
+                    color=builder.shape_color[s],
+                    opacity=builder.shape_opacity[s],
+                    label=label + builder.shape_label[s].removeprefix(builder.body_label[source]),
+                )
+                builder.shape_world[shape] = builder.shape_world[s]
+
+    def copy_masks(self, membership, filtered):
+        """Give every reserve hull the same USD collection memberships as its live source hull."""
+        for mask in (membership, filtered):
+            mask[self.first_shape :].reshape(self.capacity, len(self.shapes))[:] = mask[self.shapes]
+
+    def bind(self, plant, matrix, yaws):
+        self.plant = plant
+        self.frame = wp.transform(
+            np.asarray([0.12, 0.0, 0.9508]) @ matrix[:3, :3] + matrix[3, :3],
+            wp.quat_from_matrix(wp.mat33(matrix[:3, :3].T)),
+        )
+        device = plant.model.device
+        self.blocked = wp.zeros(1, dtype=int, device=device)
+        self.source_shapes = wp.array(self.shapes, dtype=int, device=device)
+        self.yaws = wp.array(yaws, dtype=float, device=device)
+        self.last = -float("inf")
+        self.blocked_since = None
+        self.pending = False
+
+    def request(self, time, covered):
+        if not covered:
+            self.blocked_since = None
+        elif self.blocked_since is None:
+            self.blocked_since = time
+        if time - self.last >= _ROW_SIZE * 60.0 / 425.0:
+            self.last = time
+            self.pending = self.blocked_since is None or time - self.blocked_since < 1.5
+
+    def admit(self):
+        """Stage the requested row immediately before the solver commits its body state."""
+        if not self.pending:
+            return
+        self.pending = False
+        plant = self.plant
+        self.blocked.zero_()
+        wp.launch(
+            _check_feed_space,
+            len(plant.bottles),
+            inputs=[
+                plant.state.body_q,
+                plant.bottles,
+                plant.bottle_count,
+                wp.transform_inverse(self.frame),
+                self.blocked,
+            ],
+        )
+        wp.launch(
+            _feed_row,
+            1,
+            inputs=[
+                plant.solver.dynamics.data,
+                self.frame,
+                self.blocked,
+                plant.bottle_count,
+                plant.bottles,
+                self.original,
+                self.yaws,
+                self.desc,
+                self.source_shapes,
+                self.first_body,
+                self.first_shape,
+                plant.model.shape_collision_group,
+            ],
+        )
 
 
 class InfeedController:
     """Run source splitter oscillators, jam relief, and port backpressure."""
 
-    def __init__(self, plant, vendor, first_channel):
+    def __init__(self, plant, vendor, first_channel, supply=None):
         self.plant = plant
         self.interface = json.loads((vendor / "ifm_v01/interface.json").read_text())
         module = _load_controller("_newton_berlin_infeed", vendor / "ifm_v01/controller.py")
@@ -33,6 +216,17 @@ class InfeedController:
         self.channel_end = next_channel + len(plant.names)
         self.clear_since = dict.fromkeys(plant.names)
         matrix = plant.scene.frames["/Plant/Line/IFM"]
+        self.supply = supply
+        if supply is not None:
+            scenario = _load_controller("_newton_berlin_scenario", vendor.parent / "scenario.py")
+            runtime = json.loads(plant.scene.metadata.get("bottling_plant_runtime", "{}"))
+            step = float(runtime.get("bottle_yaw_step_deg") or 0.0)
+            # Follow the source bottle sequence independently of the solver's free-slot order.
+            labels = (
+                f"/Plant/Sim/Product/Bottles/B{i:05d}"
+                for i in range(supply.original, supply.original + supply.capacity)
+            )
+            supply.bind(plant, matrix, np.radians([scenario.bottle_yaw(label, step) for label in labels]))
         origins, directions, distances = [], [], []
         self.sensor_slices = {}
         for name, sensor in self.interface["sensors"].items():
@@ -72,6 +266,7 @@ class InfeedController:
             inputs=[
                 plant.state.body_q,
                 plant.bottles,
+                plant.bottle_count,
                 self.origins,
                 self.directions,
                 self.distances,
@@ -86,6 +281,8 @@ class InfeedController:
     def before_step(self, time, commands, multipliers, data):
         """Step the source infeed PLC on a host snapshot."""
         hits = data["infeed_hits"][:, 0] != 0
+        if self.supply is not None:
+            self.supply.request(time, hits[self.sensor_slices["PE-A1"].start])
         ports = {
             port["port"]: {
                 "PACKER_READY": commands[port["packer"]]["packer_ready"],

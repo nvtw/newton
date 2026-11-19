@@ -63,6 +63,7 @@ _PHOTOEYE_BATCH_SIZE = 256
 def _photoeyes(
     body_q: wp.array[wp.transform],
     bottles: wp.array[int],
+    bottle_count: wp.array[int],
     origins: wp.array[wp.vec3],
     directions: wp.array[wp.vec3],
     distances: wp.array[float],
@@ -77,9 +78,10 @@ def _photoeyes(
     sensor, batch, lane = wp.tid()
     origin, direction, distance = origins[sensor], directions[sensor], distances[sensor]
     begin = batch * wp.static(_PHOTOEYE_BATCH_SIZE)
-    end = wp.min(begin + wp.static(_PHOTOEYE_BATCH_SIZE), bottles.shape[0])
+    end = wp.min(begin + wp.static(_PHOTOEYE_BATCH_SIZE), bottle_count[0])
     for i in range(begin + lane, end, 32):
-        if _bottle_ray(body_q[bottles[i]], origin, direction, distance, hull_mesh, hull_xform, hull_scale) <= distance:
+        bottle = bottles[i]
+        if _bottle_ray(body_q[bottle], origin, direction, distance, hull_mesh, hull_xform, hull_scale) <= distance:
             wp.atomic_max(observation, sensor / stride, sensor % stride, 1.0)
             break
 

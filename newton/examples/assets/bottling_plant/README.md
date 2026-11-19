@@ -75,9 +75,16 @@ The first empty-pallet extraction has been tested with all 15 source pallets
 and physical separator supports. Stock remains supported, but the default
 four-iteration setting permits excessive upper-stack drift. Higher iterations
 stabilize this isolated stack; they are not yet a validated full-factory setting.
-The initial product stock and case supply are finite; continuous
-bottle-pool replenishment and the source profile's operator jam recovery are not
-implemented. Inlet faults remain visible and fail validation.
+
+The default 400 cartons need 4,800 bottles. The line starts with 2,458 and
+reserves the remaining 2,342 for the upstream IFM. It admits up to seven bottles
+per row at the source full-line rate of 425 bottles/min, subject to the PE-A1
+permit and physical clearance at the inlet. Each bottle retains all eight
+source collision hulls, mass, contact materials and visual geometry. Bottles
+already in cartons stay there. `--extra-bottles N` caps admissions at N or the
+remaining carton demand, whichever is smaller. `--extra-bottles 0` runs the
+original stock without allocating reserve geometry. Operator jam recovery
+remains manual, and inlet faults fail validation.
 
 Cases retain their physical contents. After all four flaps close and slow down,
 fixed tape bonds form a rigid sealed assembly; the source instead swaps in a
@@ -106,13 +113,11 @@ Using convex contacts on the same geometry caused loaded cases to catch at
 descending-ramp transitions. A small physical replay reproduced the failure;
 restoring triangle contacts restored case transport.
 
-Before physical dispenser stock was enabled, the 130-second test with the
-defaults above retained twelve bottles in each of
-48 sealed cases. The four palletizers placed 3, 2, 2, and 1 cases, respectively,
-with no PLC faults. Maximum joint-anchor error was approximately 0.3 mm.
-This verifies that earlier finite production configuration, not the updated
-stock or unlimited operation. Autonomous
-logistics and continuous replenishment remain incomplete as described above.
+A 130-second run with 50 cartons per packer, full visual geometry and the
+default feeder admitted 623 new bottles. All eight packers placed 88 bottles
+each, and all 48 sealed cases retained twelve bottles. The four palletizers
+placed 4, 3, 3 and 2 cases respectively. The largest joint-anchor error was
+1.9 mm. Product containment was checked every simulated second.
 No 60 rendered FPS result has been validated for sustained end-to-end production.
 
 The factory defaults to regular colored sweeps. Use `--mass-splitting` to

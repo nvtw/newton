@@ -15,6 +15,7 @@ import warp as wp
 import newton
 from newton.examples.phoenx._bottling_control import _Belt, _belt_speeds, _seal_cases, _target_coordinates
 from newton.examples.phoenx._bottling_fleet import FleetController, _Transfer
+from newton.examples.phoenx._bottling_infeed import BottleSupply
 from newton.examples.phoenx._bottling_io import (
     _CASE_PHOTOEYE_BATCH_SIZE,
     _PHOTOEYE_BATCH_SIZE,
@@ -23,7 +24,7 @@ from newton.examples.phoenx._bottling_io import (
     _photoeyes,
     _valves,
 )
-from newton.examples.phoenx._bottling_scene import load_plant
+from newton.examples.phoenx._bottling_scene import PlantScene, load_plant
 from newton.examples.phoenx._bottling_transport import _carton_support_quadrants
 from newton.examples.phoenx._bottling_wrap import (
     WrapperController,
@@ -38,6 +39,97 @@ from newton.viewer import ViewerNull
 
 @requires("pxr.Usd")
 class TestBottlingPlant(unittest.TestCase):
+    def test_finite_bottle_supply(self):
+        """Admit supported compound bottles only through a clear inlet and stop at the partial final row."""
+        with wp.ScopedDevice("cpu"):
+            builder = newton.ModelBuilder()
+            builder.add_shape_box(-1, hx=1, hy=1, hz=0.01, xform=wp.transform((0, 0, 0.94), wp.quat_identity()))
+            label = "/Plant/Sim/Product/Bottles/B00000"
+            source = builder.add_link(label=label, xform=wp.transform((0.12, 0, 0.951), wp.quat_identity()))
+            hull = newton.Mesh.create_box(0.025, 0.025, 0.04)
+            for i in range(2):
+                builder.add_shape_convex_hull(
+                    source,
+                    mesh=hull,
+                    xform=wp.transform((0, 0, 0.04 + 0.08 * i), wp.quat_identity()),
+                    cfg=builder.ShapeConfig(mu=0.16, mu_static=0.20, gap=0.002, is_visible=False),
+                    label=label + f"/Collision/Hull_0{i}/collision",
+                )
+            scene = PlantScene(builder, bottle_bodies=[source])
+            supply = BottleSupply(scene, capacity=9, joints=1)
+            memberships = np.zeros(builder.shape_count, dtype=np.uint64)
+            memberships[supply.shapes] = [2, 4]
+            filtered = memberships.copy()
+            filtered[supply.shapes] = [6, 2]
+            supply.copy_masks(memberships, filtered)
+            np.testing.assert_array_equal(memberships[supply.first_shape :], np.tile([2, 4], 9))
+            np.testing.assert_array_equal(filtered[supply.first_shape :], np.tile([6, 2], 9))
+            model = builder.finalize()
+            pipeline = newton.CollisionPipeline(
+                model, broad_phase="sap", contact_matching="sticky", rigid_contact_max=1024
+            )
+            solver = newton.solvers.SolverPhoenX(
+                model,
+                collision_pipeline=pipeline,
+                substeps=3,
+                solver_iterations=6,
+                joint_mode="maximal_pgs",
+                step_layout="single_world",
+            )
+            state = model.state()
+            plant = SimpleNamespace(
+                state=state,
+                model=model,
+                solver=solver,
+                bottles=wp.array([source] + [-1] * 9, dtype=int),
+                bottle_count=wp.array([1], dtype=int),
+            )
+            supply.bind(plant, np.eye(4), np.linspace(0, 1, 9))
+            contacts = pipeline.contacts()
+
+            def advance(frames=1):
+                supply.admit()
+                for _ in range(frames):
+                    pipeline.collide(state, contacts)
+                    solver.step(state, state, None, contacts, 1.0 / 60.0)
+
+            supply.request(0, False)
+            advance()
+            self.assertEqual(plant.bottle_count.numpy()[0], 1)  # source bottle occupies the feed slot
+            supply.request(1, True)
+            advance()
+            poses = state.body_q.numpy().copy()
+            poses[source, 0] = 0.8
+            state.body_q.assign(poses)
+            supply.request(3, True)
+            advance()
+            self.assertEqual(plant.bottle_count.numpy()[0], 1)  # sustained PE-A1 coverage
+            supply.request(4, False)
+            self.assertEqual(plant.bottle_count.numpy()[0], 1)  # post-step observers still see committed stock
+            advance(90)
+            self.assertEqual(plant.bottle_count.numpy()[0], 8)
+            row = plant.bottles.numpy()[1:8]
+            poses = state.body_q.numpy().copy()
+            np.testing.assert_allclose(poses[row, 2], 0.95, atol=0.002)
+            np.testing.assert_allclose(model.body_mass.numpy()[row], model.body_mass.numpy()[source])
+            self.assertTrue(np.all(model.body_world.numpy()[row] == 0))
+            dormant = np.setdiff1d(np.arange(supply.first_body, supply.first_body + supply.capacity), row)
+            dormant_shapes = np.isin(model.shape_body.numpy(), dormant)
+            self.assertEqual(dormant_shapes.sum(), 4)
+            np.testing.assert_array_equal(model.shape_collision_group.numpy()[dormant_shapes], 0)
+            np.testing.assert_array_equal(model.body_mass.numpy()[dormant], 0.0)
+            poses[row, 0] += 0.4
+            state.body_q.assign(poses)
+            supply.request(5, False)
+            advance(90)
+            supply.request(6, False)
+            advance()
+            ids = plant.bottles.numpy()
+            self.assertEqual(plant.bottle_count.numpy()[0], 10)
+            self.assertEqual(len(set(ids)), 10)
+            np.testing.assert_allclose(state.body_q.numpy()[ids, 2], 0.95, atol=0.002)
+            self.assertEqual(int(solver.dynamics.error_count.numpy()[0]), 0)
+
     @staticmethod
     def _wrapper_components(side):
         components = []
@@ -932,6 +1024,7 @@ def Xform "Plant" {
                     dtype=wp.transform,
                 ),
                 wp.array(np.arange(product_count), dtype=int),
+                wp.array([product_count], dtype=int),
                 wp.array(origins, dtype=wp.vec3),
                 wp.array([(0.0, 0.0, -1.0)] * sensor_count, dtype=wp.vec3),
                 wp.full(sensor_count, 0.006, dtype=float),
