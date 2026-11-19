@@ -11,7 +11,9 @@ from types import SimpleNamespace
 import numpy as np
 import warp as wp
 
+from newton._src.solvers.phoenx.access_mode import ACCESS_MODE_VELOCITY_LEVEL
 from newton._src.solvers.phoenx.articulations.block_joint_system import MixedJointSystem
+from newton._src.solvers.phoenx.mass_splitting.copy_state import copy_state_container_zeros
 from newton._src.solvers.phoenx.mass_splitting.kernels import launch_average_rigid_velocity_into_bodies
 from newton.examples.phoenx import example_phoenx_ragdoll_pile as scene
 from newton.viewer import ViewerNull
@@ -113,19 +115,25 @@ class TestDirectFusedProjection(unittest.TestCase):
                 viewer,
                 SimpleNamespace(grid=(4, 4, 4), seed=42, substeps=8, iterations=4, joint_solver="exact"),
             )
-            for _ in range(40):
-                example.step()
+            example.step()
             world = example.solver.world
             direct = world._direct_equality_system
             exact = direct.exact if isinstance(direct, MixedJointSystem) else direct
             self.assertTrue(direct.fuses_copy_average)
-            copies = world._copy_state
-            self.assertGreater(int(copies.highest_index_in_use.numpy()[0]), 0)
-            # Perturb copies so the average visibly changes body velocities.
-            rng = np.random.default_rng(5)
-            velocity = copies.velocity.numpy()
-            copies.velocity.assign(velocity + rng.normal(scale=0.05, size=velocity.shape).astype(np.float32))
             bodies = exact.bodies
+            # Exercise both a partial eight-slot reduction and one spanning two chunks.
+            counts = np.zeros(bodies.velocity.shape[0], dtype=np.int32)
+            dynamic = np.flatnonzero(bodies.inverse_mass.numpy() > 0.0)
+            counts[dynamic[:2]] = (3, 11)
+            slots = int(counts.sum())
+            copies = copy_state_container_zeros(slots, len(counts), bodies.velocity.device)
+            copies.count_per_node.assign(counts)
+            copies.section_end.assign(np.cumsum(counts, dtype=np.int32))
+            copies.highest_index_in_use.fill_(slots)
+            copies.access_mode.fill_(ACCESS_MODE_VELOCITY_LEVEL)
+            rng = np.random.default_rng(5)
+            for velocities in (copies.velocity, copies.angular_velocity):
+                velocities.assign(rng.normal(scale=0.05, size=(slots, 3)).astype(np.float32))
             state = (bodies.velocity, bodies.angular_velocity, exact.accumulated_impulse)
             initial = [array.numpy().copy() for array in state]
             results = []
