@@ -1,1 +1,1 @@
-Make the complete unit loads in the Berlin bottling plant's first warehouse bay movable on their rack beams, with physical pallet fork pockets.
+Make all 1,282 stored pallets in the Berlin bottling plant's nine warehouse rack rows movable, with physical fork pockets and independently movable cartons on open loads.

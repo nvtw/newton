@@ -121,13 +121,13 @@ def _prepare_wrapper_inventory(stage):
 
 
 def _prepare_rack_inventory(stage, asset_root):
-    """Replace complete loads in the first pick bay with the source forklift unit load."""
+    """Replace stock inside each rack row with forkable pallets."""
     from pxr import Usd, UsdGeom, UsdPhysics  # noqa: PLC0415 - OpenUSD is optional.
 
-    bay = stage.GetPrimAtPath("/Plant/Physics/Racks/rack_1_11_0/Bay_00")
+    racks = stage.GetPrimAtPath("/Plant/Physics/Racks")
     instancer = UsdGeom.PointInstancer.Get(stage, "/Plant/Logistics/PalletLoads")
-    if not bay or not instancer:
-        return {}
+    if not racks or not instancer:
+        return {}, 0.0
     asset = asset_root / "assets/pallet_load/pallet_load.usda"
     if not asset.is_file():
         raise FileNotFoundError(f"Missing warehouse unit-load asset: {asset}")
@@ -156,7 +156,13 @@ def _prepare_rack_inventory(stage, asset_root):
         for box in boxes:
             UsdPhysics.MassAPI.Apply(box).CreateDensityAttr(mass / volume)
 
-    bounds = UsdGeom.BBoxCache(Usd.TimeCode.Default(), ["guide"]).ComputeWorldBound(bay).ComputeAlignedRange()
+    empty_path = "/_RackEmptyPallet"
+    empty = stage.CreateClassPrim(empty_path)
+    empty.GetReferences().AddInternalReference(template_path)
+    stage.OverridePrim(empty_path + "/Collision").SetActive(False)
+    UsdPhysics.MassAPI(empty).CreateMassAttr(pallet_mass)
+    bounds_cache = UsdGeom.BBoxCache(Usd.TimeCode.Default(), ["guide"])
+    bounds = [bounds_cache.ComputeWorldBound(row).ComputeAlignedRange() for row in racks.GetChildren()]
     targets = instancer.GetPrototypesRel().GetTargets()
     transforms = instancer.ComputeInstanceTransformsAtTime(Usd.TimeCode.Default(), Usd.TimeCode.Default())
     world = cache.GetLocalToWorldTransform(instancer.GetPrim())
@@ -165,10 +171,8 @@ def _prepare_rack_inventory(stage, asset_root):
         zip(instancer.GetIdsAttr().Get(), instancer.GetProtoIndicesAttr().Get(), transforms, strict=True)
     ):
         target = targets[proto]
-        if target.name not in ("FinishedGoods", "LoadFullOpen"):
-            continue
         placement = matrix * world
-        if not bounds.Contains(placement.ExtractTranslation()):
+        if not any(row.Contains(placement.ExtractTranslation()) for row in bounds):
             continue
         label = f"load_{identifier:05d}"
         proxy = stage.GetPrimAtPath("/Plant/Physics/Loads/" + label)
@@ -179,12 +183,16 @@ def _prepare_rack_inventory(stage, asset_root):
         prototype = stage.GetPrimAtPath(target)
         pallet_frame = cache.ComputeRelativeTransform(prototype.GetChild("Pallet"), prototype)[0]
         body = UsdGeom.Xform.Define(stage, "/Plant/Sim/RackStock/" + label)
-        body.GetPrim().GetReferences().AddInternalReference(template_path)
+        if target.name not in ("FinishedGoods", "LoadFullOpen", "LoadPartial", "EmptyPallet", "WeatheredEmptyPallet"):
+            raise ValueError(f"Unsupported warehouse rack stock: {target}")
+        wrapped = target.name == "FinishedGoods"
+        body.GetPrim().GetReferences().AddInternalReference(template_path if wrapped else empty_path)
         parent_inverse = cache.GetLocalToWorldTransform(body.GetPrim().GetParent()).GetInverse()
         body.AddTransformOp().Set(pallet_frame * placement * parent_inverse)
         proxy.SetActive(False)
         stock[index] = str(body.GetPath())
-    return stock
+    # The source forklift unit carries two layers of 17 filled cases.
+    return stock, load_mass / 34
 
 
 def _prepare_case_inventory(stage, cartons_per_packer):
@@ -284,7 +292,7 @@ def load_plant(asset_root: Path, *, cutaway=True, visuals=True, motor_off=False,
     if cutaway:
         plant.GetVariantSet("view").SetVariantSelection("cutaway")
     _prepare_wrapper_inventory(stage)
-    rack_stock = _prepare_rack_inventory(stage, asset_root)
+    rack_stock, rack_case_mass = _prepare_rack_inventory(stage, asset_root)
     prepare_dispensers(stage)
     case_inventory, case_staging = _prepare_case_inventory(stage, cartons_per_packer)
     prims = list(Usd.PrimRange.Stage(stage, Usd.TraverseInstanceProxies()))
@@ -803,32 +811,72 @@ def load_plant(asset_root: Path, *, cutaway=True, visuals=True, motor_off=False,
         return result
 
     prototype_cache = {}
-    for instancer in instancers if visuals else ():
-        if instancer.ComputeVisibility() == "invisible":
+    visual_cfg = builder.ShapeConfig(density=0.0, has_shape_collision=False, has_particle_collision=False)
+
+    def add_instance_visuals(prim, body, pose, scale, label):
+        if prim not in prototype_cache:
+            prototype_cache[prim] = prototype_meshes(prim)
+        for mesh in prototype_cache[prim]:
+            builder.add_shape_mesh(body, mesh=mesh, xform=pose, scale=scale, cfg=visual_cfg, label=label)
+
+    # Open loads can shed individual cartons. Each closed carton uses its
+    # outside dimensions and its share of the source filled unit-load mass.
+    case_dims = None
+    case_layouts = {}
+    for instancer in instancers:
+        stock = rack_stock if str(instancer.GetPath()) == "/Plant/Logistics/PalletLoads" else {}
+        visible = visuals and instancer.ComputeVisibility() != "invisible"
+        if not visible and not stock:
             continue
         targets = instancer.GetPrototypesRel().GetTargets()
         indices = instancer.GetProtoIndicesAttr().Get()
         transforms = instancer.ComputeInstanceTransformsAtTime(Usd.TimeCode.Default(), Usd.TimeCode.Default())
         world = cache.GetLocalToWorldTransform(instancer.GetPrim())
-        for path in targets:
-            if path not in prototype_cache:
-                prototype_cache[path] = prototype_meshes(stage.GetPrimAtPath(path))
-        stock = rack_stock if str(instancer.GetPath()) == "/Plant/Logistics/PalletLoads" else {}
+        label = str(instancer.GetPath()) + "/instance"
         for instance, (index, matrix) in enumerate(zip(indices, transforms, strict=True)):
-            body = scene.bodies[stock[instance]] if instance in stock else -1
+            path = stock.get(instance)
+            body = scene.bodies[path] if path else -1
             placement = matrix * world
-            pose, scale = transform(placement * matrices[body].GetInverse() if body >= 0 else placement)
-            for mesh in prototype_cache[targets[index]]:
-                builder.add_shape_mesh(
-                    body,
-                    mesh=mesh,
-                    xform=pose,
-                    scale=scale,
-                    cfg=newton.ModelBuilder.ShapeConfig(
-                        density=0.0, has_shape_collision=False, has_particle_collision=False
-                    ),
-                    label=str(instancer.GetPath()) + "/instance",
-                )
+            target = targets[index]
+            prototype = stage.GetPrimAtPath(target)
+            if path and target.name in ("LoadFullOpen", "LoadPartial"):
+                if case_dims is None:
+                    case_dims = np.asarray(
+                        json.loads((asset_root / "assets/beerbox/dimensions.json").read_text())["outside_m"]
+                    )
+                    carton_cfg = builder.ShapeConfig(
+                        density=rack_case_mass / np.prod(case_dims), gap=0.002, is_visible=False
+                    )
+                if target not in case_layouts:
+                    case_layouts[target] = [
+                        (case, cache.ComputeRelativeTransform(case, prototype)[0])
+                        for case in prototype.GetChild("Cases").GetChildren()
+                    ]
+                for case, local in case_layouts[target]:
+                    pose, scale = transform(local * placement)
+                    case_path = f"{path}/Cases/{case.GetName()}"
+                    case_body = builder.add_link(xform=pose, label=case_path)
+                    scene.bodies[case_path] = case_body
+                    half = 0.5 * case_dims * scale
+                    builder.add_shape_box(
+                        case_body,
+                        xform=wp.transform((0, 0, half[2]), wp.quat_identity()),
+                        hx=half[0],
+                        hy=half[1],
+                        hz=half[2],
+                        cfg=carton_cfg,
+                        label=case_path + "/collision",
+                    )
+                    if visible:
+                        add_instance_visuals(case, case_body, wp.transform_identity(), scale, label)
+                if visible:
+                    pallet = prototype.GetChild("Pallet")
+                    local = cache.ComputeRelativeTransform(pallet, prototype)[0]
+                    pose, scale = transform(local * placement * matrices[body].GetInverse())
+                    add_instance_visuals(pallet, body, pose, scale, label)
+            elif visible:
+                pose, scale = transform(placement * matrices[body].GetInverse() if path else placement)
+                add_instance_visuals(prototype, body, pose, scale, label)
 
     plans = []
     gripper_templates = [p.GetPath() for p in prims if p.GetTypeName() == "IsaacSurfaceGripper"]

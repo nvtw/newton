@@ -30,13 +30,15 @@ point-instancer prototypes by material, retaining their placements. The complete
 factory remains visible; `--no-visuals` removes rendering geometry for physics
 measurements. `--no-cutaway` restores the source exterior variant.
 
-The warehouse has nine static rack rows with physical beams and uprights. The
-first bay of the southernmost row (`rack_1_11_0/Bay_00`, near x = 104 m,
-y = 11 m) has 27 movable full pallets on its two faces. Each uses the source
-308.068 kg unit load with A08 fork pockets, a rigid case block, and the original
-stock visual. The remaining bays and partial loads retain their static stock
-colliders. The source models reach-truck storage and retrieval with timers.
-The Newton fleet has no automated high-rack mission.
+The nine warehouse rack rows have fixed beam and upright colliders. All 1,282
+pallets stored on them are movable and have the source A08 fork pockets.
+The 1,063 wrapped pallets use the source 308.068 kg rigid unit load. Each of
+the 5,882 filled cartons on the 98 open and 102 partial pallets is a separate
+rigid box at its source placement. The other 19 pallets are empty. Rack stock
+settles under gravity and uses normal island sleeping and waking. The 376
+stock proxies outside the rack rows retain their source colliders.
+The source models reach-truck storage and retrieval with timers. The Newton
+fleet has no automated high-rack mission.
 
 Product bodies stored below the floor are inactive supply pools and are omitted.
 The 2,458 bottles already on the line and all 56 open cases remain dynamic. Cases

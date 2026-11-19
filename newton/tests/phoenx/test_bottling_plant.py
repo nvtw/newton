@@ -340,8 +340,8 @@ class TestBottlingPlant(unittest.TestCase):
                 else:
                     self.assertTrue({path + "/collision" for path in portals}.issubset(builder.shape_label))
 
-    def test_rack_pick_bay(self):
-        """Give the pick bay's complete stock one moving visual and a forkable compound collider."""
+    def test_rack_inventory(self):
+        """Keep wrapped stock together and open cases independently movable in different rack rows."""
         from pxr import Sdf, Usd, UsdGeom, UsdPhysics
 
         def box(stage, path, center, size):
@@ -368,6 +368,9 @@ class TestBottlingPlant(unittest.TestCase):
             box(unit, "/Unit/Collision/LoadBlock", (0, 0, 0.4), (1, 1.2, 0.6))
             unit.GetRootLayer().Save()
 
+            dimensions = root / "assets/beerbox/dimensions.json"
+            dimensions.parent.mkdir()
+            dimensions.write_text('{"outside_m": [0.4, 0.3, 0.2]}')
             stage_file = root / "scenarios/line_sim/line_sim.usda"
             stage_file.parent.mkdir(parents=True)
             stage = Usd.Stage.CreateNew(str(stage_file))
@@ -376,18 +379,33 @@ class TestBottlingPlant(unittest.TestCase):
             UsdGeom.SetStageMetersPerUnit(stage, 1.0)
             beam = box(stage, "/Plant/Physics/Racks/rack_1_11_0/Bay_00/Beam", (5, 3, 0.5), (3, 1.5, 1))
             UsdGeom.Imageable(beam).CreatePurposeAttr("guide")
+            beam = box(stage, "/Plant/Physics/Racks/second/Bay_02/Beam", (5, 7, 0.5), (3, 1.5, 1))
+            UsdGeom.Imageable(beam).CreatePurposeAttr("guide")
             inventory = UsdGeom.PointInstancer.Define(stage, "/Plant/Logistics/PalletLoads")
             prototype = UsdGeom.Xform.Define(stage, inventory.GetPath().AppendChild("FinishedGoods"))
             frame = UsdGeom.Xform.Define(stage, prototype.GetPath().AppendChild("Pallet"))
             frame.AddRotateZOp().Set(90)
             UsdGeom.Cube.Define(stage, frame.GetPath().AppendChild("Stock")).CreateSizeAttr(0.4)
-            inventory.GetPrototypesRel().SetTargets([prototype.GetPath()])
-            inventory.CreateIdsAttr([7, 2])
-            inventory.CreateProtoIndicesAttr([0, 0])
-            inventory.CreatePositionsAttr([(5, 3, 1), (9, 3, 1)])
-            for identifier, x in ((7, 5), (2, 9)):
-                proxy = box(stage, f"/Plant/Physics/Loads/load_{identifier:05d}", (x, 3, 1.4), (1.2, 1, 0.8))
-                proxy.CreateAttribute("plant:kind", Sdf.ValueTypeNames.String).Set("FinishedGoods")
+            partial = UsdGeom.Xform.Define(stage, inventory.GetPath().AppendChild("LoadPartial"))
+            partial_pallet = UsdGeom.Xform.Define(stage, partial.GetPath().AppendChild("Pallet"))
+            UsdGeom.Cube.Define(stage, partial_pallet.GetPath().AppendChild("Wood")).CreateSizeAttr(0.1)
+            case = UsdGeom.Xform.Define(stage, partial.GetPath().AppendPath("Cases/C0"))
+            case.AddTranslateOp().Set((0.2, 0, 0.1))
+            UsdGeom.Cube.Define(stage, case.GetPath().AppendChild("Box")).CreateSizeAttr(0.3)
+            empty = UsdGeom.Xform.Define(stage, inventory.GetPath().AppendChild("EmptyPallet"))
+            UsdGeom.Xform.Define(stage, empty.GetPath().AppendChild("Pallet"))
+            inventory.GetPrototypesRel().SetTargets([prototype.GetPath(), partial.GetPath(), empty.GetPath()])
+            inventory.CreateIdsAttr([7, 2, 9, 5])
+            inventory.CreateProtoIndicesAttr([0, 0, 1, 2])
+            inventory.CreatePositionsAttr([(5, 3, 1), (9, 3, 1), (5, 7, 1), (6, 7, 1)])
+            for identifier, x, y, kind in (
+                (7, 5, 3, "FinishedGoods"),
+                (2, 9, 3, "FinishedGoods"),
+                (9, 5, 7, "LoadPartial"),
+                (5, 6, 7, "EmptyPallet"),
+            ):
+                proxy = box(stage, f"/Plant/Physics/Loads/load_{identifier:05d}", (x, y, 1.4), (1.2, 1, 0.8))
+                proxy.CreateAttribute("plant:kind", Sdf.ValueTypeNames.String).Set(kind)
                 UsdGeom.Imageable(proxy).CreatePurposeAttr("guide")
             stage.GetRootLayer().Save()
 
@@ -400,7 +418,16 @@ class TestBottlingPlant(unittest.TestCase):
             self.assertNotIn("/Plant/Physics/Loads/load_00007/collision", b.shape_label)
             self.assertIn("/Plant/Physics/Loads/load_00002/collision", b.shape_label)
             visuals = [i for i, label in enumerate(b.shape_label) if label.endswith("/instance")]
-            self.assertEqual([b.shape_body[i] for i in visuals], [body, -1])
+            partial_body = scene.bodies["/Plant/Sim/RackStock/load_00009"]
+            empty_body = scene.bodies["/Plant/Sim/RackStock/load_00005"]
+            carton = scene.bodies["/Plant/Sim/RackStock/load_00009/Cases/C0"]
+            self.assertCountEqual([b.shape_body[i] for i in visuals], [body, -1, partial_body, carton])
+            self.assertAlmostEqual(b.body_mass[empty_body], 60, places=3)
+            self.assertAlmostEqual(b.body_mass[partial_body], 60, places=3)
+            self.assertAlmostEqual(b.body_mass[carton], 240 / 34, places=3)
+            np.testing.assert_allclose(b.body_q[carton].p, (5.2, 7, 1.1), atol=1e-6)
+            for identifier in (9, 5):
+                self.assertNotIn(f"/Plant/Physics/Loads/load_{identifier:05d}/collision", b.shape_label)
             world = wp.transform_multiply(b.body_q[body], b.shape_transform[visuals[0]])
             np.testing.assert_allclose(world.p, (5, 3, 1), atol=1e-6)
             np.testing.assert_allclose(wp.quat_rotate(world.q, wp.vec3(1, 0, 0)), (1, 0, 0), atol=1e-6)
