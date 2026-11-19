@@ -75,7 +75,7 @@ def apply_picking_force_kernel(
     body_com: wp.array[wp.vec3],
     body_mass: wp.array[float],
     body_inv_inertia: wp.array[wp.mat33],
-    pick_effective_mass: wp.array[float],
+    pick_articulation_mass: wp.array[float],
     pick_os_inertia: wp.array[wp.mat33],
 ):
     pick_body = pick_body_arr[0]
@@ -113,12 +113,19 @@ def apply_picking_force_kernel(
     # F = Lambda a, so each eigen-direction of the anisotropic inertia gets its own mass and
     # an oblique pull does not over-command the reachable direction.
     body_rotation = wp.transform_get_rotation(X_wb)
-    pick_force = wp.quat_rotate(body_rotation, pick_os_inertia[0] * wp.quat_rotate_inv(body_rotation, pick_accel))
+    mass = body_mass[pick_body]
+    effective_mass = pick_articulation_mass[pick_body]
+    pick_force = mass * pick_accel
+    if effective_mass < 0.0:
+        # A reserved free-body slot acquires its mass when the body is spawned.
+        effective_mass = mass
+    else:
+        pick_force = wp.quat_rotate(body_rotation, pick_os_inertia[0] * wp.quat_rotate_inv(body_rotation, pick_accel))
 
     # Clamp force magnitude to prevent runaway divergence on light objects.
     # The articulation total bounds the force so picking a light link can still
     # move the whole chain.
-    max_force = max_acceleration * pick_effective_mass[pick_body]
+    max_force = max_acceleration * effective_mass
     force_mag = wp.length(pick_force)
     if not (wp.isfinite(force_mag) and wp.isfinite(max_force)) or max_force <= 0.0:
         pick_body_arr[0] = -1
@@ -130,7 +137,6 @@ def apply_picking_force_kernel(
 
     # The articulation-mass force limit can produce unstable torque on low-inertia
     # links, so bound it using the picked body's own mass and inertia.
-    mass = body_mass[pick_body]
     if mass > 0.0:
         torque_body = wp.quat_rotate_inv(body_rotation, pick_torque)
         angular_acceleration_body = body_inv_inertia[pick_body] * torque_body

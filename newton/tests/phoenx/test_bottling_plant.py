@@ -77,6 +77,7 @@ class TestBottlingPlant(unittest.TestCase):
                 step_layout="single_world",
             )
             state = model.state()
+            picking = newton.viewer.Picking(model)
             plant = SimpleNamespace(
                 state=state,
                 model=model,
@@ -129,6 +130,16 @@ class TestBottlingPlant(unittest.TestCase):
             self.assertEqual(len(set(ids)), 10)
             np.testing.assert_allclose(state.body_q.numpy()[ids, 2], 0.95, atol=0.002)
             self.assertEqual(int(solver.dynamics.error_count.numpy()[0]), 0)
+            # The viewer was open before the inlet activated this body slot.
+            bottle = ids[-1]
+            x, y, z = state.body_q.numpy()[bottle, :3]
+            picking.pick(state, wp.vec3(x, y, z + 1.0), wp.vec3(0.0, 0.0, -1.0))
+            self.assertEqual(picking.pick_body, bottle)
+            picking.pick_target = picking.pick_point + wp.vec3(0.0, 0.0, 0.5)
+            state.clear_forces()
+            picking.apply_force(state)
+            advance()
+            self.assertGreater(state.body_q.numpy()[bottle, 2], z + 0.001)
 
     @staticmethod
     def _wrapper_components(side):

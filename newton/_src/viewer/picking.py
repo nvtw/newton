@@ -225,7 +225,7 @@ class Picking:
                 self.model.body_com,
                 self.model.body_mass,
                 self.model.body_inv_inertia,
-                self._pick_effective_mass,
+                self._pick_articulation_mass,
                 self._pick_os_inertia,
             ],
             device=self.model.device,
@@ -249,13 +249,16 @@ class Picking:
             body: Index of the picked body.
             point_world: The pick point in world space.
         """
+        art = int(self._body_art[body])
+        if art < 0:
+            # Free bodies use their current model mass directly in the force kernel.
+            return
         mass = float(self._body_mass[body])
-        upper = float(self._effective_mass[body])
+        upper = float(self._art_mass[art])
         # A massless link, e.g. a URDF frame link with geometry, is moved through its subtree.
         lam = np.eye(3) * (mass if mass > 0.0 else upper)
 
-        art = int(self._body_art[body])
-        if art >= 0 and upper > 0.0:
+        if upper > 0.0:
             if self._art_has_rod[art]:
                 lam = np.eye(3) * upper
             else:
@@ -354,17 +357,17 @@ class Picking:
         # The force cap uses the articulation total, so picking a light link can still move the chain.
         in_art = body_art >= 0
         art_mass = np.bincount(body_art[in_art], weights=body_mass[in_art], minlength=model.articulation_count)
-        effective_mass = body_mass.copy()
-        effective_mass[in_art] = art_mass[body_art[in_art]]
+        pick_articulation_mass = np.full(model.body_count, -1.0, dtype=np.float32)
+        pick_articulation_mass[in_art] = art_mass[body_art[in_art]]
 
         self._body_mass = body_mass
-        self._effective_mass = effective_mass
+        self._art_mass = art_mass
         self._body_joint = body_joint
         self._body_art = body_art
         self._art_has_rod = art_has_rod
         self._art_start = model.articulation_start.numpy() if model.articulation_count else None
         self._art_end = model.articulation_end.numpy() if model.articulation_count else None
-        self._pick_effective_mass = wp.array(effective_mass, dtype=float, device=model.device)
+        self._pick_articulation_mass = wp.array(pick_articulation_mass, dtype=float, device=model.device)
 
     def _load_kernels(self) -> None:
         """Compile every Warp module picking launches, so the first pick does not stall."""

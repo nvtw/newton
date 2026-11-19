@@ -256,13 +256,12 @@ class TestPickingSetup(unittest.TestCase):
         model = _make_single_sphere_model(device="cpu")
         state = model.state()
         picking = Picking(model)
-        picking.pick_body.assign(np.array([model.body_count + 5], dtype=np.int32))
-        picking.picking_active = True
+        picking._pick_body.fill_(model.body_count + 5)
 
         state.body_f.zero_()
-        picking._apply_picking_force(state)
+        picking.apply_force(state)
 
-        self.assertEqual(int(picking.pick_body.numpy()[0]), -1)
+        self.assertEqual(picking.pick_body, -1)
         assert_np_equal(state.body_f.numpy(), np.zeros_like(state.body_f.numpy()), tol=1e-9)
 
     def test_apply_picking_force_nan_target_clears_pick(self):
@@ -270,20 +269,14 @@ class TestPickingSetup(unittest.TestCase):
         model = _make_single_sphere_model(device="cpu")
         state = model.state()
         picking = Picking(model)
-        pick_state = picking.pick_state.numpy()
-        pick_state[0]["picked_point_local"] = np.array([0.0, 0.0, 0.0], dtype=np.float32)
-        pick_state[0]["picking_target_world"] = np.array([np.nan, 0.0, 0.0], dtype=np.float32)
-        pick_state[0]["pick_stiffness"] = 50.0
-        pick_state[0]["pick_damping"] = 5.0
-        pick_state[0]["pick_max_acceleration"] = 5.0
-        picking.pick_state.assign(pick_state)
-        picking.pick_body.assign(np.array([0], dtype=np.int32))
-        picking.picking_active = True
+        picking.pick(state, wp.vec3(0.0, 0.0, -2.0), wp.vec3(0.0, 0.0, 1.0))
+        self.assertEqual(picking.pick_body, 0)
+        picking.pick_target = wp.vec3(np.nan, 0.0, 0.0)
 
         state.body_f.zero_()
-        picking._apply_picking_force(state)
+        picking.apply_force(state)
 
-        self.assertEqual(int(picking.pick_body.numpy()[0]), -1)
+        self.assertEqual(picking.pick_body, -1)
         forces = state.body_f.numpy()
         self.assertTrue(np.isfinite(forces).all())
         assert_np_equal(forces, np.zeros_like(forces), tol=1e-9)
