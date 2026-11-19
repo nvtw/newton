@@ -284,6 +284,7 @@ def iterate_d6_inequalities(
     w1: wp.vec3f,
     idt: wp.float32,
     sor_boost: wp.float32,
+    use_bias: wp.bool,
 ):
     """Solve predictive hard bounds, speed caps, and Coulomb friction."""
     count = data.row_count[cid]
@@ -302,6 +303,9 @@ def iterate_d6_inequalities(
                     upper_velocity = wp.float32(1.0e30)
                     if upper_enabled:
                         upper_velocity = (upper - coordinate) * idt
+                        # Relax the corrective motion after integration while keeping the physical stop.
+                        if not use_bias:
+                            upper_velocity = wp.max(upper_velocity, 0.0)
                     if speed_limit > wp.float32(0.0):
                         upper_velocity = wp.min(upper_velocity, speed_limit)
                     relative_velocity = _d6_row_velocity(wrench0, wrench1, v0, w0, v1, w1)
@@ -331,6 +335,8 @@ def iterate_d6_inequalities(
                     lower_velocity = wp.float32(-1.0e30)
                     if lower_enabled:
                         lower_velocity = (lower - coordinate) * idt
+                        if not use_bias:
+                            lower_velocity = wp.min(lower_velocity, 0.0)
                     if speed_limit > wp.float32(0.0):
                         lower_velocity = wp.max(lower_velocity, -speed_limit)
                     relative_velocity = _d6_row_velocity(wrench0, wrench1, v0, w0, v1, w1)

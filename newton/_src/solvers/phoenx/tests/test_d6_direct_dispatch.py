@@ -301,8 +301,8 @@ class TestD6DirectDispatch(unittest.TestCase):
         body_q = state_1.body_q.numpy()[0]
         body_qd = state_1.body_qd.numpy()[0]
         angle_x = 2.0 * np.arctan2(float(body_q[3]), float(body_q[6]))
-        self.assertLessEqual(angle_x, 0.2505, msg=f"D6 angular limit remained violated: angle_x={angle_x:.6f}")
-        self.assertLessEqual(float(body_qd[3]), 1.0e-4)
+        self.assertAlmostEqual(angle_x, 0.25, delta=5.0e-4)
+        self.assertAlmostEqual(float(body_qd[3]), 0.0, delta=1.0e-4)
 
     def test_one_axis_d6_limits_use_prepared_common_rows(self) -> None:
         """Prepare reduced revolute and prismatic D6 limits through common rows."""
@@ -589,8 +589,8 @@ class TestD6DirectDispatch(unittest.TestCase):
         position = float(state_1.body_q.numpy()[0, 0])
         velocity = state_1.body_qd.numpy()[0]
         self.assertLess(position, 0.25, msg=f"finite D6 limit did not reduce the violation: x={position}")
-        self.assertLessEqual(position, 0.1005, msg=f"finite D6 limit remained above its upper bound: x={position}")
-        self.assertLessEqual(float(velocity[0]), 1.0e-4)
+        self.assertAlmostEqual(position, 0.1, delta=5.0e-4)
+        self.assertAlmostEqual(float(velocity[0]), 0.0, delta=1.0e-4)
         np.testing.assert_allclose(velocity[1:], 0.0, rtol=0.0, atol=2.0e-4)
 
     def test_six_axis_d6_limits_share_common_rows(self) -> None:

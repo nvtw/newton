@@ -73,6 +73,7 @@ def joint_constraint_iterate_inequality(
         angular_velocity2,
         idt,
         sor_boost,
+        use_bias,
     )
     _ms_store_body_pair(
         bodies,
