@@ -279,6 +279,7 @@ from newton._src.solvers.phoenx.solver_config import (
     PHOENX_USE_GREEDY_COLORING,
 )
 from newton._src.solvers.phoenx.temporal_contacts import (
+    TEMPORAL_SURFACE_GAP_LANES,
     temporal_accumulate_velocity_kernel,
     temporal_apply_forces_kernel,
     temporal_clear_local_force_flags,
@@ -2753,11 +2754,13 @@ class PhoenXWorld:
     def _temporal_contact_rows(self, advance_dt: float) -> None:
         """Advance contact gaps by ``advance_dt`` of the current motion and refresh the sweep biases."""
         _, _, bias_rate, sweep_idt = self._temporal_contact_coefficients
-        rows_per_column = 8 if self.device.is_cuda else 1
+        use_bounds = self._moving_surface_only and self._temporal_separation_bounds is not None
+        rows_per_column = 1
         column_stride = self.max_contact_columns
         if self.device.is_cuda:
+            rows_per_column = TEMPORAL_SURFACE_GAP_LANES if use_bounds else 8
             column_stride = min(column_stride, self.device.sm_count * 1024 // rows_per_column)
-        if self._moving_surface_only and self._temporal_separation_bounds is not None:
+        if use_bounds:
             self._contact_container.separation_bounds = self._temporal_separation_bounds
             wp.launch(
                 temporal_surface_gap_kernel,

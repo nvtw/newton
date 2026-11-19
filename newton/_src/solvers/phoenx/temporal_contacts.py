@@ -61,6 +61,9 @@ from newton._src.solvers.phoenx.constraints.contact_warm_start import (
 from newton._src.solvers.phoenx.islands.island_builder import _find, _pack_entry, _unite
 from newton._src.solvers.phoenx.solver_config import PHOENX_BOOST_CONTACT_NORMAL
 
+# One CUDA warp advances one column, reducing bounds across four adjacent rows.
+TEMPORAL_SURFACE_GAP_LANES = 32
+
 
 @wp.func
 def _advance_temporal_gap(
@@ -123,9 +126,8 @@ def temporal_surface_gap_kernel(
         w2 = bodies.angular_velocity[b2]
         first = contact_get_contact_first(columns, cid)
         end = first + contact_get_contact_count(columns, cid)
-        # Eight lanes per column keep every four-lane reduction inside a single warp.
         # Padding the last group contributes neutral values without reading the next column.
-        for start in range(first, end, 8):
+        for start in range(first, end, wp.static(TEMPORAL_SURFACE_GAP_LANES)):
             k = start + lane
             lower = wp.float32(1.0e25)
             r0 = wp.float32(0.0)

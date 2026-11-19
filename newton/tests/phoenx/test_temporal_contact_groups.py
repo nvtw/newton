@@ -17,7 +17,11 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
 )
 from newton._src.solvers.phoenx.constraints.constraint_contact_solve import _contact_group_is_separated
 from newton._src.solvers.phoenx.constraints.contact_container import contact_container_zeros
-from newton._src.solvers.phoenx.temporal_contacts import temporal_contact_gap_kernel, temporal_surface_gap_kernel
+from newton._src.solvers.phoenx.temporal_contacts import (
+    TEMPORAL_SURFACE_GAP_LANES,
+    temporal_contact_gap_kernel,
+    temporal_surface_gap_kernel,
+)
 
 
 @wp.kernel
@@ -53,21 +57,21 @@ class TestTemporalContactGroups(unittest.TestCase):
             data = columns.data.numpy()
             headers = data.view(np.int32)
             headers[int(_OFF_BODY2)] = 1
-            headers[int(_OFF_CONTACT_FIRST)] = [0, 9, 12]
-            headers[int(_OFF_CONTACT_COUNT)] = [9, 3, 1]
+            headers[int(_OFF_CONTACT_FIRST)] = [0, 37, 40]
+            headers[int(_OFF_CONTACT_COUNT)] = [37, 3, 1]
             columns.data.assign(data)
             columns.articulation_owner.assign(np.array([-1, -1, 0], dtype=np.int32))
             bodies = body_container_zeros(2)
             bodies.velocity.assign(np.array([[0, 0, 0], [0, 0, 0.04]], dtype=np.float32))
-            cc = contact_container_zeros(13, track_gap=True, surface_velocity=True)
+            cc = contact_container_zeros(41, track_gap=True, surface_velocity=True)
             basis = cc.lambdas.numpy()
             basis[2] = 1.0
             cc.lambdas.assign(basis)
             impulses = cc.impulses.numpy()
             impulses[2, 1] = 0.1
             cc.impulses.assign(impulses)
-            gaps = np.full(13, 0.001, dtype=np.float32)
-            gaps[8] = -0.002
+            gaps = np.full(41, 0.001, dtype=np.float32)
+            gaps[36] = -0.002
             count = wp.array([3], dtype=int)
             inputs = [columns, cc, bodies, count, columns.articulation_owner]
             cc.gap.assign(gaps)
@@ -76,12 +80,14 @@ class TestTemporalContactGroups(unittest.TestCase):
             reference_gaps, reference_biases = cc.gap.numpy(), cc.derived.numpy()[3].copy()
             cc.gap.assign(gaps)
             cc.derived.zero_()
-            cc.separation_bounds = wp.zeros(13, dtype=wp.vec4f)
-            wp.launch(temporal_surface_gap_kernel, (2, 8), inputs=[*inputs, 0.001, 1000.0, 5.0, 2])
+            cc.separation_bounds = wp.zeros(41, dtype=wp.vec4f)
+            wp.launch(
+                temporal_surface_gap_kernel, (2, TEMPORAL_SURFACE_GAP_LANES), inputs=[*inputs, 0.001, 1000.0, 5.0, 2]
+            )
             np.testing.assert_array_equal(cc.gap.numpy(), reference_gaps)
             np.testing.assert_array_equal(cc.derived.numpy()[3], reference_biases)
             bounds = cc.separation_bounds.numpy()[:, 0]
-            np.testing.assert_array_equal(np.flatnonzero(bounds > 0), [4, 9])
+            np.testing.assert_array_equal(np.flatnonzero(bounds > 0), [4, 8, 12, 16, 20, 24, 28, 32, 37])
             self.assertLess(bounds[0], 0.0)
-            self.assertLess(bounds[8], 0.0)
-            self.assertEqual(bounds[12], 0.0)
+            self.assertLess(bounds[36], 0.0)
+            self.assertEqual(bounds[40], 0.0)
