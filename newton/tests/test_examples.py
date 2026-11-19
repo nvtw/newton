@@ -607,6 +607,12 @@ add_example_batch(
     variants=[
         {
             "devices": test_devices,
+            "test_options": {"requires": ("pxr.Usd",), "num-frames": 150, "solver": "phoenx"},
+            "test_suffix": "phoenx",
+            "allow_output_regexes": [(_WARP_SDF_CONSTANT_CONVERSION_WARNING_RE, "stderr")],
+        },
+        {
+            "devices": test_devices,
             "test_options": {"requires": ("pxr.Usd",), "num-frames": 150, "solver": "xpbd"},
             "test_suffix": "xpbd",
             "allow_output_regexes": [(_WARP_SDF_CONSTANT_CONVERSION_WARNING_RE, "stderr")],

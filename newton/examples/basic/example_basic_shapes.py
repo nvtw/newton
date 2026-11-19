@@ -234,6 +234,10 @@ class Example:
         self.capture()
 
     def capture(self):
+        if self.solver_type == "phoenx" and self.model.device.is_cpu:
+            # The CPU solve must see contacts generated after the shapes land.
+            self.graph = None
+            return
         with wp.ScopedCapture() as capture:
             self.simulate()
         self.graph = capture.graph
