@@ -25,7 +25,7 @@ from newton.examples.phoenx._bottling_io import (
     _valves,
 )
 from newton.examples.phoenx._bottling_scene import PlantScene, load_plant
-from newton.examples.phoenx._bottling_transport import _carton_support_quadrants
+from newton.examples.phoenx._bottling_transport import _carton_support_quadrants, _placement_motions
 from newton.examples.phoenx._bottling_wrap import (
     WrapperController,
     build_wrapper,
@@ -39,6 +39,50 @@ from newton.viewer import ViewerNull
 
 @requires("pxr.Usd")
 class TestBottlingPlant(unittest.TestCase):
+    def test_palletizer_places_off_center_grasps(self):
+        """Keep the carried carton centered through a turn without changing the authored timing or tool height."""
+        times = np.array([0.0, 0.5, 1.0])
+        pick = np.radians([15, -70, 85, 10])
+        above = np.radians([-35, -65, 80, -10])
+        down = np.radians([-35, -58, 87, -10])
+        limits = np.radians([[-155, -120, 15, -350], [155, -15, 145, 350]])
+        offset = np.array([0.016, -0.004])
+
+        def flange(q):
+            a1, a2, a3, _ = q.T
+            radius = 0.42 + 0.85 * (np.cos(a2) + np.cos(a2 + a3))
+            return np.column_stack((radius * np.cos(a1), -radius * np.sin(a1), -0.85 * (np.sin(a2) + np.sin(a2 + a3))))
+
+        for orientation, wrist_turn in (("X", 0.0), ("Y", np.pi / 2)):
+            with self.subTest(orientation=orientation):
+                picked = pick.copy()
+                picked[3] += wrist_turn
+                original = {
+                    f"{phase}_{orientation}_4": (times, np.linspace(start, end, len(times)))
+                    for phase, start, end in (
+                        ("transfer", picked, above),
+                        ("descend", above, down),
+                        ("lift", down, above),
+                    )
+                }
+                self.assertIs(_placement_motions(original, orientation, 4, picked, np.zeros(2), limits), original)
+                motions = _placement_motions(original, orientation, 4, picked, offset, limits)
+                for key, (stamp, q) in motions.items():
+                    self.assertIs(stamp, times)
+                    authored = original[key][1]
+                    np.testing.assert_allclose(flange(q)[:, 2], flange(authored)[:, 2], atol=1e-12)
+                    np.testing.assert_allclose(q[:, 0] + q[:, 3], authored[:, 0] + authored[:, 3], atol=1e-12)
+                descent = f"descend_{orientation}_4"
+                yaw = picked[0] + picked[3] - above[0] - above[3]
+                world_offset = np.array([[np.cos(yaw), -np.sin(yaw)], [np.sin(yaw), np.cos(yaw)]]) @ offset
+                np.testing.assert_allclose(
+                    flange(motions[descent][1])[:, :2] + world_offset, flange(original[descent][1])[:, :2], atol=1e-12
+                )
+                transfer, lift = motions[f"transfer_{orientation}_4"][1], motions[f"lift_{orientation}_4"][1]
+                np.testing.assert_allclose(transfer[[0, -1]], [picked, motions[descent][1][0]], atol=1e-12)
+                np.testing.assert_allclose(lift[[0, -1]], [motions[descent][1][-1], above], atol=1e-12)
+                self.assertIs(_placement_motions(original, orientation, 4, picked, offset * 300, limits), original)
+
     def test_finite_bottle_supply(self):
         """Admit supported compound bottles only through a clear inlet and stop at the partial final row."""
         with wp.ScopedDevice("cpu"):

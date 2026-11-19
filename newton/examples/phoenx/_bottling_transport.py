@@ -20,6 +20,45 @@ from newton.examples.phoenx._bottling_io import (
 from newton.solvers import phoenx
 
 
+def _placement_motions(authored, orientation, slot, pick_q, offset_xy, limits):
+    """Place the carton center on the source trajectory using its measured horizontal offset in the robot base."""
+    if not np.any(offset_xy):
+        return authored
+    motions = authored.copy()
+    for phase in ("transfer", "descend", "lift"):
+        key = f"{phase}_{orientation}_{slot}"
+        times, q = authored[key]
+        a1, a2, a3, a6 = q.T
+        # The source kr40_plan uses two 850 mm links and 420 mm of radial offsets.
+        # Keep the flange height and yaw while shifting its XY position opposite the load.
+        link = 0.850
+        radius = 0.420 + link * (np.cos(a2) + np.cos(a2 + a3))
+        height = -link * (np.sin(a2) + np.sin(a2 + a3))
+        yaw = pick_q[0] + pick_q[3] - a1 - a6
+        dx = np.cos(yaw) * offset_xy[0] - np.sin(yaw) * offset_xy[1]
+        dy = np.sin(yaw) * offset_xy[0] + np.cos(yaw) * offset_xy[1]
+        blend = 1.0
+        if phase != "descend":
+            t = times / times[-1]
+            blend = t**3 * (10.0 + t * (-15.0 + 6.0 * t))
+            if phase == "lift":
+                blend = 1.0 - blend
+        x = radius * np.cos(a1) - blend * dx
+        y = -radius * np.sin(a1) - blend * dy
+        radial = np.hypot(x, y) - 0.420
+        reach = np.hypot(radial, height) / (2.0 * link)
+        if np.any(reach > 1.0):
+            return authored
+        elbow = 2.0 * np.arccos(reach)
+        base = -np.arctan2(y, x)
+        shifted = np.column_stack((base, -np.arctan2(height, radial) - 0.5 * elbow, elbow, a6 + a1 - base))
+        if np.any(shifted < limits[0]) or np.any(shifted > limits[1]):
+            # Preserve the feasible, continuous source cycle for an off-center grip outside the workspace.
+            return authored
+        motions[key] = times, shifted
+    return motions
+
+
 @wp.kernel
 def _arm_targets(
     offset: int,
@@ -225,6 +264,8 @@ class TransportController:
         self.palletizers = {
             name: module.Palletizer(name, libraries[name], libraries[name]["timing"]) for name in self.names
         }
+        self.authored_motions = {name: palletizer.m for name, palletizer in self.palletizers.items()}
+        self.arm_base_axes = [scene.frames[f"/Plant/Line/Palletizers/{name}"][:2, :2].T for name in self.names]
         self.arm_dofs = []
         grippers = []
         for name in self.names:
@@ -234,6 +275,7 @@ class TransportController:
             )
             grippers.append(scene.bodies[root + "/link_6/ToolMount/Gripper/gripper_body"])
         self.grippers = wp.array(grippers, dtype=int)
+        self.gripper_bodies = grippers
         self.held = wp.full(4, -1, dtype=int)
         self.joints = wp.full(4, -1, dtype=int)
         self.commands = wp.zeros(4, dtype=int)
@@ -253,6 +295,7 @@ class TransportController:
         self.velocities = wp.zeros(len(self.drive_dofs), dtype=float)
         self.q_starts = model.joint_q_start.numpy()
         initial = model.body_q.numpy()
+        self.arm_limits = np.stack((model.joint_limit_lower.numpy(), model.joint_limit_upper.numpy()))[:, self.arm_dofs]
         self.pallet_bodies = np.asarray(
             [body for label, body in scene.bodies.items() if label.endswith("/sm_pallet_block_a08_obj_00")],
             dtype=np.int32,
@@ -293,7 +336,7 @@ class TransportController:
         self.integral = wp.zeros(len(self.arm_coordinate_array), dtype=float)
         plant.link.watch("transport_hits", self.hits)
         plant.link.watch("transport_held", self.held)
-        plant.link.watch("body_q", plant.state.body_q, np.r_[self.pallet_bodies, self.case_roots])
+        plant.link.watch("body_q", plant.state.body_q, np.r_[self.pallet_bodies, self.case_roots, grippers])
         plant.link.watch(
             "joint_q",
             plant.state.joint_q,
@@ -435,8 +478,19 @@ class TransportController:
                 [model.body_label[held[i]]] if held[i] >= 0 else [],
                 fifo[0] if fifo else "X",
             )
-            if previous == "GRIPPING" and palletizer.state == "LIFT_PICK" and fifo:
-                fifo.pop(0)
+            if previous == "GRIPPING" and palletizer.state == "LIFT_PICK":
+                poses = data["body_q"]
+                offset = (poses[held[i], :2] - poses[self.gripper_bodies[i], :2]) @ self.arm_base_axes[i]
+                palletizer.m = _placement_motions(
+                    self.authored_motions[name],
+                    palletizer.o,
+                    palletizer.slot,
+                    palletizer.q,
+                    offset,
+                    self.arm_limits[:, i],
+                )
+                if fifo:
+                    fifo.pop(0)
             if result["cmd"] == "close":
                 self.closing_until[i] = time + 0.5
             elif result["cmd"] == "open":
