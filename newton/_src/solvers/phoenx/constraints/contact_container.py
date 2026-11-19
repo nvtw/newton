@@ -187,6 +187,9 @@ class ContactContainer:
     #: :func:`~newton._src.solvers.phoenx.temporal_contacts.temporal_sweep_relaxation_kernel`.
     #: Empty for other schedules.
     sweep_relaxation: wp.array[wp.float32]
+    #: Minimum speculative bias [m/s] and maximum lever lengths [m] at each four-row group start.
+    #: Valid only between a temporal gap update and its biased rigid sweep.
+    separation_bounds: wp.array[wp.vec4f]
     #: Nonzero when the sweep schedule or a requested contact frequency caps
     #: the maximal contact spring below the Nyquist limit
     #: (:func:`contact_container_set_sweeps`). The capped

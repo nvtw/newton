@@ -1431,6 +1431,29 @@ def _get_parallel_contact_prepare_kernel(has_mass_splitting: bool, has_soft_pd: 
     return kernel
 
 
+@wp.func
+def _speed_upper_bound(velocity: wp.vec3f) -> float:
+    # The 1-norm bounds the Euclidean speed without a square root in the row loop.
+    return wp.abs(velocity[0]) + wp.abs(velocity[1]) + wp.abs(velocity[2])
+
+
+@wp.func
+def _contact_group_is_separated(bounds: wp.vec4f, v1: wp.vec3f, v2: wp.vec3f, w1: wp.vec3f, w2: wp.vec3f) -> bool:
+    """Test the minimum separation bias against the largest possible approach speed in a group."""
+    if bounds[0] <= wp.float32(0.0):
+        return False
+    # Forming the point velocity adds spin to the full translation before subtracting v1.
+    # Even equal large translations can round a marginally separated row into contact.
+    translation_error = wp.float32(2.0e-6) * _speed_upper_bound(v1)
+    approach = (
+        _speed_upper_bound(v2 - v1)
+        + wp.max(_speed_upper_bound(w1), wp.float32(1.0e-18)) * bounds[1]
+        + wp.max(_speed_upper_bound(w2), wp.float32(1.0e-18)) * bounds[2]
+        + translation_error
+    )
+    return bounds[0] > approach
+
+
 def _make_contact_iterate_at(
     cloth_support: bool,
     has_mass_splitting: bool = True,
@@ -1585,7 +1608,22 @@ def _make_contact_iterate_at(
             if cc.sweep_relaxation.shape[0] > contact_first:
                 row_sor = sor_boost * cc.sweep_relaxation[contact_first]
 
-        for i in range(contact_count):
+        next_row = wp.int32(0)
+        while next_row < contact_count:
+            i = next_row
+            next_row += 1
+            if wp.static(
+                moving_surface_only
+                and use_bias
+                and not has_mass_splitting
+                and not cloth_support
+                and not patch_friction
+                and cooperative_lanes == 1
+            ):
+                if cc.separation_bounds.shape[0] > 0 and (i & 3) == 0 and row_sor >= 0.0:
+                    if _contact_group_is_separated(cc.separation_bounds[contact_first + i], v1, v2, w1, w2):
+                        next_row = i + 4
+                        continue
             active_point = True
             if wp.static(cooperative_lanes > 1):
                 active_point = parallel_id == i % wp.static(cooperative_lanes)

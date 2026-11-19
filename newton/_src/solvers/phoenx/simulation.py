@@ -290,6 +290,7 @@ from newton._src.solvers.phoenx.temporal_contacts import (
     temporal_restore_velocity_kernel,
     temporal_scatter_jointed_kernel,
     temporal_select_local_joints,
+    temporal_surface_gap_kernel,
     temporal_swap_average_velocity_kernel,
     temporal_sweep_entry_kernel,
     temporal_sweep_relaxation_kernel,
@@ -1391,6 +1392,7 @@ class PhoenXWorld:
 
         self._contact_views: ContactViews | None = None
         self._has_soft_contact_pd: bool = False
+        self._temporal_separation_bounds = None
         self._moving_surface_only: bool = False
         self._contact_views_placeholder: ContactViews = self._make_placeholder_contact_views()
 
@@ -2755,6 +2757,25 @@ class PhoenXWorld:
         column_stride = self.max_contact_columns
         if self.device.is_cuda:
             column_stride = min(column_stride, self.device.sm_count * 1024 // rows_per_column)
+        if self._moving_surface_only and self._temporal_separation_bounds is not None:
+            self._contact_container.separation_bounds = self._temporal_separation_bounds
+            wp.launch(
+                temporal_surface_gap_kernel,
+                dim=(column_stride, rows_per_column),
+                inputs=[
+                    self._contact_cols,
+                    self._contact_container,
+                    self.bodies,
+                    self._ingest_scratch.num_contact_columns,
+                    self._contact_cols.articulation_owner,
+                    advance_dt,
+                    sweep_idt,
+                    bias_rate,
+                    column_stride,
+                ],
+                device=self.device,
+            )
+            return
         wp.launch(
             temporal_contact_gap_kernel,
             dim=(column_stride, rows_per_column),
@@ -2962,6 +2983,7 @@ class PhoenXWorld:
         """
         if self._temporal_contacts_active():
             if last:
+                self._contact_container.separation_bounds = None
                 self._apply_contact_coefficients(self._temporal_contact_coefficients[0])
             else:
                 self._temporal_contact_rows(float(self.substep_dt) / self.solver_iterations)
@@ -4483,6 +4505,15 @@ class PhoenXWorld:
         cc = self._contact_container
         if self.max_contact_columns > 0 and cc.surface_target.shape[0] == 0:
             cc.surface_target = wp.zeros(max(1, int(self.rigid_contact_max)), dtype=wp.vec3f, device=self.device)
+            if (
+                self.device.is_cuda
+                and self.temporal_iterations
+                and self._contact_container_solve is cc
+                and self._singleworld_rigid_direct()
+                and not self.mass_splitting_enabled
+                and not self._contact_patch_enabled
+            ):
+                self._temporal_separation_bounds = wp.empty(self.rigid_contact_max, dtype=wp.vec4f, device=self.device)
 
     def _mass_splitting_average_overflow_into_bodies(self) -> None:
         """Finish a rigid overflow pass without writing unused copy slots."""

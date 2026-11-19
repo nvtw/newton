@@ -62,6 +62,90 @@ from newton._src.solvers.phoenx.islands.island_builder import _find, _pack_entry
 from newton._src.solvers.phoenx.solver_config import PHOENX_BOOST_CONTACT_NORMAL
 
 
+@wp.func
+def _advance_temporal_gap(
+    cc: ContactContainer,
+    k: int,
+    v1: wp.vec3f,
+    w1: wp.vec3f,
+    v2: wp.vec3f,
+    w2: wp.vec3f,
+    advance_dt: float,
+    idt: float,
+    bias_rate: float,
+):
+    gap = cc.gap[k]
+    if advance_dt > 0.0:
+        relative = v2 + wp.cross(w2, cc_get_r1(cc, k)) - v1 - wp.cross(w1, cc_get_r0(cc, k))
+        gap = gap + advance_dt * wp.dot(relative, cc_get_normal(cc, k))
+        cc.gap[k] = gap
+    bias = contact_normal_bias(gap, idt, bias_rate)
+    cc_set_bias(cc, k, bias)
+    return gap, bias
+
+
+@wp.func_native("""
+#if defined(__CUDA_ARCH__)
+    unsigned mask = __activemask();
+    for (int offset = 1; offset < 4; offset *= 2) {
+        bias = fminf(bias, __shfl_xor_sync(mask, bias, offset, 4));
+        r0 = fmaxf(r0, __shfl_xor_sync(mask, r0, offset, 4));
+        r1 = fmaxf(r1, __shfl_xor_sync(mask, r1, offset, 4));
+    }
+#endif
+    return wp::vec_t<4, float>(bias, r0, r1, 0.0f);
+""")
+def _reduce_separation_bounds(bias: float, r0: float, r1: float) -> wp.vec4f: ...
+
+
+@wp.kernel(enable_backward=False)
+def temporal_surface_gap_kernel(
+    columns: ContactColumnContainer,
+    cc: ContactContainer,
+    bodies: BodyContainer,
+    column_count: wp.array[int],
+    owner: wp.array[int],
+    advance_dt: float,
+    idt: float,
+    bias_rate: float,
+    column_stride: int,
+):
+    """Update moving-surface gaps and bound the approach speed of four unloaded rows at a time."""
+    first_column, lane = wp.tid()
+    for cid in range(first_column, column_count[0], column_stride):
+        if owner[cid] >= 0:
+            continue
+        b1 = contact_get_body1(columns, cid)
+        b2 = contact_get_body2(columns, cid)
+        v1 = bodies.velocity[b1]
+        w1 = bodies.angular_velocity[b1]
+        v2 = bodies.velocity[b2]
+        w2 = bodies.angular_velocity[b2]
+        first = contact_get_contact_first(columns, cid)
+        end = first + contact_get_contact_count(columns, cid)
+        # Eight lanes per column keep every four-lane reduction inside a single warp.
+        # Padding the last group contributes neutral values without reading the next column.
+        for start in range(first, end, 8):
+            k = start + lane
+            lower = wp.float32(1.0e25)
+            r0 = wp.float32(0.0)
+            r1 = wp.float32(0.0)
+            if k < end:
+                gap, bias = _advance_temporal_gap(cc, k, v1, w1, v2, w2, advance_dt, idt, bias_rate)
+                lower = wp.float32(-1.0)
+                if gap > 0.0 and cc.impulses[0, k] == 0.0 and cc.impulses[1, k] == 0.0 and cc.impulses[2, k] == 0.0:
+                    if wp.length_sq(cc_get_normal(cc, k)) < wp.float32(1.00001):
+                        target = cc.surface_target[k][2]
+                        # Allow for normal normalization, dot-product roundoff and cancellation
+                        # between the surface target and the speculative bias.
+                        lower = (bias + target) * 0.99998 - 1.0e-4 - 2.0e-6 * (wp.abs(bias) + wp.abs(target))
+                        r0 = wp.max(wp.length(cc_get_r0(cc, k)), wp.float32(1.0e-18))
+                        r1 = wp.max(wp.length(cc_get_r1(cc, k)), wp.float32(1.0e-18))
+            bounds = _reduce_separation_bounds(lower, r0, r1)
+            if (lane & 3) == 0 and k < end:
+                cc.separation_bounds[k] = bounds
+
+
 @wp.kernel(enable_backward=False)
 def temporal_contact_gap_kernel(
     columns: ContactColumnContainer,
@@ -96,12 +180,7 @@ def temporal_contact_gap_kernel(
         first = contact_get_contact_first(columns, cid)
         count = contact_get_contact_count(columns, cid)
         for k in range(first + lane, first + count, rows_per_column):
-            gap = cc.gap[k]
-            if advance_dt > wp.float32(0.0):
-                relative = v2 + wp.cross(w2, cc_get_r1(cc, k)) - v1 - wp.cross(w1, cc_get_r0(cc, k))
-                gap = gap + advance_dt * wp.dot(relative, cc_get_normal(cc, k))
-                cc.gap[k] = gap
-            cc_set_bias(cc, k, contact_normal_bias(gap, idt, bias_rate))
+            gap, _bias = _advance_temporal_gap(cc, k, v1, w1, v2, w2, advance_dt, idt, bias_rate)
 
             # Contact views and uncolored rows share canonical ordering, also
             # when compound-body grouping sorts the input material arrays.
@@ -391,6 +470,7 @@ __all__ = [
     "temporal_mark_jointed_components_kernel",
     "temporal_restore_velocity_kernel",
     "temporal_scatter_jointed_kernel",
+    "temporal_surface_gap_kernel",
     "temporal_swap_average_velocity_kernel",
     "temporal_sweep_entry_kernel",
     "temporal_sweep_relaxation_kernel",
