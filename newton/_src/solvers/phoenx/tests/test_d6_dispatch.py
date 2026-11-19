@@ -685,6 +685,33 @@ class TestD6Universal(unittest.TestCase):
       constraint there).
     """
 
+    def test_unloaded_universal_preserves_composed_rotation(self) -> None:
+        """A rotation about each free axis, in order, satisfies the passive Cardan joint."""
+        for second_axis in (wp.vec3(0.0, 1.0, 0.0), wp.normalize(wp.vec3(0.5, 1.0, 0.0))):
+            with self.subTest(second_axis=tuple(second_axis)):
+                builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+                first_axis = wp.vec3(1.0, 0.0, 0.0)
+                rotation = wp.quat_from_axis_angle(first_axis, 0.5) * wp.quat_from_axis_angle(second_axis, 0.6)
+                body = builder.add_link(
+                    xform=wp.transform(wp.vec3(), rotation),
+                    mass=1.0,
+                    inertia=wp.mat33(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0),
+                )
+                joint = builder.add_joint_d6(
+                    parent=-1,
+                    child=body,
+                    angular_axes=[builder.JointDofConfig(axis=axis) for axis in (first_axis, second_axis)],
+                )
+                builder.add_articulation([joint])
+                model = builder.finalize()
+                state, next_state = model.state(), model.state()
+                solver = newton.solvers.SolverPhoenX(model, joint_mode="maximal_direct")
+                for _ in range(10):
+                    solver.step(state, next_state, None, None, _DT)
+                    state, next_state = next_state, state
+                np.testing.assert_allclose(state.body_q.numpy()[0, 3:], np.asarray(rotation), atol=1e-6)
+                np.testing.assert_allclose(state.body_qd.numpy(), 0.0, atol=1e-5)
+
     def test_universal_pattern_uses_common_d6_rows(self) -> None:
         model = _build_d6_universal_pendulum(locked_angular_index=2)
         solver = newton.solvers.SolverPhoenX(model, substeps=5)

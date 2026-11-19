@@ -253,7 +253,11 @@ def _generic_d6_constraint_bases(
         angular_count[members] = len(locked_angular)
         linear_axes[members, : len(locked_linear)] = locked_linear
         angular_axes[members, : len(locked_angular)] = locked_angular
-        if len(locked_angular) == 2:
+        if len(locked_angular) == 1:
+            # The Cardan axes belong to the parent and child frames, respectively.
+            free = np.asarray(free_angular)
+            angular_axes[members, 1:] = free / np.linalg.norm(free, axis=1, keepdims=True)
+        elif len(locked_angular) == 2:
             angular_axes[members, 2] = np.cross(locked_angular[0], locked_angular[1])
         structural_count[members] = len(locked_linear) + len(locked_angular)
 
@@ -793,10 +797,8 @@ def _prepare_direct_rows(
                 )
             row += wp.int32(1)
     angular_count = generic_angular_count[joint]
-    # The finalized locked-axis counts are configuration flags. Fully free
-    # rotations need no quaternion logarithm or material reference load.
     rotation_error = wp.vec3f(0.0)
-    if angular_count > wp.int32(0):
+    if angular_count == wp.int32(3):
         rotation_error = _quat_log(q1 * wp.quat_inverse(q0))
         if material_rows:
             rotation_error = _quat_log(
@@ -805,7 +807,23 @@ def _prepare_direct_rows(
     alignment_error = wp.vec3f(0.0)
     tangent0 = wp.vec3f(0.0)
     tangent1 = wp.vec3f(0.0)
-    if angular_count == wp.int32(2):
+    cardan_error = wp.float32(0.0)
+    if angular_count == wp.int32(1):
+        # The angle between the first (parent) and second (child) free axis
+        # is invariant, including at finite rotations about both axes.
+        local0 = generic_angular_axes[joint * wp.int32(3) + wp.int32(1)]
+        local1 = generic_angular_axes[joint * wp.int32(3) + wp.int32(2)]
+        axis0 = wp.quat_rotate(q0, local0)
+        axis1 = wp.quat_rotate(q1, local1)
+        normal = wp.cross(axis0, axis1)
+        sine = wp.length(normal)
+        rest_normal = wp.cross(local0, local1)
+        if sine > wp.float32(1.0e-7):
+            tangent0 = normal / sine
+        else:
+            tangent0 = wp.quat_rotate(q0, wp.normalize(rest_normal))
+        cardan_error = wp.atan2(sine, wp.dot(axis0, axis1)) - wp.atan2(wp.length(rest_normal), wp.dot(local0, local1))
+    elif angular_count == wp.int32(2):
         free_axis_local = generic_angular_axes[joint * wp.int32(3) + wp.int32(2)]
         free_axis0 = wp.quat_rotate(q0, free_axis_local)
         free_axis1 = wp.quat_rotate(q1, free_axis_local)
@@ -816,7 +834,10 @@ def _prepare_direct_rows(
         if wp.int32(axis_index) < angular_count:
             direction = wp.quat_rotate(q0, generic_angular_axes[joint * wp.int32(3) + wp.int32(axis_index)])
             error = wp.dot(rotation_error, direction)
-            if angular_count == wp.int32(2):
+            if angular_count == wp.int32(1):
+                direction = tangent0
+                error = cardan_error
+            elif angular_count == wp.int32(2):
                 direction = tangent0
                 if axis_index == 1:
                     direction = tangent1
