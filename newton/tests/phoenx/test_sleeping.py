@@ -13,6 +13,29 @@ from newton.solvers import SolverPhoenX
 
 
 class TestSleepingKinematicContact(unittest.TestCase):
+    def test_velocity_edit_wakes_before_collision(self):
+        with wp.ScopedDevice("cpu"):
+            builder = newton.ModelBuilder()
+            body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.1)))
+            builder.add_shape_box(body, hx=0.1, hy=0.1, hz=0.1)
+            builder.add_ground_plane()
+            model = builder.finalize()
+            solver = SolverPhoenX(model, sleeping_velocity_threshold=0.02, sleeping_frames_required=3)
+            state, contacts, control = model.state(), model.contacts(), model.control()
+            for _ in range(60):
+                solver.collide(state, contacts, dt=1 / 120)
+                solver.step(state, state, control, contacts, 1 / 120)
+            self.assertGreaterEqual(solver.bodies.island_root.numpy()[1], 0)
+            solver.collide(state, contacts, dt=1 / 120)
+            self.assertEqual(contacts.rigid_contact_count.numpy()[0], 0)
+            velocity = state.body_qd.numpy().copy()
+            velocity[body, 0] = 0.5
+            state.body_qd.assign(velocity)
+            solver.wake_on_external_input(state)
+            self.assertLess(solver.bodies.island_root.numpy()[1], 0)
+            solver.collide(state, contacts, dt=1 / 120)
+            self.assertGreater(contacts.rigid_contact_count.numpy()[0], 0)
+
     def test_sleeping_keeps_preconfigured_pipeline(self):
         with wp.ScopedDevice("cpu"):
             for broad_phase in ("explicit", "nxn", "sap"):

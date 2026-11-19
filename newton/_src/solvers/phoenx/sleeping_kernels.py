@@ -83,7 +83,6 @@ __all__ = [
     "_phoenx_finalize_body_aabb_diagonal_kernel",
     "_phoenx_init_body_aabb_kernel",
     "_phoenx_inject_chain_edges_kernel",
-    "_phoenx_island_fanin_external_input_kernel",
     "_phoenx_island_max_velocity_kernel",
     "_phoenx_joint_activity_kernel",
     "_phoenx_kinematic_contact_wake_kernel",
@@ -546,32 +545,20 @@ def _phoenx_self_wake_fanin_kernel(
     bodies: BodyContainer,
     body_aabb_diagonal: wp.array[wp.float32],
     sleeping_velocity_threshold: wp.float32,
-    step_dt: wp.float32,
     wake_flag: wp.array[wp.int32],
 ):
-    """Per sleeping body: if its predicted score exceeds the threshold,
-    raise the wake flag for its ``island_root``. Catches host-side
-    velocity (``state.body_qd``) or force injection that bypasses
-    :meth:`PhoenXWorld.wake_on_external_input`. Same score formula as
-    :func:`_phoenx_island_max_velocity_kernel`.
-    """
+    """Wake sleeping islands with an applied wrench or an above-threshold body velocity."""
     b = wp.tid()
     if bodies.motion_type[b] != MOTION_DYNAMIC:
         return
     root = bodies.island_root[b]
     if root < wp.int32(0):
         return
-    inv_mass = bodies.inverse_mass[b]
-    if inv_mass == 0.0:
+    if bodies.inverse_mass[b] == 0.0:
         return
-    force = bodies.force[b]
-    torque = bodies.torque[b]
-    v_pred = bodies.velocity[b] + force * (inv_mass * step_dt)
-    w_pred = bodies.angular_velocity[b] + (mat33_from_sym6(bodies.inverse_inertia_world[b]) * torque) * step_dt
-    score = wp.length(v_pred) + 0.5 * body_aabb_diagonal[b] * wp.length(w_pred)
-    if wp.length_sq(force) > wp.float32(0.0) or wp.length_sq(torque) > wp.float32(0.0):
-        score = wp.max(score, sleeping_velocity_threshold)
-    if score >= sleeping_velocity_threshold:
+    score = wp.length(bodies.velocity[b]) + 0.5 * body_aabb_diagonal[b] * wp.length(bodies.angular_velocity[b])
+    has_wrench = wp.length_sq(bodies.force[b]) > 0.0 or wp.length_sq(bodies.torque[b]) > 0.0
+    if score >= sleeping_velocity_threshold or has_wrench:
         wp.atomic_max(wake_flag, root, wp.int32(1))
 
 
@@ -590,27 +577,6 @@ def _phoenx_apply_wake_flag_kernel(
     if wake_flag[root] != wp.int32(0):
         bodies.island_root[b] = wp.int32(-1)
         bodies.frames_below_threshold[b] = wp.int32(0)
-
-
-@wp.kernel(enable_backward=False)
-def _phoenx_island_fanin_external_input_kernel(
-    bodies: BodyContainer,
-    island_has_external: wp.array[wp.int32],
-):
-    """Pre-collide variant of ``_phoenx_self_wake_fanin_kernel``: raises
-    a per-root flag for any sleeping body carrying a user-applied force
-    or torque, so :meth:`PhoenXWorld.wake_on_external_input` can wake
-    the island before the broad-phase filter drops supporting contact
-    pairs. Gravity is *not* counted (it lives on a separate per-world
-    array and never touches ``bodies.force``)."""
-    b = wp.tid()
-    if bodies.motion_type[b] != MOTION_DYNAMIC:
-        return
-    root = bodies.island_root[b]
-    if root < wp.int32(0):
-        return
-    if wp.length_sq(bodies.force[b]) > wp.float32(0.0) or wp.length_sq(bodies.torque[b]) > wp.float32(0.0):
-        wp.atomic_max(island_has_external, root, wp.int32(1))
 
 
 @wp.kernel(enable_backward=False)

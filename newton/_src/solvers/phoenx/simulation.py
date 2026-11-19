@@ -263,7 +263,6 @@ from newton._src.solvers.phoenx.sleeping_kernels import (
     _phoenx_finalize_body_aabb_diagonal_kernel,
     _phoenx_init_body_aabb_kernel,
     _phoenx_inject_chain_edges_kernel,
-    _phoenx_island_fanin_external_input_kernel,
     _phoenx_island_max_velocity_kernel,
     _phoenx_kinematic_contact_wake_kernel,
     _phoenx_mark_sleeping_islands_kernel,
@@ -4024,7 +4023,7 @@ class PhoenXWorld:
             )
 
     def wake_on_external_input(self) -> None:
-        """Wake islands receiving a user wrench or moving kinematic support,
+        """Wake islands with edited velocity, a user wrench, or moving kinematic support,
         *before* ``CollisionPipeline.collide()`` runs the broad phase.
 
         The per-step sleeping pass inside :meth:`step` cannot drive
@@ -4048,9 +4047,9 @@ class PhoenXWorld:
             return
         self._island_has_external_input.zero_()
         wp.launch(
-            _phoenx_island_fanin_external_input_kernel,
+            _phoenx_self_wake_fanin_kernel,
             dim=self.num_bodies,
-            inputs=[self.bodies],
+            inputs=[self.bodies, self._body_aabb_diagonal, wp.float32(self._sleeping_velocity_threshold)],
             outputs=[self._island_has_external_input],
             device=self.device,
         )
@@ -4230,7 +4229,6 @@ class PhoenXWorld:
                     self.bodies,
                     self._body_aabb_diagonal,
                     wp.float32(self._sleeping_velocity_threshold),
-                    wp.float32(self.step_dt),
                 ],
                 outputs=[self._wake_flag],
                 device=self.device,

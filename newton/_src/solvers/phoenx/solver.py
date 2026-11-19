@@ -2001,7 +2001,7 @@ class SolverPhoenX(SolverBase):
             )
 
     def wake_on_external_input(self, state_in: State) -> None:
-        """Wake sleeping islands affected by external forces, torques,
+        """Wake sleeping islands affected by velocity edits, external wrenches,
         or changed kinematic contact targets, *before* the host
         calls ``CollisionPipeline.collide(...)``.
 
