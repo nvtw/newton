@@ -123,6 +123,9 @@ def _key_columns(
     slots[slot] = slot
 
 
+_LARGE_ISLAND_COLUMNS = wp.constant(128)
+
+
 @wp.kernel(enable_backward=False)
 def _index_islands(
     keys: wp.array[int],
@@ -142,7 +145,12 @@ def _index_islands(
     ordered[i] = columns[slots[i]]
     if i == 0 or keys[i - 1] != root:
         starts[root] = i
-        roots[wp.atomic_add(count, 0, 1)] = root
+        # Start long islands early so their final colors overlap shorter islands.
+        last = i + _LARGE_ISLAND_COLUMNS - 1
+        if last < ordered.shape[0] and keys[last] == root:
+            roots[wp.atomic_add(count, 0, 1)] = root
+        else:
+            roots[roots.shape[0] - 1 - wp.atomic_add(count, 1, 1)] = root
     if i + 1 == ordered.shape[0] or keys[i + 1] != root:
         ends[root] = i + 1
 
@@ -169,8 +177,11 @@ def _index_colors(
     colors: wp.array[int],
     ends: wp.array[int],
     families: wp.array[int],
+    count: wp.array[int],
 ):
     i = wp.tid()
+    if i == 0:
+        count[0] += count[1]
     root = keys[i]
     if root == sentinel:
         return
@@ -256,8 +267,13 @@ def _get_island_iteration(axes, *, small_colors: bool = False):
         num_blocks: int,
     ):
         block, lane = wp.tid()
-        for index in range(block, count[0], num_blocks):
-            root = roots[index]
+        total = count[0]
+        large = total - count[1]
+        for index in range(block, total, num_blocks):
+            slot = index
+            if index >= large:
+                slot = roots.shape[0] - 1 - (index - large)
+            root = roots[slot]
             i = starts[root]
             while i < ends[root]:
                 color = colors[i]
@@ -319,7 +335,7 @@ class IslandIterationSchedule:
         self.roots = wp.empty(num_bodies + 1, dtype=int, device=device)
         self.starts = wp.empty_like(self.roots)
         self.ends = wp.empty_like(self.roots)
-        self.count = wp.empty(1, dtype=int, device=device)
+        self.count = wp.empty(2, dtype=int, device=device)
         self.interval = wp.empty(2, dtype=int, device=device)
         self.small_interval = wp.empty_like(self.interval)
         self.blocks = min(self.roots.size, 4 * device.sm_count)
@@ -395,6 +411,7 @@ class IslandIterationSchedule:
                 self.colors,
                 self.color_ends,
                 self.families,
+                self.count,
             ],
             device=world.device,
         )
