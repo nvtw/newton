@@ -20,7 +20,7 @@ import newton.examples
 from newton.examples.phoenx.caterpillar_scene import SCENE
 from newton.solvers import SolverPhoenX
 
-ASSETS = Path(newton.examples.get_asset_directory()) / "caterpillar"
+ASSETS = Path(newton.examples.get_local_asset_directory("caterpillar"))
 
 STEEL_DENSITY = 7850.0
 # The collision meshes close over hollow frame and machinery volumes. This

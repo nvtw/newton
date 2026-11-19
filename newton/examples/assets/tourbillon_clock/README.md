@@ -44,11 +44,21 @@ The local links point to:
 
 ## Regenerate assets
 
+The copyrighted OBJ files are not distributed with Newton and must never be
+committed. The example loads them from `$NEWTON_LOCAL_ASSETS/tourbillon_clock` (default
+`~/newton_local_assets/tourbillon_clock`), outside the repository. Symbolic links to the
+generated meshes work:
+
+```bash
+mkdir -p ~/newton_local_assets/tourbillon_clock
+ln -s ~/Documents/Meshes/TourbillonClock/*.obj ~/newton_local_assets/tourbillon_clock/
+```
+
 Regeneration requires USD Python bindings and trimesh:
 
 ```bash
 uv run python newton/examples/assets/tourbillon_clock/extract_usd.py \
-    /home/twidmer/Documents/colibri/TourbillonClock.usd \
+    /path/to/TourbillonClock.usd \
     --output ~/Documents/Meshes/TourbillonClock
 uv run ruff format newton/examples/phoenx/tourbillon_clock_scene.py
 ```

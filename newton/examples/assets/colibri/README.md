@@ -3,9 +3,17 @@
 These local assets come from the supplied `Colibri Plans Rev FF` OBJ files and
 `Colibri.usd`. The original files remain unchanged.
 
-The copyrighted OBJ files are not distributed with Newton. Local development
-uses ignored symlinks to `~/Documents/Meshes/Colibri`. The original
-`Colibri obj` CAD exports remain beside the source USD.
+The copyrighted OBJ files are not distributed with Newton and must never be
+committed. The example loads them from `$NEWTON_LOCAL_ASSETS/colibri` (default
+`~/newton_local_assets/colibri`), outside the repository. Symbolic links to the
+generated meshes work:
+
+```bash
+mkdir -p ~/newton_local_assets/colibri
+ln -s ~/Documents/Meshes/Colibri/*.obj ~/newton_local_assets/colibri/
+```
+
+The original `Colibri obj` CAD exports remain beside the source USD.
 
 ## Units and geometry
 

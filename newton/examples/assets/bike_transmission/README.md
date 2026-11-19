@@ -6,9 +6,15 @@ joints, and drive settings are recorded in
 `newton/examples/phoenx/bike_transmission_scene.py`. The USD and USD Python
 libraries are **not required to run the example**.
 
-The copyrighted OBJ files are not distributed with Newton. Keep generated
-meshes in `~/Documents/Meshes/BikeTransmission` and link them into this
-ignored asset directory for the example.
+The copyrighted OBJ files are not distributed with Newton and must never be
+committed. The example loads them from `$NEWTON_LOCAL_ASSETS/bike_transmission` (default
+`~/newton_local_assets/bike_transmission`), outside the repository. Symbolic links to the
+generated meshes work:
+
+```bash
+mkdir -p ~/newton_local_assets/bike_transmission
+ln -s ~/Documents/Meshes/BikeTransmission/*.obj ~/newton_local_assets/bike_transmission/
+```
 
 Run from the repository root:
 

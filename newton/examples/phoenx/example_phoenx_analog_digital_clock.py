@@ -20,7 +20,7 @@ import newton.examples
 from newton.examples.phoenx.analog_digital_clock_scene import SCENE
 from newton.solvers import SolverPhoenX
 
-ASSETS = Path(newton.examples.get_asset_directory()) / "analog_digital_clock"
+ASSETS = Path(newton.examples.get_local_asset_directory("analog_digital_clock"))
 
 
 @wp.kernel

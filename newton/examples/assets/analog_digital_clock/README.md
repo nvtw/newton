@@ -65,6 +65,16 @@ convex-plane contacts can have opposite endpoint order within the same body-pair
 column. Canonicalizing contact endpoints fixes the spurious frame impulses;
 the example retains the source convex collision shapes.
 
+The copyrighted OBJ files are not distributed with Newton and must never be
+committed. The example loads them from `$NEWTON_LOCAL_ASSETS/analog_digital_clock` (default
+`~/newton_local_assets/analog_digital_clock`), outside the repository. Symbolic links to the
+generated meshes work:
+
+```bash
+mkdir -p ~/newton_local_assets/analog_digital_clock
+ln -s ~/Documents/Meshes/AnalogDigitalClock/*.obj.gz ~/newton_local_assets/analog_digital_clock/
+```
+
 ## Regenerate assets
 
 Only regeneration requires USD Python bindings and trimesh:

@@ -19,7 +19,7 @@ import newton.examples
 from newton.examples.phoenx.tourbillon_clock_scene import SCENE
 from newton.solvers import SolverPhoenX
 
-ASSETS = Path(newton.examples.get_asset_directory()) / "tourbillon_clock"
+ASSETS = Path(newton.examples.get_local_asset_directory("tourbillon_clock"))
 REDUNDANT_BEARING_JOINT = "/World/Clock/SmallConnectorWatchGear/RevoluteJoint_01"
 BEARING_FRICTION = 1.0e-2
 OSCILLATOR_FRICTION_SCALE = 0.05

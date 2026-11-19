@@ -18,7 +18,7 @@ from newton.viewer import ViewerNull
 @unittest.skipUnless(wp.is_cuda_available(), "Phoenx Colibri requires CUDA")
 class TestColibriContacts(unittest.TestCase):
     def _make_example(self, num_worlds=1, fix_base=False):
-        assets = Path(newton.examples.get_asset_directory()) / "colibri"
+        assets = Path(newton.examples.get_local_asset_directory("colibri"))
         if not assets.is_dir():
             self.skipTest("Colibri mesh assets are not installed")
         args = Example.create_parser().parse_args(

@@ -5,13 +5,14 @@ Body poses, mesh placements, materials, joint frames, limits, and drives are
 stored in `newton/examples/phoenx/caterpillar_scene.py`. The USD and USD Python
 libraries are not required at runtime.
 
-The copyrighted OBJ files are not distributed with Newton. Keep generated meshes in
-`~/Documents/Meshes/Caterpillar`. Ignored symbolic links
-in this directory can make those files available to the example without
-copying or committing them. For example:
+The copyrighted OBJ files are not distributed with Newton and must never be
+committed. The example loads them from `$NEWTON_LOCAL_ASSETS/caterpillar` (default
+`~/newton_local_assets/caterpillar`), outside the repository. Symbolic links to the
+generated meshes work:
 
 ```bash
-ln -s ~/Documents/Meshes/Caterpillar/*.obj.gz newton/examples/assets/caterpillar/
+mkdir -p ~/newton_local_assets/caterpillar
+ln -s ~/Documents/Meshes/Caterpillar/*.obj.gz ~/newton_local_assets/caterpillar/
 ```
 
 Run from the repository root:

@@ -2242,7 +2242,7 @@ def build_scene(
     flower = bodies["FrameGround"]
     if not attach_flower_to_base:
         flower = builder.add_link(xform=_transform(BODY_POSES["FrameGround"]), label="Flower", is_kinematic=True)
-    assets = Path(newton.examples.get_asset_directory()) / "colibri"
+    assets = Path(newton.examples.get_local_asset_directory("colibri"))
     for name, kind, label, data, dimensions in SHAPES:
         if name not in bodies:
             continue
