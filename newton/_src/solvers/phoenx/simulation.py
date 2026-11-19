@@ -3524,6 +3524,7 @@ class PhoenXWorld:
                         self.gravity,
                         self.substep_dt,
                         self.substep_dt * self.substeps,
+                        self._contact_container,
                     ],
                     outputs=[self._restitution_targets],
                     device=self.device,

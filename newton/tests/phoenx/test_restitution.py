@@ -44,6 +44,38 @@ class TestRestitution(unittest.TestCase):
         self.assertLess(np.abs(vz[:, 2]).max(), 0.12)
         np.testing.assert_allclose(final_heights[1:], radius, atol=0.005)
 
+    def test_loaded_stack_sleeps(self):
+        """A stack of touching boxes with restitution settles under its own weight."""
+        with wp.ScopedDevice("cpu"):
+            builder = newton.ModelBuilder()
+            material = builder.ShapeConfig(mu=0.5, restitution=0.4, density=500.0, gap=0.003)
+            builder.add_ground_plane(cfg=material)
+            for layer in range(4):
+                pose = wp.transform(wp.vec3(0.0, 0.0, 0.1 + layer * 0.2), wp.quat_identity())
+                body = builder.add_body(xform=pose)
+                builder.add_shape_box(body, hx=0.18, hy=0.14, hz=0.1, cfg=material)
+            model = builder.finalize()
+            pipeline = newton.CollisionPipeline(model, contact_matching="sticky", rigid_contact_max=64)
+            solver = SolverPhoenX(
+                model,
+                collision_pipeline=pipeline,
+                step_layout="single_world",
+                temporal_iterations=True,
+                solver_iterations=12,
+                sleeping_velocity_threshold=0.01,
+                sleeping_frames_required=60,
+            )
+            state, next_state = model.state(), model.state()
+            initial = state.body_q.numpy()[:, :3].copy()
+            contacts = pipeline.contacts()
+            for _ in range(120):
+                solver.collide(state, contacts)
+                solver.step(state, next_state, None, contacts, 1.0 / 120.0)
+                state, next_state = next_state, state
+            asleep = solver.bodies.island_root.numpy()[1 : model.body_count + 1] >= 0
+            self.assertTrue(np.all(asleep), f"Sleeping stack bodies: {asleep.tolist()}")
+            np.testing.assert_allclose(state.body_q.numpy()[:, :3], initial, atol=0.001)
+
     def test_swept_eccentric_impact(self):
         """An impulse changes terminal velocity immediately and transports the new motion only after impact."""
         with wp.ScopedDevice("cpu"):

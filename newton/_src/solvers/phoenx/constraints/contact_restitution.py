@@ -8,7 +8,7 @@ import warp as wp
 from newton._src.solvers.phoenx.adapter_kernels import _contact_impulse
 from newton._src.solvers.phoenx.body import MOTION_DYNAMIC, BodyContainer, mat33_from_sym6, sym6_from_mat33
 from newton._src.solvers.phoenx.constraints.constraint_contact import ContactViews
-from newton._src.solvers.phoenx.constraints.contact_container import ContactContainer
+from newton._src.solvers.phoenx.constraints.contact_container import ContactContainer, cc_get_normal_lambda
 from newton._src.solvers.phoenx.helpers.math_helpers import rotate_inertia
 from newton._src.solvers.phoenx.materials import MaterialData, resolve_restitution_in_kernel
 from newton._src.solvers.phoenx.simulation_kernels import _rotation_quaternion
@@ -23,6 +23,7 @@ def prepare_restitution_targets(
     gravity: wp.array[wp.vec3f],
     dt: wp.float32,
     detection_interval: wp.float32,
+    points: ContactContainer,
     targets: wp.array[wp.vec2f],
 ):
     k = wp.tid()
@@ -49,6 +50,10 @@ def prepare_restitution_targets(
     gap = wp.dot(bodies.position[b1] - bodies.position[b0] + r1 - r0, n)
     gap -= contacts.rigid_contact_margin0[k] + contacts.rigid_contact_margin1[k]
 
+    # A touching witness carrying compressive load belongs to a continuing contact.
+    if gap <= 0.0 and cc_get_normal_lambda(points, k) > 0.0:
+        return
+
     world = wp.max(wp.max(bodies.world_id[b0], bodies.world_id[b1]), 0)
     normal_gravity = wp.dot(gravity[world], n)
     acceleration = wp.float32(0.0)
@@ -67,7 +72,8 @@ def prepare_restitution_targets(
     if discriminant >= 0.0:
         arrival = 2.0 * gap / (closing + wp.sqrt(discriminant))
         if arrival <= dt:
-            arrival = wp.max(-detection_interval, arrival)
+            if arrival < -detection_interval:
+                return
             outgoing = restitution * (closing - acceleration * arrival) + acceleration * (dt - arrival)
             targets[k] = wp.vec2f(outgoing, arrival)
             return
