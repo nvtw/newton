@@ -24,6 +24,7 @@ from newton.examples.phoenx._bottling_io import (
     _valves,
 )
 from newton.examples.phoenx._bottling_scene import load_plant
+from newton.examples.phoenx._bottling_transport import _carton_support_quadrants
 from newton.examples.phoenx._bottling_wrap import (
     WrapperController,
     build_wrapper,
@@ -59,6 +60,57 @@ class TestBottlingPlant(unittest.TestCase):
             translated = np.asarray(center) * (1, side, 1) + (5, side * 10, 0)
             components.append((name, mesh.copy(vertices=mesh.vertices + translated)))
         return components
+
+    def test_palletizer_detects_carton_support(self):
+        """Release needs upward support around a slow carton during the placement stroke."""
+        with wp.ScopedDevice("cpu"):
+            # The carton root is 0.2 m above the pallet origin. Its welded flap has a distinct body.
+            corners = np.array([[-0.09, -0.06, 0], [0.09, -0.06, 0], [-0.09, 0.06, 0], [0.09, 0.06, 0]])
+            poses = wp.array([[0, 0, z, 0, 0, 0, 1] for z in (0, 0.2, 0.2)], dtype=wp.transform)
+            held = wp.array([1, -1, -1, -1], dtype=int)
+            bodies = wp.array([0, 1, 2], dtype=int)
+            lower = wp.zeros(4, dtype=int)
+            flap = wp.full(4, 2, dtype=int)
+            mask = wp.zeros(4, dtype=int)
+            margin = wp.full(4, 0.0001, dtype=float)
+
+            for support, gap, speed, armed, count, reverse, expected in (
+                (-2, 0.0006, 0.0, 1, 4, False, 15),  # surfaces are 0.4 mm apart after margins
+                (0, 0.0006, 0.0, 1, 4, True, 15),  # another carton, with the witnesses exchanged
+                (-2, 0.001, 0.0, 1, 4, False, 0),
+                (-2, 0.0006, 0.0, 1, 3, False, 7),
+                (-2, 0.0006, 0.2, 1, 4, False, 0),
+                (-2, 0.0006, 0.0, 2, 4, False, 0),
+                (-1, 0.0006, 0.0, 1, 4, False, 0),
+            ):
+                with self.subTest(support=support, gap=gap, speed=speed, armed=armed, count=count, reverse=reverse):
+                    mask.zero_()
+                    top = wp.array(corners + np.array([0, 0, gap - 0.2]), dtype=wp.vec3)
+                    bottom = wp.array(corners, dtype=wp.vec3)
+                    velocity = wp.array([[0, 0, z, 0, 0, 0] for z in (0, speed, speed)], dtype=wp.spatial_vector)
+                    wp.launch(
+                        _carton_support_quadrants,
+                        4,
+                        inputs=[
+                            wp.array([count], dtype=int),
+                            flap if reverse else lower,
+                            lower if reverse else flap,
+                            bodies,
+                            wp.array([support, 1, 1], dtype=int),
+                            held,
+                            wp.array([armed], dtype=int),
+                            poses,
+                            velocity,
+                            top if reverse else bottom,
+                            bottom if reverse else top,
+                            wp.array([[0, 0, -1.0 if reverse else 1.0]] * 4, dtype=wp.vec3),
+                            margin,
+                            margin,
+                            mask,
+                            4,
+                        ],
+                    )
+                    np.testing.assert_array_equal(mask.numpy(), [expected, 0, 0, 0])
 
     def test_wrapper_frame_clearance(self):
         """Remove source crossmember interference without altering moving mass or geometry."""

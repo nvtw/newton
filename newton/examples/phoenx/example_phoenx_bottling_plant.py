@@ -347,6 +347,7 @@ class Example:
             self.pipeline.collide(self.state_0, self.contacts, dt=dt)
             self.solver.step(self.state_0, self.state_0, self.control, self.contacts, dt)
         if self.controller is not None:
+            self.controller.transport.sense_pallet_support(self.contacts)
             self.controller.sense()
 
     def step(self):

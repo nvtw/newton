@@ -40,6 +40,66 @@ def _arm_targets(
 
 
 @wp.kernel
+def _carton_support_quadrants(
+    contact_count: wp.array[int],
+    shape0: wp.array[int],
+    shape1: wp.array[int],
+    shape_body: wp.array[int],
+    support_owner: wp.array[int],
+    held: wp.array[int],
+    armed: wp.array[int],
+    poses: wp.array[wp.transform],
+    velocities: wp.array[wp.spatial_vector],
+    point0: wp.array[wp.vec3],
+    point1: wp.array[wp.vec3],
+    normals: wp.array[wp.vec3],
+    margin0: wp.array[float],
+    margin1: wp.array[float],
+    quadrants: wp.array[int],
+    stride: int,
+):
+    """Mark the quadrants of each held carton supported by a pallet or a lower carton."""
+    for k in range(wp.tid(), wp.min(contact_count[0], shape0.shape[0]), stride):
+        sa = shape0[k]
+        sb = shape1[k]
+        if sa < 0 or sb < 0:
+            continue
+        a = shape_body[sa]
+        b = shape_body[sb]
+        if a < 0 or b < 0:
+            continue
+        owner_a = support_owner[a]
+        owner_b = support_owner[b]
+        if owner_a == -1 or owner_b == -1 or owner_a == owner_b:
+            continue
+        for cell in range(4):
+            carton = held[cell]
+            if (armed[0] & (1 << cell)) == 0 or carton < 0 or (owner_a != carton and owner_b != carton):
+                continue
+            if wp.abs(wp.spatial_top(velocities[carton])[2]) >= 0.12:
+                continue
+            peer = wp.where(owner_a == carton, owner_b, owner_a)
+            if (
+                peer >= 0
+                and wp.transform_get_translation(poses[peer])[2] + 0.12
+                >= wp.transform_get_translation(poses[carton])[2]
+            ):
+                continue
+            normal = normals[k]
+            if wp.where(owner_a == carton, -normal[2], normal[2]) < 0.9:
+                continue
+            x = wp.transform_point(poses[a], point0[k])
+            y = wp.transform_point(poses[b], point1[k])
+            if wp.dot(normal, y - x) - margin0[k] - margin1[k] > 0.0005:
+                continue
+            local = wp.transform_point(wp.transform_inverse(poses[carton]), (x + y) * 0.5)
+            # Exclude the center strips so four near-coincident witnesses cannot qualify the carton.
+            if wp.abs(local[0]) >= 0.015 and wp.abs(local[1]) >= 0.015:
+                quadrant = wp.int32(local[0] > 0.0) + 2 * wp.int32(local[1] > 0.0)
+                wp.atomic_or(quadrants, cell, 1 << quadrant)
+
+
+@wp.kernel
 def _vacuum(
     dynamics: phoenx.DynamicsData,
     poses: wp.array[wp.transform],
@@ -59,10 +119,14 @@ def _vacuum(
     held: wp.array[int],
     joints: wp.array[int],
     claimed: wp.array[int],
+    armed: wp.array[int],
+    quadrants: wp.array[int],
 ):
     cell = wp.tid()
     parent = grippers[cell]
-    if commands[cell] < 0 and held[cell] >= 0:
+    supported = (armed[0] & (1 << cell)) != 0 and quadrants[cell] == 15
+    quadrants[cell] = 0
+    if (commands[cell] < 0 or supported) and held[cell] >= 0:
         phoenx.remove_joint(dynamics, joints[cell])
         claimed[held[cell]] = 0
         held[cell] = -1
@@ -208,6 +272,14 @@ class TransportController:
             ]
         )
         self.case_roots = np.asarray([bodies[0] for bodies in plant.case_body_groups.values()], dtype=np.int32)
+        # A carton root owns its welded flaps. Pallets share the sentinel -2.
+        support_owner = np.full(model.body_count, -1, dtype=np.int32)
+        support_owner[self.pallet_bodies] = -2
+        for bodies in plant.case_body_groups.values():
+            support_owner[np.asarray(bodies)] = bodies[0]
+        self.support_owner = wp.array(support_owner, dtype=int)
+        self.release_armed = wp.zeros(1, dtype=int)
+        self.support_quadrants = wp.zeros(len(self.names), dtype=int)
         self.arm_coordinates = [
             [
                 self.q_starts[scene.joints[f"/Plant/Line/Palletizers/{name}/KR40/Joints/{a}"]]
@@ -294,6 +366,37 @@ class TransportController:
             ],
         )
 
+    def sense_pallet_support(self, contacts):
+        """Sample the last substep before the next vacuum actuation."""
+
+        def sample():
+            threads = min(4096, contacts.rigid_contact_max)
+            if threads:
+                wp.launch(
+                    _carton_support_quadrants,
+                    threads,
+                    inputs=[
+                        contacts.rigid_contact_count,
+                        contacts.rigid_contact_shape0,
+                        contacts.rigid_contact_shape1,
+                        self.plant.model.shape_body,
+                        self.support_owner,
+                        self.held,
+                        self.release_armed,
+                        self.plant.state.body_q,
+                        self.plant.state.body_qd,
+                        contacts.rigid_contact_point0,
+                        contacts.rigid_contact_point1,
+                        contacts.rigid_contact_normal,
+                        contacts.rigid_contact_margin0,
+                        contacts.rigid_contact_margin1,
+                        self.support_quadrants,
+                        threads,
+                    ],
+                )
+
+        wp.capture_if(self.release_armed, sample)
+
     def before_step(self, time, multipliers, data):
         """Step the source conveyor and palletizer PLCs on a host snapshot."""
         plant, model = self.plant, self.plant.model
@@ -316,6 +419,7 @@ class TransportController:
             qd.append(velocity)
         held = data["transport_held"]
         commands = np.zeros(4, dtype=np.int32)
+        release_armed = 0
         for i, (name, palletizer) in enumerate(self.palletizers.items()):
             station = self.conveyors.stations[name]
             ready = self.conveyors.held(station["pick_eye"], 0.5) and not self.conveyors.run.get(
@@ -338,10 +442,17 @@ class TransportController:
             elif result["cmd"] == "open":
                 self.closing_until[i] = 0.0
             commands[i] = -1 if result["cmd"] == "open" else int(held[i] < 0 and time < self.closing_until[i])
+            if palletizer.state == "SET_DOWN" or (
+                palletizer.state == "DESCEND_PLACE"
+                and palletizer.cur is not None
+                and time >= palletizer.t0 + palletizer.m[palletizer.cur][0][-1] - 0.18
+            ):
+                release_armed |= 1 << i
             q.extend(result["q"])
             qd.extend(result["qd"])
             palletizer.events.clear()
         plant.link.write(self.commands, commands)
+        plant.link.write(self.release_armed, [release_armed])
         plant.link.write(self.positions, q)
         plant.link.write(self.velocities, qd)
         self.conveyors.events.clear()
@@ -400,6 +511,8 @@ class TransportController:
                 self.held,
                 self.joints,
                 plant.claimed,
+                self.release_armed,
+                self.support_quadrants,
             ],
         )
 
