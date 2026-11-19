@@ -1591,6 +1591,11 @@ def _make_contact_iterate_at(
                 active_point = parallel_id == i % wp.static(cooperative_lanes)
             if active_point:
                 k = contact_first + i
+                if wp.static(not use_bias):
+                    # Velocity relaxation skips separated rows. Check before
+                    # loading their geometry or computing endpoint velocities.
+                    if cc_get_bias(cc, k) > wp.float32(0.0):
+                        continue
                 n = cc_get_normal(cc, k)
                 normal_only = False
                 if wp.static(frictionless_fast_path and not cloth_support):
@@ -1712,8 +1717,6 @@ def _make_contact_iterate_at(
                             bias_t1_val = cc_get_bias_t1(cc, k)
                             bias_t2_val = cc_get_bias_t2(cc, k)
                 is_speculative = speculative_bias > wp.float32(0.0)
-                if is_speculative and wp.static(not use_bias):
-                    continue
                 if wp.static(not use_bias):
                     bias_val = wp.float32(0.0)
 
