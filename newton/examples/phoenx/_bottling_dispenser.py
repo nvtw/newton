@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Recover existing dispenser stock and its stationary separator contacts."""
+"""Restore the palletizer area's empty-pallet stores, magazines and separator contacts."""
 
 import numpy as np
 
@@ -25,8 +25,16 @@ def disable_owned_proxies(stage, covered_roots, *, scope="/Plant/Physics/NavProx
                 proxy.SetActive(False)
 
 
+def _restore_pallet(pallet):
+    for name, choice in (("physics", "dynamic"), ("collision", "boxes")):
+        variants = pallet.GetVariantSet(name)
+        if choice not in variants.GetVariantNames():
+            raise ValueError(f"{pallet.GetPath()}: source pallet has no {name}={choice} variant")
+        variants.SetVariantSelection(choice)
+
+
 def prepare_dispensers(stage):
-    """Physicalize all authored magazine pallets and their four support fingers.
+    """Restore the floor stores, magazine pallets and four support fingers per dispenser.
 
     Select each pallet's authored dynamic variant and compound collision.
     Overrides live only in the session layer; visual geometry and authored
@@ -43,6 +51,21 @@ def prepare_dispensers(stage):
     """
     from pxr import Usd, UsdGeom, UsdPhysics, UsdShade  # noqa: PLC0415 - OpenUSD is optional.
 
+    stores = stage.GetPrimAtPath("/Plant/WrapLine/Stores")
+    if stores:
+        with Usd.EditContext(stage, stage.GetSessionLayer()):
+            for store in stores.GetChildren():
+                for bay in store.GetChildren():
+                    if not bay.GetName().startswith("bay_") or not bay.GetChildren():
+                        continue
+                    for pallet in bay.GetChildren():
+                        _restore_pallet(pallet)
+                    # The same-named cube represents the entire stockpile.
+                    # The plant floor underneath supplies the actual support.
+                    proxy = stage.GetPrimAtPath(store.GetPath().AppendPath("Physics/" + bay.GetName()))
+                    if proxy and proxy.HasAPI(UsdPhysics.CollisionAPI):
+                        proxy.SetActive(False)
+
     root = stage.GetPrimAtPath("/Plant/WrapLine/Dispensers")
     if not root:
         return []
@@ -53,10 +76,6 @@ def prepare_dispensers(stage):
         if not magazine:
             continue
         for pallet in magazine.GetChildren():
-            if "dynamic" not in pallet.GetVariantSet("physics").GetVariantNames():
-                raise ValueError(f"{pallet.GetPath()}: source stock has no dynamic physics variant")
-            if "boxes" not in pallet.GetVariantSet("collision").GetVariantNames():
-                raise ValueError(f"{pallet.GetPath()}: source stock has no compound collision variant")
             pallets.append(str(pallet.GetPath()))
         steel = stage.GetPrimAtPath(str(dispenser.GetPath()) + "/Frame/steel")
         if not steel:
@@ -83,9 +102,7 @@ def prepare_dispensers(stage):
 
     with Usd.EditContext(stage, stage.GetSessionLayer()):
         for pallet_path in pallets:
-            pallet = stage.GetPrimAtPath(pallet_path)
-            pallet.GetVariantSet("physics").SetVariantSelection("dynamic")
-            pallet.GetVariantSet("collision").SetVariantSelection("boxes")
+            _restore_pallet(stage.GetPrimAtPath(pallet_path))
         for dispenser_path, components, material in fingers:
             for i, (vertices, indices) in enumerate(components):
                 finger = UsdGeom.Mesh.Define(stage, f"{dispenser_path}/Physics/SeparatorFinger{i}")

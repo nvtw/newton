@@ -43,6 +43,15 @@ class TestBottlingDispenser(unittest.TestCase):
                     UsdPhysics.CollisionAPI.Apply(box.GetPrim())
             physics.SetVariantSelection("none")
 
+        store = "/Plant/WrapLine/Stores/EPS_U"
+        for i in range(2):
+            stock = stage.DefinePrim(f"{store}/bay_1_front/P{i:02}")
+            stock.GetReferences().AddInternalReference(f"{root}/Magazine/P{i:02}")
+            stock.GetVariantSet("physics").SetVariantSelection("none")
+        for name in ("bay_1_front", "bay_1_back", "guard"):
+            proxy = UsdGeom.Cube.Define(stage, store + "/Physics/" + name)
+            UsdPhysics.CollisionAPI.Apply(proxy.GetPrim())
+
         vertices, indices = [], []
         for center in ((-0.5, -0.3, 0.3375), (-0.5, 0.3, 0.3375), (0.5, -0.3, 0.3375), (0.5, 0.3, 0.3375)):
             mesh = newton.Mesh.create_box(0.125, 0.06, 0.025, compute_inertia=False)
@@ -71,6 +80,13 @@ class TestBottlingDispenser(unittest.TestCase):
         paths = prepare_dispensers(stage)
         self.assertEqual(len(paths), 2)
         self.assertEqual(stage.GetRootLayer().ExportToString(), source)
+        for i in range(2):
+            stock = stage.GetPrimAtPath(f"{store}/bay_1_front/P{i:02}/Geometry/sm_pallet_block_a08_obj_00")
+            self.assertTrue(stock.HasAPI(UsdPhysics.RigidBodyAPI))
+            self.assertEqual(len(stock.GetChild("CollisionBoxes").GetChildren()), 2)
+        self.assertFalse(stage.GetPrimAtPath(store + "/Physics/bay_1_front").IsActive())
+        self.assertTrue(stage.GetPrimAtPath(store + "/Physics/bay_1_back").IsActive())
+        self.assertTrue(stage.GetPrimAtPath(store + "/Physics/guard").IsActive())
         for name in owners:
             proxy = stage.GetPrimAtPath("/Plant/Physics/NavProxies/Replaceable/" + name)
             self.assertEqual(proxy.IsActive(), name != "covered")

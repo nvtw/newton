@@ -49,8 +49,11 @@ in the source; the Newton fleet has no automated high-rack mission.
 
 Product bodies stored below the floor are inactive supply pools and are omitted.
 The 2,458 bottles already on the line and all 56 open cases remain dynamic. Cases
-have their source hinged flaps. All 60 existing dispenser pallets use their
-authored dynamic variants and compound colliders. The separator fingers retain
+have their source hinged flaps. Behind the four palletizing robots, all 302
+reserve pallets in the two floor stores are separate 61.196 kg bodies. Their
+32 stacks rest on the floor, with fork pockets formed by the source boards.
+All 60 dispenser pallets use the same authored dynamic variants and compound
+colliders. The separator fingers retain
 their exact source triangles and the station's contact material. Coarse magazine
 proxies are retired only after their physical stock is installed. The wrapper
 ports start empty, matching the source live scenario: its layout-only loads and
