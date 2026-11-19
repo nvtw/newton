@@ -1060,12 +1060,12 @@ class SolverPhoenX(SolverBase):
         if int(model.shape_count) > 0 and not self._has_deformable_collision:
             existing_cp = getattr(model, "_collision_pipeline", None)
             needs_new_cp = existing_cp is None or not getattr(existing_cp, "contact_matching", False)
-            # When sleeping is on we need a broad-phase filter func wired
-            # into the pipeline at construction time; force rebuild if
-            # the existing pipeline doesn't carry one.
-            if uses_broad_phase_filter and not needs_new_cp:
-                existing_filter = getattr(existing_cp, "_broad_phase_filter_func", None)
-                if existing_filter is None:
+            if uses_broad_phase_filter and not needs_new_cp and existing_cp._broad_phase_filter_func is None:
+                if collision_pipeline is not None and collision_pipeline._matching_enabled:
+                    # Callers may already hold Contacts from this pipeline. Retain its buffers,
+                    # broad-phase configuration and narrow-phase settings when installing the filter.
+                    collision_pipeline._install_broad_phase_filter(phoenx_sleeping_filter, PhoenXSleepingFilterData)
+                else:
                     needs_new_cp = True
             if needs_new_cp:
                 # PhoenX-tight rigid_contact_max from shape_contact_pair_count;
@@ -1137,7 +1137,10 @@ class SolverPhoenX(SolverBase):
             # buffers into one internal PGS row space.
             rigid_contact_max = rigid_contact_capacity + soft_contact_capacity + self_contact_capacity
         else:
-            rigid_contact_max = int(model.rigid_contact_max or 0)  # None for a model without shapes
+            pipeline = getattr(model, "_collision_pipeline", None)
+            rigid_contact_max = int(
+                pipeline.rigid_contact_max if pipeline is not None else model.rigid_contact_max or 0
+            )
 
         gravity_tuples = [tuple(float(x) for x in row) for row in gravity_np]
         if len(gravity_tuples) == 1:

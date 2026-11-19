@@ -1162,6 +1162,11 @@ def ingest_contacts(
             get no column, so they report overlaps without a contact response.
     """
     rigid_contact_max = int(contacts.rigid_contact_max)
+    if rigid_contact_max > scratch.rigid_contact_max:
+        raise ValueError(
+            f"Rigid contact buffer capacity {rigid_contact_max} exceeds PhoenX capacity {scratch.rigid_contact_max}. "
+            "Pass the collision pipeline to SolverPhoenX when constructing the solver."
+        )
     if cid_of_contact is None:
         cid_of_contact = scratch.pair_id
     if num_active_constraints is None:

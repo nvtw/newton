@@ -666,8 +666,11 @@ class BroadPhaseGrid:
         )
         self.keys = wp.empty(2 * self.capacity, dtype=wp.uint64, device=device)
         self.values = wp.empty(2 * self.capacity, dtype=wp.int32, device=device)
-        self._has_custom_filter = filter_func is not None
         self._empty_filter_data = EmptyFilterData()
+        self._set_filter_kernels(filter_func, filter_data_type)
+
+    def _set_filter_kernels(self, filter_func: Any | None, filter_data_type: Any | None) -> None:
+        self._has_custom_filter = filter_func is not None
         if self._has_custom_filter:
             (
                 self._grid_kernel,

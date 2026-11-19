@@ -3242,6 +3242,12 @@ class CollisionPipeline:
         """Maximum soft contact buffer capacity used by this pipeline."""
         return self._soft_contact_max
 
+    def _install_broad_phase_filter(self, filter_func: Any, filter_data_type: Any) -> None:
+        """Bind a pair filter at setup time, retaining the configured collision buffers."""
+        self.broad_phase._set_filter_kernels(filter_func, filter_data_type)
+        self._broad_phase_filter_func = filter_func
+        self._broad_phase_filter_data_type = filter_data_type
+
     def set_broad_phase_filter_data(self, filter_data: Any) -> None:
         """Install the runtime ``filter_data`` instance forwarded to broad-phase launches.
 

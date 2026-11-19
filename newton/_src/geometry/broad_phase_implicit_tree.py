@@ -263,8 +263,11 @@ class BroadPhaseImplicitTree:
         # which the leaf kernel below writes while reading this order.
         self.values = wp.empty(2 * self.shape_count, dtype=wp.int32, device=device)
         self.leaf_base = self.tree.leaf_base
-        self._has_custom_filter = filter_func is not None
         self._empty_filter_data = EmptyFilterData()
+        self._set_filter_kernels(filter_func, filter_data_type)
+
+    def _set_filter_kernels(self, filter_func: Any | None, filter_data_type: Any | None) -> None:
+        self._has_custom_filter = filter_func is not None
         self._kernels = (
             _make_pair_kernels(filter_func, filter_data_type) if self._has_custom_filter else _DEFAULT_KERNELS
         )

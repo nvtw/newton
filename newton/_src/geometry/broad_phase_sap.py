@@ -894,7 +894,6 @@ class BroadPhaseSAP:
         """
         if (filter_func is None) != (filter_data_type is None):
             raise ValueError("filter_func and filter_data_type must be provided together")
-        self._has_custom_filter = filter_func is not None
         self._empty_filter_data = EmptyFilterData()
 
         self.sweep_thread_count_multiplier = sweep_thread_count_multiplier
@@ -985,16 +984,7 @@ class BroadPhaseSAP:
                 self.sort_type = "segmented"
 
         self._adaptive_sweep = self.max_shapes_per_world >= _SAP_CHUNKED_MIN_SHAPES
-        if filter_func is None:
-            self._kernel = _sap_adaptive_broadphase_kernel if self._adaptive_sweep else _sap_broadphase_kernel
-            self._chunked_kernel = _sap_chunked_broadphase_kernel
-        else:
-            self._kernel = create_sap_broadphase_kernel(
-                filter_func,
-                filter_data_type,
-                adaptive_sweep=self._adaptive_sweep,
-            )
-            self._chunked_kernel = create_sap_chunked_broadphase_kernel(filter_func, filter_data_type)
+        self._set_filter_kernels(filter_func, filter_data_type)
 
         # Create tile sort kernel if using tile-based sorting
         self.tile_sort_kernel = None
@@ -1052,6 +1042,19 @@ class BroadPhaseSAP:
         self.direction_best_pause = wp.zeros(1, dtype=wp.int32, device=device)
         self.direction_best_score = wp.full(1, np.finfo(np.float32).max, dtype=wp.float32, device=device)
         self.direction_best_index = wp.zeros(1, dtype=wp.int32, device=device)
+
+    def _set_filter_kernels(self, filter_func: Any | None, filter_data_type: Any | None) -> None:
+        self._has_custom_filter = filter_func is not None
+        if filter_func is None:
+            self._kernel = _sap_adaptive_broadphase_kernel if self._adaptive_sweep else _sap_broadphase_kernel
+            self._chunked_kernel = _sap_chunked_broadphase_kernel
+        else:
+            self._kernel = create_sap_broadphase_kernel(
+                filter_func,
+                filter_data_type,
+                adaptive_sweep=self._adaptive_sweep,
+            )
+            self._chunked_kernel = create_sap_chunked_broadphase_kernel(filter_func, filter_data_type)
 
     def _sort_projected_intervals(self, device: Devicelike | None) -> None:
         if self.sort_type == "tile" and self.tile_sort_kernel is not None:

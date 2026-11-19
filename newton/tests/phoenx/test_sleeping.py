@@ -13,6 +13,36 @@ from newton.solvers import SolverPhoenX
 
 
 class TestSleepingKinematicContact(unittest.TestCase):
+    def test_sleeping_keeps_preconfigured_pipeline(self):
+        with wp.ScopedDevice("cpu"):
+            for broad_phase in ("explicit", "nxn", "sap"):
+                with self.subTest(broad_phase=broad_phase):
+                    builder = newton.ModelBuilder()
+                    body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.095)))
+                    builder.add_shape_box(body, hx=0.1, hy=0.1, hz=0.1)
+                    builder.add_ground_plane()
+                    model = builder.finalize()
+                    pipeline = newton.CollisionPipeline(
+                        model,
+                        broad_phase=broad_phase,
+                        rigid_contact_max=4096,
+                        publish_capacity=False,
+                        contact_matching="sticky",
+                        speculative_contact_gap_max=0.005,
+                    )
+                    contacts = pipeline.contacts()
+                    solver = SolverPhoenX(model, collision_pipeline=pipeline, sleeping_velocity_threshold=0.01)
+                    self.assertIs(model._collision_pipeline, pipeline)
+                    self.assertEqual(solver.world.rigid_contact_max, contacts.rigid_contact_max)
+                    state = model.state()
+                    pipeline.collide(state, contacts, dt=1 / 60)
+                    self.assertGreater(contacts.rigid_contact_count.numpy()[0], 0)
+                    solver.step(state, state, None, contacts, 1 / 60)
+                    self.assertTrue(np.isfinite(state.body_q.numpy()).all())
+                    solver.bodies.island_root.fill_(1)
+                    pipeline.collide(state, contacts, dt=1 / 60)
+                    self.assertEqual(contacts.rigid_contact_count.numpy()[0], 0)
+
     def test_read_only_support_does_not_serialize_contacts(self):
         """Keep independent awake contacts parallel when they share a kinematic support."""
         results = []

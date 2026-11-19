@@ -317,12 +317,7 @@ class BroadPhaseAllPairs:
         if (filter_func is None) != (filter_data_type is None):
             raise ValueError("filter_func and filter_data_type must be provided together")
 
-        if filter_func is None:
-            self._kernel = _nxn_broadphase_kernel
-            self._has_custom_filter = False
-        else:
-            self._kernel = create_nxn_broadphase_kernel(filter_func, filter_data_type)
-            self._has_custom_filter = True
+        self._set_filter_kernels(filter_func, filter_data_type)
         self._empty_filter_data = EmptyFilterData()
 
         # Convert to numpy if it's a warp array
@@ -379,6 +374,14 @@ class BroadPhaseAllPairs:
 
         # Store number of regular worlds (for distinguishing dedicated -1 segment)
         self.num_regular_worlds = int(num_regular_worlds)
+
+    def _set_filter_kernels(self, filter_func: Any | None, filter_data_type: Any | None) -> None:
+        if filter_func is None:
+            self._kernel = _nxn_broadphase_kernel
+            self._has_custom_filter = False
+        else:
+            self._kernel = create_nxn_broadphase_kernel(filter_func, filter_data_type)
+            self._has_custom_filter = True
 
     def launch(
         self,
@@ -527,13 +530,16 @@ class BroadPhaseExplicit:
         """
         if (filter_func is None) != (filter_data_type is None):
             raise ValueError("filter_func and filter_data_type must be provided together")
+        self._set_filter_kernels(filter_func, filter_data_type)
+        self._empty_filter_data = EmptyFilterData()
+
+    def _set_filter_kernels(self, filter_func: Any | None, filter_data_type: Any | None) -> None:
         if filter_func is None:
             self._kernel = _nxn_broadphase_precomputed_pairs
             self._has_custom_filter = False
         else:
             self._kernel = create_nxn_broadphase_precomputed_pairs_kernel(filter_func, filter_data_type)
             self._has_custom_filter = True
-        self._empty_filter_data = EmptyFilterData()
 
     def _warn_large_pair_count(
         self,
