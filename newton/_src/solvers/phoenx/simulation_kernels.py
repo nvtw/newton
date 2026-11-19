@@ -621,7 +621,7 @@ def _per_world_jp_coloring_kernel(
         return
 
     # Phase 1: zero per-element assigned flags for this world's elements.
-    stride = _PER_WORLD_COLORING_BLOCK_DIM
+    stride = wp.block_dim()
     offset = wp.int32(0)
     while offset < count:
         slot = offset + lane
