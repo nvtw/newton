@@ -7,6 +7,8 @@ Run `uv run scripts/benchmark_phoenx_bottling_plant.py` with the local plant
 assets installed. The default run uses headless OptiX and advances 330 seconds
 of simulation. Use `--window START STOP` to select frame intervals and
 `--timing-output FILE` to save the timings and final controller report.
+Each window records contact and production counts at both ends so runs can
+be compared at the same factory workload.
 """
 
 import json
@@ -18,6 +20,18 @@ import warp as wp
 
 import newton.examples
 from newton.examples.phoenx.example_phoenx_bottling_plant import Example
+
+
+def _workload(example):
+    workload = {"rigid_contacts": int(example.contacts.rigid_contact_count.numpy()[0])}
+    controller = example.controller
+    if controller is not None:
+        workload.update(
+            placed_bottles=controller.placed.numpy().tolist(),
+            sealed_cases=int(controller.sealed.numpy().sum()),
+            palletized_cases={name: len(plc.placed) for name, plc in controller.transport.palletizers.items()},
+        )
+    return workload
 
 
 def main():
@@ -34,13 +48,19 @@ def main():
     boundaries = []
     endpoints = {frame for window in windows for frame in window}
     timings = []
+    workloads = {}
+    observation_time = 0.0
 
     def measure_boundary():
+        nonlocal observation_time
         frame = len(boundaries)
         if frame in endpoints:
             viewer.synchronize_simulation_step()
             wp.synchronize_device(example.model.device)
-        boundaries.append(perf_counter())
+        now = perf_counter()
+        boundaries.append(now - observation_time)
+        if frame in endpoints:
+            workloads[frame] = _workload(example)
         for start, stop in windows:
             if frame == stop:
                 elapsed = np.diff(boundaries[start : stop + 1]) * 1000
@@ -52,9 +72,14 @@ def main():
                     "median_ms": median,
                     "p95_ms": p95,
                     "p99_ms": p99,
+                    "start_workload": workloads[start],
+                    "stop_workload": workloads[stop],
                 }
                 timings.append(result)
                 print(json.dumps(result), flush=True)
+        if frame in endpoints:
+            # Shared or overlapping windows can contain another window's readback and reporting.
+            observation_time += perf_counter() - now
         return frame < args.num_frames and running()
 
     # Keep the normal viewer loop, including its render snapshot and CUDA stream ordering.
