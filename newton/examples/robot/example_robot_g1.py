@@ -101,13 +101,13 @@ class Example:
 
         if solver_name == "phoenx":
             # Let PhoenX own the temporal schedule. Joint equalities solve
-            # directly; two biased and two bias-free inequality sweeps keep
-            # impact and resting friction converged at five temporal steps.
+            # directly. Four substeps with two biased and two bias-free sweeps
+            # settle the fingers after hand contact in the falling-pose test.
             self.sim_substeps = 1
             self.sim_dt = self.frame_dt
             self.solver = newton.solvers.SolverPhoenX(
                 self.model,
-                substeps=5,
+                substeps=4,
                 solver_iterations=2,
                 velocity_iterations=2,
                 joint_mode="reduced" if self.phoenx_reduced_coordinates else "maximal_direct",
