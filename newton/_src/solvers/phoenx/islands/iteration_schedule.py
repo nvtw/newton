@@ -123,7 +123,8 @@ def _key_columns(
     slots[slot] = slot
 
 
-_LARGE_ISLAND_COLUMNS = wp.constant(128)
+# A dozen columns can already span a long sequence of dependent contact colors.
+_LARGE_ISLAND_COLUMNS = wp.constant(12)
 
 
 @wp.kernel(enable_backward=False)
