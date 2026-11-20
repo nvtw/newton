@@ -691,6 +691,24 @@ def _zero_direct_row(
 
 
 @wp.func
+def _anchor_arc_velocity(w: wp.vec3, r: wp.vec3, dt: wp.float32) -> wp.vec3:
+    """Difference between mean anchor velocity along its circular arc and its initial tangent."""
+    tangent = wp.cross(w, r)
+    angle_sq = wp.length_sq(w) * dt * dt
+    normal = wp.cross(w, tangent)
+    normal_factor = 0.5 * dt
+    tangent_factor = -angle_sq / 6.0
+    if angle_sq > 0.01:
+        angle = wp.sqrt(angle_sq)
+        normal_factor = dt * (1.0 - wp.cos(angle)) / angle_sq
+        tangent_factor = wp.sin(angle) / angle - 1.0
+    else:
+        normal_factor *= 1.0 - angle_sq / 12.0
+        tangent_factor *= 1.0 - angle_sq / 20.0
+    return tangent_factor * tangent + normal_factor * normal
+
+
+@wp.func
 def _prepare_direct_rows(
     structural_index: wp.int32,
     joint: wp.int32,
@@ -711,6 +729,7 @@ def _prepare_direct_rows(
     joint_target_kd: wp.array[wp.float32],
     bodies: BodyContainer,
     bias_rate: wp.float32,
+    step_dt: wp.float32,
     row_wrench0: wp.array2d[wp.spatial_vector],
     row_wrench1: wp.array2d[wp.spatial_vector],
     row_bias: wp.array2d[wp.float32],
@@ -763,6 +782,11 @@ def _prepare_direct_rows(
     # zero-then-overwrite pass the dominant cost of this one-wave kernel.
     row = wp.int32(0)
     linear_count = generic_linear_count[joint]
+    arc_velocity = wp.vec3(0.0)
+    if not material_rows and linear_count == 3:
+        arc_velocity = _anchor_arc_velocity(bodies.angular_velocity[child], point1_com, step_dt) - _anchor_arc_velocity(
+            bodies.angular_velocity[parent], point0_com, step_dt
+        )
     for axis_index in range(3):
         if wp.int32(axis_index) < linear_count:
             direction = wp.quat_rotate(q0, generic_linear_axes[joint * wp.int32(3) + wp.int32(axis_index)])
@@ -788,6 +812,7 @@ def _prepare_direct_rows(
                     row_wrench1,
                     row_bias,
                 )
+                row_bias[structural_index, row] += wp.dot(direction, arc_velocity)
                 row_error[structural_index, row] = error
                 row_stiffness[structural_index, row] = stiffness
                 row_damping[structural_index, row] = damping
@@ -958,7 +983,7 @@ def get_prepare_direct_equality_rows_kernel(temporal_substeps: int | None = None
             bias_rate, _mass_coeff, _impulse_coeff = soft_constraint_coefficients(
                 DEFAULT_HERTZ_LINEAR,
                 DEFAULT_DAMPING_RATIO,
-                wp.float32(1.0) / idt,
+                wp.float32(1.0) / (wp.float32(_DIRECT_BAUMGARTE) * idt),
             )
         else:
             bias_rate = wp.float32(temporal_erp) * idt
@@ -983,6 +1008,7 @@ def get_prepare_direct_equality_rows_kernel(temporal_substeps: int | None = None
             joint_target_kd,
             bodies,
             bias_rate,
+            wp.float32(1.0) / idt,
             row_wrench0,
             row_wrench1,
             row_bias,
@@ -2728,7 +2754,6 @@ class DirectEqualitySystem:
     def set_temporal_substeps(self, substeps: int | None) -> None:
         """Select joint correction before graph capture; None restores soft rows."""
         self._prepare_rows_kernel = get_prepare_direct_equality_rows_kernel(substeps)
-        self._joint_correction_dt_scale = _DIRECT_BAUMGARTE if substeps is None else 1.0
 
     def refresh_geometry(self, idt: wp.float32) -> None:
         """Refresh body-space rows without changing impulses or drive references."""
@@ -2755,7 +2780,7 @@ class DirectEqualitySystem:
                 self.joint_target_ke,
                 self.joint_target_kd,
                 self.bodies,
-                wp.float32(self._joint_correction_dt_scale) * idt,
+                idt,
                 self.row_count,
                 self.row_wrench0,
                 self.row_wrench1,

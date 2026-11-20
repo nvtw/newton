@@ -225,6 +225,39 @@ def _rigid_system_momentum(model: newton.Model, state: newton.State) -> tuple[np
 
 
 class TestDirectEquality(unittest.TestCase):
+    def test_spinning_offset_hinge_preserves_anchor_and_energy(self):
+        """A freely rotating link follows its circular path without losing kinetic energy."""
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        radius, mass, inertia, omega = 0.5, 1.0, 0.05, 10.0
+        offset = wp.vec3(-radius, 0.0, 0.0)
+        body = builder.add_link(
+            xform=wp.transform((radius, 0.0, 0.0), wp.quat_identity()),
+            mass=mass,
+            inertia=wp.mat33(np.eye(3) * inertia),
+            lock_inertia=True,
+        )
+        hinge = builder.add_joint_revolute(
+            -1, body, axis=newton.Axis.Z, child_xform=wp.transform(offset, wp.quat_identity())
+        )
+        builder.add_articulation([hinge])
+        model = builder.finalize()
+        solver = newton.solvers.SolverPhoenX(
+            model, joint_mode="maximal_direct", solver_iterations=8, velocity_iterations=1
+        )
+        state, target, control = model.state(), model.state(), model.control()
+        state.body_qd.assign(np.array([[0, omega * radius, 0, 0, 0, omega]], dtype=np.float32))
+        for _ in range(10):
+            solver.step(state, target, control, None, 0.01)
+            state, target = target, state
+        raw_pose = state.body_q.numpy()[body]
+        pose = wp.transform(raw_pose[:3], raw_pose[3:])
+        anchor = wp.transform_point(pose, offset)
+        linear, angular = np.split(state.body_qd.numpy()[body], 2)
+        kinetic_energy = 0.5 * (mass * np.dot(linear, linear) + inertia * np.dot(angular, angular))
+        initial_energy = 0.5 * (mass * radius**2 + inertia) * omega**2
+        self.assertLess(wp.length(anchor), 1.0e-4)
+        self.assertAlmostEqual(kinetic_energy / initial_energy, 1.0, delta=1.0e-3)
+
     def test_panel_size_selector_keeps_trees_narrow_and_widens_dense_loops(self) -> None:
         """Select panel sizes from precomputed mechanism cycle density."""
         body_count = 200
