@@ -6,12 +6,16 @@
 Read the downloaded plant's composed USD with an example-specific builder. The
 factory keeps its source geometry, rigid bodies, mass properties, colliders,
 joint frames, and drive settings. Meshes are shared between repeated parts.
+With ``--filling-room-physics``, rigid bottles follow the wet-end belt and
+carousel route through the filling room and retain their source mass.
 The source assets remain outside the repository and require NVIDIA Storage
 access; see ``newton/examples/assets/bottling_plant/README.md``.
 
 Success criteria:
 - Body poses and velocities remain finite.
 - Bottles stay off the factory floor, and sealed cases retain all 12 bottles.
+- When enabled, the driven wet end moves bottles toward the packer infeed.
+- With filling-room physics, a 30-second run delivers an upright bottle to the IFM.
 - Joint attachments remain within their physical travel.
 - Inlet, case-line, sealer, and palletizer controllers remain free of faults.
 - Runs of at least 22 simulated seconds fill a case at each of the eight packers.
@@ -20,6 +24,7 @@ Success criteria:
 
 Runs:
 - `python -m newton.examples phoenx_bottling_plant`
+- `python -m newton.examples phoenx_bottling_plant --filling-room-physics`
 - `python -m newton.examples phoenx_bottling_plant --viewer null --test --num-frames 600`
 - `python -m newton.examples phoenx_bottling_plant --viewer null --timing-frames 600`
 """
@@ -164,6 +169,7 @@ class Example:
             visuals=args.visuals if args.visuals is not None else args.viewer != "null",
             motor_off=args.motor_off,
             cartons_per_packer=args.cartons_per_packer,
+            filling_room_physics=args.filling_room_physics,
         )
         self.supply = None
         if args.controllers and not args.motor_off:
@@ -491,7 +497,21 @@ class Example:
             bodies = bodies[bodies >= 0]
         bottles = poses[bodies]
         # Even floor-level pallets support the case contents above 0.1 m.
-        assert float(bottles[:, 2].min()) > 0.1, "a bottle escaped the line or its case"
+        lowest = int(np.argmin(bottles[:, 2]))
+        assert float(bottles[lowest, 2]) > 0.1, (
+            f"bottle {self.model.body_label[bodies[lowest]]} escaped the line or its case at {bottles[lowest, :3]}"
+        )
+        handoff = self.scene.metadata.get("process_handoff")
+        if handoff is not None and not self.args.motor_off:
+            point, support_length, half_width = handoff
+            relative = bottles[:, :3] - point
+            near = (-support_length < relative[:, 0]) & (relative[:, 0] < 0.80) & (np.abs(relative[:, 1]) < half_width)
+            off_deck = bodies[near & (relative[:, 2] < -0.005)]
+            assert len(off_deck) == 0, f"bottle {self.model.body_label[off_deck[0]]} sank below the wet-end deck"
+            receiving = near & (relative[:, 0] > 0.04)
+            tilted = np.linalg.norm(bottles[receiving, 3:5], axis=1) > np.sin(np.radians(7.5))
+            fallen = bodies[receiving][tilted]
+            assert len(fallen) == 0, f"bottle {self.model.body_label[fallen[0]]} tipped at the wet-end handoff"
         if self.controller is None:
             return
 
@@ -533,6 +553,16 @@ class Example:
         bottles = poses[self.bottle_bodies]
         self._check_products(poses)
         travel = np.linalg.norm(bottles[:, :2] - self.initial_poses[self.bottle_bodies, :2], axis=1)
+        process_bottles = self.scene.metadata.get("process_bottles", 0)
+        if process_bottles and not self.args.motor_off and self.sim_time >= 2.0:
+            assert travel[-process_bottles:].max() > 0.1, "wet-end bottles must advance on the process route"
+            if self.sim_time + 0.5 * self.frame_dt >= 30.0:
+                wet_end = bottles[-process_bottles:]
+                infeed_x = self.scene.frames["/Plant/Line/IFM"][3, 0]
+                upright = np.linalg.norm(wet_end[:, 3:5], axis=1) < np.sin(np.radians(7.5))
+                assert np.any(upright & (wet_end[:, 0] > infeed_x + 0.05)), (
+                    "an upright wet-end bottle must reach the IFM"
+                )
         live = int(self.controller.bottle_count.numpy()[0]) if self.controller is not None else len(bottles)
         print(
             f"PhoenX bottling plant: {live} bottles, max initial-stock travel {travel.max():.3f} m, "
@@ -621,7 +651,7 @@ class Example:
             "--extra-bottles",
             type=int,
             default=None,
-            help="Maximum additional bottles admitted at the IFM inlet. Defaults to the remaining carton demand. Set to zero for the authored initial stock only.",
+            help="Maximum additional bottles admitted at the line entrance. Defaults to the remaining carton demand. Set to zero for the initial stock only.",
         )
         parser.add_argument("--controllers", action=argparse.BooleanOptionalAction, default=True)
         parser.add_argument(
@@ -643,6 +673,12 @@ class Example:
             help="Regular colors before the overflow partition when --mass-splitting is enabled.",
         )
         parser.add_argument("--diagnostics", action="store_true")
+        parser.add_argument(
+            "--filling-room-physics",
+            action=argparse.BooleanOptionalAction,
+            default=False,
+            help="Enable physical bottle transport from the depalletiser through the filling room to the IFM.",
+        )
         parser.add_argument(
             "--correct-inertia", action="store_true", help="Balance source actuator inertia approximations."
         )

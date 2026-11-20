@@ -1,0 +1,1 @@
+Add opt-in rigid bottle transport through the Berlin bottling plant's rinser, filler, crowner, and return to the IFM. Enable it with `--filling-room-physics` to admit additional bottles at the filling-line entrance as space becomes available.

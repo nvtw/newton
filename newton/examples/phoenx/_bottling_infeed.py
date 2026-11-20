@@ -13,6 +13,8 @@ from newton.solvers import phoenx
 
 _ROW_SIZE = 7
 _BOTTLE_PITCH = 0.0616  # metres, from the IFM supply interface
+_BOTTLES_PER_MINUTE = 425.0
+_SINGLE_FILE_PITCH = 0.071  # metres, including the upstream clearance check.
 
 
 @wp.kernel
@@ -21,6 +23,7 @@ def _check_feed_space(
     bottles: wp.array[int],
     count: wp.array[int],
     inlet_inverse: wp.transform,
+    row_size: int,
     blocked: wp.array[int],
 ):
     index = wp.tid()
@@ -35,7 +38,7 @@ def _check_feed_space(
     pitch = wp.static(_BOTTLE_PITCH)
     if (
         wp.abs(center[0]) <= pitch * 0.6 + tip[0] + radius
-        and wp.abs(center[1]) <= pitch * wp.static(_ROW_SIZE / 2) + 0.02 + tip[1] + radius
+        and wp.abs(center[1]) <= pitch * 0.5 * float(row_size) + 0.02 + tip[1] + radius
         and wp.abs(center[2] - 0.12) <= 0.12 + tip[2] + radius
     ):
         wp.atomic_max(blocked, 0, 1)
@@ -49,6 +52,7 @@ def _feed_row(
     count: wp.array[int],
     bottles: wp.array[int],
     original: int,
+    row_size: int,
     yaws: wp.array[float],
     desc: phoenx.BodyDesc,
     source_shapes: wp.array[int],
@@ -58,10 +62,10 @@ def _feed_row(
 ):
     if blocked[0] != 0:
         return
-    for lane in range(wp.min(wp.static(_ROW_SIZE), bottles.shape[0] - count[0])):
+    for lane in range(wp.min(row_size, bottles.shape[0] - count[0])):
         slot = count[0] - original
         desc.pose = inlet * wp.transform(
-            wp.vec3(0.0, (float(lane) - wp.static((_ROW_SIZE - 1) / 2)) * wp.static(_BOTTLE_PITCH), 0.0),
+            wp.vec3(0.0, (float(lane) - 0.5 * float(row_size - 1)) * wp.static(_BOTTLE_PITCH), 0.0),
             wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), yaws[slot]),
         )
         body = phoenx.add_body(dynamics, desc)
@@ -75,7 +79,7 @@ def _feed_row(
 
 
 class BottleSupply:
-    """Admit finite bottle stock at the source IFM's seven-wide, 425 bottle/min inlet."""
+    """Admit finite bottle stock to the active line entrance when it has room."""
 
     def __init__(self, scene, capacity, joints):
         builder = scene.builder
@@ -85,6 +89,9 @@ class BottleSupply:
         self.first_body = builder.body_count
         self.first_shape = builder.shape_count
         self.shapes = builder.body_shapes[source]
+        self.process_inlet = scene.metadata.get("process_inlet")
+        self.row_size = 1 if self.process_inlet is not None else _ROW_SIZE
+        self.period = self.row_size * 60.0 / _BOTTLES_PER_MINUTE
         self.desc = phoenx.BodyDesc()
         self.desc.mass = builder.body_mass[source]
         self.desc.inertia = builder.body_inertia[source]
@@ -93,42 +100,17 @@ class BottleSupply:
         # The source stage can use global colliders in its sole physical world.
         self.desc.world = max(0, builder.body_world[source])
         builder.reserve_dynamic_capacity(bodies=capacity, joints=joints)
-        modes = builder.custom_attributes.get("phoenx:restitution_combine_mode")
-        configs = []
-        for s in self.shapes:
-            cfg = builder.ShapeConfig(
-                margin=builder.shape_margin[s],
-                gap=builder.shape_gap[s],
-                mu=builder.shape_material_mu[s],
-                mu_static=builder.shape_material_mu_static[s],
-                restitution=builder.shape_material_restitution[s],
-            )
-            cfg.flags = builder.shape_flags[s]
-            cfg.density = 0.0
-            cfg.collision_group = 0
-            configs.append(cfg)
+        shapes = bottle_shape_templates(builder, source, dormant=True)
+        label_prefix = "WetEndSupply" if self.process_inlet is not None else "Infeed"
         for slot in range(capacity):
             body = self.first_body + slot
-            label = f"/Plant/Sim/Product/Bottles/Infeed_{slot:05d}"
+            label = f"/Plant/Sim/Product/Bottles/{label_prefix}_{slot:05d}"
             builder.body_label[body] = label
             # Separate dormant bounds for SAP. Group zero disables every contact until admission.
             builder.body_q[body] = wp.transform(
                 (200.0 + slot % 64 * 0.12, 200.0 + slot // 64 * 0.12, -10.0), wp.quat_identity()
             )
-            for s, cfg in zip(self.shapes, configs, strict=True):
-                shape = builder.add_shape(
-                    body=body,
-                    type=builder.shape_type[s],
-                    src=builder.shape_source[s],
-                    scale=builder.shape_scale[s],
-                    xform=builder.shape_transform[s],
-                    cfg=cfg,
-                    color=builder.shape_color[s],
-                    opacity=builder.shape_opacity[s],
-                    custom_attributes={modes.key: modes.values[s]} if modes and s in modes.values else None,
-                    label=label + builder.shape_label[s].removeprefix(builder.body_label[source]),
-                )
-                builder.shape_world[shape] = builder.shape_world[s]
+            add_bottle_shapes(builder, body, label, shapes)
 
     def copy_masks(self, membership, filtered):
         """Give every reserve hull the same USD collection memberships as its live source hull."""
@@ -137,10 +119,15 @@ class BottleSupply:
 
     def bind(self, plant, matrix, yaws):
         self.plant = plant
-        self.frame = wp.transform(
-            np.asarray([0.12, 0.0, 0.9508]) @ matrix[:3, :3] + matrix[3, :3],
-            wp.quat_from_matrix(wp.mat33(matrix[:3, :3].T)),
-        )
+        if self.process_inlet is None:
+            self.frame = wp.transform(
+                np.asarray([0.12, 0.0, 0.9508]) @ matrix[:3, :3] + matrix[3, :3],
+                wp.quat_from_matrix(wp.mat33(matrix[:3, :3].T)),
+            )
+        else:
+            self.frame, velocity = self.process_inlet
+            self.desc.velocity = wp.spatial_vector(*velocity, 0.0, 0.0, 0.0)
+            self.period = max(self.period, _SINGLE_FILE_PITCH / float(np.linalg.norm(velocity)))
         device = plant.model.device
         self.blocked = wp.zeros(1, dtype=int, device=device)
         self.source_shapes = wp.array(self.shapes, dtype=int, device=device)
@@ -150,16 +137,18 @@ class BottleSupply:
         self.pending = False
 
     def request(self, time, covered):
-        if not covered:
+        # The physical wet end holds several minutes of transit stock. Its
+        # local clearance check provides backpressure from an occupied line.
+        if self.process_inlet is not None or not covered:
             self.blocked_since = None
         elif self.blocked_since is None:
             self.blocked_since = time
-        if time - self.last >= _ROW_SIZE * 60.0 / 425.0:
+        if time - self.last >= self.period:
             self.last = time
             self.pending = self.blocked_since is None or time - self.blocked_since < 1.5
 
     def admit(self):
-        """Stage the requested row immediately before the solver commits its body state."""
+        """Stage requested bottles immediately before the solver commits their body states."""
         if not self.pending:
             return
         self.pending = False
@@ -173,6 +162,7 @@ class BottleSupply:
                 plant.bottles,
                 plant.bottle_count,
                 wp.transform_inverse(self.frame),
+                self.row_size,
                 self.blocked,
             ],
         )
@@ -186,6 +176,7 @@ class BottleSupply:
                 plant.bottle_count,
                 plant.bottles,
                 self.original,
+                self.row_size,
                 self.yaws,
                 self.desc,
                 self.source_shapes,
@@ -194,6 +185,48 @@ class BottleSupply:
                 plant.model.shape_collision_group,
             ],
         )
+
+
+def bottle_shape_templates(builder, source, *, dormant=False):
+    """Reuse the source bottle's full collision and visual shapes for additional stock."""
+    modes = builder.custom_attributes.get("phoenx:restitution_combine_mode")
+    templates = []
+    for shape in builder.body_shapes[source]:
+        cfg = builder.ShapeConfig(
+            margin=builder.shape_margin[shape],
+            gap=builder.shape_gap[shape],
+            mu=builder.shape_material_mu[shape],
+            mu_static=builder.shape_material_mu_static[shape],
+            restitution=builder.shape_material_restitution[shape],
+        )
+        cfg.flags = builder.shape_flags[shape]
+        cfg.density = 0.0
+        cfg.collision_group = 0 if dormant else builder.shape_collision_group[shape]
+        suffix = builder.shape_label[shape].removeprefix(builder.body_label[source])
+        templates.append(
+            (
+                builder.shape_world[shape],
+                suffix,
+                {
+                    "type": builder.shape_type[shape],
+                    "src": builder.shape_source[shape],
+                    "scale": builder.shape_scale[shape],
+                    "xform": builder.shape_transform[shape],
+                    "cfg": cfg,
+                    "color": builder.shape_color[shape],
+                    "opacity": builder.shape_opacity[shape],
+                    "custom_attributes": {modes.key: modes.values[shape]} if modes and shape in modes.values else None,
+                },
+            )
+        )
+    return templates
+
+
+def add_bottle_shapes(builder, body, label, templates):
+    """Allocate shapes in the same order as the source bottle."""
+    for world, suffix, config in templates:
+        shape = builder.add_shape(body=body, label=label + suffix, **config)
+        builder.shape_world[shape] = world
 
 
 class InfeedController:

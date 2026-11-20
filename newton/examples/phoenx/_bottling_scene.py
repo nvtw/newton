@@ -23,6 +23,15 @@ import newton
 import newton.usd
 from newton._src.solvers.phoenx.materials import CombineMode
 from newton.examples.phoenx._bottling_dispenser import disable_owned_proxies, prepare_dispensers
+from newton.examples.phoenx._bottling_process import (
+    IFM_ENTRY_SPEED_RATIO,
+    PROCESS_BOTTLES,
+    add_filling_bottles,
+    add_filling_transport,
+    filling_route,
+    open_pool_passage,
+    replace_process_proxies,
+)
 from newton.examples.phoenx._bottling_wrap import build_wrapper, correct_wrapper_frame, mesh_components
 from newton.solvers import SolverPhoenX
 
@@ -370,7 +379,15 @@ def _prepare_case_inventory(stage, cartons_per_packer):
     return inventory, staging
 
 
-def load_plant(asset_root: Path, *, cutaway=True, visuals=True, motor_off=False, cartons_per_packer=None) -> PlantScene:
+def load_plant(
+    asset_root: Path,
+    *,
+    cutaway=True,
+    visuals=True,
+    motor_off=False,
+    cartons_per_packer=None,
+    filling_room_physics=False,
+) -> PlantScene:
     """Build the full line from local USD, retaining its authored SI properties."""
     from pxr import Gf, Usd, UsdGeom, UsdPhysics, UsdShade  # noqa: PLC0415 - OpenUSD is optional.
 
@@ -394,8 +411,12 @@ def load_plant(asset_root: Path, *, cutaway=True, visuals=True, motor_off=False,
     stock_instances, rack_case_mass = _prepare_warehouse_inventory(stage, asset_root)
     prepare_dispensers(stage)
     case_inventory, case_staging = _prepare_case_inventory(stage, cartons_per_packer)
-    prims = list(Usd.PrimRange.Stage(stage, Usd.TraverseInstanceProxies()))
     cache = UsdGeom.XformCache()
+    process_path = filling_route(stage, cache) if filling_room_physics else None
+    if process_path is not None:
+        replace_process_proxies(stage, cache, process_path[0, 2])
+        open_pool_passage(stage, process_path)
+    prims = list(Usd.PrimRange.Stage(stage, Usd.TraverseInstanceProxies()))
     scene = PlantScene(newton.ModelBuilder())
     builder = scene.builder
     SolverPhoenX.register_custom_attributes(builder)
@@ -596,7 +617,17 @@ def load_plant(asset_root: Path, *, cutaway=True, visuals=True, motor_off=False,
         points = np.asarray(mesh.vertices) * np.asarray(scale) @ rotation.T + np.asarray(shape_pose[:3])
         # Newton rotates and scales vertex velocities. Undo the shape transform
         # so the authored speed remains in metres per second in the body frame.
-        speeds = ((np.asarray(linear) + np.cross(np.asarray(angular), points)) @ rotation) / np.asarray(scale)
+        speeds = np.asarray(linear) + np.cross(np.asarray(angular), points)
+        if process_path is not None and belt_label.startswith("/Plant/Line/IFM/Modules/IFM_A/Belts/S"):
+            belt_pose, _ = transform(cache.GetLocalToWorldTransform(stage.GetPrimAtPath(belt_label)))
+            axis = np.asarray(wp.quat_to_matrix(belt_pose.q)).reshape(3, 3)[0]
+            leading_edge = process_path[-1, 0]
+            distance = points @ axis + belt_pose.p[0] - leading_edge
+            # Accelerate the receiving strands at the pool transfer. The
+            # downstream half returns to the source PLC's nominal speed.
+            ratio = np.interp(distance, (0.0, 0.748, 1.496), (IFM_ENTRY_SPEED_RATIO, IFM_ENTRY_SPEED_RATIO, 1.0))
+            speeds *= ratio[:, None]
+        speeds = (speeds @ rotation) / np.asarray(scale)
         scene.belts.append((mesh, speeds.astype(np.float32), belt_label))
         return mesh
 
@@ -931,7 +962,16 @@ def load_plant(asset_root: Path, *, cutaway=True, visuals=True, motor_off=False,
     # outside dimensions and its share of the source filled unit-load mass.
     case_dims = None
     case_layouts = {}
+    if process_path is not None:
+        receiving_belt = nominal.get("/Plant/Line/IFM/Modules/IFM_A/Belts/S2")
+        inlet_speed = (
+            0.14 if receiving_belt is None else IFM_ENTRY_SPEED_RATIO * float(np.linalg.norm(receiving_belt[0]))
+        )
+        add_filling_transport(scene, process_path, motor_off=motor_off, inlet_speed=inlet_speed)
+        add_filling_bottles(scene, process_path, motor_off=motor_off, inlet_speed=inlet_speed)
     for instancer in instancers:
+        if process_path is not None and str(instancer.GetPath()) == PROCESS_BOTTLES:
+            continue
         stock = stock_instances if str(instancer.GetPath()) == "/Plant/Logistics/PalletLoads" else {}
         visible = visuals and instancer.ComputeVisibility() != "invisible"
         if not visible and not stock:
