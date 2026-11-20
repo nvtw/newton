@@ -1,0 +1,1 @@
+Add an opt-in pose-based settling metric to PhoenX and enable it in the bottling plant example. The factory defaults to six internal substeps per frame and four biased sweeps per substep, with two collision passes per frame. Use `--solver-substeps 1 --iterations 12 --sleeping-motion-threshold 0` to restore the previous factory schedule and sleep policy.

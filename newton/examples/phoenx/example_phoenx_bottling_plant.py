@@ -142,6 +142,8 @@ class Example:
         self.args = args
         if args.substeps < 1:
             raise ValueError("--substeps must be positive")
+        if args.solver_substeps < 1:
+            raise ValueError("--solver-substeps must be positive")
         if args.cartons_per_packer < 1:
             raise ValueError("--cartons-per-packer must be positive")
         if args.extra_bottles is not None and args.extra_bottles < 0:
@@ -150,6 +152,8 @@ class Example:
             raise ValueError("--max-colored-partitions must be positive")
         if not np.isfinite(args.sleeping_velocity_threshold) or args.sleeping_velocity_threshold < 0.0:
             raise ValueError("--sleeping-velocity-threshold must be finite and nonnegative")
+        if not np.isfinite(args.sleeping_motion_threshold) or args.sleeping_motion_threshold < 0.0:
+            raise ValueError("--sleeping-motion-threshold must be finite and nonnegative")
         if args.controllers and not args.motor_off and args.joint_mode != "maximal_pgs":
             raise ValueError("Physical runtime grasp joints require --joint-mode maximal_pgs")
         self.frame_dt = 1.0 / 60.0
@@ -246,6 +250,8 @@ class Example:
                 device=self.model.device,
             )
         self.pipeline.set_broad_phase_filter_data(self.filter_data)
+        sleep_motion = args.sleeping_motion_threshold if args.sleeping_velocity_threshold > 0.0 else 0.0
+        sleep_frames = 1 if sleep_motion > 0.0 else 30 * args.substeps
         if args.joint_mode == "maximal_pgs":
             mass_splitting = args.mass_splitting
             # Exact solves are faster for these driven scalar-joint mechanisms.
@@ -263,7 +269,7 @@ class Example:
             self.solver = SolverPhoenX(
                 self.model,
                 collision_pipeline=self.pipeline,
-                substeps=1,
+                substeps=args.solver_substeps,
                 solver_iterations=args.iterations,
                 temporal_iterations=args.temporal_iterations,
                 contact_hertz=args.contact_hertz,
@@ -290,14 +296,15 @@ class Example:
                 mass_splitting_unrolled=mass_splitting,
                 partitioner_algorithm="endpoint_owner" if mass_splitting else "greedy",
                 sleeping_velocity_threshold=args.sleeping_velocity_threshold,
-                sleeping_frames_required=30 * args.substeps,
+                sleeping_frames_required=sleep_frames,
+                sleeping_motion_threshold=sleep_motion,
             )
         else:
             self.solver = SolverPhoenX(
                 self.model,
                 collision_pipeline=self.pipeline,
                 step_layout="single_world",
-                substeps=1,
+                substeps=args.solver_substeps,
                 solver_iterations=args.iterations,
                 temporal_iterations=args.temporal_iterations,
                 contact_hertz=args.contact_hertz,
@@ -305,7 +312,8 @@ class Example:
                 reduced_articulations=self.scene.articulations if args.joint_mode == "reduced" else None,
                 velocity_iterations=1,
                 sleeping_velocity_threshold=args.sleeping_velocity_threshold,
-                sleeping_frames_required=30 * args.substeps,
+                sleeping_frames_required=sleep_frames,
+                sleeping_motion_threshold=sleep_motion,
             )
         # Runtime joints install their default data during solver setup. This
         # filter also handles grasp pairs, alongside the source's hull groups.
@@ -639,12 +647,21 @@ class Example:
             "--correct-inertia", action="store_true", help="Balance source actuator inertia approximations."
         )
         parser.add_argument("--substeps", type=int, default=2, help="Collision and solver steps per 60 Hz frame.")
-        parser.add_argument("--iterations", type=int, default=12)
+        parser.add_argument(
+            "--solver-substeps", type=int, default=3, help="Internal solver substeps per collision pass."
+        )
+        parser.add_argument("--iterations", type=int, default=4, help="Biased solver sweeps per internal substep.")
         parser.add_argument(
             "--sleeping-velocity-threshold",
             type=float,
             default=0.01,
-            help="Experimental island sleep-score cutoff [m/s]; zero disables sleeping, with a 0.5 s quiet dwell.",
+            help="Island velocity cutoff [m/s] for waking and moving kinematics. Zero disables sleeping.",
+        )
+        parser.add_argument(
+            "--sleeping-motion-threshold",
+            type=float,
+            default=0.0002,
+            help="Equivalent material displacement [m] for pose-based settling. Zero uses the velocity test.",
         )
         parser.add_argument(
             "--temporal-iterations",

@@ -403,6 +403,7 @@ class SolverPhoenX(SolverBase):
         sor_boost: float = 1.0,
         sleeping_velocity_threshold: float = 0.0,
         sleeping_frames_required: int = 30,
+        sleeping_motion_threshold: float = 0.0,
         prepare_refresh_stride: int | str = "auto",
         parallel_contact_prepare: bool = False,
         island_parallel_iterations: bool = False,
@@ -600,6 +601,13 @@ class SolverPhoenX(SolverBase):
                 Islands with configured servo gains or contacts on surface-velocity
                 meshes stay awake so subsequent drive commands remain responsive.
                 ``0`` recovers single-frame sleep.
+            sleeping_motion_threshold: Equivalent material displacement [m]
+                allowed during the approximately 0.2 s settling window.
+                A positive value uses the accumulated translation and
+                inertia-weighted rotation of committed poses to decide when
+                dynamic bodies settle. Requires sleeping to be enabled.
+                ``0.0`` keeps the velocity-based sleep test. The velocity
+                threshold also applies to wake-up and moving kinematics.
             joint_mode: Joint representation and solve strategy. ``"maximal_direct"``
                 (default) keeps independent-body dynamics, solves structural
                 joint rows as one sparse mechanism system, and leaves inequality
@@ -1263,6 +1271,7 @@ class SolverPhoenX(SolverBase):
             sor_boost=sor_boost,
             sleeping_velocity_threshold=float(sleeping_velocity_threshold),
             sleeping_frames_required=int(sleeping_frames_required),
+            sleeping_motion_threshold=float(sleeping_motion_threshold),
             prepare_refresh_stride=prepare_refresh_stride,
             parallel_contact_prepare=parallel_contact_prepare,
             island_parallel_iterations=island_parallel_iterations,

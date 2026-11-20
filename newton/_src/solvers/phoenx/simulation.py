@@ -277,6 +277,7 @@ from newton._src.solvers.phoenx.sleeping_kernels import (
     _phoenx_shape_aabb_fanin_kernel,
     _phoenx_surface_activity_kernel,
 )
+from newton._src.solvers.phoenx.sleeping_motion import create_motion_sleep_history, score_island_motion
 from newton._src.solvers.phoenx.solver_config import (
     FUSE_TAIL_BLOCK_DIM,
     FUSE_TAIL_MAX_COLOR_SIZE,
@@ -445,6 +446,7 @@ class PhoenXWorld:
         enable_column_timers: bool = False,
         sleeping_velocity_threshold: float = 0.0,
         sleeping_frames_required: int = 30,
+        sleeping_motion_threshold: float = 0.0,
         prepare_refresh_stride: int | str = "auto",
         parallel_contact_prepare: bool = False,
         island_parallel_iterations: bool = False,
@@ -1439,6 +1441,15 @@ class PhoenXWorld:
         self._sleeping_velocity_threshold: float = sleeping_threshold
         self._sleeping_frames_required: int = sleeping_frames
         self._sleeping_enabled: bool = sleeping_threshold > 0.0
+        motion_threshold = float(sleeping_motion_threshold)
+        if not math.isfinite(motion_threshold) or motion_threshold < 0.0:
+            raise ValueError("sleeping_motion_threshold must be finite and nonnegative")
+        if motion_threshold > 0.0 and not self._sleeping_enabled:
+            raise ValueError("sleeping_motion_threshold requires a positive sleeping_velocity_threshold")
+        self._sleeping_motion_threshold_squared = wp.float32(motion_threshold * motion_threshold)
+        self._sleeping_motion_history = (
+            create_motion_sleep_history(self.num_bodies, self.device) if motion_threshold > 0.0 else None
+        )
         self._sleeping_forced_awake = (
             wp.zeros(self.num_bodies, dtype=wp.int32, device=self.device) if self._sleeping_enabled else None
         )
@@ -4343,19 +4354,20 @@ class PhoenXWorld:
             device=self.device,
         )
 
-        # --- Max velocity + sleeping mark + propagate. ---
+        # --- Island activity score + sleeping mark + propagate. ---
+        score_kernel = _phoenx_island_max_velocity_kernel
+        score_inputs = [
+            self.bodies,
+            self._body_aabb_diagonal,
+            self._island_builder.set_nr,
+            wp.float32(self.step_dt),
+            wp.float32(self._sleeping_velocity_threshold),
+        ]
+        if self._sleeping_motion_history is not None:
+            score_kernel = score_island_motion
+            score_inputs += [self._sleeping_motion_threshold_squared, self._sleeping_motion_history]
         wp.launch(
-            _phoenx_island_max_velocity_kernel,
-            dim=self.num_bodies,
-            inputs=[
-                self.bodies,
-                self._body_aabb_diagonal,
-                self._island_builder.set_nr,
-                wp.float32(self.step_dt),
-                wp.float32(self._sleeping_velocity_threshold),
-            ],
-            outputs=[self._island_max_velocity],
-            device=self.device,
+            score_kernel, self.num_bodies, inputs=score_inputs, outputs=[self._island_max_velocity], device=self.device
         )
         wp.launch(
             _phoenx_activity_score_kernel,
