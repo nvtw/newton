@@ -2636,12 +2636,13 @@ def _make_transpose_response_kernel():
         # articulation's columns and rows; a whole-tile store would overwrite its neighbors.
         row0 = row_tile * wp.int32(_RESPONSE_TILE)
         dof0 = dof_tile * wp.int32(_RESPONSE_TILE)
-        for row in range(_RESPONSE_TILE):
-            value = transposed[row, lane]
-            if row0 + wp.int32(row) < row_count and dof0 + lane < dof_count:
-                packed_response[storage_page * wp.int32(_MAX_ROWS) + row0 + wp.int32(row), dof_start + dof0 + lane] = (
-                    value
-                )
+        for col in range(lane, _RESPONSE_TILE, wp.block_dim()):
+            for row in range(_RESPONSE_TILE):
+                value = transposed[row, col]
+                if row0 + wp.int32(row) < row_count and dof0 + col < dof_count:
+                    packed_response[
+                        storage_page * wp.int32(_MAX_ROWS) + row0 + wp.int32(row), dof_start + dof0 + col
+                    ] = value
 
     return wp.kernel(enable_backward=False, module=module)(
         _bind_rows_dtype_annotations(_transpose_generalized_contact_response_kernel, _rows_dtype, "packed_response")
