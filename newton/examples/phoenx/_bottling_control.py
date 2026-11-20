@@ -169,6 +169,24 @@ def _supply_cases(
         body_qd[body] = wp.spatial_vector()
 
 
+@wp.func_native("""
+#ifdef __CUDA_ARCH__
+    for (int offset = 16; offset; offset >>= 1) {
+        float d = __shfl_down_sync(0xffffffffu, distance, offset);
+        int i = __shfl_down_sync(0xffffffffu, index, offset);
+        if (i >= 0 && (index < 0 || d < distance || (d == distance && i < index))) {
+            index = i;
+            distance = d;
+        }
+    }
+    return __shfl_sync(0xffffffffu, index, 0);
+#else
+    return index;
+#endif
+""")
+def _nearest_pickup_lane(distance: float, index: int) -> int: ...
+
+
 @wp.kernel
 def _robots(
     dyn: phoenx.DynamicsData,
@@ -195,9 +213,41 @@ def _robots(
     attachments: wp.array2d[int],
     claimed: wp.array[int],
     placed: wp.array[int],
+    lanes: int,
 ):
-    cell = wp.tid()
+    cell = wp.tid() // lanes
+    lane = wp.tid() % lanes
     state = mode[cell]
+    picking = state == 3 and ready[cell] != 0
+    selected = wp.vec4i(-1, -1, -1, -1)
+    complete = bool(True)
+    if picking:
+        # Cups choose in order. Equal distances retain the original bottle-list order.
+        for head in range(4):
+            point = wp.transform_point(body_q[gripper[cell]], wp.vec3(-0.1053 + float(head) * 0.0702, 0.0, 0.12664))
+            nearest = int(-1)
+            direction = wp.transform_vector(body_q[gripper[cell]], wp.vec3(0.0, 0.0, 1.0))
+            closest = float(0.006)
+            for i in range(lane, bottle_count[0], lanes):
+                bottle = bottles[i]
+                if claimed[bottle] != 0:
+                    continue
+                distance = _bottle_ray(body_q[bottle], point, direction, 0.006, hull_mesh, hull_xform, hull_scale)
+                used = bool(False)
+                for previous in range(head):
+                    if selected[previous] == bottle:
+                        used = True
+                if distance < closest and not used:
+                    nearest, closest = i, distance
+            if lanes == 32:
+                nearest = _nearest_pickup_lane(closest, nearest)
+            if nearest >= 0:
+                nearest = bottles[nearest]
+            selected[head] = nearest
+            if nearest < 0:
+                complete = False
+    if lane != 0:
+        return
     timer = age[cell]
     row = rows[cell] % 3
     motion = int(0)
@@ -222,28 +272,7 @@ def _robots(
         targets[arm_coordinate[cell, j]] = motion_q[offsets[motion] + index, j]
         target_velocity[arm_dof[cell, j]] = motion_qd[offsets[motion] + index, j]
 
-    if state == 3 and ready[cell] != 0:
-        selected = wp.vec4i(-1, -1, -1, -1)
-        complete = bool(True)
-        for head in range(4):
-            point = wp.transform_point(body_q[gripper[cell]], wp.vec3(-0.1053 + float(head) * 0.0702, 0.0, 0.12664))
-            nearest = int(-1)
-            direction = wp.transform_vector(body_q[gripper[cell]], wp.vec3(0.0, 0.0, 1.0))
-            closest = float(0.006)
-            for i in range(bottle_count[0]):
-                bottle = bottles[i]
-                if claimed[bottle] != 0:
-                    continue
-                distance = _bottle_ray(body_q[bottle], point, direction, 0.006, hull_mesh, hull_xform, hull_scale)
-                used = bool(False)
-                for previous in range(head):
-                    if selected[previous] == bottle:
-                        used = True
-                if distance < closest and not used:
-                    nearest, closest = bottle, distance
-            selected[head] = nearest
-            if nearest < 0:
-                complete = False
+    if picking:
         if complete:
             for head in range(4):
                 bottle = selected[head]
@@ -1159,9 +1188,10 @@ class PlantController:
                 self.control.joint_target_qd,
             ],
         )
+        lanes = 32 if self.state.body_q.device.is_cuda else 1
         wp.launch(
             _robots,
-            dim=8,
+            dim=8 * lanes,
             inputs=[
                 self.solver.dynamics.data,
                 self.state.body_q,
@@ -1187,6 +1217,7 @@ class PlantController:
                 self.attachments,
                 self.claimed,
                 self.placed,
+                lanes,
             ],
         )
 
