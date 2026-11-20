@@ -1309,6 +1309,11 @@ contact accuracy are still being investigated.
       <br><b>Newton Verification with PhoenX</b>
       <br><code>python -m newton.examples phoenx_verification --scenario rigid.resting_shapes</code>
     </td>
+    <td align="center" width="33%">
+      <img width="320" src="docs/images/examples/example_phoenx_carton_floor.jpg" alt="Single bottle beside transparent filled cartons with stepped and flat floors">
+      <br><b>Bottle on a carton flap</b>
+      <br><code>python -m newton.examples phoenx_carton_floor</code>
+    </td>
   </tr>
 </table>
 
