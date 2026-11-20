@@ -73,11 +73,13 @@ def _seal_cases(
     hinges: wp.array2d[int],
     joint_enabled: wp.array[wp.bool],
 ):
-    # Stable allocation order keeps runtime joint IDs and solver ordering repeatable.
+    # Each station owns a consecutive range of case IDs. Station order therefore
+    # preserves tape allocation order even when several requests arrive at once.
     if wp.tid() != 0:
         return
-    for case in range(requests.shape[0]):
-        if requests[case] == 0 or sealed[case] != 0:
+    for station in range(requests.shape[0]):
+        case = requests[station]
+        if case < 0 or sealed[case] != 0:
             continue
         root = bodies[case, 0]
         normal = wp.quat_rotate(poses[root].q, wp.vec3(0.0, 0.0, 1.0))
@@ -838,7 +840,6 @@ class PlantController:
                 raise ValueError("Case flap hinges must connect to their case root")
             hinges.append(row)
         self.seal_hinges = wp.array(hinges, dtype=int)
-        self.seal_requests = wp.zeros(len(self.case_index), dtype=int)
         self.sealed = wp.zeros(len(self.case_index), dtype=int)
         self.seal_joints = wp.full((len(self.case_index), 4), -1, dtype=int)
         self.case_origins = wp.array(origins, dtype=wp.vec3)
@@ -1063,7 +1064,6 @@ class PlantController:
             outputs=[
                 self.case_speeds,
                 self.case_closed,
-                self.seal_requests,
                 self.spawn_enabled,
                 self.spawn_bodies,
                 self.spawn_local,
@@ -1099,7 +1099,7 @@ class PlantController:
                 self.state.body_q,
                 self.state.body_qd,
                 self.seal_bodies,
-                self.seal_requests,
+                lines.swap_request,
                 self.sealed,
                 self.seal_joints,
                 self.seal_hinges,

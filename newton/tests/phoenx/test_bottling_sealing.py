@@ -48,8 +48,8 @@ class TestBottlingSealing(unittest.TestCase):
             case_bodies[active] = bodies
             case_hinges = np.tile(hinges[0], (400, 1))
             case_hinges[active] = hinges
-            requests = np.zeros(400, dtype=np.int32)
-            requests[active] = 1
+            expected_sealed = np.zeros(400, dtype=np.int32)
+            expected_sealed[active] = 1
             for capture in (False, True):
                 with self.subTest(capture=capture):
                     model.joint_enabled.fill_(True)
@@ -61,7 +61,7 @@ class TestBottlingSealing(unittest.TestCase):
                         state.body_q,
                         state.body_qd,
                         wp.array(case_bodies, dtype=int),
-                        wp.array(requests, dtype=int),
+                        wp.array(active, dtype=int),
                         sealed,
                         tape,
                         wp.array(case_hinges, dtype=int),
@@ -75,7 +75,7 @@ class TestBottlingSealing(unittest.TestCase):
                         wp.launch(_seal_cases, dim=400, inputs=inputs)
                     first = int(solver.dynamics.data.joint_pool.start)
                     np.testing.assert_array_equal(tape.numpy()[active], np.arange(first, first + 32).reshape(8, 4))
-                    np.testing.assert_array_equal(sealed.numpy(), requests)
+                    np.testing.assert_array_equal(sealed.numpy(), expected_sealed)
                     self.assertFalse(model.joint_enabled.numpy()[np.asarray(hinges)].any())
 
     def test_tape_replaces_hinges_only_after_complete_allocation(self):
@@ -97,7 +97,7 @@ class TestBottlingSealing(unittest.TestCase):
                     state, control = model.state(), model.control()
                     bodies = wp.array([[0, 1, 2, 3, 4]], dtype=int)
                     hinges = wp.array([authored[1:]], dtype=int)
-                    requests, sealed = wp.ones(1, dtype=int), wp.zeros(1, dtype=int)
+                    requests, sealed = wp.zeros(1, dtype=int), wp.zeros(1, dtype=int)
                     tape = wp.full((1, 4), -1, dtype=int)
                     pose, velocity = state.body_q.numpy().copy(), state.body_qd.numpy().copy()
                     mass, inertia = model.body_mass.numpy().copy(), model.body_inertia.numpy().copy()

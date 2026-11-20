@@ -119,7 +119,6 @@ def case_line_plcs(
     case_local: wp.array2d[wp.transform],
     speed: wp.array2d[wp.float64],
     closed: wp.array[int],
-    seal_requests: wp.array[int],
     spawn_enabled: wp.array[int],
     spawn_bodies: wp.array2d[int],
     spawn_local: wp.array2d[wp.transform],
@@ -358,12 +357,10 @@ def case_line_plcs(
     if lines.sealer[cell] == 2 and lines.sealer_box[cell] >= 0:
         closed[lines.sealer_box[cell]] = 1
     box = lines.swap_request[cell]
-    if box >= 0:
-        seal_requests[box] = 1
-        if sealed[box] != 0:
-            lines.sealer_box[cell] = box
-            lines.swap_request[cell] = -1
-            _set_sealer(lines, cell, t, 3)
+    if box >= 0 and sealed[box] != 0:
+        lines.sealer_box[cell] = box
+        lines.swap_request[cell] = -1
+        _set_sealer(lines, cell, t, 3)
 
     # Case supply (CaseLine.can_spawn / on_spawn).
     spawn_enabled[cell] = 0

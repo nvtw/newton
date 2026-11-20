@@ -1292,7 +1292,7 @@ def Xform "Plant" {
         )
         state = model.state()
         bodies = wp.array([[0, 1, 2, 3, 4]], dtype=int)
-        requests, sealed = wp.ones(1, dtype=int), wp.zeros(1, dtype=int)
+        requests, sealed = wp.zeros(1, dtype=int), wp.zeros(1, dtype=int)
         attachments = wp.full((1, 4), -1, dtype=int)
         inputs = [
             solver.dynamics.data,
