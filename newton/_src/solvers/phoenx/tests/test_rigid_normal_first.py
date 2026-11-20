@@ -18,7 +18,11 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
 )
 from newton._src.solvers.phoenx.constraints.constraint_contact_solve import _make_contact_iterate_at
 from newton._src.solvers.phoenx.constraints.constraint_container import constraint_bodies_make
-from newton._src.solvers.phoenx.constraints.contact_container import ContactContainer
+from newton._src.solvers.phoenx.constraints.contact_container import (
+    ContactContainer,
+    contact_tile_rows_numpy,
+    pack_contact_tiles,
+)
 from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
 from newton._src.solvers.phoenx.particle import ParticleContainer
 from newton._src.solvers.phoenx.tests.test_rigid_contact_energy import _make_ordinary_contact
@@ -92,7 +96,7 @@ class TestNormalFirstContact(unittest.TestCase):
             initial_v = world.bodies.velocity.numpy()
             initial_w = world.bodies.angular_velocity.numpy()
             initial_impulses = cc.impulses.numpy()
-            initial_derived = cc.derived.numpy()
+            initial_derived = contact_tile_rows_numpy(cc, "derived")
             for bias in (False, True):
                 for pd in (False, True):
                     for normal_seed in (0.0, 0.5):
@@ -125,7 +129,7 @@ class TestNormalFirstContact(unittest.TestCase):
                                             initial_w if normal_seed else np.zeros_like(initial_w)
                                         )
                                         cc.impulses.assign(impulses)
-                                        cc.derived.assign(derived)
+                                        cc.derived.assign(pack_contact_tiles(derived))
                                         wp.launch(
                                             _make_sweep(fast=fast, bias=bias, pd=pd),
                                             dim=1,

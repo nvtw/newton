@@ -13,6 +13,8 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     CC_RIGID_DWORDS_PER_CONTACT,
     contact_container_copy_current_to_prev,
     contact_container_zeros,
+    contact_tile_rows_numpy,
+    pack_contact_tiles,
 )
 from newton._src.solvers.phoenx.constraints.contact_ingest import (
     _build_tangent1_from_normal,
@@ -48,7 +50,7 @@ class TestContactContainerCopy(unittest.TestCase):
 
     def test_copy_is_scoped_to_valid_count(self) -> None:
         device = require_cuda_graph_capture("PhoenX contact-copy tests")
-        capacity = 4096
+        capacity = 4099
         valid = 37  # Newton packs live contacts into [0, valid).
         cc = contact_container_zeros(capacity, device=device)
         rng = np.random.default_rng(3)
@@ -57,7 +59,9 @@ class TestContactContainerCopy(unittest.TestCase):
         # prev starts non-zero so an out-of-range write would be visible.
         cc.prev_impulses.assign(np.full_like(impulses, -7.0))
         lambdas = rng.standard_normal((CC_RIGID_DWORDS_PER_CONTACT, capacity)).astype(np.float32)
-        cc.lambdas[:CC_RIGID_DWORDS_PER_CONTACT].assign(lambdas)
+        geometry = contact_tile_rows_numpy(cc, "lambdas")
+        geometry[:CC_RIGID_DWORDS_PER_CONTACT] = lambdas
+        cc.lambdas.assign(pack_contact_tiles(geometry))
         cc.prev_lambdas.assign(np.full_like(lambdas, -9.0))
         valid_count = wp.array([valid], dtype=wp.int32, device=device)
 

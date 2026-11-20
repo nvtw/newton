@@ -37,6 +37,9 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_get_tangent1,
     contact_container_zeros,
     contact_solve_container_zeros,
+    contact_tile_rows_numpy,
+    contact_tile_shape,
+    pack_contact_tiles,
 )
 from newton._src.solvers.phoenx.helpers.math_helpers import contact_mobility_scalar
 from newton._src.solvers.phoenx.tests.test_stacking import _PhoenXScene
@@ -130,7 +133,7 @@ class TestColoredContactRows(unittest.TestCase):
             ],
             device=scene.device,
         )
-        stored = world._contact_container_solve.derived.numpy()[1:3, :total]
+        stored = contact_tile_rows_numpy(world._contact_container_solve, "derived")[1:3, :total]
         predicted = expected.numpy()[:, :total]
         self.assertTrue(np.isfinite(stored).all())
         self.assertGreater(float(np.max(predicted)), 0.1)
@@ -256,8 +259,8 @@ class TestColoredContactRows(unittest.TestCase):
             CC_DERIVED_DWORDS_PER_CONTACT, row_capacity
         )
         source.impulses.assign(impulse_np)
-        source.lambdas.assign(lambda_np)
-        source.derived.assign(derived_np)
+        source.lambdas.assign(pack_contact_tiles(lambda_np))
+        source.derived.assign(pack_contact_tiles(derived_np))
 
         # Color slots: source column 1, a non-contact joint, then columns 0 and 2.
         element_ids = wp.array(np.array([101, 5, 100, 102], dtype=np.int32), dtype=wp.int32, device=device)
@@ -321,17 +324,17 @@ class TestColoredContactRows(unittest.TestCase):
         np.testing.assert_array_equal(total.numpy(), np.array([21], dtype=np.int32))
         np.testing.assert_array_equal(source_indices.numpy()[:21], expected_order)
         np.testing.assert_array_equal(offsets.numpy(), np.array([0, 1, 1, 8], dtype=np.int32))
-        self.assertEqual(packed.lambdas.shape[0], CC_RIGID_DWORDS_PER_CONTACT)
+        self.assertEqual(packed.lambdas.shape, contact_tile_shape(CC_RIGID_DWORDS_PER_CONTACT, row_capacity))
         expected_packed_lambdas = lambda_np[:CC_RIGID_DWORDS_PER_CONTACT, expected_order].copy()
-        np.testing.assert_array_equal(packed.lambdas.numpy()[:, :21], expected_packed_lambdas)
+        np.testing.assert_array_equal(contact_tile_rows_numpy(packed, "lambdas")[:, :21], expected_packed_lambdas)
         expected_packed_derived = np.zeros_like(derived_np[:, expected_order])
         expected_packed_derived[-1] = derived_np[-1, expected_order]
-        np.testing.assert_array_equal(packed.derived.numpy()[:, :21], expected_packed_derived)
+        np.testing.assert_array_equal(contact_tile_rows_numpy(packed, "derived")[:, :21], expected_packed_derived)
 
         expected_impulses = impulse_np.copy()
         expected_impulses[:, :21] += 10000.0
         np.testing.assert_array_equal(source.impulses.numpy(), expected_impulses)
-        np.testing.assert_array_equal(source.lambdas.numpy(), lambda_np)
+        np.testing.assert_array_equal(contact_tile_rows_numpy(source, "lambdas"), lambda_np)
 
 
 if __name__ == "__main__":

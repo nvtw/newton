@@ -20,6 +20,7 @@ from newton._src.solvers.phoenx.articulations.fixed_pattern_llt import (
 from newton._src.solvers.phoenx.constraints.constraint_joint import (
     JOINT_MODE_GENERIC_D6,
 )
+from newton._src.solvers.phoenx.constraints.contact_container import contact_tile_rows_numpy
 
 _INERTIA = ((0.7, 0.0, 0.0), (0.0, 0.8, 0.0), (0.0, 0.0, 0.9))
 
@@ -831,8 +832,8 @@ class TestDirectJointTypes(unittest.TestCase):
                         for row in range(dimension)
                     ]
                 )
-        lambdas = solver.world._contact_container.lambdas.numpy()
-        derived = solver.world._contact_container.derived.numpy()
+        lambdas = contact_tile_rows_numpy(solver.world._contact_container, "lambdas")
+        derived = contact_tile_rows_numpy(solver.world._contact_container, "derived")
         normal = lambdas[0:3, contact]
         tangent0 = lambdas[3:6, contact]
         directions = np.stack((normal, tangent0, np.cross(normal, tangent0)))

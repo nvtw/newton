@@ -25,6 +25,7 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_set_r0,
     cc_set_r1,
     cc_set_tangent1,
+    contact_tile_shape,
 )
 
 
@@ -107,8 +108,8 @@ class TestMaximalContactMobility(unittest.TestCase):
 
         # Translating the mechanism must not round the prepared contact levers.
         contacts = ContactContainer()
-        contacts.lambdas = wp.zeros((32, 1), dtype=float, device=device)
-        contacts.derived = wp.zeros((32, 1), dtype=float, device=device)
+        contacts.lambdas = wp.zeros(contact_tile_shape(32, 1), dtype=float, device=device)
+        contacts.derived = wp.zeros(contact_tile_shape(32, 1), dtype=float, device=device)
         mobility = wp.zeros((6, 1), dtype=float, device=device)
         for translation in (0.0, 1000.0):
             bodies.position = wp.array(np.array([[0, 0, 0], -shift]) + translation, dtype=wp.vec3, device=device)

@@ -9,6 +9,7 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton._src.solvers.phoenx.constraints.contact_container import contact_tile_rows_numpy
 from newton._src.solvers.phoenx.tests.test_rigid_split_prepare import run_scene
 
 
@@ -66,7 +67,7 @@ class TestContactPrepareGrid(unittest.TestCase):
                         delta = position[second] - position[first] + offset1 - offset0
                         expected0 = offset0 + (1 - weight) * delta
                         expected1 = offset1 - weight * delta
-                        derived = cc.derived.numpy()[:, :count].T
+                        derived = contact_tile_rows_numpy(cc, "derived")[:, :count].T
                         # At 64 m, a world-position round trip loses micrometers;
                         # these 0.1 m lever arms should retain float32 local precision.
                         np.testing.assert_allclose(derived[:, 9:12], expected0, rtol=0, atol=2e-7)

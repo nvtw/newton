@@ -31,6 +31,7 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_set_tangent1_lambda,
     cc_set_tangent2_lambda,
     contact_container_zeros,
+    contact_tile_rows_numpy,
 )
 from newton._src.solvers.phoenx.constraints.contact_warm_start import (
     ContactBodyEntries,
@@ -128,7 +129,7 @@ class TestContactWarmStart(unittest.TestCase):
             poses[:, :2] += (73.0, 43.0)
             state.body_q.assign(poses)
             solver.step(state, state, model.control(), contacts, 1 / 120)
-            anchors = solver.world._contact_container.lambdas.numpy()[6:12, 0].reshape(2, 3)
+            anchors = contact_tile_rows_numpy(solver.world._contact_container, "lambdas")[6:12, 0].reshape(2, 3)
             for anchor in anchors:
                 np.testing.assert_allclose(anchor[:2], offset[:2], atol=1e-8, rtol=0)
 

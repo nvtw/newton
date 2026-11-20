@@ -13,7 +13,11 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import ContactCol
 from newton._src.solvers.phoenx.constraints.constraint_contact_solve import (
     contact_prepare_for_iteration_lean_no_soft_pd,
 )
-from newton._src.solvers.phoenx.constraints.contact_container import ContactContainer
+from newton._src.solvers.phoenx.constraints.contact_container import (
+    ContactContainer,
+    contact_tile_rows_numpy,
+    pack_contact_tiles,
+)
 from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
 from newton._src.solvers.phoenx.particle import ParticleContainer
 
@@ -68,10 +72,10 @@ class TestRigidContactBias(unittest.TestCase):
             point[0, 0] += 1.0e-5
             contacts.rigid_contact_point0.assign(point)
             world = solver.world
-            anchors = world._contact_container.lambdas.numpy()
+            anchors = contact_tile_rows_numpy(world._contact_container, "lambdas")
             anchors[6:9, 0] = contacts.rigid_contact_point0.numpy()[0]
             anchors[9:12, 0] = contacts.rigid_contact_point1.numpy()[0]
-            world._contact_container.lambdas.assign(anchors)
+            world._contact_container.lambdas.assign(pack_contact_tiles(anchors))
             impulses = world._contact_container.impulses.numpy()
             impulses[:, 0] = [mass * 1.0e-5, 0.0, 0.0]
             world._contact_container.impulses.assign(impulses)
@@ -89,7 +93,7 @@ class TestRigidContactBias(unittest.TestCase):
                 ],
                 device=model.device,
             )
-            biases.append(world._contact_container.derived.numpy()[4:6, 0].copy())
+            biases.append(contact_tile_rows_numpy(world._contact_container, "derived")[4:6, 0].copy())
         self.assertGreater(float(np.linalg.norm(biases[0])), 1.0e-5)
         self.assertGreater(float(np.linalg.norm(biases[0])), 0.0007)
         np.testing.assert_allclose(biases[1], biases[0], rtol=1.0e-5, atol=1.0e-8)

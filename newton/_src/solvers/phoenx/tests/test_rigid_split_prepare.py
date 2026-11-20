@@ -9,6 +9,7 @@ import warp as wp
 
 import newton
 from newton._src.solvers.phoenx.constraints.constraint_contact_solve import _make_contact_prepare_for_iteration_at
+from newton._src.solvers.phoenx.constraints.contact_container import contact_tile_rows_numpy
 from newton._src.solvers.phoenx.tests.test_contact_coupling import _total_momentum
 
 
@@ -85,9 +86,9 @@ def run_scene(parallel, mass_splitting=True, *, chunk_size=0):
             {
                 "q": state.body_q.numpy(),
                 "qd": state.body_qd.numpy(),
-                "derived": world._contact_container.derived.numpy(),
+                "derived": contact_tile_rows_numpy(world._contact_container, "derived"),
                 "impulses": world._contact_container.impulses.numpy(),
-                "anchors": world._contact_container.lambdas.numpy(),
+                "anchors": contact_tile_rows_numpy(world._contact_container, "lambdas"),
                 "copy_velocity": world._copy_state.velocity.numpy(),
                 "copy_angular_velocity": world._copy_state.angular_velocity.numpy(),
                 "copy_counts": world._copy_state.count_per_node.numpy(),

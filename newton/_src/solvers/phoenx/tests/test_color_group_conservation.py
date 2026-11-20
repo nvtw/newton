@@ -10,6 +10,7 @@ import warp as wp
 
 import newton
 from newton._src.solvers.phoenx.body import inertia_sym6_unpack_np
+from newton._src.solvers.phoenx.constraints.contact_container import contact_tile_rows_numpy
 from newton._src.solvers.phoenx.tests.test_direct_drive import _cuda_with_graph_capture
 
 
@@ -212,8 +213,8 @@ class TestColorGroupConservation(unittest.TestCase):
                 original(dispatcher, idt)
                 after, energy_after = _physical_totals(world)
                 new = world._contact_container.impulses.numpy()
-                cc = world._contact_container.lambdas.numpy().astype(np.float64)
-                derived = world._contact_container.derived.numpy().astype(np.float64)
+                cc = contact_tile_rows_numpy(world._contact_container, "lambdas").astype(np.float64)
+                derived = contact_tile_rows_numpy(world._contact_container, "derived").astype(np.float64)
                 h = world._contact_cols.data.numpy().view(np.int32)
                 positions = world.bodies.position.numpy().astype(np.float64)
                 inverse_mass = world.bodies.inverse_mass.numpy()

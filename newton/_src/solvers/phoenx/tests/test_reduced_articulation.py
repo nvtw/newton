@@ -54,6 +54,7 @@ from newton._src.solvers.phoenx.articulations.reduced_contact_block import (
     _transpose_generalized_contact_response_kernel,
 )
 from newton._src.solvers.phoenx.body import BodyContainer, inertia_sym6_unpack_np
+from newton._src.solvers.phoenx.constraints.contact_container import contact_tile_rows_numpy
 from newton._src.solvers.phoenx.constraints.contact_endpoint import _articulation_pair_wrench_response
 
 
@@ -2098,7 +2099,7 @@ class TestReducedArticulation(unittest.TestCase):
                 joint_ownership = solver.world._joint_pgs_enabled.numpy()
                 self.assertGreater(int(np.count_nonzero(joint_ownership == 2)), 0)
 
-                standard_derived_before = solver.world._contact_container.derived.numpy()
+                standard_derived_before = contact_tile_rows_numpy(solver.world._contact_container, "derived")
                 with wp.ScopedCapture(device=device) as mobility_capture:
                     response.compute_mobility()
                     wp.launch(
@@ -2119,7 +2120,7 @@ class TestReducedArticulation(unittest.TestCase):
                     )
                 wp.capture_launch(mobility_capture.graph)
                 np.testing.assert_array_equal(
-                    solver.world._contact_container.derived.numpy(),
+                    contact_tile_rows_numpy(solver.world._contact_container, "derived"),
                     standard_derived_before,
                 )
                 exact_mobility = schedule.mobility.numpy()
@@ -3169,7 +3170,7 @@ class TestReducedArticulation(unittest.TestCase):
         jacobian_row = block.packed_jacobian.numpy()[0, :dof_count]
         response_row = block.packed_response.numpy()[0, :dof_count]
         expected_effective_mass = 1.0 / float(np.dot(jacobian_row, response_row))
-        actual_effective_mass = float(solver.world._contact_container.derived.numpy()[0, 0])
+        actual_effective_mass = float(contact_tile_rows_numpy(solver.world._contact_container, "derived")[0, 0])
         self.assertAlmostEqual(actual_effective_mass, expected_effective_mass, delta=2.0e-5)
 
         # Reuse the same cached rows with different source paths. The packed

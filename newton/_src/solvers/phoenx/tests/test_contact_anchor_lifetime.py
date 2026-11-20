@@ -9,6 +9,7 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton._src.solvers.phoenx.constraints.contact_container import contact_tile_rows_numpy
 
 
 class _ContactScene:
@@ -62,7 +63,7 @@ class _ContactScene:
         self.state, self.output = self.output, self.state
 
     def anchors(self):
-        return self.solver.world._contact_container.lambdas.numpy()[6:12, : self.count].copy()
+        return contact_tile_rows_numpy(self.solver.world._contact_container, "lambdas")[6:12, : self.count].copy()
 
     def impulses(self):
         return self.solver.world._contact_container.impulses.numpy()[:, : self.count].copy()

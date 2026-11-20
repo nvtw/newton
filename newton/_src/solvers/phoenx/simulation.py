@@ -106,6 +106,7 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     contact_container_set_sweeps,
     contact_container_zeros,
     contact_solve_container_zeros,
+    contact_tile_shape,
 )
 from newton._src.solvers.phoenx.constraints.contact_ingest import (
     IngestScratch,
@@ -1732,9 +1733,10 @@ class PhoenXWorld:
             ("derived", CC_DERIVED_DWORDS_PER_CONTACT),
         ):
             actual = getattr(self._contact_container, name).shape
-            assert actual == (expected_rows, expected_cc_cols), (
-                f"ContactContainer.{name} has shape {actual}, expected ({expected_rows}, {expected_cc_cols})"
-            )
+            expected = (expected_rows, expected_cc_cols)
+            if name in ("lambdas", "derived"):
+                expected = contact_tile_shape(*expected)
+            assert actual == expected, f"ContactContainer.{name} has shape {actual}, expected {expected}"
 
         gravity_n = int(self.gravity.shape[0])
         assert gravity_n == self.num_worlds, (

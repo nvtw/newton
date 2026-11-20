@@ -55,6 +55,8 @@ from newton._src.solvers.phoenx.adapter_kernels import (
 )
 from newton._src.solvers.phoenx.constraints.contact_container import (
     contact_container_zeros,
+    contact_tile_rows_numpy,
+    pack_contact_tiles,
 )
 from newton.sensors import SensorContact
 
@@ -158,7 +160,7 @@ class TestContactImpulseToForceKernel(unittest.TestCase):
         impulse_host[_IMP_ROW_TANGENT2_LAMBDA, :] = 0.0
         cc.impulses.assign(impulse_host)
 
-        manifold_host = cc.lambdas.numpy()
+        manifold_host = contact_tile_rows_numpy(cc, "lambdas")
         manifold_host[:] = 0.0
         manifold_host[_MAN_ROW_NORMAL_X + 0, :] = 0.0  # n.x
         manifold_host[_MAN_ROW_NORMAL_X + 1, :] = 0.0  # n.y
@@ -166,7 +168,7 @@ class TestContactImpulseToForceKernel(unittest.TestCase):
         manifold_host[_MAN_ROW_TANGENT1_X + 0, :] = 1.0  # t1.x (orthogonal to n)
         manifold_host[_MAN_ROW_TANGENT1_X + 1, :] = 0.0
         manifold_host[_MAN_ROW_TANGENT1_X + 2, :] = 0.0
-        cc.lambdas.assign(manifold_host)
+        cc.lambdas.assign(pack_contact_tiles(manifold_host))
         return cc
 
     def _launch_readback(
@@ -293,11 +295,11 @@ class TestContactImpulseToForceKernel(unittest.TestCase):
         impulse_host[_IMP_ROW_TANGENT2_LAMBDA, 0] = 11.0  # lam_t2
         cc.impulses.assign(impulse_host)
 
-        manifold_host = cc.lambdas.numpy()
+        manifold_host = contact_tile_rows_numpy(cc, "lambdas")
         manifold_host[:] = 0.0
         manifold_host[_MAN_ROW_NORMAL_X + 2, 0] = 1.0  # n = +Z
         manifold_host[_MAN_ROW_TANGENT1_X + 0, 0] = 1.0  # t1 = +X
-        cc.lambdas.assign(manifold_host)
+        cc.lambdas.assign(pack_contact_tiles(manifold_host))
 
         sort_perm = wp.array(np.array([0], dtype=np.int32), dtype=wp.int32, device=device)
         rigid_contact_count = wp.array(np.array([1], dtype=np.int32), dtype=wp.int32, device=device)

@@ -48,6 +48,7 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
 )
 from newton._src.solvers.phoenx.constraints.contact_container import (
     ContactContainer,
+    _write_contact_tile,
     cc_get_prev_normal,
     cc_get_prev_normal_lambda,
     cc_get_prev_tangent1,
@@ -1010,7 +1011,7 @@ def _contact_warmstart_gather_kernel(
     # whether impulse warm-starting is enabled.
     if prev_valid and wp.dot(cc_get_prev_normal(cc, prev_k), n) >= wp.float32(0.95):
         for row in range(6, 12):
-            cc.lambdas[row, k] = cc.prev_lambdas[row, prev_k]
+            _write_contact_tile(cc.lambdas, row, k, cc.prev_lambdas[row, prev_k])
     else:
         sa = contacts.rigid_contact_shape0[k]
         sb = contacts.rigid_contact_shape1[k]

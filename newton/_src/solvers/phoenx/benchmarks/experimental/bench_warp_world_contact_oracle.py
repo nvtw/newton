@@ -114,6 +114,7 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_get_normal_lambda,
     cc_get_tangent1_lambda,
     cc_get_tangent2_lambda,
+    contact_tile_rows_numpy,
 )
 from newton._src.solvers.phoenx.constraints.contact_projection import (
     contact_project_velocity_update_no_soft_pd,
@@ -986,7 +987,7 @@ def main() -> int:
     wp.synchronize_device(device)
     production_qd_delta = reduced.joint_qd.numpy() - qd_before
     production_v_delta = bodies.velocity.numpy() - v_before
-    production_lambdas = cc.lambdas.numpy().copy()
+    production_lambdas = contact_tile_rows_numpy(cc, "lambdas").copy()
 
     qd_scale = max(1.0e-6, float(np.max(np.abs(production_qd_delta))))
     v_scale = max(1.0e-6, float(np.max(np.abs(production_v_delta))))
@@ -998,7 +999,7 @@ def main() -> int:
         wp.synchronize_device(device)
         oracle_qd_delta = reduced.joint_qd.numpy() - qd_before
         oracle_v_delta = bodies.velocity.numpy() - v_before
-        oracle_lambdas = cc.lambdas.numpy().copy()
+        oracle_lambdas = contact_tile_rows_numpy(cc, "lambdas").copy()
         if not np.isfinite(oracle_qd_delta).all():
             raise RuntimeError(f"{variant} produced non-finite generalized velocity deltas")
         validation[variant] = {

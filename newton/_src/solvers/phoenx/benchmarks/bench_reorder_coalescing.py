@@ -103,6 +103,7 @@ import numpy as np
 import warp as wp
 
 from newton._src.solvers.phoenx.benchmarks.scenarios import h1_flat, tower
+from newton._src.solvers.phoenx.constraints.contact_container import contact_tile_rows_numpy, pack_contact_tiles
 from newton._src.solvers.phoenx.simulation import PhoenXWorld
 from newton._src.solvers.phoenx.solver import SolverPhoenX
 
@@ -267,7 +268,9 @@ def _apply_permutation(
         world._contact_cols.data = _permute_2d(world._contact_cols.data, ci)
         world._contact_container.impulses = _permute_2d(world._contact_container.impulses, ci)
         world._contact_container.prev_impulses = _permute_2d(world._contact_container.prev_impulses, ci)
-        world._contact_container.lambdas = _permute_2d(world._contact_container.lambdas, ci)
+        cc = world._contact_container
+        geometry = contact_tile_rows_numpy(cc, "lambdas")[:, contact_inv]
+        cc.lambdas.assign(pack_contact_tiles(geometry))
         world._contact_container.prev_lambdas = _permute_2d(world._contact_container.prev_lambdas, ci)
 
     new_eids_arr = wp.array(new_eids, dtype=wp.int32, device=device)

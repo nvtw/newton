@@ -7,13 +7,17 @@
   barycentrics).
 * ``derived`` -- per-substep scratch (eff masses, biases); rebuilt every prepare.
 
-All buffers are ``[dword, k]`` with k inner for coalesced loads.
+Current geometry and prepared data store sixteen nearby contacts per tile.
+The layout reduces the number of cache sectors used when an island warp
+walks several contact columns. Impulses and history use ``[dword, k]``.
+Both layouts use the same logical contact index ``k``.
 """
 
 from __future__ import annotations
 
 import math
 
+import numpy as np
 import warp as wp
 
 from newton._src.solvers.phoenx.constraints.constraint_container import (
@@ -93,6 +97,9 @@ __all__ = [
     "contact_container_set_sweeps",
     "contact_container_zeros",
     "contact_solve_container_zeros",
+    "contact_tile_rows_numpy",
+    "contact_tile_shape",
+    "pack_contact_tiles",
 ]
 
 
@@ -162,14 +169,14 @@ _CC_OFF_START_GAP = wp.constant(18)
 
 @wp.struct
 class ContactContainer:
-    """Per-contact warm-start + derived state. All buffers are
-    ``(dwords, rigid_contact_max)`` with k inner. k matches Newton's per-contact
-    arrays."""
+    """Persistent and prepared contact data in logical Newton contact order."""
 
     impulses: wp.array2d[wp.float32]
     prev_impulses: wp.array2d[wp.float32]
+    #: Current geometry in sixteen-contact tiles.
     lambdas: wp.array2d[wp.float32]
     prev_lambdas: wp.array2d[wp.float32]
+    #: Prepared per-contact data in sixteen-contact tiles.
     derived: wp.array2d[wp.float32]
     #: Target velocity of conveyor-surface contacts along (t1, t2, normal) [m/s]; empty unless
     #: the collision pipeline generates surface velocities, so other scenes never touch it.
@@ -279,6 +286,21 @@ def contact_container_set_sweeps(
     cc.soft_bias_dt, cc.soft_mass_coeff, cc.soft_impulse_coeff = contact_soft_coefficient_values(omega_dt)
 
 
+_CONTACT_TILE_WIDTH = wp.constant(16)
+
+
+@wp.func
+def _read_contact_tile(rows: wp.array2d[wp.float32], field: int, contact: int) -> wp.float32:
+    return read2d_f32(rows, contact // _CONTACT_TILE_WIDTH, field * _CONTACT_TILE_WIDTH + contact % _CONTACT_TILE_WIDTH)
+
+
+@wp.func
+def _write_contact_tile(rows: wp.array2d[wp.float32], field: int, contact: int, value: wp.float32):
+    write2d_f32(
+        rows, contact // _CONTACT_TILE_WIDTH, field * _CONTACT_TILE_WIDTH + contact % _CONTACT_TILE_WIDTH, value
+    )
+
+
 @wp.kernel(enable_backward=False)
 def _contact_container_copy_current_to_prev_kernel(cc: ContactContainer, valid_count: wp.array[wp.int32]):
     k = wp.tid()
@@ -291,7 +313,7 @@ def _contact_container_copy_current_to_prev_kernel(cc: ContactContainer, valid_c
     for row in range(CC_IMPULSE_DWORDS_PER_CONTACT):
         cc.prev_impulses[row, k] = cc.impulses[row, k]
     for row in range(CC_RIGID_DWORDS_PER_CONTACT):
-        cc.prev_lambdas[row, k] = cc.lambdas[row, k]
+        cc.prev_lambdas[row, k] = _read_contact_tile(cc.lambdas, row, k)
 
 
 @wp.kernel(enable_backward=False)
@@ -326,11 +348,11 @@ def _contact_container_clear_reset_worlds_kernel(
         cc.impulses[row, k] = wp.float32(0.0)
         cc.prev_impulses[row, k] = wp.float32(0.0)
     for row in range(CC_DWORDS_PER_CONTACT):
-        cc.lambdas[row, k] = wp.float32(0.0)
+        _write_contact_tile(cc.lambdas, row, k, wp.float32(0.0))
     for row in range(CC_RIGID_DWORDS_PER_CONTACT):
         cc.prev_lambdas[row, k] = wp.float32(0.0)
     for row in range(CC_DERIVED_DWORDS_PER_CONTACT):
-        cc.derived[row, k] = wp.float32(0.0)
+        _write_contact_tile(cc.derived, row, k, wp.float32(0.0))
 
     cid_of_contact_cur[k] = wp.int32(-1)
     cid_of_contact_prev[k] = wp.int32(-1)
@@ -378,76 +400,76 @@ def cc_set_tangent2_lambda(cc: ContactContainer, k: wp.int32, v: wp.float32):
 @wp.func
 def cc_get_normal(cc: ContactContainer, k: wp.int32) -> wp.vec3f:
     return wp.vec3f(
-        read2d_f32(cc.lambdas, _CC_OFF_NORMAL_X, k),
-        read2d_f32(cc.lambdas, _CC_OFF_NORMAL_Y, k),
-        read2d_f32(cc.lambdas, _CC_OFF_NORMAL_Z, k),
+        _read_contact_tile(cc.lambdas, _CC_OFF_NORMAL_X, k),
+        _read_contact_tile(cc.lambdas, _CC_OFF_NORMAL_Y, k),
+        _read_contact_tile(cc.lambdas, _CC_OFF_NORMAL_Z, k),
     )
 
 
 @wp.func
 def cc_set_normal(cc: ContactContainer, k: wp.int32, v: wp.vec3f):
-    write2d_f32(cc.lambdas, _CC_OFF_NORMAL_X, k, v[0])
-    write2d_f32(cc.lambdas, _CC_OFF_NORMAL_Y, k, v[1])
-    write2d_f32(cc.lambdas, _CC_OFF_NORMAL_Z, k, v[2])
+    _write_contact_tile(cc.lambdas, _CC_OFF_NORMAL_X, k, v[0])
+    _write_contact_tile(cc.lambdas, _CC_OFF_NORMAL_Y, k, v[1])
+    _write_contact_tile(cc.lambdas, _CC_OFF_NORMAL_Z, k, v[2])
 
 
 @wp.func
 def cc_get_tangent1(cc: ContactContainer, k: wp.int32) -> wp.vec3f:
     return wp.vec3f(
-        read2d_f32(cc.lambdas, _CC_OFF_TANGENT1_X, k),
-        read2d_f32(cc.lambdas, _CC_OFF_TANGENT1_Y, k),
-        read2d_f32(cc.lambdas, _CC_OFF_TANGENT1_Z, k),
+        _read_contact_tile(cc.lambdas, _CC_OFF_TANGENT1_X, k),
+        _read_contact_tile(cc.lambdas, _CC_OFF_TANGENT1_Y, k),
+        _read_contact_tile(cc.lambdas, _CC_OFF_TANGENT1_Z, k),
     )
 
 
 @wp.func
 def cc_set_tangent1(cc: ContactContainer, k: wp.int32, v: wp.vec3f):
-    write2d_f32(cc.lambdas, _CC_OFF_TANGENT1_X, k, v[0])
-    write2d_f32(cc.lambdas, _CC_OFF_TANGENT1_Y, k, v[1])
-    write2d_f32(cc.lambdas, _CC_OFF_TANGENT1_Z, k, v[2])
+    _write_contact_tile(cc.lambdas, _CC_OFF_TANGENT1_X, k, v[0])
+    _write_contact_tile(cc.lambdas, _CC_OFF_TANGENT1_Y, k, v[1])
+    _write_contact_tile(cc.lambdas, _CC_OFF_TANGENT1_Z, k, v[2])
 
 
 # Per-side barycentric weights are populated only for deformable endpoints.
 @wp.func
 def cc_get_side0_bary(cc: ContactContainer, k: wp.int32) -> wp.vec3f:
     return wp.vec3f(
-        read2d_f32(cc.lambdas, _CC_OFF_SIDE0_BARY_X, k),
-        read2d_f32(cc.lambdas, _CC_OFF_SIDE0_BARY_Y, k),
-        read2d_f32(cc.lambdas, _CC_OFF_SIDE0_BARY_Z, k),
+        _read_contact_tile(cc.lambdas, _CC_OFF_SIDE0_BARY_X, k),
+        _read_contact_tile(cc.lambdas, _CC_OFF_SIDE0_BARY_Y, k),
+        _read_contact_tile(cc.lambdas, _CC_OFF_SIDE0_BARY_Z, k),
     )
 
 
 @wp.func
 def cc_set_side0_bary(cc: ContactContainer, k: wp.int32, v: wp.vec3f):
-    write2d_f32(cc.lambdas, _CC_OFF_SIDE0_BARY_X, k, v[0])
-    write2d_f32(cc.lambdas, _CC_OFF_SIDE0_BARY_Y, k, v[1])
-    write2d_f32(cc.lambdas, _CC_OFF_SIDE0_BARY_Z, k, v[2])
+    _write_contact_tile(cc.lambdas, _CC_OFF_SIDE0_BARY_X, k, v[0])
+    _write_contact_tile(cc.lambdas, _CC_OFF_SIDE0_BARY_Y, k, v[1])
+    _write_contact_tile(cc.lambdas, _CC_OFF_SIDE0_BARY_Z, k, v[2])
 
 
 @wp.func
 def cc_get_side1_bary(cc: ContactContainer, k: wp.int32) -> wp.vec3f:
     return wp.vec3f(
-        read2d_f32(cc.lambdas, _CC_OFF_SIDE1_BARY_X, k),
-        read2d_f32(cc.lambdas, _CC_OFF_SIDE1_BARY_Y, k),
-        read2d_f32(cc.lambdas, _CC_OFF_SIDE1_BARY_Z, k),
+        _read_contact_tile(cc.lambdas, _CC_OFF_SIDE1_BARY_X, k),
+        _read_contact_tile(cc.lambdas, _CC_OFF_SIDE1_BARY_Y, k),
+        _read_contact_tile(cc.lambdas, _CC_OFF_SIDE1_BARY_Z, k),
     )
 
 
 @wp.func
 def cc_set_side1_bary(cc: ContactContainer, k: wp.int32, v: wp.vec3f):
-    write2d_f32(cc.lambdas, _CC_OFF_SIDE1_BARY_X, k, v[0])
-    write2d_f32(cc.lambdas, _CC_OFF_SIDE1_BARY_Y, k, v[1])
-    write2d_f32(cc.lambdas, _CC_OFF_SIDE1_BARY_Z, k, v[2])
+    _write_contact_tile(cc.lambdas, _CC_OFF_SIDE1_BARY_X, k, v[0])
+    _write_contact_tile(cc.lambdas, _CC_OFF_SIDE1_BARY_Y, k, v[1])
+    _write_contact_tile(cc.lambdas, _CC_OFF_SIDE1_BARY_Z, k, v[2])
 
 
 @wp.func
 def cc_get_start_gap(cc: ContactContainer, k: wp.int32) -> wp.float32:
-    return read2d_f32(cc.derived, _CC_OFF_START_GAP, k)
+    return _read_contact_tile(cc.derived, _CC_OFF_START_GAP, k)
 
 
 @wp.func
 def cc_set_start_gap(cc: ContactContainer, k: wp.int32, v: wp.float32):
-    write2d_f32(cc.derived, _CC_OFF_START_GAP, k, v)
+    _write_contact_tile(cc.derived, _CC_OFF_START_GAP, k, v)
 
 
 @wp.func
@@ -517,122 +539,122 @@ def cc_get_prev_tangent1(cc: ContactContainer, k: wp.int32) -> wp.vec3f:
 
 @wp.func
 def cc_get_eff_n(cc: ContactContainer, k: wp.int32) -> wp.float32:
-    return read2d_f32(cc.derived, _CC_OFF_EFF_N, k)
+    return _read_contact_tile(cc.derived, _CC_OFF_EFF_N, k)
 
 
 @wp.func
 def cc_set_eff_n(cc: ContactContainer, k: wp.int32, v: wp.float32):
-    write2d_f32(cc.derived, _CC_OFF_EFF_N, k, v)
+    _write_contact_tile(cc.derived, _CC_OFF_EFF_N, k, v)
 
 
 @wp.func
 def cc_get_eff_t1(cc: ContactContainer, k: wp.int32) -> wp.float32:
-    return read2d_f32(cc.derived, _CC_OFF_EFF_T1, k)
+    return _read_contact_tile(cc.derived, _CC_OFF_EFF_T1, k)
 
 
 @wp.func
 def cc_set_eff_t1(cc: ContactContainer, k: wp.int32, v: wp.float32):
-    write2d_f32(cc.derived, _CC_OFF_EFF_T1, k, v)
+    _write_contact_tile(cc.derived, _CC_OFF_EFF_T1, k, v)
 
 
 @wp.func
 def cc_get_eff_t2(cc: ContactContainer, k: wp.int32) -> wp.float32:
-    return read2d_f32(cc.derived, _CC_OFF_EFF_T2, k)
+    return _read_contact_tile(cc.derived, _CC_OFF_EFF_T2, k)
 
 
 @wp.func
 def cc_set_eff_t2(cc: ContactContainer, k: wp.int32, v: wp.float32):
-    write2d_f32(cc.derived, _CC_OFF_EFF_T2, k, v)
+    _write_contact_tile(cc.derived, _CC_OFF_EFF_T2, k, v)
 
 
 @wp.func
 def cc_get_mobility_nt1(cc: ContactContainer, k: wp.int32) -> wp.float32:
-    return read2d_f32(cc.derived, _CC_OFF_MOBILITY_NT1, k)
+    return _read_contact_tile(cc.derived, _CC_OFF_MOBILITY_NT1, k)
 
 
 @wp.func
 def cc_set_mobility_nt1(cc: ContactContainer, k: wp.int32, v: wp.float32):
-    write2d_f32(cc.derived, _CC_OFF_MOBILITY_NT1, k, v)
+    _write_contact_tile(cc.derived, _CC_OFF_MOBILITY_NT1, k, v)
 
 
 @wp.func
 def cc_get_mobility_nt2(cc: ContactContainer, k: wp.int32) -> wp.float32:
-    return read2d_f32(cc.derived, _CC_OFF_MOBILITY_NT2, k)
+    return _read_contact_tile(cc.derived, _CC_OFF_MOBILITY_NT2, k)
 
 
 @wp.func
 def cc_set_mobility_nt2(cc: ContactContainer, k: wp.int32, v: wp.float32):
-    write2d_f32(cc.derived, _CC_OFF_MOBILITY_NT2, k, v)
+    _write_contact_tile(cc.derived, _CC_OFF_MOBILITY_NT2, k, v)
 
 
 @wp.func
 def cc_get_mobility_t1t2(cc: ContactContainer, k: wp.int32) -> wp.float32:
-    return read2d_f32(cc.derived, _CC_OFF_MOBILITY_T1T2, k)
+    return _read_contact_tile(cc.derived, _CC_OFF_MOBILITY_T1T2, k)
 
 
 @wp.func
 def cc_set_mobility_t1t2(cc: ContactContainer, k: wp.int32, v: wp.float32):
-    write2d_f32(cc.derived, _CC_OFF_MOBILITY_T1T2, k, v)
+    _write_contact_tile(cc.derived, _CC_OFF_MOBILITY_T1T2, k, v)
 
 
 @wp.func
 def cc_get_bias(cc: ContactContainer, k: wp.int32) -> wp.float32:
-    return read2d_f32(cc.derived, _CC_OFF_BIAS, k)
+    return _read_contact_tile(cc.derived, _CC_OFF_BIAS, k)
 
 
 @wp.func
 def cc_set_bias(cc: ContactContainer, k: wp.int32, v: wp.float32):
-    write2d_f32(cc.derived, _CC_OFF_BIAS, k, v)
+    _write_contact_tile(cc.derived, _CC_OFF_BIAS, k, v)
 
 
 @wp.func
 def cc_get_bias_t1(cc: ContactContainer, k: wp.int32) -> wp.float32:
-    return read2d_f32(cc.derived, _CC_OFF_BIAS_T1, k)
+    return _read_contact_tile(cc.derived, _CC_OFF_BIAS_T1, k)
 
 
 @wp.func
 def cc_set_bias_t1(cc: ContactContainer, k: wp.int32, v: wp.float32):
-    write2d_f32(cc.derived, _CC_OFF_BIAS_T1, k, v)
+    _write_contact_tile(cc.derived, _CC_OFF_BIAS_T1, k, v)
 
 
 @wp.func
 def cc_get_bias_t2(cc: ContactContainer, k: wp.int32) -> wp.float32:
-    return read2d_f32(cc.derived, _CC_OFF_BIAS_T2, k)
+    return _read_contact_tile(cc.derived, _CC_OFF_BIAS_T2, k)
 
 
 @wp.func
 def cc_set_bias_t2(cc: ContactContainer, k: wp.int32, v: wp.float32):
-    write2d_f32(cc.derived, _CC_OFF_BIAS_T2, k, v)
+    _write_contact_tile(cc.derived, _CC_OFF_BIAS_T2, k, v)
 
 
 @wp.func
 def cc_get_pd_gamma(cc: ContactContainer, k: wp.int32) -> wp.float32:
-    return read2d_f32(cc.derived, _CC_OFF_PD_GAMMA, k)
+    return _read_contact_tile(cc.derived, _CC_OFF_PD_GAMMA, k)
 
 
 @wp.func
 def cc_set_pd_gamma(cc: ContactContainer, k: wp.int32, v: wp.float32):
-    write2d_f32(cc.derived, _CC_OFF_PD_GAMMA, k, v)
+    _write_contact_tile(cc.derived, _CC_OFF_PD_GAMMA, k, v)
 
 
 @wp.func
 def cc_get_pd_bias(cc: ContactContainer, k: wp.int32) -> wp.float32:
-    return read2d_f32(cc.derived, _CC_OFF_PD_BIAS, k)
+    return _read_contact_tile(cc.derived, _CC_OFF_PD_BIAS, k)
 
 
 @wp.func
 def cc_set_pd_bias(cc: ContactContainer, k: wp.int32, v: wp.float32):
-    write2d_f32(cc.derived, _CC_OFF_PD_BIAS, k, v)
+    _write_contact_tile(cc.derived, _CC_OFF_PD_BIAS, k, v)
 
 
 @wp.func
 def cc_get_pd_eff_soft(cc: ContactContainer, k: wp.int32) -> wp.float32:
-    return read2d_f32(cc.derived, _CC_OFF_PD_EFF_SOFT, k)
+    return _read_contact_tile(cc.derived, _CC_OFF_PD_EFF_SOFT, k)
 
 
 @wp.func
 def cc_set_pd_eff_soft(cc: ContactContainer, k: wp.int32, v: wp.float32):
-    write2d_f32(cc.derived, _CC_OFF_PD_EFF_SOFT, k, v)
+    _write_contact_tile(cc.derived, _CC_OFF_PD_EFF_SOFT, k, v)
 
 
 @wp.func
@@ -675,38 +697,63 @@ def cc_get_surface_target(cc: ContactContainer, k: wp.int32) -> wp.vec3f:
 @wp.func
 def cc_get_r0(cc: ContactContainer, k: wp.int32) -> wp.vec3f:
     return wp.vec3f(
-        read2d_f32(cc.derived, _CC_OFF_R0_X, k),
-        read2d_f32(cc.derived, _CC_OFF_R0_Y, k),
-        read2d_f32(cc.derived, _CC_OFF_R0_Z, k),
+        _read_contact_tile(cc.derived, _CC_OFF_R0_X, k),
+        _read_contact_tile(cc.derived, _CC_OFF_R0_Y, k),
+        _read_contact_tile(cc.derived, _CC_OFF_R0_Z, k),
     )
 
 
 @wp.func
 def cc_set_r0(cc: ContactContainer, k: wp.int32, v: wp.vec3f):
-    write2d_f32(cc.derived, _CC_OFF_R0_X, k, v[0])
-    write2d_f32(cc.derived, _CC_OFF_R0_Y, k, v[1])
-    write2d_f32(cc.derived, _CC_OFF_R0_Z, k, v[2])
+    _write_contact_tile(cc.derived, _CC_OFF_R0_X, k, v[0])
+    _write_contact_tile(cc.derived, _CC_OFF_R0_Y, k, v[1])
+    _write_contact_tile(cc.derived, _CC_OFF_R0_Z, k, v[2])
 
 
 @wp.func
 def cc_get_r1(cc: ContactContainer, k: wp.int32) -> wp.vec3f:
     return wp.vec3f(
-        read2d_f32(cc.derived, _CC_OFF_R1_X, k),
-        read2d_f32(cc.derived, _CC_OFF_R1_Y, k),
-        read2d_f32(cc.derived, _CC_OFF_R1_Z, k),
+        _read_contact_tile(cc.derived, _CC_OFF_R1_X, k),
+        _read_contact_tile(cc.derived, _CC_OFF_R1_Y, k),
+        _read_contact_tile(cc.derived, _CC_OFF_R1_Z, k),
     )
 
 
 @wp.func
 def cc_set_r1(cc: ContactContainer, k: wp.int32, v: wp.vec3f):
-    write2d_f32(cc.derived, _CC_OFF_R1_X, k, v[0])
-    write2d_f32(cc.derived, _CC_OFF_R1_Y, k, v[1])
-    write2d_f32(cc.derived, _CC_OFF_R1_Z, k, v[2])
+    _write_contact_tile(cc.derived, _CC_OFF_R1_X, k, v[0])
+    _write_contact_tile(cc.derived, _CC_OFF_R1_Y, k, v[1])
+    _write_contact_tile(cc.derived, _CC_OFF_R1_Z, k, v[2])
 
 
 # ---------------------------------------------------------------------------
 # Host-side factories.
 # ---------------------------------------------------------------------------
+
+
+def contact_tile_shape(fields: int, capacity: int) -> tuple[int, int]:
+    """Return the storage shape of a tiled array with the given logical dimensions."""
+    width = int(_CONTACT_TILE_WIDTH)
+    return (capacity + width - 1) // width, fields * width
+
+
+def pack_contact_tiles(rows: np.ndarray) -> np.ndarray:
+    """Pack host contact rows ``[field, contact]`` for tests and diagnostics."""
+    fields, capacity = rows.shape
+    tiles, stride = contact_tile_shape(fields, capacity)
+    width = int(_CONTACT_TILE_WIDTH)
+    padded = np.pad(rows, ((0, 0), (0, tiles * width - capacity)))
+    return np.ascontiguousarray(padded.reshape(fields, tiles, width).transpose(1, 0, 2)).reshape(tiles, stride)
+
+
+def contact_tile_rows_numpy(cc: ContactContainer, field: str) -> np.ndarray:
+    """Copy tiled contact data to host rows ``[field, contact]`` for diagnostics."""
+    values = getattr(cc, field).numpy()
+    tiles, stride = values.shape
+    width = int(_CONTACT_TILE_WIDTH)
+    fields = stride // width
+    capacity = cc.impulses.shape[1]
+    return values.reshape(tiles, fields, width).transpose(1, 0, 2).reshape(fields, tiles * width)[:, :capacity]
 
 
 def contact_container_zeros(
@@ -727,9 +774,9 @@ def contact_container_zeros(
     cc = ContactContainer()
     cc.impulses = wp.zeros((CC_IMPULSE_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
     cc.prev_impulses = wp.zeros((CC_IMPULSE_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
-    cc.lambdas = wp.zeros((CC_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
+    cc.lambdas = wp.zeros(contact_tile_shape(CC_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
     cc.prev_lambdas = wp.zeros((CC_RIGID_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
-    cc.derived = wp.zeros((CC_DERIVED_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
+    cc.derived = wp.zeros(contact_tile_shape(CC_DERIVED_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
     cc.surface_target = wp.zeros(n if surface_velocity else 0, dtype=wp.vec3f, device=device)
     cc.gap = wp.zeros(n if track_gap else 0, dtype=wp.float32, device=device)
     cc.normal_compliance_scale = wp.empty(0, dtype=wp.float32, device=device)
@@ -756,8 +803,8 @@ def contact_solve_container_zeros(
     # Prepare, iterate, and relax share this color-ordered state across
     # every substep, including manifold anchors needed by prepare.
     lambda_rows = CC_RIGID_DWORDS_PER_CONTACT if rigid_only else CC_DWORDS_PER_CONTACT
-    cc.lambdas = wp.zeros((lambda_rows, n), dtype=wp.float32, device=device)
-    cc.derived = wp.zeros((CC_DERIVED_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
+    cc.lambdas = wp.zeros(contact_tile_shape(lambda_rows, n), dtype=wp.float32, device=device)
+    cc.derived = wp.zeros(contact_tile_shape(CC_DERIVED_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
     cc.surface_target = wp.empty(0, dtype=wp.vec3f, device=device)
     cc.gap = wp.zeros(n if track_gap else 0, dtype=wp.float32, device=device)
     cc.normal_compliance_scale = wp.empty(0, dtype=wp.float32, device=device)

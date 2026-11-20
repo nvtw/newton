@@ -21,6 +21,8 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     ContactContainer,
     contact_container_copy_current_to_prev,
     contact_container_zeros,
+    contact_tile_rows_numpy,
+    pack_contact_tiles,
 )
 from newton._src.solvers.phoenx.constraints.contact_ingest import _contact_warmstart_gather_kernel
 from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
@@ -78,10 +80,10 @@ class TestRigidFrictionAnchors(unittest.TestCase):
             point[0, 0] += 0.003
             contacts.rigid_contact_point0.assign(point)
             world = solver.world
-            anchor_rows = world._contact_container.lambdas.numpy()
+            anchor_rows = contact_tile_rows_numpy(world._contact_container, "lambdas")
             anchor_rows[6:9, 0] = contacts.rigid_contact_point0.numpy()[0]
             anchor_rows[9:12, 0] = contacts.rigid_contact_point1.numpy()[0]
-            world._contact_container.lambdas.assign(anchor_rows)
+            world._contact_container.lambdas.assign(pack_contact_tiles(anchor_rows))
             impulses = world._contact_container.impulses.numpy()
             impulses[:, 0] = [mass * 1.0e-5, mass * 1.0e-5, 0.0]
             world._contact_container.impulses.assign(impulses)
@@ -99,7 +101,7 @@ class TestRigidFrictionAnchors(unittest.TestCase):
                 ],
                 device=model.device,
             )
-            biases.append(world._contact_container.derived.numpy()[4:6, 0].copy())
+            biases.append(contact_tile_rows_numpy(world._contact_container, "derived")[4:6, 0].copy())
         np.testing.assert_array_equal(world._contact_container.impulses.numpy(), impulses)
         np.testing.assert_allclose(biases[0], 0.0, atol=1.0e-8)
         np.testing.assert_array_equal(contacts.rigid_contact_point0.numpy(), point)
@@ -118,7 +120,9 @@ class TestRigidFrictionAnchors(unittest.TestCase):
             ],
             device=model.device,
         )
-        np.testing.assert_allclose(world._contact_container.derived.numpy()[4:6, 0], 0.0, atol=1.0e-8)
+        np.testing.assert_allclose(
+            contact_tile_rows_numpy(world._contact_container, "derived")[4:6, 0], 0.0, atol=1.0e-8
+        )
 
         # Slide the dynamic body after the break. The new material reference
         # must recover only this displacement, not the discarded old spring.
@@ -144,7 +148,7 @@ class TestRigidFrictionAnchors(unittest.TestCase):
             ],
             device=model.device,
         )
-        bias = world._contact_container.derived.numpy()[4:6, 0]
+        bias = contact_tile_rows_numpy(world._contact_container, "derived")[4:6, 0]
         self.assertAlmostEqual(float(np.linalg.norm(bias)), 0.0008, delta=1.0e-7)
 
         # Re-express the same physical configuration in a rotated, translated
@@ -159,10 +163,10 @@ class TestRigidFrictionAnchors(unittest.TestCase):
             orientations[index] = np.asarray(rotation * wp.quat(*orientations[index]))
         world.bodies.position.assign(rotated_positions)
         world.bodies.orientation.assign(orientations)
-        rows = world._contact_container.lambdas.numpy()
+        rows = contact_tile_rows_numpy(world._contact_container, "lambdas")
         rows[:3, 0] = np.asarray(wp.quat_rotate(rotation, wp.vec3(*rows[:3, 0])))
         rows[3:6, 0] = np.asarray(wp.quat_rotate(rotation, wp.vec3(*rows[3:6, 0])))
-        world._contact_container.lambdas.assign(rows)
+        world._contact_container.lambdas.assign(pack_contact_tiles(rows))
         normals = contacts.rigid_contact_normal.numpy()
         normals[0] = np.asarray(wp.quat_rotate(rotation, wp.vec3(*normals[0])))
         contacts.rigid_contact_normal.assign(normals)
@@ -180,7 +184,9 @@ class TestRigidFrictionAnchors(unittest.TestCase):
             ],
             device=model.device,
         )
-        np.testing.assert_allclose(world._contact_container.derived.numpy()[4:6, 0], bias, rtol=0.0, atol=5.0e-6)
+        np.testing.assert_allclose(
+            contact_tile_rows_numpy(world._contact_container, "derived")[4:6, 0], bias, rtol=0.0, atol=5.0e-6
+        )
 
     def test_material_history_follows_matching_and_colored_scatter(self):
         """Preserve reset references through solve order and matched contact IDs."""
@@ -213,9 +219,9 @@ class TestRigidFrictionAnchors(unittest.TestCase):
         anchor_values = np.array(
             [[0.1, 0.2], [0.3, 0.4], [0.5, 0.6], [-0.1, -0.2], [-0.3, -0.4], [-0.5, -0.6]], dtype=np.float32
         )
-        rows = ordered.lambdas.numpy()
+        rows = contact_tile_rows_numpy(ordered, "lambdas")
         rows[6:12, :2] = anchor_values
-        ordered.lambdas.assign(rows)
+        ordered.lambdas.assign(pack_contact_tiles(rows))
         perm = wp.array([1, 0], dtype=wp.int32, device=model.device)
         slots = wp.array([0, 1], dtype=wp.int32, device=model.device)
         count = wp.array([2], dtype=wp.int32, device=model.device)
@@ -254,7 +260,7 @@ class TestRigidFrictionAnchors(unittest.TestCase):
         wp.capture_launch(capture.graph)
         # Solve-order scatter reverses the rows; matching reverses them again.
         # Impulse warm-start is disabled, so reference continuity cannot rely on it.
-        np.testing.assert_array_equal(canonical.lambdas.numpy()[6:12, :2], anchor_values)
+        np.testing.assert_array_equal(contact_tile_rows_numpy(canonical, "lambdas")[6:12, :2], anchor_values)
         np.testing.assert_array_equal(canonical.impulses.numpy()[:, :2], 0.0)
 
 

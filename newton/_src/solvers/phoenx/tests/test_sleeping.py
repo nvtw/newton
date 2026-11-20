@@ -37,6 +37,8 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
 from newton._src.solvers.phoenx.constraints.contact_container import (
     contact_container_copy_current_to_prev,
     contact_container_zeros,
+    contact_tile_rows_numpy,
+    pack_contact_tiles,
 )
 from newton._src.solvers.phoenx.constraints.contact_ingest import IngestScratch, gather_contact_warmstart
 from newton._src.solvers.phoenx.constraints.contact_patch_friction import copy_contact_patch_impulses
@@ -110,7 +112,7 @@ class TestSleepingWarmstart(unittest.TestCase):
             cc.impulses.assign(impulses)
             references = np.arange(72, dtype=np.float32).reshape(12, 6) / 100
             references[:6] = np.array([0, 0, 1, 1, 0, 0], dtype=np.float32)[:, None]
-            cc.lambdas.assign(references)
+            cc.lambdas.assign(pack_contact_tiles(references))
             patch_impulses = np.arange(18, dtype=np.float32).reshape(6, 3) + 1
             columns.patch.impulse_world.assign(patch_impulses)
             contacts = ContactViews()
@@ -147,7 +149,7 @@ class TestSleepingWarmstart(unittest.TestCase):
             expected_patch = patch_impulses.copy()
             expected_patch[[0]] = 0
             np.testing.assert_array_equal(cc.impulses.numpy(), expected)
-            np.testing.assert_array_equal(cc.lambdas.numpy(), references)
+            np.testing.assert_array_equal(contact_tile_rows_numpy(cc, "lambdas"), references)
             np.testing.assert_array_equal(columns.patch.impulse_world.numpy(), expected_patch)
 
             # Dormant rows were not solved. A subsequent wake and real history gather
@@ -174,7 +176,7 @@ class TestSleepingWarmstart(unittest.TestCase):
                 direct_shape_pair_runs=True,
             )
             np.testing.assert_array_equal(cc.impulses.numpy()[:, :5], expected[:, :5])
-            np.testing.assert_array_equal(cc.lambdas.numpy()[6:, :5], references[6:, :5])
+            np.testing.assert_array_equal(contact_tile_rows_numpy(cc, "lambdas")[6:, :5], references[6:, :5])
 
     def test_quiet_contact_warmstart_preserves_active_history(self):
         """Clear dormant impulses while retaining awake quiet impulses and friction anchors."""

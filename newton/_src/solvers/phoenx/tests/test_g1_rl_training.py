@@ -27,6 +27,7 @@ from newton._src.solvers.phoenx.benchmarks.bench_g1_train_to_gate import (
 from newton._src.solvers.phoenx.benchmarks.bench_g1_train_to_gate import (
     benchmark_train_to_gate,
 )
+from newton._src.solvers.phoenx.constraints.contact_container import contact_tile_rows_numpy
 from newton._src.solvers.phoenx.constraints.d6_joint_data import build_d6_inequality_data
 from newton._src.solvers.phoenx.experimental.nanog1_import import (
     PufferNetWeights,
@@ -4969,8 +4970,8 @@ class TestG1PhoenXRL(unittest.TestCase):
 
         impulses = world._contact_container.impulses.numpy()
         prev_impulses = world._contact_container.prev_impulses.numpy()
-        lambdas = world._contact_container.lambdas.numpy()
-        derived = world._contact_container.derived.numpy()
+        lambdas = contact_tile_rows_numpy(world._contact_container, "lambdas")
+        derived = contact_tile_rows_numpy(world._contact_container, "derived")
         cid_cur = world._cid_of_contact_cur.numpy()
         cid_prev = world._cid_of_contact_prev.numpy()
 

@@ -38,6 +38,8 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     CC_IMPULSE_DWORDS_PER_CONTACT,
     CC_RIGID_DWORDS_PER_CONTACT,
     ContactContainer,
+    _read_contact_tile,
+    _write_contact_tile,
     cc_get_bias,
     cc_get_bias_t1,
     cc_get_bias_t2,
@@ -469,9 +471,9 @@ def _contact_gather_colored_rows_kernel(
     for row in range(CC_IMPULSE_DWORDS_PER_CONTACT):
         destination.impulses[row, destination_k] = source.impulses[row, source_k]
     for row in range(CC_DWORDS_PER_CONTACT):
-        destination.lambdas[row, destination_k] = source.lambdas[row, source_k]
+        _write_contact_tile(destination.lambdas, row, destination_k, _read_contact_tile(source.lambdas, row, source_k))
     for row in range(CC_DERIVED_DWORDS_PER_CONTACT):
-        destination.derived[row, destination_k] = source.derived[row, source_k]
+        _write_contact_tile(destination.derived, row, destination_k, _read_contact_tile(source.derived, row, source_k))
 
 
 @wp.kernel(enable_backward=False)
@@ -495,7 +497,7 @@ def _contact_gather_colored_rigid_rows_kernel(
     for row in range(CC_IMPULSE_DWORDS_PER_CONTACT):
         destination.impulses[row, destination_k] = source.impulses[row, source_k]
     for row in range(CC_RIGID_DWORDS_PER_CONTACT):
-        destination.lambdas[row, destination_k] = source.lambdas[row, source_k]
+        _write_contact_tile(destination.lambdas, row, destination_k, _read_contact_tile(source.lambdas, row, source_k))
     cc_set_start_gap(destination, destination_k, cc_get_start_gap(source, source_k))
 
 
@@ -522,7 +524,7 @@ def _contact_scatter_colored_rows_kernel(
     # Prepare may reset material anchors while rows are in solve order.
     # Publish those references before the next matched-history snapshot.
     for row in range(6, 12):
-        destination.lambdas[row, destination_k] = source.lambdas[row, source_k]
+        _write_contact_tile(destination.lambdas, row, destination_k, _read_contact_tile(source.lambdas, row, source_k))
 
 
 def contact_pack_colored_headers(

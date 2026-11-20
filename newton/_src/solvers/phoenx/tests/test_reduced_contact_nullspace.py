@@ -9,6 +9,7 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton._src.solvers.phoenx.constraints.contact_container import contact_tile_rows_numpy
 
 
 class TestReducedContactNullspace(unittest.TestCase):
@@ -45,7 +46,7 @@ class TestReducedContactNullspace(unittest.TestCase):
         solver.step(state, state, model.control(), contacts, 1.0 / 1200.0)
         self.assertTrue(np.isfinite(state.body_q.numpy()).all())
         self.assertLess(abs(float(state.joint_q.numpy()[0])), 0.001)
-        self.assertGreater(float(solver.world._contact_container.derived.numpy()[0, 0]), 0.0)
+        self.assertGreater(float(contact_tile_rows_numpy(solver.world._contact_container, "derived")[0, 0]), 0.0)
 
     def test_blocked_internal_contact_has_zero_mobility(self):
         """Reject roundoff mobility for contact along an internal hinge axis."""
@@ -82,7 +83,9 @@ class TestReducedContactNullspace(unittest.TestCase):
         solver.step(state, state, model.control(), contacts, 1.0 / 1200.0)
         count = int(contacts.rigid_contact_count.numpy()[0])
         self.assertGreater(count, 0)
-        np.testing.assert_array_equal(solver.world._contact_container.derived.numpy()[0, :count], np.zeros(count))
+        np.testing.assert_array_equal(
+            contact_tile_rows_numpy(solver.world._contact_container, "derived")[0, :count], np.zeros(count)
+        )
         history = solver.world._contact_container.impulses.numpy()
         history[0, :count] = 1.0
         solver.world._contact_container.impulses.assign(history)
@@ -117,7 +120,9 @@ class TestReducedContactNullspace(unittest.TestCase):
         solver.step(state, state, model.control(), contacts, 1.0 / 1200.0)
         self.assertEqual(int(contacts.rigid_contact_count.numpy()[0]), 1)
         np.testing.assert_allclose(
-            solver.world._contact_container.derived.numpy()[0, 0], model.body_mass.numpy()[dynamic], rtol=1.0e-5
+            contact_tile_rows_numpy(solver.world._contact_container, "derived")[0, 0],
+            model.body_mass.numpy()[dynamic],
+            rtol=1.0e-5,
         )
         np.testing.assert_allclose(state.body_qd.numpy()[kinematic], np.zeros(6), atol=1.0e-7)
 

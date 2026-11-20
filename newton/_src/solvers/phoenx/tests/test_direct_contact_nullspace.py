@@ -9,6 +9,7 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton._src.solvers.phoenx.constraints.contact_container import contact_tile_rows_numpy
 
 
 class TestDirectContactNullspace(unittest.TestCase):
@@ -80,7 +81,9 @@ class TestDirectContactNullspace(unittest.TestCase):
         self.assertIsNone(solver._direct_contact_response)
         self.assertEqual(int(contacts.rigid_contact_count.numpy()[0]), 1)
         np.testing.assert_allclose(
-            solver.world._contact_container.derived.numpy()[0, 0], model.body_mass.numpy()[dynamic], rtol=1.0e-5
+            contact_tile_rows_numpy(solver.world._contact_container, "derived")[0, 0],
+            model.body_mass.numpy()[dynamic],
+            rtol=1.0e-5,
         )
         np.testing.assert_allclose(state.body_qd.numpy()[kinematic], np.zeros(6), atol=1.0e-7)
 

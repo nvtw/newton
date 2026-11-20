@@ -30,6 +30,7 @@ import unittest
 import numpy as np
 import warp as wp
 
+from newton._src.solvers.phoenx.constraints.contact_container import contact_tile_rows_numpy
 from newton._src.solvers.phoenx.examples.example_rabbit_pile import (
     DEFAULT_SHAPE_GAP,
 )
@@ -204,7 +205,7 @@ class TestPhoenXSpeculativeContactNoDrag(unittest.TestCase):
 
         self.assertGreater(int(scene.contacts.rigid_contact_count.numpy()[0]), 0)
         impulses = scene.world._contact_container.impulses.numpy()
-        derived = scene.world._contact_container.derived.numpy()
+        derived = contact_tile_rows_numpy(scene.world._contact_container, "derived")
         speculative = derived[3] > 0.0
         self.assertTrue(np.any(speculative), "expected a positive-gap contact")
         max_tangent_lambda = float(np.max(np.abs(impulses[1:3, speculative])))

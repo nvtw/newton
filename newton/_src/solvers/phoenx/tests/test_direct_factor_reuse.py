@@ -13,6 +13,7 @@ import warp as wp
 
 from newton._src.solvers.phoenx.articulations.block_joint_system import MixedJointSystem
 from newton._src.solvers.phoenx.articulations.direct_equality import DirectEqualitySystem
+from newton._src.solvers.phoenx.constraints.contact_container import contact_tile_rows_numpy
 from newton._src.solvers.phoenx.solver import _can_reuse_relax_direct_factor
 from newton.examples.phoenx import example_phoenx_ragdoll_pile as scene
 from newton.viewer import ViewerNull
@@ -113,7 +114,7 @@ def run(reuse: bool, frames: int = 12):
                     example.state.body_q.numpy().copy(),
                     example.state.body_qd.numpy().copy(),
                     contacts.impulses.numpy().copy(),
-                    contacts.lambdas.numpy().copy(),
+                    contact_tile_rows_numpy(contacts, "lambdas").copy(),
                     example.contacts.rigid_contact_count.numpy().copy(),
                 )
             )

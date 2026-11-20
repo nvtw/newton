@@ -10,6 +10,7 @@ import warp as wp
 import newton
 from newton._src.solvers.phoenx.body import inertia_sym6_pack_np, inertia_sym6_unpack_np
 from newton._src.solvers.phoenx.constraints.constraint_contact_solve import rebase_ordinary_contact_relax_kernel
+from newton._src.solvers.phoenx.constraints.contact_container import contact_tile_rows_numpy, pack_contact_tiles
 from newton._src.solvers.phoenx.tests.test_rigid_normal_first import CopyStateContainer, ParticleContainer, _make_sweep
 from newton._src.solvers.phoenx.tests.test_stacking import _PhoenXScene
 
@@ -37,11 +38,11 @@ class TestContactRelaxMomentum(unittest.TestCase):
         values = current.impulses.numpy()
         values[:, :4] = np.arange(12, dtype=np.float32).reshape(3, 4) * 0.01
         current.impulses.assign(values)
-        references = current.lambdas.numpy().copy()
+        references = contact_tile_rows_numpy(current, "lambdas").copy()
         self.assertFalse(np.array_equal(values, world._contact_container.impulses.numpy()))
         world._refresh_owned_relax_geometry(wp.float32(60.0))
         np.testing.assert_array_equal(current.impulses.numpy(), values)
-        np.testing.assert_array_equal(current.lambdas.numpy(), references)
+        np.testing.assert_array_equal(contact_tile_rows_numpy(current, "lambdas"), references)
 
     def test_unpacked_rebase_is_independent_of_row_lanes(self):
         """Rebase every row once and identically for any lane count per column."""
@@ -67,10 +68,10 @@ class TestContactRelaxMomentum(unittest.TestCase):
         positions[1] += [0.01, -0.02, 0.005]
         positions[2] += [-0.015, 0.01, 0.02]
         world.bodies.position.assign(positions)
-        prepared = cc.derived.numpy().copy()
+        prepared = contact_tile_rows_numpy(cc, "derived").copy()
 
         def rebase(rows_per_column, column_stride):
-            cc.derived.assign(prepared)
+            cc.derived.assign(pack_contact_tiles(prepared))
             wp.launch(
                 rebase_ordinary_contact_relax_kernel,
                 dim=(column_stride, rows_per_column),
@@ -92,7 +93,7 @@ class TestContactRelaxMomentum(unittest.TestCase):
                 ],
                 device=scene.device,
             )
-            return cc.derived.numpy().copy()
+            return contact_tile_rows_numpy(cc, "derived").copy()
 
         reference = rebase(1, world.max_contact_columns)
         self.assertFalse(np.array_equal(reference[:, :8], prepared[:, :8]))
@@ -100,9 +101,9 @@ class TestContactRelaxMomentum(unittest.TestCase):
             with self.subTest(rows_per_column=rows_per_column, column_stride=column_stride):
                 np.testing.assert_array_equal(rebase(rows_per_column, column_stride), reference)
         # The solver's own launch shape produces the same rows.
-        cc.derived.assign(prepared)
+        cc.derived.assign(pack_contact_tiles(prepared))
         world._refresh_owned_relax_geometry(wp.float32(60.0))
-        np.testing.assert_array_equal(cc.derived.numpy(), reference)
+        np.testing.assert_array_equal(contact_tile_rows_numpy(cc, "derived"), reference)
 
     def test_free_pair_relaxation_uses_one_world_point(self):
         """Move COMs after prepare without moving the common impulse point."""
@@ -159,12 +160,12 @@ class TestContactRelaxMomentum(unittest.TestCase):
                 world.bodies.velocity.assign(velocities)
                 world.bodies.angular_velocity.zero_()
                 cc.impulses.zero_()
-                references = cc.lambdas.numpy()[6:12].copy()
+                references = contact_tile_rows_numpy(cc, "lambdas")[6:12].copy()
                 points0 = contacts.rigid_contact_point0.numpy().copy()
                 points1 = contacts.rigid_contact_point1.numpy().copy()
-                derived = cc.derived.numpy()
+                derived = contact_tile_rows_numpy(cc, "derived")
                 derived[3, :] = 0.0
-                cc.derived.assign(derived)
+                cc.derived.assign(pack_contact_tiles(derived))
                 masses = 1.0 / world.bodies.inverse_mass.numpy()[1:]
                 inertia = np.linalg.inv(
                     inertia_sym6_unpack_np(world.bodies.inverse_inertia_world.numpy()[1:]).astype(np.float64)
@@ -180,14 +181,14 @@ class TestContactRelaxMomentum(unittest.TestCase):
 
                 before = momentum()
                 world._refresh_owned_relax_geometry(wp.float32(1000.0))
-                prepared = cc.derived.numpy()
+                prepared = contact_tile_rows_numpy(cc, "derived")
                 mapping = world._active_contact_views().shape_body.numpy()
                 b0 = int(mapping[int(contacts.rigid_contact_shape0.numpy()[0])])
                 b1 = int(mapping[int(contacts.rigid_contact_shape1.numpy()[0])])
                 r0, r1 = prepared[9:12, 0], prepared[12:15, 0]
                 np.testing.assert_allclose(positions[b0] + r0, positions[b1] + r1, rtol=0.0, atol=1.0e-6)
-                normal = cc.lambdas.numpy()[:3, 0]
-                tangent = cc.lambdas.numpy()[3:6, 0]
+                normal = contact_tile_rows_numpy(cc, "lambdas")[:3, 0]
+                tangent = contact_tile_rows_numpy(cc, "lambdas")[3:6, 0]
                 for row, direction in enumerate((normal, tangent, np.cross(normal, tangent))):
                     a0, a1 = np.cross(r0, direction), np.cross(r1, direction)
                     mobility = 2.0 + a0 @ inverse_inertia[b0] @ a0 + a1 @ inverse_inertia[b1] @ a1
@@ -212,7 +213,7 @@ class TestContactRelaxMomentum(unittest.TestCase):
                 self.assertGreater(float(np.max(np.abs(cc.impulses.numpy()))), 0.1)
                 np.testing.assert_allclose(after[0], before[0], rtol=0.0, atol=1.0e-6)
                 np.testing.assert_allclose(after[1], before[1], rtol=0.0, atol=1.0e-6)
-                np.testing.assert_array_equal(cc.lambdas.numpy()[6:12], references)
+                np.testing.assert_array_equal(contact_tile_rows_numpy(cc, "lambdas")[6:12], references)
                 np.testing.assert_array_equal(contacts.rigid_contact_point0.numpy(), points0)
                 np.testing.assert_array_equal(contacts.rigid_contact_point1.numpy(), points1)
 

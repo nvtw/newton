@@ -17,7 +17,11 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     contact_column_container_zeros,
 )
 from newton._src.solvers.phoenx.constraints.constraint_contact_solve import _contact_group_is_separated
-from newton._src.solvers.phoenx.constraints.contact_container import contact_container_zeros
+from newton._src.solvers.phoenx.constraints.contact_container import (
+    contact_container_zeros,
+    contact_tile_rows_numpy,
+    pack_contact_tiles,
+)
 from newton._src.solvers.phoenx.temporal_contacts import (
     TEMPORAL_SURFACE_GAP_LANES,
     temporal_contact_gap_kernel,
@@ -65,9 +69,9 @@ class TestTemporalContactGroups(unittest.TestCase):
             bodies = body_container_zeros(2)
             bodies.velocity.assign(np.array([[0, 0, 0], [0, 0, 0.04]], dtype=np.float32))
             cc = contact_container_zeros(41, track_gap=True, surface_velocity=True)
-            basis = cc.lambdas.numpy()
+            basis = contact_tile_rows_numpy(cc, "lambdas")
             basis[2] = 1.0
-            cc.lambdas.assign(basis)
+            cc.lambdas.assign(pack_contact_tiles(basis))
             impulses = cc.impulses.numpy()
             impulses[2, 1] = 0.1
             cc.impulses.assign(impulses)
@@ -81,7 +85,7 @@ class TestTemporalContactGroups(unittest.TestCase):
                 (2, 8),
                 inputs=[*inputs, 8, 0.001, 1000.0, 5.0, 2, ContactViews(), None, 0.002, 1, 2],
             )
-            reference_gaps, reference_biases = cc.gap.numpy(), cc.derived.numpy()[3].copy()
+            reference_gaps, reference_biases = cc.gap.numpy(), contact_tile_rows_numpy(cc, "derived")[3].copy()
             cc.gap.assign(gaps)
             cc.derived.zero_()
             cc.separation_bounds = wp.zeros(41, dtype=wp.vec4f)
@@ -89,7 +93,7 @@ class TestTemporalContactGroups(unittest.TestCase):
                 temporal_surface_gap_kernel, (2, TEMPORAL_SURFACE_GAP_LANES), inputs=[*inputs, 0.001, 1000.0, 5.0, 2]
             )
             np.testing.assert_array_equal(cc.gap.numpy(), reference_gaps)
-            np.testing.assert_array_equal(cc.derived.numpy()[3], reference_biases)
+            np.testing.assert_array_equal(contact_tile_rows_numpy(cc, "derived")[3], reference_biases)
             bounds = cc.separation_bounds.numpy()[:, 0]
             np.testing.assert_array_equal(np.flatnonzero(bounds > 0), [4, 8, 12, 16, 20, 24, 28, 32, 37])
             self.assertLess(bounds[0], 0.0)

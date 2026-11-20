@@ -19,6 +19,8 @@ import unittest
 
 import warp as wp
 
+from newton._src.solvers.phoenx.constraints.contact_container import CC_DWORDS_PER_CONTACT, contact_tile_shape
+
 if not wp.get_preferred_device().is_cuda:
     raise unittest.SkipTest("PhoenX tests require CUDA")
 
@@ -195,7 +197,7 @@ class TestInvariants(unittest.TestCase):
         w = PhoenXWorld(**_make_kwargs(num_bodies=2, num_joints=1, rigid_contact_max=128, max_contact_columns=12))
         self.assertEqual(w.rigid_contact_max, 128)
         self.assertEqual(w.max_contact_columns, 12)
-        self.assertEqual(w._contact_container.lambdas.shape[1], 128)
+        self.assertEqual(w._contact_container.lambdas.shape, contact_tile_shape(CC_DWORDS_PER_CONTACT, 128))
         self.assertEqual(w._contact_cols.data.shape[1], 12)
         self.assertEqual(w._constraint_capacity, w.num_joints + 12)
 
