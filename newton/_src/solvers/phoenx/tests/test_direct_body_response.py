@@ -201,6 +201,23 @@ class TestDirectBodyResponse(unittest.TestCase):
             np.testing.assert_array_equal(direct.bodies.velocity.numpy()[:3], velocity[:3])
             np.testing.assert_array_equal(direct.bodies.angular_velocity.numpy()[:3], -velocity[:3])
 
+    def test_shared_spatial_workspace_is_independent_of_column_capacity(self):
+        """The same body basis serves every manifold on the mechanism."""
+        direct = _fixture("cpu")
+        sizes = []
+        for columns in (8, 128):
+            response = DirectContactResponse(direct, 128, columns)
+            self.assertTrue(response.shared_body_basis)
+            sizes.append(
+                sum(
+                    array.size
+                    for array in vars(response.data).values()
+                    if isinstance(array, wp.array) and array.dtype == wp.spatial_vector
+                )
+            )
+        self.assertGreater(sizes[0], 0)
+        self.assertEqual(sizes[0], sizes[1])
+
     def test_grouped_response_matches_column_response(self):
         """Match endpoint responses and deferred joint reactions exactly."""
         for device in dict.fromkeys(("cpu", self.device)):
@@ -229,12 +246,27 @@ class TestDirectBodyResponse(unittest.TestCase):
                 direct.solver.compute()
                 shared.compute(contacts)
                 legacy.compute(contacts)
-                for field in ("endpoint_response", "contact_response", "mobility"):
+                for field in ("contact_response", "mobility"):
                     np.testing.assert_array_equal(
                         getattr(shared.data, field).numpy().view(np.uint32),
                         getattr(legacy.data, field).numpy().view(np.uint32),
                         err_msg=field,
                     )
+                # Check the normal-axis twist against the dense constrained
+                # inverse mass, independently of either basis layout.
+                inverse = direct.dense_inverse_mass
+                jacobian = direct.dense_jacobian
+                constrained = inverse - inverse @ jacobian.T @ np.linalg.solve(
+                    jacobian @ inverse @ jacobian.T, jacobian @ inverse
+                )
+                twists = shared.data.contact_response.numpy()
+                for index, pair in enumerate(pairs):
+                    loads = np.zeros((6, 6))
+                    loads[pair[0]] = [0.0, 0.0, -1.0, -0.2, 0.1, 0.0]
+                    loads[pair[1]] = [0.0, 0.0, 1.0, 0.12, 0.15, 0.0]
+                    expected = np.zeros_like(loads)
+                    expected[1:] = (constrained @ loads[1:].ravel()).reshape(5, 6)
+                    np.testing.assert_allclose(twists[index, :, 0], expected[pair], rtol=2.0e-5, atol=2.0e-6)
                 # Body responses are indexed by basis slot: per body when shared,
                 # per column endpoint otherwise. Both must agree bitwise.
                 slots = []

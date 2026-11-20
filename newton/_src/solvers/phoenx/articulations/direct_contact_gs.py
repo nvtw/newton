@@ -12,6 +12,7 @@ from newton._src.solvers.phoenx.articulations.direct_contact_response import (
     DirectContactResponseData,
     _basis_slot_body,
     _endpoint_basis_item,
+    _push_response,
 )
 from newton._src.solvers.phoenx.articulations.fixed_pattern_llt import (
     GROUPED_RHS_ITEM_WIDTH,
@@ -342,19 +343,6 @@ def _body_twist(bodies: BodyContainer, body: wp.int32) -> wp.spatial_vector:
     linear = bodies.velocity[body]
     angular = bodies.angular_velocity[body]
     return wp.spatial_vectorf(linear[0], linear[1], linear[2], angular[0], angular[1], angular[2])
-
-
-@wp.func
-def _push_response(
-    response: DirectContactResponseData,
-    slot: wp.int32,
-    local_body: wp.int32,
-    wrench: wp.spatial_vector,
-) -> wp.spatial_vector:
-    twist = wp.spatial_vectorf(0.0)
-    for component in range(6):
-        twist += wrench[component] * response.body_response[slot, local_body, component]
-    return twist
 
 
 @wp.kernel(enable_backward=False)

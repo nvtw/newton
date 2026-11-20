@@ -54,7 +54,6 @@ class DirectContactResponseData:
     body_basis_item: wp.array[wp.int32]
     body_basis_task: wp.array[wp.int32]
     body_basis_active: wp.array[wp.int32]
-    endpoint_response: wp.array3d[wp.spatial_vector]
     contact_response: wp.array3d[wp.spatial_vector]
     mechanism_body_start: wp.array[wp.int32]
     mechanism_body: wp.array[wp.int32]
@@ -253,33 +252,55 @@ def _build_grouped_endpoint_equality_rhs_kernel(
 
 
 @wp.func
+def _push_response(
+    response: DirectContactResponseData,
+    slot: wp.int32,
+    local_body: wp.int32,
+    wrench: wp.spatial_vector,
+) -> wp.spatial_vector:
+    twist = wp.spatial_vectorf(0.0)
+    for component in range(6):
+        twist += wrench[component] * response.body_response[slot, local_body, component]
+    return twist
+
+
+@wp.func
 def _endpoint_twist_delta(
     response: DirectContactResponseData,
+    bodies: BodyContainer,
     column: wp.int32,
-    target_endpoint: wp.int32,
+    endpoint: wp.int32,
     wrench0: wp.spatial_vector,
     wrench1: wp.spatial_vector,
-) -> wp.spatial_vector:
-    result = wp.spatial_vectorf(0.0)
-    for source_endpoint in range(2):
+):
+    """Sum both contact wrenches through the same body basis used to apply impulses."""
+    target = response.column_body0[column]
+    mechanism = response.column_mechanism0[column]
+    if endpoint == 1:
+        target = response.column_body1[column]
+        mechanism = response.column_mechanism1[column]
+    twist = wp.spatial_vectorf(0.0)
+    for src in range(2):
+        body = response.column_body0[column]
         wrench = wrench0
-        if source_endpoint == wp.int32(1):
+        if src == 1:
+            body = response.column_body1[column]
             wrench = wrench1
-        source = source_endpoint * wp.int32(6)
-        force = wp.spatial_top(wrench)
-        torque = wp.spatial_bottom(wrench)
-        result += force[0] * response.endpoint_response[column, target_endpoint, source]
-        result += force[1] * response.endpoint_response[column, target_endpoint, source + wp.int32(1)]
-        result += force[2] * response.endpoint_response[column, target_endpoint, source + wp.int32(2)]
-        result += torque[0] * response.endpoint_response[column, target_endpoint, source + wp.int32(3)]
-        result += torque[1] * response.endpoint_response[column, target_endpoint, source + wp.int32(4)]
-        result += torque[2] * response.endpoint_response[column, target_endpoint, source + wp.int32(5)]
-    return result
+        if mechanism >= 0 and response.body_mechanism[body] == mechanism:
+            slot = _endpoint_basis_item(response, column, src, body) // 2
+            local = response.body_lane[target]
+            twist += _push_response(response, slot, local, wrench)
+        elif mechanism < 0 and target == body:
+            linear = bodies.inverse_mass[body] * wp.spatial_top(wrench)
+            angular = mat33_from_sym6(bodies.inverse_inertia_world[body]) * wp.spatial_bottom(wrench)
+            twist += wp.spatial_vectorf(linear[0], linear[1], linear[2], angular[0], angular[1], angular[2])
+    return twist
 
 
 @wp.kernel(enable_backward=False)
 def _compute_contact_endpoint_response_kernel(
     response: DirectContactResponseData,
+    bodies: BodyContainer,
     contacts: ContactContainer,
 ):
     contact, endpoint, axis = wp.tid()
@@ -302,6 +323,7 @@ def _compute_contact_endpoint_response_kernel(
     wrench1 = wp.spatial_vectorf(force1[0], force1[1], force1[2], torque1[0], torque1[1], torque1[2])
     response.contact_response[contact, endpoint, axis] = _endpoint_twist_delta(
         response,
+        bodies,
         response.contact_column[contact],
         endpoint,
         wrench0,
@@ -414,77 +436,6 @@ def _compute_contact_mobility_kernel(
     response.mobility[4, contact] = inverse02
     response.mobility[5, contact] = inverse12
     _store_tangent_eigenframe(response, contact)
-
-
-@wp.kernel(enable_backward=False)
-def _compute_column_endpoint_response_kernel(
-    response: DirectContactResponseData,
-    bodies: BodyContainer,
-):
-    column, target_endpoint, source = wp.tid()
-    if response.column_mechanism0[column] < wp.int32(0) and response.column_mechanism1[column] < wp.int32(0):
-        return
-    source_endpoint = source // wp.int32(6)
-    source_mechanism = response.column_mechanism0[column]
-    target_mechanism = response.column_mechanism0[column]
-    if source_endpoint == wp.int32(1):
-        source_mechanism = response.column_mechanism1[column]
-    if target_endpoint == wp.int32(1):
-        target_mechanism = response.column_mechanism1[column]
-    mechanism = source_mechanism
-    component = source - source_endpoint * wp.int32(6)
-    source_body = response.column_body0[column]
-    target_body = response.column_body0[column]
-    if source_endpoint == wp.int32(1):
-        source_body = response.column_body1[column]
-    if target_endpoint == wp.int32(1):
-        target_body = response.column_body1[column]
-
-    force = wp.vec3(0.0)
-    torque = wp.vec3(0.0)
-    axis = component
-    if component < wp.int32(3):
-        force = _unit_axis(component)
-    else:
-        axis = component - wp.int32(3)
-        torque = _unit_axis(axis)
-
-    corrected_wrench = wp.spatial_vectorf(0.0)
-    if source_mechanism >= wp.int32(0) and target_mechanism == source_mechanism:
-        item = _endpoint_basis_item(response, column, source_endpoint, source_body)
-        item_column = component
-        if component >= wp.int32(3):
-            item += wp.int32(1)
-            item_column -= wp.int32(3)
-        for incidence in range(
-            response.body_row_start[target_body],
-            response.body_row_start[target_body + wp.int32(1)],
-        ):
-            row = response.body_rows[incidence]
-            joint = response.row_joint[row]
-            local_row = row - response.mechanism_row_start[mechanism]
-            offset = item * response.workspace_stride + local_row * wp.int32(GROUPED_RHS_ITEM_WIDTH) + item_column
-            corrected_wrench -= (
-                response.row_scale[row]
-                * response.solution[offset]
-                * _row_wrench_for_body(
-                    target_body,
-                    joint,
-                    response.joint_to_structural[joint],
-                    response.row_local[row],
-                    response.joint_parent,
-                    response.joint_child,
-                    response.row_wrench0,
-                    response.row_wrench1,
-                )
-            )
-    if target_body == source_body:
-        corrected_wrench += wp.spatial_vectorf(force[0], force[1], force[2], torque[0], torque[1], torque[2])
-    linear = bodies.inverse_mass[target_body] * wp.spatial_top(corrected_wrench)
-    angular = mat33_from_sym6(bodies.inverse_inertia_world[target_body]) * wp.spatial_bottom(corrected_wrench)
-    response.endpoint_response[column, target_endpoint, source] = wp.spatial_vectorf(
-        linear[0], linear[1], linear[2], angular[0], angular[1], angular[2]
-    )
 
 
 @wp.kernel(enable_backward=False)
@@ -691,8 +642,6 @@ class DirectContactResponse:
         self.data.gram = self.contact_batch.gram
         # A manifold's response is fully described by the two endpoint
         # twists under twelve endpoint spatial-wrench basis vectors.
-        self.endpoint_response_dim = (column_capacity, 2, 12)
-        self.data.endpoint_response = wp.zeros(self.endpoint_response_dim, dtype=wp.spatial_vector, device=device)
         self.contact_response_dim = (capacity, 2, 3)
         self.data.contact_response = wp.zeros(self.contact_response_dim, dtype=wp.spatial_vector, device=device)
         self.data.mobility = wp.zeros((10, capacity), dtype=wp.float32, device=device)
@@ -763,27 +712,21 @@ class DirectContactResponse:
                 device=self.direct.model.device,
             )
         wp.launch(
-            _compute_column_endpoint_response_kernel,
-            dim=self.endpoint_response_dim,
+            _compute_body_response_kernel,
+            dim=self.body_response_dim,
             inputs=[self.data, self.direct.bodies],
             device=self.direct.model.device,
         )
         wp.launch(
             _compute_contact_endpoint_response_kernel,
             dim=self.contact_response_dim,
-            inputs=[self.data, contacts],
+            inputs=[self.data, self.direct.bodies, contacts],
             device=self.direct.model.device,
         )
         wp.launch(
             _compute_contact_mobility_kernel,
             dim=self.contact_mechanism.shape[0],
             inputs=[self.data, self.direct.bodies, contacts],
-            device=self.direct.model.device,
-        )
-        wp.launch(
-            _compute_body_response_kernel,
-            dim=self.body_response_dim,
-            inputs=[self.data, self.direct.bodies],
             device=self.direct.model.device,
         )
 
