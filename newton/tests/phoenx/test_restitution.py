@@ -13,6 +13,38 @@ from newton.solvers import SolverPhoenX
 
 
 class TestRestitution(unittest.TestCase):
+    def test_fast_separated_contact_preserves_approach_velocity(self):
+        """Allow fast motion when the body cannot reach the surface this step."""
+        builder = newton.ModelBuilder(gravity=wp.vec3(0.0))
+        cfg = builder.ShapeConfig(gap=0.05, mu=0.0, mu_static=0.0)
+        builder.add_ground_plane(cfg=cfg)
+        body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.14)))
+        builder.add_shape_sphere(body, radius=0.1, cfg=cfg)
+        model = builder.finalize(device="cpu")
+        pipeline = newton.CollisionPipeline(
+            model, rigid_contact_max=8, contact_matching="sticky", speculative_contact_gap_max=0.055
+        )
+        solver = SolverPhoenX(
+            model,
+            collision_pipeline=pipeline,
+            substeps=1,
+            solver_iterations=4,
+            velocity_iterations=1,
+            step_layout="single_world",
+        )
+        state, result = model.state(), model.state()
+        velocity = state.body_qd.numpy()
+        velocity[body, 2] = -20.0
+        state.body_qd.assign(velocity)
+        contacts = pipeline.contacts()
+        dt = 0.001
+
+        pipeline.collide(state, contacts, dt=dt)
+        self.assertEqual(int(contacts.rigid_contact_count.numpy()[0]), 1)
+        solver.step(state, result, model.control(), contacts, dt)
+        self.assertAlmostEqual(float(result.body_qd.numpy()[body, 2]), -20.0, places=5)
+        self.assertAlmostEqual(float(result.body_q.numpy()[body, 2]), 0.12, places=6)
+
     def test_mixed_restitution_rebound_and_rest(self):
         """Recover the pair's restitution on impact while a resting bouncy sphere stays supported."""
         with wp.ScopedDevice("cpu"):

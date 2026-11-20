@@ -186,9 +186,8 @@ __all__ = [
 ]
 
 
-#: Normal-row speed caps [m/s]: depenetration push and speculative approach.
+#: Maximum speed [m/s] added by penetration recovery.
 _CONTACT_MAX_PUSH_SPEED = wp.constant(wp.float32(2.0))
-_CONTACT_MAX_APPROACH_SPEED = wp.constant(wp.float32(10.0))
 
 
 @wp.func
@@ -199,10 +198,9 @@ def contact_normal_bias(gap: wp.float32, idt: wp.float32, bias_rate: wp.float32)
     gap within the substep; a penetrating row pushes out at the soft-contact
     rate.
     """
-    bias = gap * bias_rate
     if gap > wp.float32(0.0):
-        bias = gap * idt
-    return wp.clamp(bias, -_CONTACT_MAX_PUSH_SPEED, _CONTACT_MAX_APPROACH_SPEED)
+        return gap * idt
+    return wp.max(gap * bias_rate, -_CONTACT_MAX_PUSH_SPEED)
 
 
 # The uncapped default contact hertz is Nyquist-clamped whenever idt <= 2*hertz.
