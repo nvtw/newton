@@ -1691,6 +1691,15 @@ class SolverPhoenX(SolverBase):
         """Stream Model's per-shape (mu_static, mu_dynamic, restitution) into
         PhoenX's material table; each shape gets its own material index."""
 
+        defaults = newton.ModelBuilder.ShapeConfig()
+        default_coefficients = np.array([defaults.ke, defaults.kd], dtype=np.float32)
+        coefficients = np.column_stack((self.model.shape_material_ke.numpy(), self.model.shape_material_kd.numpy()))
+        self.world._shape_contact_compliance = None
+        if np.any(coefficients != default_coefficients):
+            self.world._shape_contact_compliance = (
+                wp.array(coefficients, dtype=wp.vec2f, device=self.device),
+                wp.vec2f(*default_coefficients),
+            )
         mu_np = self.model.shape_material_mu.numpy()
         mu_static_np = self.model.shape_material_mu_static.numpy()
         restitution = (

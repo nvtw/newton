@@ -41,9 +41,9 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     contact_get_body2,
     contact_get_contact_count,
     contact_get_contact_first,
+    contact_pd_coefficients,
 )
 from newton._src.solvers.phoenx.constraints.constraint_contact_solve import contact_normal_bias
-from newton._src.solvers.phoenx.constraints.constraint_container import pd_coefficients
 from newton._src.solvers.phoenx.constraints.contact_container import (
     ContactContainer,
     cc_get_eff_n,
@@ -61,7 +61,6 @@ from newton._src.solvers.phoenx.constraints.contact_warm_start import (
     gathered_contact_impulse,
 )
 from newton._src.solvers.phoenx.islands.island_builder import _find, _pack_entry, _unite
-from newton._src.solvers.phoenx.solver_config import PHOENX_BOOST_CONTACT_NORMAL
 
 # One CUDA warp advances one column, reducing bounds across four adjacent rows.
 TEMPORAL_SURFACE_GAP_LANES = 32
@@ -175,8 +174,6 @@ def temporal_contact_gap_kernel(
     coefficients use that same timestep and the updated penetration depth.
     """
     previous_start = native_dt * float(wp.max(0, sweep - 1)) / float(sweeps)
-    stiffness = views.rigid_contact_stiffness
-    damping = views.rigid_contact_damping
     first_column, lane = wp.tid()
     for cid in range(first_column, column_count[0], column_stride):
         if owner[cid] >= wp.int32(0):
@@ -211,25 +208,16 @@ def temporal_contact_gap_kernel(
                     continue
                 if target[0] < 0.0:
                     cc_set_pd_eff_soft(cc, k, 0.0)
-            if stiffness.shape[0] > k or damping.shape[0] > k:
-                k_n = wp.float32(0.0)
-                c_n = wp.float32(0.0)
-                if stiffness.shape[0] > k:
-                    k_n = stiffness[k]
-                if damping.shape[0] > k:
-                    c_n = damping[k]
+            if (
+                views.rigid_contact_stiffness.shape[0] > k
+                or views.rigid_contact_damping.shape[0] > k
+                or views.shape_compliance.shape[0] > 0
+            ):
                 eff_n = cc_get_eff_n(cc, k)
-                gamma = wp.float32(0.0)
-                bias = wp.float32(0.0)
-                eff_soft = wp.float32(0.0)
-                if gap <= wp.float32(0.0) and eff_n > wp.float32(0.0):
-                    gamma, bias, eff_soft = pd_coefficients(
-                        k_n,
-                        c_n,
-                        -gap,
-                        wp.float32(1.0) / eff_n,
-                        wp.float32(1.0) / idt,
-                        PHOENX_BOOST_CONTACT_NORMAL,
+                gamma, bias, eff_soft = wp.float32(0.0), wp.float32(0.0), wp.float32(0.0)
+                if gap <= 0.0 and eff_n > 0.0:
+                    gamma, bias, eff_soft = contact_pd_coefficients(
+                        views, k, -gap, wp.float32(1.0) / eff_n, wp.float32(1.0) / idt
                     )
                 cc_set_pd_gamma(cc, k, gamma)
                 cc_set_pd_bias(cc, k, bias)

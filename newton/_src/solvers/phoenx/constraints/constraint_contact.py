@@ -30,6 +30,7 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     ConstraintBodies,
     assert_constraint_header,
     constraint_bodies_make,
+    pd_coefficients,
 )
 from newton._src.solvers.phoenx.constraints.contact_container import (
     CC_DERIVED_DWORDS_PER_CONTACT,
@@ -77,6 +78,7 @@ from newton._src.solvers.phoenx.helpers.data_packing import (
 )
 from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
 from newton._src.solvers.phoenx.particle import ParticleContainer
+from newton._src.solvers.phoenx.solver_config import PHOENX_BOOST_CONTACT_NORMAL
 
 __all__ = [
     "CONTACT_DWORDS",
@@ -700,6 +702,9 @@ class ContactViews:
     #: back to the legacy Box2D hertz-based normal row.
     rigid_contact_stiffness: wp.array[wp.float32]
     rigid_contact_damping: wp.array[wp.float32]
+    #: Shape-authored (stiffness, damping), empty when all shapes use the defaults.
+    shape_compliance: wp.array[wp.vec2f]
+    default_shape_compliance: wp.vec2f
     #: Per-contact friction scale. ``0`` leaves material friction unchanged.
     rigid_contact_friction: wp.array[wp.float32]
     #: Surface velocity of shape 1 minus shape 0 [m/s] (conveyor surfaces), or empty.
@@ -764,6 +769,32 @@ def contact_views_make(
     v.side_witness0 = side_witness0 if side_witness0 is not None else empty_witness
     v.side_witness1 = side_witness1 if side_witness1 is not None else empty_witness
     return v
+
+
+@wp.func
+def contact_pd_coefficients(
+    views: ContactViews, row: wp.int32, depth: wp.float32, inverse_mass: wp.float32, dt: wp.float32
+):
+    """Resolve an explicit contact override or the authored arithmetic-mean shape spring."""
+    k, d = wp.float32(0.0), wp.float32(0.0)
+    if row < views.rigid_contact_stiffness.shape[0]:
+        k = views.rigid_contact_stiffness[row]
+    if row < views.rigid_contact_damping.shape[0]:
+        d = views.rigid_contact_damping[row]
+    if k > 0.0 or d > 0.0:
+        return pd_coefficients(k, d, depth, inverse_mass, dt, PHOENX_BOOST_CONTACT_NORMAL)
+
+    count = views.shape_compliance.shape[0]
+    if count > 0:
+        a, b = views.rigid_contact_shape0[row], views.rigid_contact_shape1[row]
+        if 0 <= a and a < count and 0 <= b and b < count:
+            first, second = views.shape_compliance[a], views.shape_compliance[b]
+            defaults = views.default_shape_compliance
+            if wp.length_sq(first - defaults) != 0.0 or wp.length_sq(second - defaults) != 0.0:
+                coefficients = 0.5 * (first + second)
+                # Preserve the physical static deflection F/k at every timestep.
+                return pd_coefficients(coefficients[0], coefficients[1], depth, inverse_mass, dt, wp.float32(0.0))
+    return wp.float32(0.0), wp.float32(0.0), wp.float32(0.0)
 
 
 @wp.func

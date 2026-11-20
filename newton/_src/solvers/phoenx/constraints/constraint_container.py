@@ -732,10 +732,10 @@ def pd_coefficients(
     if stiffness <= 0.0 and damping <= 0.0:
         return wp.float32(0.0), wp.float32(0.0), wp.float32(0.0)
 
-    # Nyquist clamp on k: beyond ~1/(M_inv * dt^2) PGS sees a rigid row.
-    boost = wp.clamp(nyquist_boost, wp.float32(1.0), _PD_NYQUIST_HEADROOM_MAX)
-    k_max = boost / (eff_mass_inv * dt * dt)
-    k_clamped = wp.min(stiffness, k_max)
+    k_clamped = stiffness
+    if nyquist_boost > 0.0:
+        boost = wp.clamp(nyquist_boost, wp.float32(1.0), _PD_NYQUIST_HEADROOM_MAX)
+        k_clamped = wp.min(stiffness, boost / (eff_mass_inv * dt * dt))
 
     softness = wp.float32(1.0) / (damping + dt * k_clamped)
     bias_factor = dt * k_clamped * softness

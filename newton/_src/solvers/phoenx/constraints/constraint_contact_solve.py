@@ -51,6 +51,7 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     contact_get_side1_slots_extra,
     contact_get_slot1,
     contact_get_slot2,
+    contact_pd_coefficients,
     contact_set_packed_body_properties,
     contact_side_witness,
 )
@@ -58,7 +59,6 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
     DEFAULT_HERTZ_CONTACT,
     ConstraintBodies,
     constraint_bodies_make,
-    pd_coefficients,
 )
 from newton._src.solvers.phoenx.constraints.contact_container import (
     ContactContainer,
@@ -156,7 +156,6 @@ from newton._src.solvers.phoenx.mass_splitting.access import (
 )
 from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
 from newton._src.solvers.phoenx.particle import ParticleContainer
-from newton._src.solvers.phoenx.solver_config import PHOENX_BOOST_CONTACT_NORMAL
 
 __all__ = [
     "contact_cached_warmstart_lean",
@@ -929,25 +928,14 @@ def _make_contact_prepare_for_iteration_at(
             # Scenes without stiffness/damping arrays use a specialised iterate
             # variant and skip these per-contact scratch writes entirely.
             if wp.static(has_soft_contact_pd):
-                stiffness_arr_len = contacts.rigid_contact_stiffness.shape[0]
-                damping_arr_len = contacts.rigid_contact_damping.shape[0]
-                if stiffness_arr_len > k or damping_arr_len > k:
-                    k_n = wp.float32(0.0)
-                    c_n = wp.float32(0.0)
-                    if stiffness_arr_len > k:
-                        k_n = contacts.rigid_contact_stiffness[source_k]
-                    if damping_arr_len > k:
-                        c_n = contacts.rigid_contact_damping[source_k]
-                    if (
-                        (k_n > wp.float32(0.0) or c_n > wp.float32(0.0))
-                        and eff_n > wp.float32(0.0)
-                        and solver_gap <= wp.float32(0.0)
-                    ):
-                        eff_inv_n = wp.float32(1.0) / eff_n
-                        # ``-effective_gap`` flips sign so spring depth is +ve
-                        # for penetration; matches the lam_n >= 0 clamp.
-                        pd_gamma_n, pd_bias_n, pd_eff_soft_n = pd_coefficients(
-                            k_n, c_n, -effective_gap, eff_inv_n, dt_substep, PHOENX_BOOST_CONTACT_NORMAL
+                if (
+                    contacts.rigid_contact_stiffness.shape[0] > source_k
+                    or contacts.rigid_contact_damping.shape[0] > source_k
+                    or contacts.shape_compliance.shape[0] > 0
+                ):
+                    if eff_n > 0.0 and solver_gap <= 0.0:
+                        pd_gamma_n, pd_bias_n, pd_eff_soft_n = contact_pd_coefficients(
+                            contacts, source_k, -effective_gap, wp.float32(1.0) / eff_n, dt_substep
                         )
                         cc_set_pd_gamma(cc, k, pd_gamma_n)
                         cc_set_pd_bias(cc, k, pd_bias_n)

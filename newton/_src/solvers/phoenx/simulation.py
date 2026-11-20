@@ -1401,6 +1401,7 @@ class PhoenXWorld:
             else None
         )
 
+        self._shape_contact_compliance = None
         self._contact_views: ContactViews | None = None
         self._has_soft_contact_pd: bool = False
         self._temporal_separation_bounds = None
@@ -3714,7 +3715,11 @@ class PhoenXWorld:
             contact_damping_src is not None and int(contact_damping_src.shape[0]) > 0
         )
         has_surface_velocity = surface_velocity_src is not None and surface_velocity_src.shape[0] > 0
-        has_normal_targets = has_material_coefficients or self._restitution_targets is not None
+        has_normal_targets = (
+            has_material_coefficients
+            or self._shape_contact_compliance is not None
+            or self._restitution_targets is not None
+        )
         self._has_soft_contact_pd = has_normal_targets or has_surface_velocity
         self._moving_surface_only = has_surface_velocity and not has_normal_targets
         contact_stiffness = contact_stiffness_src if contact_stiffness_src is not None else self._soft_contact_sentinel
@@ -3833,6 +3838,11 @@ class PhoenXWorld:
                 rigid_contact_surface_velocity=contacts.rigid_contact_surface_velocity,
                 side_witness0=self._side_witness0,
                 side_witness1=self._side_witness1,
+            )
+
+        if self._shape_contact_compliance is not None:
+            self._contact_views.shape_compliance, self._contact_views.default_shape_compliance = (
+                self._shape_contact_compliance
             )
 
         if self._restitution_targets is not None:

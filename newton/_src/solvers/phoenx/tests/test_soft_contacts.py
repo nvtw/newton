@@ -256,6 +256,23 @@ class TestSoftContactAnalyticalDepth(unittest.TestCase):
     SETTLE_FRAMES = 400  # ~1.7 s
     RADIUS = 0.1
 
+    def test_authored_shape_spring_and_contact_override(self):
+        """The mean shape stiffness supports mg/k, and a contact override takes precedence."""
+        for override, expected_stiffness in ((False, 300_000.0), (True, 1200.0)):
+            with self.subTest(override=override):
+                builder = newton.ModelBuilder()
+                body = _add_sphere_on_ground(builder, radius=self.RADIUS, mass=1.0)
+                builder.shape_material_ke[:] = [200_000.0, 400_000.0]
+                builder.shape_material_kd[:] = [200.0, 400.0]
+                model, state, target, contacts, solver = _finalize_phoenx(
+                    builder, per_contact_shape_properties=override, substeps=1, solver_iterations=4
+                )
+                for _ in range(90):
+                    _step_soft(model, solver, state, target, contacts, 1.0 / 60.0, 1200.0, 70.0)
+                    state, target = target, state
+                depth = self.RADIUS - float(state.body_q.numpy()[body, 2])
+                self.assertAlmostEqual(depth, _G / expected_stiffness, delta=2.0e-6)
+
     def _settle_and_measure_depth(
         self,
         *,
