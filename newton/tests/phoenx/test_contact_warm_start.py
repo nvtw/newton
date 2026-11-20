@@ -8,6 +8,7 @@ import unittest
 import numpy as np
 import warp as wp
 
+import newton
 from newton._src.solvers.phoenx.body import BodyContainer, body_container_zeros, inertia_sym6
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
     ContactColumnContainer,
@@ -97,6 +98,40 @@ def _colored_reference(
 
 
 class TestContactWarmStart(unittest.TestCase):
+    def test_friction_anchor_preserves_local_witness_precision(self):
+        """A common world translation leaves both tangential friction references unchanged."""
+        with wp.ScopedDevice("cpu"):
+            builder = newton.ModelBuilder(gravity=(0, 0, 0))
+            offset = (0.0234567, 0.0156789, 0.0)
+            for z in (1.0, 1.099):
+                body = builder.add_body(
+                    xform=wp.transform((0, 0, z), wp.quat_identity()),
+                    mass=1,
+                    inertia=wp.mat33(np.eye(3)),
+                    lock_inertia=True,
+                )
+                builder.add_shape_sphere(body, xform=wp.transform(offset, wp.quat_identity()), radius=0.05)
+            model = builder.finalize()
+            pipeline = newton.CollisionPipeline(model, contact_matching="sticky", rigid_contact_max=8)
+            solver = newton.solvers.SolverPhoenX(
+                model,
+                collision_pipeline=pipeline,
+                step_layout="single_world",
+                joint_mode="maximal_pgs",
+                substeps=1,
+                solver_iterations=1,
+            )
+            state, contacts = model.state(), pipeline.contacts()
+            pipeline.collide(state, contacts)
+            self.assertEqual(int(contacts.rigid_contact_count.numpy()[0]), 1)
+            poses = state.body_q.numpy()
+            poses[:, :2] += (73.0, 43.0)
+            state.body_q.assign(poses)
+            solver.step(state, state, model.control(), contacts, 1 / 120)
+            anchors = solver.world._contact_container.lambdas.numpy()[6:12, 0].reshape(2, 3)
+            for anchor in anchors:
+                np.testing.assert_allclose(anchor[:2], offset[:2], atol=1e-8, rtol=0)
+
     @staticmethod
     def _fixture(rows=2):
         columns = contact_column_container_zeros(7)

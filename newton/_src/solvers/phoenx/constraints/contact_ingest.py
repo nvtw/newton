@@ -1025,15 +1025,11 @@ def _contact_warmstart_gather_kernel(
             com2 = bodies.body_com[b2]
             local0, extra0 = contact_side_witness(contacts, k, wp.int32(0))
             local1, extra1 = contact_side_witness(contacts, k, wp.int32(1))
-            witness0 = p1 + wp.quat_rotate(q1, local0 - com1)
-            witness1 = p2 + wp.quat_rotate(q2, local1 - com2)
-            point = wp.float32(0.5) * (
-                witness0
-                + witness1
-                + (contacts.rigid_contact_margin0[k] + extra0 - contacts.rigid_contact_margin1[k] - extra1) * n
-            )
-            cc_set_friction_anchor0(cc, k, com1 + wp.quat_rotate_inv(q1, point - p1))
-            cc_set_friction_anchor1(cc, k, com2 + wp.quat_rotate_inv(q2, point - p2))
+            r0 = wp.quat_rotate(q1, local0 - com1) + (contacts.rigid_contact_margin0[k] + extra0) * n
+            r1 = wp.quat_rotate(q2, local1 - com2) - (contacts.rigid_contact_margin1[k] + extra1) * n
+            half_delta = wp.float32(0.5) * ((p2 - p1) + (r1 - r0))
+            cc_set_friction_anchor0(cc, k, com1 + wp.quat_rotate_inv(q1, r0 + half_delta))
+            cc_set_friction_anchor1(cc, k, com2 + wp.quat_rotate_inv(q2, r1 - half_delta))
 
     uses_start_gap = _contact_uses_stale_anchor_start_gap(contacts, k)
     if uses_start_gap or reuse:
