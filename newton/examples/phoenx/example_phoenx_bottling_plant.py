@@ -46,6 +46,44 @@ from newton.geometry import BroadPhaseImplicitTree
 from newton.solvers import SolverPhoenX
 
 
+def _local_fixture_drives(builder: newton.ModelBuilder) -> list[int]:
+    """Use the contact timestep for independent rollers and stops on world-fixed packing fixtures."""
+    incident = [[] for _ in builder.body_flags]
+    for joint, (parent, child) in enumerate(zip(builder.joint_parent, builder.joint_child, strict=True)):
+        if parent >= 0:
+            incident[parent].append(joint)
+        if child >= 0:
+            incident[child].append(joint)
+
+    local = []
+    for weld, kind in enumerate(builder.joint_type):
+        if kind != newton.JointType.FIXED or builder.joint_parent[weld] != -1 or not builder.joint_enabled[weld]:
+            continue
+        mount = builder.joint_child[weld]
+        if mount < 0:
+            continue
+        drives = [joint for joint in incident[mount] if joint != weld]
+        if not all(
+            builder.joint_parent[j] == mount
+            and builder.joint_type[j] in (newton.JointType.PRISMATIC, newton.JointType.REVOLUTE)
+            and builder.joint_child[j] >= 0
+            and len(incident[builder.joint_child[j]]) == 1
+            for j in drives
+        ):
+            continue
+        has_stop = any(
+            builder.joint_type[j] == newton.JointType.PRISMATIC
+            and builder.joint_target_ke[builder.joint_qd_start[j]] > 0
+            for j in drives
+        )
+        if has_stop and any(builder.joint_type[j] == newton.JointType.REVOLUTE for j in drives):
+            # The permanent world weld prescribes the mount pose. Its reaction
+            # cannot couple the roller and stop velocities through the mount.
+            builder.body_flags[mount] = int(newton.BodyFlags.KINEMATIC)
+            local.extend(drives)
+    return local
+
+
 @wp.struct
 class _PlantFilter:
     product: wp.array[wp.int32]
@@ -138,6 +176,9 @@ class Example:
         # Several source actuator tensors are positive definite but violate
         # the triangle inequality. Keep those authored approximations unless
         # the caller explicitly asks Newton to balance them.
+        local_drives = []
+        if args.temporal_iterations and args.joint_mode == "maximal_pgs" and not args.motor_off:
+            local_drives = _local_fixture_drives(self.scene.builder)
         self.model = self.scene.builder.finalize(skip_validation_inertia=not args.correct_inertia)
         initial_state = self.model.state()
         newton.eval_ik(self.model, initial_state, self.model.joint_q, self.model.joint_qd)
@@ -218,6 +259,7 @@ class Example:
                 ],
                 dtype=bool,
             )
+            exact[local_drives] = False
             self.solver = SolverPhoenX(
                 self.model,
                 collision_pipeline=self.pipeline,

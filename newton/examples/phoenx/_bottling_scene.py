@@ -662,7 +662,7 @@ def load_plant(asset_root: Path, *, cutaway=True, visuals=True, motor_off=False,
         pose, scale = transform(local)
         cfg = newton.ModelBuilder.ShapeConfig(
             density=1000.0 if collision else 0.0,
-            gap=max(0.0, float(_value(prim, "physxCollision:contactOffset", 0.002))),
+            gap=max(0.0, float(_value(prim, "physxCollision:contactOffset", 0.001))),
             margin=float(_value(prim, "physxCollision:restOffset", 0.0)),
             has_shape_collision=collision,
             has_particle_collision=False,

@@ -32,13 +32,35 @@ from newton.examples.phoenx._bottling_wrap import (
     correct_wrapper_frame,
     mesh_components,
 )
-from newton.examples.phoenx.example_phoenx_bottling_plant import Example
+from newton.examples.phoenx.example_phoenx_bottling_plant import Example, _local_fixture_drives
 from newton.tests.unittest_utils import requires
 from newton.viewer import ViewerNull
 
 
 @requires("pxr.Usd")
 class TestBottlingPlant(unittest.TestCase):
+    def test_packing_fixture_drive_ownership(self):
+        """Only independent roller and stop axes on a world-fixed mount use local contact steps."""
+        builder = newton.ModelBuilder()
+        expected = []
+        mounts = []
+        for kind in ("packing", "linked", "unwelded", "conveyor"):
+            mount, roller, stop = (builder.add_link() for _ in range(3))
+            mounts.append(mount)
+            if kind != "unwelded":
+                builder.add_joint_fixed(-1, mount)
+            spindle = builder.add_joint_revolute(mount, roller)
+            if kind != "conveyor":
+                slide = builder.add_joint_prismatic(mount, stop, target_ke=1000.0)
+                if kind == "packing":
+                    expected.extend((spindle, slide))
+                elif kind == "linked":
+                    builder.add_joint_fixed(stop, builder.add_link())
+
+        self.assertEqual(_local_fixture_drives(builder), expected)
+        self.assertEqual(builder.body_flags[mounts[0]], newton.BodyFlags.KINEMATIC)
+        self.assertTrue(all(builder.body_flags[m] == newton.BodyFlags.DYNAMIC for m in mounts[1:]))
+
     def test_palletizer_places_off_center_grasps(self):
         """Keep the carried carton centered through a turn without changing the authored timing or tool height."""
         times = np.array([0.0, 0.5, 1.0])
@@ -798,7 +820,7 @@ class TestBottlingPlant(unittest.TestCase):
 
     def test_offset_box_hulls_preserve_exact_geometry(self):
         """Recognize float32 box corners without replacing tapered hulls."""
-        from pxr import Usd, UsdGeom, UsdPhysics
+        from pxr import Sdf, Usd, UsdGeom, UsdPhysics
 
         with tempfile.TemporaryDirectory() as directory, wp.ScopedDevice("cpu"):
             root = Path(directory)
@@ -816,6 +838,7 @@ class TestBottlingPlant(unittest.TestCase):
                 vertices = points.copy()
                 if name == "Tapered":
                     vertices[4:, 0] *= 0.99
+                    mesh.GetPrim().CreateAttribute("physxCollision:contactOffset", Sdf.ValueTypeNames.Float).Set(0.002)
                 mesh.CreatePointsAttr(vertices.tolist())
                 mesh.CreateFaceVertexCountsAttr([4] * 6)
                 mesh.CreateFaceVertexIndicesAttr(
@@ -830,6 +853,8 @@ class TestBottlingPlant(unittest.TestCase):
             tapered = builder.shape_label.index("/Plant/Tapered/collision")
             self.assertEqual(builder.shape_type[box], newton.GeoType.BOX)
             self.assertEqual(builder.shape_type[tapered], newton.GeoType.CONVEX_MESH)
+            self.assertAlmostEqual(builder.shape_gap[box], 0.001)
+            self.assertAlmostEqual(builder.shape_gap[tapered], 0.002)
             center = np.asarray(builder.shape_transform[box].p)
             half = np.asarray(builder.shape_scale[box])
             np.testing.assert_allclose(center - half, points.min(axis=0), rtol=0, atol=2e-8)
