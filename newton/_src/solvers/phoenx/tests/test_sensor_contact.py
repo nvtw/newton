@@ -74,8 +74,7 @@ def _step_with_sensor_graph(
     *,
     n_frames: int,
 ) -> None:
-    """Run ``n_frames`` of (collide, step, update_contacts, sensor.update)
-    through CUDA graph capture.
+    """Run ``n_frames`` of collision, solver observables, and sensor updates in a CUDA graph.
 
     First call performs a warm-up step eagerly (compiles every kernel
     Warp will touch and primes any lazy scratch allocations); the next
@@ -84,14 +83,14 @@ def _step_with_sensor_graph(
     """
     device = wp.get_device()
     assert device.is_cuda, "graph-captured sensor tests require CUDA"
+    observables = solver.observables(kinds=SensorContact.solver_observable_kinds, contacts=contacts)
 
     def _frame() -> None:
         state_in.clear_forces()
         model.collide(state_in, contacts)
-        solver.step(state_in, state_out, control, contacts, _DT)
-        solver.update_contacts(contacts, state_out)
-        for s in sensors:
-            s.update(state_out, contacts)
+        solver.step(state_in, state_out, control, contacts, _DT, observables=observables)
+        for sensor in sensors:
+            sensor.update(state_out, contacts, observables=observables)
         # Mirror the new pose back into ``state_in`` so the next frame
         # begins from the just-integrated state. Tests reuse a single
         # ``state_in`` / ``state_out`` pair to keep the graph
@@ -672,7 +671,7 @@ class TestSensorContactPhoenX(unittest.TestCase):
         friction component must be orthogonal to the contact normal.
 
         The sensor's :func:`accumulate_contact_forces_kernel` derives
-        friction by projecting ``contacts.force`` onto
+        friction by projecting ``observables.contact_f`` onto
         ``rigid_contact_normal`` and storing the residual. Two
         invariants pin the readback:
 
@@ -1019,12 +1018,8 @@ class TestSensorContactPhoenX(unittest.TestCase):
     # Attribute-request flow
     # ------------------------------------------------------------------
 
-    def test_request_force_attribute_flow(self) -> None:
-        """Constructing ``SensorContact`` before ``model.contacts()``
-        must implicitly request the ``force`` extended attribute, so
-        the resulting ``Contacts`` object has ``force`` allocated and
-        ``solver.update_contacts()`` works without manual setup.
-        """
+    def test_contact_force_observable_flow(self) -> None:
+        """Request the contact force observable used by a default sensor."""
         builder = newton.ModelBuilder()
         builder.add_ground_plane()
         body = builder.add_body(
@@ -1040,19 +1035,13 @@ class TestSensorContactPhoenX(unittest.TestCase):
         )
         model = builder.finalize()
 
-        # Sensor first -- must request "force" before the Contacts
-        # buffer is built.
-        SensorContact(model, sensing_shapes="ball", verbose=False)
-        self.assertIn("force", model.get_requested_contact_attributes())
-
-        # ``SolverPhoenX.__init__`` builds a CollisionPipeline; the
-        # subsequent ``model.contacts()`` should pick up "force".
-        _make_solver(model)
+        sensor = SensorContact(model, sensing_shapes="ball", verbose=False)
+        solver = _make_solver(model)
         contacts = model.contacts()
-        self.assertIsNotNone(
-            contacts.force,
-            "SensorContact-then-SolverPhoenX flow should yield Contacts with force allocated",
-        )
+        observables = solver.observables(kinds=sensor.solver_observable_kinds, contacts=contacts)
+
+        self.assertIsNotNone(observables.contact_f)
+        self.assertEqual(observables.contact_f.shape[0], contacts.rigid_contact_max)
 
 
 if __name__ == "__main__":
