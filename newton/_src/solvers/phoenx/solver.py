@@ -1484,6 +1484,8 @@ class SolverPhoenX(SolverBase):
                 effective_joint_dof_start=effective_joint_dof_start,
                 effective_joint_target_start=joint_target_start,
                 direct_joint_friction=joint_solver == "direct" and self._joint_friction_model == "hard",
+                # Arc prediction assumes one full-step pose update after the direct solve.
+                predict_anchor_arc=joint_mode == "maximal_direct" and not self.world.temporal_iterations,
             )
             self.world._direct_equality_system = self._direct_equality_system
             self._direct_equality_system.bind_constraint_indices(self._joint_constraints.joint_idx_to_cid)

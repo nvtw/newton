@@ -783,7 +783,7 @@ def _prepare_direct_rows(
     row = wp.int32(0)
     linear_count = generic_linear_count[joint]
     arc_velocity = wp.vec3(0.0)
-    if not material_rows and linear_count == 3:
+    if step_dt > 0.0 and not material_rows and linear_count == 3:
         arc_velocity = _anchor_arc_velocity(bodies.angular_velocity[child], point1_com, step_dt) - _anchor_arc_velocity(
             bodies.angular_velocity[parent], point0_com, step_dt
         )
@@ -939,7 +939,7 @@ def _prepare_direct_rows(
 
 
 @functools.cache
-def get_prepare_direct_equality_rows_kernel(temporal_substeps: int | None = None):
+def get_prepare_direct_equality_rows_kernel(temporal_substeps: int | None = None, *, predict_anchor_arc: bool = True):
     """Specialize joint correction for soft rows or PhysX-style temporal steps.
 
     Temporal hard rows use half the joint bias coefficient, with the source
@@ -1008,7 +1008,7 @@ def get_prepare_direct_equality_rows_kernel(temporal_substeps: int | None = None
             joint_target_kd,
             bodies,
             bias_rate,
-            wp.float32(1.0) / idt,
+            wp.float32(1.0) / idt if wp.static(predict_anchor_arc) else wp.float32(0.0),
             row_wrench0,
             row_wrench1,
             row_bias,
@@ -2246,6 +2246,7 @@ class DirectEqualitySystem:
         temporal_substeps: int | None = None,
         direct_joint_friction: bool = False,
         fixed_joint_rows: bool = False,
+        predict_anchor_arc: bool = True,
     ):
         self.model = model
         self._microstep_joint = wp.empty(0, dtype=wp.bool, device=model.device)
@@ -2255,6 +2256,7 @@ class DirectEqualitySystem:
         self._microstep_previous = wp.empty(0, dtype=wp.bool, device=model.device)
         self.fixed_joint_rows = bool(fixed_joint_rows)
         self._direct_joint_friction = bool(direct_joint_friction)
+        self._predict_anchor_arc = predict_anchor_arc
         self.bodies = bodies
         self.set_temporal_substeps(temporal_substeps)
         joint_types = np.asarray(model.joint_type.numpy(), dtype=np.int32)
@@ -2753,7 +2755,9 @@ class DirectEqualitySystem:
 
     def set_temporal_substeps(self, substeps: int | None) -> None:
         """Select joint correction before graph capture; None restores soft rows."""
-        self._prepare_rows_kernel = get_prepare_direct_equality_rows_kernel(substeps)
+        self._prepare_rows_kernel = get_prepare_direct_equality_rows_kernel(
+            substeps, predict_anchor_arc=self._predict_anchor_arc and substeps is None
+        )
 
     def refresh_geometry(self, idt: wp.float32) -> None:
         """Refresh body-space rows without changing impulses or drive references."""
