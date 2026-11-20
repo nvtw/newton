@@ -109,7 +109,6 @@ def _finalize_direct_contact_schedule_kernel(
     response: DirectContactResponseData,
     num_columns: wp.array[wp.int32],
     mechanism_component: wp.array[wp.int32],
-    key_stride: wp.int64,
     keys: wp.array[wp.int64],
     scheduled_column: wp.array[wp.int32],
     section_end: wp.array[wp.int32],
@@ -126,7 +125,8 @@ def _finalize_direct_contact_schedule_kernel(
         mechanism = mechanism1
     component = mechanism_component[mechanism]
     columns.articulation_owner[column] = component
-    keys[column] = wp.int64(component) * key_stride + wp.int64(column)
+    # Radix sorting is stable, so equal components retain ascending column order.
+    keys[column] = wp.int64(component)
     wp.atomic_add(section_end, component, wp.int32(1))
     first = contact_get_contact_first(columns, column)
     count = contact_get_contact_count(columns, column)
@@ -442,7 +442,6 @@ def _build_direct_contact_endpoint_keys_kernel(
     section_end: wp.array[wp.int32],
     records: wp.array[_record_t],
     slot_capacity: wp.int32,
-    key_stride: wp.int64,
     keys: wp.array[wp.int64],
     entries: wp.array[wp.int32],
     entry_count: wp.array[wp.int32],
@@ -472,7 +471,7 @@ def _build_direct_contact_endpoint_keys_kernel(
         if target < wp.int64(0):
             keys[entry] = wp.int64(_INT64_MAX)
         else:
-            keys[entry] = target * key_stride + wp.int64(entry)
+            keys[entry] = target
 
 
 @wp.kernel(enable_backward=False)
@@ -516,7 +515,6 @@ def _warm_start_direct_contact_wrench_kernel(
 def _warm_start_direct_contact_targets_kernel(
     bodies: BodyContainer,
     slot_capacity: wp.int32,
-    key_stride: wp.int64,
     keys: wp.array[wp.int64],
     entries: wp.array[wp.int32],
     entry_count: wp.array[wp.int32],
@@ -528,12 +526,12 @@ def _warm_start_direct_contact_targets_kernel(
     count = entry_count[0]
     if index >= count or keys[index] == wp.int64(_INT64_MAX):
         return
-    target = keys[index] // key_stride
-    if index > 0 and keys[index - 1] // key_stride == target:
+    target = keys[index]
+    if index > 0 and keys[index - 1] == target:
         return
     wrench = wp.spatial_vectorf(0.0)
     cursor = index
-    while cursor < count and keys[cursor] != wp.int64(_INT64_MAX) and keys[cursor] // key_stride == target:
+    while cursor < count and keys[cursor] == target:
         wrench += endpoint_wrench[entries[cursor]]
         cursor += 1
     if target < wp.int64(slot_capacity):
@@ -818,7 +816,6 @@ class DirectContactRunSchedule:
         self.endpoint_entries = wp.empty(4 * self.capacity, dtype=wp.int32, device=device)
         self.endpoint_count = wp.zeros(1, dtype=wp.int32, device=device)
         self.endpoint_wrench = wp.zeros(2 * self.capacity, dtype=wp.spatial_vector, device=device)
-        self.endpoint_key_stride = 2 * self.capacity + 1
         self.record_friction = wp.zeros(self.capacity, dtype=wp.vec2, device=device)
         self.solve_kernel = make_solve_direct_contact_columns_kernel(
             response.body_capacity, response.max_mechanism_bodies, is_cuda=device.is_cuda
@@ -849,7 +846,6 @@ class DirectContactRunSchedule:
             inputs=[
                 bodies,
                 wp.int32(self.basis_wrench.shape[0]),
-                wp.int64(self.endpoint_key_stride),
                 self.endpoint_keys,
                 self.endpoint_entries,
                 self.endpoint_count,
@@ -972,7 +968,6 @@ class DirectContactRunSchedule:
                 self.response.data,
                 num_columns,
                 self.islands.set_nr,
-                wp.int64(self.capacity + 1),
                 self.keys,
                 self.columns,
                 self.section_end,
@@ -983,7 +978,8 @@ class DirectContactRunSchedule:
             self.keys,
             self.columns,
             num_columns,
-            end_bit=(self.section_end.size * (self.capacity + 1)).bit_length(),
+            end_bit=self.section_end.size.bit_length(),
+            tail_masked=True,
         )
         wp.utils.array_scan(self.section_end, self.section_end, inclusive=True)
         wp.launch(
@@ -1001,7 +997,6 @@ class DirectContactRunSchedule:
                 self.section_end,
                 self.records,
                 wp.int32(self.basis_wrench.shape[0]),
-                wp.int64(self.endpoint_key_stride),
                 self.endpoint_keys,
                 self.endpoint_entries,
                 self.endpoint_count,
@@ -1012,9 +1007,7 @@ class DirectContactRunSchedule:
             self.endpoint_keys,
             self.endpoint_entries,
             self.endpoint_count,
-            end_bit=(
-                (self.basis_wrench.shape[0] + self.response.direct.bodies.position.shape[0]) * self.endpoint_key_stride
-            ).bit_length(),
+            end_bit=(self.basis_wrench.shape[0] + self.response.direct.bodies.position.shape[0]).bit_length(),
         )
         wp.launch(
             _fill_direct_contact_rhs_tasks_kernel,
