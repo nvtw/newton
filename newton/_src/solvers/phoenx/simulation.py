@@ -969,6 +969,9 @@ class PhoenXWorld:
                 raise ValueError(f"threads_per_world must be 'auto' or one of (8, 16, 32) (got {tpw_int})")
             self._tpw_auto = False
             initial_tpw = tpw_int
+        if self.device.is_cpu:
+            # CPU lanes cannot synchronize between successive constraint colors.
+            self._tpw_auto, initial_tpw = False, 1
         self._tpw_launch_bound: int = _STRAGGLER_BLOCK_DIM if self._tpw_auto else int(initial_tpw)
         self._tpw_choice: wp.array[wp.int32] = wp.array([initial_tpw], dtype=wp.int32, device=self.device)
         # Scratch for the picker's parallel colour-count reduction.
@@ -5388,7 +5391,9 @@ class PhoenXWorld:
             # Rows were grouped by island for another policy.
             self._allocate_partition(self.num_worlds)
             self._body_group = wp.empty(0, dtype=wp.int32, device=self.device)
-        if kind == "auto":
+        if self.device.is_cpu:
+            kind = "fast_tail"
+        elif kind == "auto":
             kind, block_dim = self._auto_multi_world_scheduler()
         elif kind == "one_world":
             # Give each world a full block. The solver selects this policy for a single
