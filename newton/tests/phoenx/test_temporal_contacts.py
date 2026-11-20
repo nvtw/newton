@@ -56,6 +56,25 @@ class TestTemporalIterationPhysics(unittest.TestCase):
             # Semi-implicit Euler at 1/240 s overshoots by dt/t = 0.8%; the substep average by 0.1%.
             self.assertAlmostEqual(drop / (0.5 * 9.81 * t * t), 1.0, delta=2.0e-3)
 
+    def test_kinematic_mount_isolates_local_drive(self):
+        """A prescribed support transmits no impulse between its weld and its slider."""
+        with wp.ScopedDevice("cpu"):
+            builder = newton.ModelBuilder()
+            mount = builder.add_link(is_kinematic=True)
+            slider = builder.add_link(mass=1, inertia=wp.mat33(np.eye(3)))
+            base = builder.add_joint_fixed(-1, mount)
+            drive = builder.add_joint_prismatic(mount, slider, axis=newton.Axis.Z, target_ke=1000, target_kd=100)
+            builder.add_articulation([base, drive])
+            model = builder.finalize()
+            solver = self._solver(model, True)
+            state = model.state()
+            control = model.control()
+            for _ in range(240):
+                solver.step(state, state, control, None, 1 / 120)
+            np.testing.assert_array_equal(solver._direct_equality_system._microstep_joint.numpy(), [False, True])
+            self.assertAlmostEqual(float(state.body_q.numpy()[slider, 2]), -9.81 / 1000, delta=2e-5)
+            self.assertLess(abs(float(state.body_qd.numpy()[slider, 2])), 1e-4)
+
     def test_resting_contact_force_balances_weight(self):
         """Balance a resting body weight with accumulated contact force."""
         with wp.ScopedDevice("cpu"):

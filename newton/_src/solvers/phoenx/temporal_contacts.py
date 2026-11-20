@@ -496,10 +496,11 @@ def temporal_select_local_joints(
     awake = wp.bool(False)
     for side in range(2):
         body = wp.where(side == 0, parent[joint], child[joint]) + 1
-        if body > 0 and bodies.motion_type[body] == MOTION_DYNAMIC and bodies.island_root[body] < 0:
-            awake = True
-        if body > 0 and marked[_find(entries, body)] != 0:
-            use_micro = False
+        if body > 0 and bodies.motion_type[body] == MOTION_DYNAMIC:
+            if bodies.island_root[body] < 0:
+                awake = True
+            if marked[_find(entries, body)] != 0:
+                use_micro = False
     selected[joint] = use_micro and awake
 
 

@@ -1656,6 +1656,11 @@ class SolverPhoenX(SolverBase):
             world._temporal_joint_springs = True
             world._temporal_force_step = True
 
+        if self.world.temporal_iterations and solver_scheme != "tgs":
+            blocks = getattr(self._direct_equality_system, "blocks", self._direct_equality_system)
+            if isinstance(blocks, BlockJointSystem) and blocks.enabled:
+                blocks.configure_temporal_iterations()
+
         # Placeholder for _contact_impulse_to_force_wrapper_kernel when grouping
         # is off (has_perm=0 makes the kernel ignore it).
         self._sort_perm_placeholder = wp.zeros(1, dtype=wp.int32, device=self.device)

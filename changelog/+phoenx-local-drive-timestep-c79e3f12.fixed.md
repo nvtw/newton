@@ -1,0 +1,1 @@
+Correct supported local scalar-drive spring equilibrium and reaction forces during PhoenX temporal iterations by integrating drive impulses on the contact timestep, while preserving the outer-step schedule for components coupled to exact mechanisms or unsupported joint features.
