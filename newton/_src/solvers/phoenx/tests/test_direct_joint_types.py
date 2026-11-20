@@ -746,6 +746,12 @@ class TestDirectJointTypes(unittest.TestCase):
                 body_qd = state.body_qd.numpy()[list(bodies)]
                 self.assertTrue(np.isfinite(body_q).all())
                 self.assertTrue(np.isfinite(body_qd).all())
+                world = solver.world
+                if world._separate_static_contacts:
+                    count = int(world._ingest_scratch.num_contact_columns.numpy()[0])
+                    direct_owned = world._contact_cols.articulation_owner.numpy()[:count] >= 0
+                    self.assertTrue(np.any(direct_owned))
+                    self.assertTrue(np.all(world._contact_cols.static_owner.numpy()[:count][direct_owned] < 0))
                 self.assertGreater(float(body_q[1, 2]), 0.08)
                 self.assertGreater(float(body_q[0, 2]), 0.37)
                 self.assertLess(float(np.max(np.abs(body_qd))), 5.0e-3)

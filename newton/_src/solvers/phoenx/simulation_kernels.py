@@ -2872,7 +2872,8 @@ def _constraints_to_elements_kernel(
     side1_extra = contact_get_side1_nodes_extra(contact_cols, local_cid)
     owner = wp.int32(-1)
     if separate_static_contacts != 0:
-        owner = static_owner(contact_cols, local_cid, bodies)
+        if contact_cols.articulation_owner[local_cid] < wp.int32(0):
+            owner = static_owner(contact_cols, local_cid, bodies)
         contact_cols.static_owner[local_cid] = owner
     if owner >= wp.int32(0):
         elements[tid] = _element_data_compact2(wp.int32(-1), wp.int32(-1))

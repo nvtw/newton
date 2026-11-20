@@ -3351,9 +3351,11 @@ class PhoenXWorld:
                     self._ingest_scratch.num_contact_columns,
                     reset_owner=True,
                 )
-                # Maximal and reduced schedules rewrite the column ownership.
+                # Later schedules rewrite ownership and static-contact lists read it.
                 direct_schedule_pending = (
-                    self._maximal_contact_schedule is None and not self._reduced_contacts_active_this_step
+                    self._maximal_contact_schedule is None
+                    and not self._reduced_contacts_active_this_step
+                    and not self._separate_static_contacts
                 )
                 if not direct_schedule_pending:
                     self._direct_contact_schedule.join()
