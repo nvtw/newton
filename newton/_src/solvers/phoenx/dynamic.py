@@ -187,6 +187,8 @@ class ShapeDesc:
     margin: wp.float32
     gap: wp.float32
     mu: wp.float32
+    #: Static friction; zero follows ``mu``, and positive values must be at least ``mu``.
+    mu_static: wp.float32
     restitution: wp.float32
     #: Per-shape combine mode: average (0), min (1), multiply (2), or max (3).
     restitution_combine_mode: wp.int32
@@ -429,6 +431,9 @@ def add_shape(dyn: DynamicsData, body: wp.int32, desc: ShapeDesc) -> wp.int32:
     valid = valid and desc.restitution_combine_mode >= 0 and desc.restitution_combine_mode <= 3
     if is_reference and valid:
         valid = dyn.shape_type[proto] == geo
+    mu_static = desc.mu if desc.mu_static == 0.0 else desc.mu_static
+    valid = valid and wp.isfinite(desc.mu) and desc.mu >= 0.0
+    valid = valid and wp.isfinite(mu_static) and mu_static >= desc.mu
     world = desc.world
     if body >= 0:
         world = dyn.body_world[body]
@@ -437,6 +442,7 @@ def add_shape(dyn: DynamicsData, body: wp.int32, desc: ShapeDesc) -> wp.int32:
     slot = _pool_alloc(dyn.shape_pool)
     if slot < 0:
         return _fail(dyn)
+    desc.mu_static = mu_static
     dyn.staged_shapes[slot] = desc
     dyn.staged_shape_body[slot] = body
     return dyn.shape_pool.start + slot
@@ -765,6 +771,7 @@ class _ShapeRows:
     gap: wp.array[wp.float32]
     is_solid: wp.array[wp.bool]
     mu: wp.array[wp.float32]
+    mu_static: wp.array[wp.float32]
     restitution: wp.array[wp.float32]
     restitution_combine_mode: wp.array[wp.int32]
     collision_radius: wp.array[wp.float32]
@@ -1090,6 +1097,7 @@ def _write_shape(rows: _ShapeRows, shape: wp.int32, body: wp.int32, desc: ShapeD
     rows.gap[shape] = desc.gap
     rows.is_solid[shape] = True
     rows.mu[shape] = desc.mu
+    rows.mu_static[shape] = desc.mu_static
     rows.restitution[shape] = desc.restitution
     rows.collision_radius[shape] = radius
     rows.aabb_lower[shape] = lower
@@ -1097,7 +1105,7 @@ def _write_shape(rows: _ShapeRows, shape: wp.int32, body: wp.int32, desc: ShapeD
     rows.interior_point[shape] = interior
     rows.voxel_resolution[shape] = _voxel_resolution(lower, upper)
     material = MaterialData()
-    material.static_friction = desc.mu
+    material.static_friction = desc.mu_static
     material.dynamic_friction = desc.mu
     material.restitution = desc.restitution
     material.friction_combine_mode = rows.friction_combine_mode
@@ -1833,6 +1841,7 @@ class Dynamics:
         )
         shape_rows.body_world = model.body_world
         shape_rows.mu = model.shape_material_mu
+        shape_rows.mu_static = model.shape_material_mu_static
         shape_rows.restitution = model.shape_material_restitution
         shape_rows.restitution_combine_mode = getattr(getattr(model, "phoenx", None), "restitution_combine_mode", None)
         shape_rows.aabb_lower = model.shape_collision_aabb_lower
@@ -1927,6 +1936,7 @@ class Dynamics:
                 desc = ShapeDesc()
                 for name in ("type", "transform", "scale", "margin", "gap", "mu", "restitution", "flags", "prototype"):
                     setattr(desc, name, s[name])
+                desc.mu_static = s.get("mu_static", s["mu"])
                 desc.restitution_combine_mode = s.get("restitution_combine_mode", 0)
                 shapes.append(desc)
                 shape_body.append(s["body"])

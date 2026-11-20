@@ -6323,6 +6323,7 @@ class ModelBuilder:
             )
         shapes, prototypes = [], []
         restitution_modes = template.custom_attributes.get("phoenx:restitution_combine_mode")
+        static_friction = template._resolve_shape_material_mu_static()
         for s in range(template.shape_count):
             flags = int(template.shape_flags[s])
             body = int(template.shape_body[s])
@@ -6359,6 +6360,7 @@ class ModelBuilder:
                     "margin": float(template.shape_margin[s]),
                     "gap": float(template.shape_gap[s]),
                     "mu": float(template.shape_material_mu[s]),
+                    "mu_static": float(static_friction[s]),
                     "restitution": float(template.shape_material_restitution[s]),
                     "restitution_combine_mode": int(restitution_modes.values.get(s, restitution_modes.default))
                     if restitution_modes is not None

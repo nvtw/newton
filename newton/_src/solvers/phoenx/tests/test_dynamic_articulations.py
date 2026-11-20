@@ -17,6 +17,7 @@ import warp as wp
 
 import newton
 from newton.solvers import phoenx
+from newton.tests.unittest_utils import get_test_devices
 
 _DT = 1.0 / 60.0
 _LINK = 0.2  # half length of a chain link along x [m]
@@ -188,6 +189,90 @@ def _hinge_gap(body_q: np.ndarray, a: int, b: int) -> float:
     pa = wp.transform_point(wp.transform(*body_q[a].tolist()), wp.vec3(_LINK, 0.0, 0.0))
     pb = wp.transform_point(wp.transform(*body_q[b].tolist()), wp.vec3(-_LINK, 0.0, 0.0))
     return float(np.linalg.norm(np.asarray(pa) - np.asarray(pb)))
+
+
+@wp.kernel
+def _invalid_static_friction_shape(dyn: phoenx.DynamicsData, result: wp.array[int]):
+    desc = phoenx.shape_desc(int(newton.GeoType.BOX), wp.vec3(0.1))
+    desc.mu = 0.5
+    desc.mu_static = 0.2
+    result[0] = phoenx.add_shape(dyn, -1, desc)
+
+
+class TestDynamicArticulationMaterials(unittest.TestCase):
+    def test_template_preserves_static_and_dynamic_friction(self):
+        """Spawn and reuse captured shape slots without losing or retaining stale friction."""
+        for device in get_test_devices():
+            with self.subTest(device=device), wp.ScopedDevice(device):
+                templates = []
+                for mu, mu_static in ((0.3, 0.8), (0.6, None)):
+                    template = newton.ModelBuilder()
+                    body = template.add_body()
+                    template.add_shape_box(
+                        body, hx=0.1, hy=0.1, hz=0.1, cfg=template.ShapeConfig(mu=mu, mu_static=mu_static)
+                    )
+                    templates.append(template)
+                builder = newton.ModelBuilder()
+                builder.reserve_dynamic_capacity(
+                    bodies=1, shapes=1, joints=0, articulations=1, articulation_templates=templates
+                )
+                model = builder.finalize(device=device)
+                solver = newton.solvers.SolverPhoenX(model, joint_mode="maximal_pgs", step_layout="single_world")
+                dyn = solver.dynamics
+                instances = wp.zeros(1, dtype=int)
+                template_ids = wp.zeros(1, dtype=int)
+                positions = wp.array([(0.0, 0.0, 1.0)], dtype=wp.vec3)
+                state, next_state = model.state(), model.state()
+                control = model.control()
+                shape = model._dynamic_capacity.shape_start
+
+                # Reject an explicit positive coefficient below dynamic friction before reserving a slot.
+                before = dyn.shapes.data.counts.numpy().copy()
+                wp.launch(_invalid_static_friction_shape, dim=1, inputs=[dyn.data, instances])
+                self.assertEqual(int(instances.numpy()[0]), -1)
+                self.assertEqual(int(dyn.data.error_count.numpy()[0]), 1)
+                np.testing.assert_array_equal(dyn.shapes.data.counts.numpy(), before)
+
+                def step(solver=solver, state=state, next_state=next_state, control=control):
+                    solver.step(state, next_state, control, None, _DT)
+                    wp.copy(state.body_q, next_state.body_q)
+                    wp.copy(state.body_qd, next_state.body_qd)
+
+                def spawn(dyn=dyn, template_ids=template_ids, positions=positions, instances=instances, step=step):
+                    wp.launch(
+                        _spawn_kernel,
+                        dim=1,
+                        inputs=[dyn.data, template_ids, positions, wp.spatial_vector(), instances],
+                    )
+                    step()
+
+                def remove(dyn=dyn, instances=instances, step=step):
+                    wp.launch(_remove_kernel, dim=1, inputs=[dyn.data, instances])
+                    step()
+                    step()
+
+                if device.is_cuda:
+                    with wp.ScopedCapture(device=device) as spawning:
+                        spawn()
+                    with wp.ScopedCapture(device=device) as removing:
+                        remove()
+                for template_id, mu, mu_static in ((0, 0.3, 0.8), (1, 0.6, 0.6), (0, 0.3, 0.8)):
+                    template_ids.assign([template_id])
+                    if device.is_cuda:
+                        wp.capture_launch(spawning.graph)
+                    else:
+                        spawn()
+                    self.assertGreaterEqual(int(instances.numpy()[0]), 0)
+                    self.assertAlmostEqual(float(model.shape_material_mu.numpy()[shape]), mu, places=6)
+                    self.assertAlmostEqual(float(model.shape_material_mu_static.numpy()[shape]), mu_static, places=6)
+                    material = dyn._shape_rows.materials.numpy()[shape]
+                    self.assertAlmostEqual(float(material["static_friction"]), mu_static, places=6)
+                    self.assertAlmostEqual(float(material["dynamic_friction"]), mu, places=6)
+                    if device.is_cuda:
+                        wp.capture_launch(removing.graph)
+                    else:
+                        remove()
+                self.assertEqual(int(dyn.data.error_count.numpy()[0]), 1)
 
 
 @unittest.skipUnless(wp.is_cuda_available(), "runtime creation tests require CUDA graph capture")
