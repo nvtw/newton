@@ -72,7 +72,8 @@ def _join_columns(
     first = int(0)
     second = int(0)
     if column < num_joints:
-        if joint_pgs_enabled[column] != 1:
+        # Prepare-only joints also write rows during the warm-start sweep.
+        if joint_pgs_enabled[column] == 0:
             return
         first = constraint_get_body1(constraints, column)
         second = constraint_get_body2(constraints, column)
@@ -317,7 +318,7 @@ def _get_island_iteration(axes, *, small_colors: bool = False):
 
 
 class IslandIterationSchedule:
-    """CUDA graph scratch for the current substep's dynamic-body components."""
+    """CUDA graph scratch for the current collision step's dynamic-body components."""
 
     def __init__(self, world: PhoenXWorld):
         device = world.device

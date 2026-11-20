@@ -14,6 +14,7 @@ from newton._src.solvers.phoenx.tests.test_parallel_prepare_sleeping import _bui
 @unittest.skipUnless(wp.is_cuda_available(), "Island iteration scheduling requires CUDA")
 class TestIslandIterationSchedule(unittest.TestCase):
     def test_mixed_islands_in_captured_sweeps(self):
+        """Preserve poses and impulses through multiple warm starts on the same island schedule."""
         # The stack and anchored pendulum share the static world body. Their
         # contacts and joints must form independent writable components.
         with wp.ScopedDevice("cuda:0"):
@@ -27,7 +28,8 @@ class TestIslandIterationSchedule(unittest.TestCase):
                     step_layout="single_world",
                     joint_mode="maximal_pgs",
                     mass_splitting=False,
-                    substeps=1,
+                    substeps=2,
+                    parallel_contact_prepare=True,
                     solver_iterations=3,
                     island_parallel_iterations=independent,
                 )

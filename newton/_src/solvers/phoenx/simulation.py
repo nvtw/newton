@@ -3013,7 +3013,13 @@ class PhoenXWorld:
         # configured symmetric direction a second time.
         wp.copy(self._partitioner.color_cursor, self._partitioner.num_colors)
         self._singleworld_head_plus_tail_sweep(
-            head, tail, wp.float32(1.0 / self.substep_dt), structural_projection=True
+            head,
+            tail,
+            wp.float32(1.0 / self.substep_dt),
+            structural_projection=True,
+            island_schedule=getattr(self._dispatcher, "_island_schedule", None)
+            if self._regular_pgs_active_this_step
+            else None,
         )
 
     def _temporal_end_sweep(self, last: bool) -> None:

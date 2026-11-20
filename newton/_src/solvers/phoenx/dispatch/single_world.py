@@ -50,9 +50,17 @@ class SingleWorldDispatcher:
                 direct.solve(use_bias=False)
                 direct.resolve_bounded_drives(idt, use_bias=False)
             prepare_head, prepare_fused, iterate_head, iterate_fused, _, _ = w._singleworld_kernels()
+            # Contact columns, joint ownership, and sleep states span the native substeps.
+            if self._island_schedule is not None and w._current_substep_index == 0:
+                self._island_schedule.build(w)
             if w._refresh_prepare_this_substep():
                 w._partitioner.begin_sweep()
-                w._singleworld_head_plus_tail_sweep(prepare_head, prepare_fused, idt)
+                w._singleworld_head_plus_tail_sweep(
+                    prepare_head,
+                    prepare_fused,
+                    idt,
+                    island_schedule=self._island_schedule if w.parallel_contact_prepare else None,
+                )
             else:
                 w._run_cached_prepare_bookkeeping(idt)
             if direct is not None and direct.enabled:
@@ -65,8 +73,6 @@ class SingleWorldDispatcher:
             temporal = w.temporal_iterations
             if temporal:
                 w._temporal_begin_sweeps()
-            if self._island_schedule is not None:
-                self._island_schedule.build(w)
             for iteration in range(w.solver_iterations):
                 last = iteration == w.solver_iterations - 1
                 if temporal and iteration > 0:
