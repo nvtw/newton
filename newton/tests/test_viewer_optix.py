@@ -12,6 +12,7 @@ import warp as wp
 
 import newton
 import newton.examples
+from newton._src.viewer.optix_recording import LiveMp4Recorder
 from newton._src.viewer.picking import Picking
 from newton.viewer import ViewerBase, ViewerGL, ViewerOptix
 
@@ -303,6 +304,14 @@ class TestViewerOptix(unittest.TestCase):
         self.assertEqual(log_shapes.call_count, 2)
         scoped_capture.assert_called_once_with()
         self.assertIs(viewer._shape_update_graphs[17], capture.graph)
+        viewer._recorder = LiveMp4Recorder()
+        with mock.patch("newton._src.viewer.viewer_optix._PathTracingViewerBackend.end_frame"):
+            viewer.end_frame()
+            self.assertIs(viewer._shape_update_graphs[17], capture.graph)
+            viewer._scene_dirty = True
+            viewer.end_frame()
+        self.assertEqual(viewer._shape_update_graphs, {})
+        self.assertIsNone(viewer._shape_update_graph_signature)
 
     def test_snapshot_wait_does_not_drain_physics(self):
         """Rendering waits for the snapshot, while the next step remains asynchronous."""

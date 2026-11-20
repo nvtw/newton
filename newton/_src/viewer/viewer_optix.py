@@ -598,13 +598,6 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
         self._log_non_shape_state(state)
         self.model_changed = False
 
-    @override
-    def end_frame(self):
-        """Invalidate update graphs when OptiX rebuilds device scene storage."""
-        if self._scene_dirty:
-            self._invalidate_shape_update_graphs()
-        return super().end_frame()
-
     def should_step(self) -> bool:
         """Return whether the simulation should advance by one step."""
         if not self.is_paused():
@@ -1552,6 +1545,8 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
     @override
     def end_frame(self) -> None:
         """Render and present a frame, including while simulation is paused."""
+        if self._scene_dirty:
+            self._invalidate_shape_update_graphs()
         super().end_frame()
         if self._recorder.is_recording:
             renderer = self._api._viewer
