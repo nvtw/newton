@@ -2460,6 +2460,7 @@ class DirectEqualitySystem:
         self.dynamic_coordinate = wp.zeros(row_count, dtype=wp.float32, device=device)
         self.velocity_reference = wp.zeros(row_count, dtype=wp.float32, device=device)
         self.drive_active_set_flag = wp.zeros(1, dtype=wp.int32, device=device)
+        self._bound_scan_flags = self.drive_active_set_flag
         self.drive_saturated = wp.zeros(row_count, dtype=wp.bool, device=device)
         self.accumulated_impulse = wp.zeros(row_count, dtype=wp.float32, device=device)
         joint_q = np.asarray(model.joint_q.numpy(), dtype=np.float32)
@@ -2559,7 +2560,10 @@ class DirectEqualitySystem:
                 np.searchsorted(np.asarray(self.topology.mechanism_row_start), np.arange(row_count), side="right") - 1
             )
             self._bound_row_mechanism = wp.array(row_mechanism.astype(np.int32), dtype=wp.int32, device=device)
-            self._bound_changed_mechanism = wp.zeros(len(self.topology.dimensions), dtype=wp.int32, device=device)
+            # A scan clears its global change flag and per-mechanism flags together.
+            self._bound_scan_flags = wp.zeros(1 + len(self.topology.dimensions), dtype=wp.int32, device=device)
+            self.drive_active_set_flag = self._bound_scan_flags[:1]
+            self._bound_changed_mechanism = self._bound_scan_flags[1:]
         self.matrix_row = wp.array(symbolic.matrix_row, dtype=wp.int32, device=device)
         self.matrix_column = wp.array(symbolic.matrix_column, dtype=wp.int32, device=device)
         self.matrix_storage = wp.array(symbolic.matrix_storage, dtype=wp.int32, device=device)
@@ -2886,9 +2890,7 @@ class DirectEqualitySystem:
     def _find_new_bounds(self, idt: wp.float32, any_flag: wp.array) -> None:
         """Scan bounded drive rows; ``drive_active_set_flag`` and ``any_flag`` mark a change."""
         dt = wp.float32(1.0) / idt
-        self.drive_active_set_flag.zero_()
-        if self._bound_row_mechanism.shape[0] > 0:
-            self._bound_changed_mechanism.zero_()
+        self._bound_scan_flags.zero_()
         wp.launch(
             _activate_bounded_direct_drives_kernel,
             dim=len(self.topology.row_joint),
