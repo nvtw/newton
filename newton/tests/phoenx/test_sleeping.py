@@ -229,6 +229,49 @@ class TestSleepingKinematicContact(unittest.TestCase):
         np.testing.assert_array_equal(results[0][1], results[1][1])
         np.testing.assert_array_equal(results[0][2], results[1][2])
 
+    def test_shared_stationary_support_allows_independent_sleep(self):
+        with wp.ScopedDevice("cpu"):
+            builder = newton.ModelBuilder()
+            frictionless = builder.ShapeConfig(mu=0, mu_static=0)
+            support = builder.add_body(is_kinematic=True)
+            builder.add_shape_box(support, hx=4, hy=1, hz=0.1, cfg=frictionless)
+            boxes = []
+            for x in (-1, 1):
+                box = builder.add_body(xform=wp.transform(wp.vec3(x, 0, 0.2)))
+                builder.add_shape_box(box, hx=0.1, hy=0.1, hz=0.1, cfg=frictionless)
+                boxes.append(box)
+            model = builder.finalize()
+            solver = SolverPhoenX(
+                model,
+                step_layout="single_world",
+                substeps=1,
+                solver_iterations=4,
+                contact_hertz=80,
+                sleeping_velocity_threshold=0.02,
+                sleeping_frames_required=20,
+            )
+            state, contacts, control = model.state(), model.contacts(), model.control()
+            velocity = state.body_qd.numpy().copy()
+            velocity[boxes[1], 0] = 0.12
+            state.body_qd.assign(velocity)
+            dt = 1 / 120
+            for _ in range(80):
+                solver.wake_on_external_input(state)
+                solver.collide(state, contacts, dt=dt)
+                solver.step(state, state, control, contacts, dt)
+            slots = np.asarray(boxes) + 1
+            np.testing.assert_array_equal(solver.bodies.island_root.numpy()[slots] >= 0, [True, False])
+            self.assertAlmostEqual(state.body_qd.numpy()[boxes[1], 0], 0.12, places=4)
+
+            poses = state.body_q.numpy().copy()
+            poses[support, 2] = -2
+            state.body_q.assign(poses)
+            solver.wake_on_external_input(state)
+            self.assertTrue(np.all(solver.bodies.island_root.numpy()[slots] < 0))
+            solver.collide(state, contacts, dt=dt)
+            solver.step(state, state, control, contacts, dt)
+            np.testing.assert_allclose(state.body_qd.numpy()[boxes, 2], -9.81 * dt, atol=0.003)
+
     def test_moving_support_wakes_stack(self):
         """Wake the whole sleeping stack when its kinematic support rises."""
         self._check_moving_support(False)

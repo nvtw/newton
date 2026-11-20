@@ -339,14 +339,12 @@ def _phoenx_copy_elements_to_int2d_kernel(
     island_active: wp.array[wp.int32],
     interaction_bodies: wp.array2d[wp.int32],
 ):
-    """Pack each element's dynamic + kinematic body slots to the front
-    of its row in ``interaction_bodies``. STATIC bodies and particles
-    are dropped to ``-1``; rows of inactive cids are left untouched.
+    """Pack dynamic bodies and moving kinematics into each active interaction row.
 
     Sleeping (dynamic) bodies whose root is **not** active stay filtered
     (cost nothing in the live UF). Sleeping bodies in **active** islands
     are kept -- their chain edges to ``root`` (injected separately) then
-    merge them with the bridging body. KINEMATIC bodies are kept so a
+    merge them with the bridging body. Moving kinematics are kept so a
     kinematic mover (e.g. a camera collider) sharing an element with a
     sleeping brick lands in the same compact island; the per-island
     score kernel reads kinematic velocity and lifts the score above
@@ -365,6 +363,13 @@ def _phoenx_copy_elements_to_int2d_kernel(
             continue
         mt = bodies.motion_type[b]
         if mt != MOTION_DYNAMIC and mt != MOTION_KINEMATIC:
+            continue
+        if (
+            mt == MOTION_KINEMATIC
+            and wp.length_sq(bodies.velocity[b]) == 0.0
+            and wp.length_sq(bodies.angular_velocity[b]) == 0.0
+        ):
+            # Independent loads on a stationary prescribed support can sleep separately.
             continue
         if mt == MOTION_DYNAMIC:
             root = bodies.island_root[b]
