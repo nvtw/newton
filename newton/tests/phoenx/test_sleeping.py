@@ -229,8 +229,15 @@ class TestSleepingKinematicContact(unittest.TestCase):
         np.testing.assert_array_equal(results[0][1], results[1][1])
         np.testing.assert_array_equal(results[0][2], results[1][2])
 
-    def test_shared_stationary_support_allows_independent_sleep(self):
-        with wp.ScopedDevice("cpu"):
+    def test_shared_stationary_support_allows_independent_sleep_cpu(self):
+        self._check_shared_stationary_support("cpu")
+
+    @unittest.skipUnless(wp.is_cuda_available(), "CUDA device required")
+    def test_shared_stationary_support_allows_independent_sleep_cuda(self):
+        self._check_shared_stationary_support("cuda:0")
+
+    def _check_shared_stationary_support(self, device):
+        with wp.ScopedDevice(device):
             builder = newton.ModelBuilder()
             frictionless = builder.ShapeConfig(mu=0, mu_static=0)
             support = builder.add_body(is_kinematic=True)
@@ -241,8 +248,10 @@ class TestSleepingKinematicContact(unittest.TestCase):
                 builder.add_shape_box(box, hx=0.1, hy=0.1, hz=0.1, cfg=frictionless)
                 boxes.append(box)
             model = builder.finalize()
+            pipeline = newton.CollisionPipeline(model, contact_matching="sticky")
             solver = SolverPhoenX(
                 model,
+                collision_pipeline=pipeline,
                 step_layout="single_world",
                 substeps=1,
                 solver_iterations=4,
@@ -250,7 +259,7 @@ class TestSleepingKinematicContact(unittest.TestCase):
                 sleeping_velocity_threshold=0.02,
                 sleeping_frames_required=20,
             )
-            state, contacts, control = model.state(), model.contacts(), model.control()
+            state, contacts, control = model.state(), pipeline.contacts(), model.control()
             velocity = state.body_qd.numpy().copy()
             velocity[boxes[1], 0] = 0.12
             state.body_qd.assign(velocity)
