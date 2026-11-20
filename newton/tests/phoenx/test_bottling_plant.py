@@ -362,7 +362,7 @@ class TestBottlingPlant(unittest.TestCase):
 
     def test_wrapper_portal_proxy_ownership(self):
         """Replace portal proxies only when exact wrapper colliders own their contacts."""
-        from pxr import Usd, UsdGeom, UsdPhysics
+        from pxr import Sdf, Usd, UsdGeom, UsdPhysics
 
         with tempfile.TemporaryDirectory() as directory, wp.ScopedDevice("cpu"):
             root = Path(directory)
@@ -394,8 +394,32 @@ class TestBottlingPlant(unittest.TestCase):
                 portal.AddScaleOp().Set((0.15, 0.15, 3.15))
                 UsdPhysics.CollisionAPI.Apply(portal.GetPrim())
                 portals.append(portal_path)
-            for reconstructed in (True, False):
+            line = label.removesuffix("/Wrapper")
+            for i in range(1, 6):
+                zone_root = UsdGeom.Xform.Define(stage, f"{line}/Physics/Conveyors/Z{i}")
+                zone = UsdGeom.Cube.Define(stage, zone_root.GetPath().AppendChild("Strand_0"))
+                zone.CreateSizeAttr(1.0)
+                zone.AddTranslateOp().Set((float(i), 10.0, 0.4))
+                zone.AddScaleOp().Set((1.0, 1.0, 0.2))
+                UsdPhysics.CollisionAPI.Apply(zone.GetPrim())
+
+            navigation = "/Plant/Physics/NavProxies"
+            wrappers = f"{label}/machine; {label}/steel"
+            proxy_owners = {
+                "Wrapper": wrappers,
+                "Mixed": f"{wrappers}; {line}/Conveyor/galv",
+                "External": f"{wrappers}; /Plant/Building/Wall",
+            }
+            for name, owners in proxy_owners.items():
+                proxy = UsdGeom.Cube.Define(stage, f"{navigation}/{name}")
+                proxy.CreateSizeAttr(1.0)
+                proxy.AddTranslateOp().Set((5.0, 12.0 if name == "External" else 10.0, 1.5))
+                proxy.GetPrim().CreateAttribute("plant:owner", Sdf.ValueTypeNames.String).Set(owners)
+                UsdPhysics.CollisionAPI.Apply(proxy.GetPrim())
+
+            for reconstructed, belts in ((True, True), (True, False), (False, True)):
                 stage.GetPrimAtPath(label).SetActive(reconstructed)
+                stage.GetPrimAtPath(f"{line}/Physics/Conveyors").SetActive(belts)
                 stage.GetRootLayer().Save()
                 scene = load_plant(root, visuals=False, motor_off=True)
                 builder = scene.builder
@@ -403,6 +427,8 @@ class TestBottlingPlant(unittest.TestCase):
                 for x, y in centers:
                     body = builder.add_body(xform=wp.transform((x + 0.08, y, 1.0), wp.quat_identity()))
                     probes.append(builder.add_shape_sphere(body, radius=0.01))
+                tunnel = builder.add_body(xform=wp.transform((5.0, 10.0, 1.5), wp.quat_identity()))
+                tunnel_probe = builder.add_shape_sphere(tunnel, radius=0.01)
                 model = builder.finalize()
                 pipeline = newton.CollisionPipeline(model, broad_phase="nxn")
                 contacts = pipeline.contacts()
@@ -420,6 +446,18 @@ class TestBottlingPlant(unittest.TestCase):
                     )
                 else:
                     self.assertTrue({path + "/collision" for path in portals}.issubset(builder.shape_label))
+                for name, covered in (
+                    ("Wrapper", reconstructed),
+                    ("Mixed", reconstructed and belts),
+                    ("External", False),
+                ):
+                    self.assertEqual(f"{navigation}/{name}/collision" in builder.shape_label, not covered)
+                tunnel_hits = set(second[first == tunnel_probe]) | set(first[second == tunnel_probe])
+                navigation_hits = {builder.shape_label[i] for i in tunnel_hits} & {
+                    f"{navigation}/Wrapper/collision",
+                    f"{navigation}/Mixed/collision",
+                }
+                self.assertEqual(len(navigation_hits), int(not reconstructed) + int(not (reconstructed and belts)))
 
     def test_rack_inventory(self):
         """Import wrapped, open and empty stock on the rack rows, floor and in pallet stacks."""

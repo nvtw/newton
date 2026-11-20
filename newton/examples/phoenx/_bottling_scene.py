@@ -131,6 +131,34 @@ def _prepare_wrapper_inventory(stage):
     disable_owned_proxies(stage, retired)
 
 
+def _prepare_wrapper_proxy_ownership(stage):
+    """Use the reconstructed frame and authored belts around the wrapper opening."""
+    from pxr import Usd, UsdGeom, UsdPhysics  # noqa: PLC0415 - OpenUSD is optional.
+
+    covered = []
+    for name in ("WL_U", "WL_D"):
+        line = f"/Plant/WrapLine/Lines/{name}"
+        wrapper = stage.GetPrimAtPath(line + "/Wrapper")
+        if not wrapper or not any(prim.IsA(UsdGeom.Mesh) for prim in wrapper.GetChildren()):
+            continue
+        covered.append(str(wrapper.GetPath()))
+        zones = [stage.GetPrimAtPath(f"{line}/Physics/Conveyors/Z{i}") for i in range(1, 6)]
+        if all(
+            zone
+            and any(
+                part.IsA(UsdGeom.Gprim)
+                and part.HasAPI(UsdPhysics.CollisionAPI)
+                and _value(part, "physics:collisionEnabled", True)
+                for part in Usd.PrimRange(zone)
+            )
+            for zone in zones
+        ):
+            # The coarse navigation union fills the space under the rotary
+            # arm. Its wrapper and conveyor owners already supply colliders.
+            covered.append(line + "/Conveyor")
+    disable_owned_proxies(stage, covered, scope="/Plant/Physics/NavProxies")
+
+
 def _warehouse_supply_template(stage, asset_root, name, prototype, empty_path, pallet_mass):
     """Combine the shipping material with an A08 pallet, preserving their individual masses."""
     from pxr import Gf, Usd, UsdGeom, UsdPhysics  # noqa: PLC0415 - OpenUSD is optional.
@@ -408,6 +436,7 @@ def load_plant(
     if cutaway:
         plant.GetVariantSet("view").SetVariantSelection("cutaway")
     _prepare_wrapper_inventory(stage)
+    _prepare_wrapper_proxy_ownership(stage)
     stock_instances, rack_case_mass = _prepare_warehouse_inventory(stage, asset_root)
     prepare_dispensers(stage)
     case_inventory, case_staging = _prepare_case_inventory(stage, cartons_per_packer)
