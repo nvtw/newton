@@ -691,7 +691,7 @@ def test_mujoco_stale_contact_at_capacity(test, device, *, body_actuator):
                 np.testing.assert_array_equal(solver._contact_tid_to_cid.numpy()[:2], [-1, 0])
 
 
-def test_planar_recovery_overflow(test, device):
+def test_planar_recovery_overflow(test, device, *, geometric=False):
     """Track a deep pair only if its row fits, and return shallow pairs to ordinary contacts."""
     with wp.ScopedDevice(device):
         wall, probe = test.loaded_wall_and_probe(device)
@@ -705,11 +705,17 @@ def test_planar_recovery_overflow(test, device):
         pairs = wp.array([(0, 1), (0, 2)], dtype=wp.vec2i)
         # Deliberately overfill one output slot and verify the overflow count below.
         pipeline = newton.CollisionPipeline(
-            model, broad_phase="explicit", shape_pairs_filtered=pairs, rigid_contact_max=1, verify_buffers=False
+            model,
+            broad_phase="explicit",
+            shape_pairs_filtered=pairs,
+            rigid_contact_max=1,
+            verify_buffers=False,
+            speculative_contact_gap_max=0.002 if geometric else None,
+            speculative_contact_velocity_filter=not geometric,
         )
         contacts = pipeline.contacts()
         state = model.state()
-        pipeline.collide(state, contacts)
+        pipeline.collide(state, contacts, dt=0.0)
         test.assertGreater(int(contacts.rigid_contact_count.numpy()[0]), contacts.rigid_contact_max)
         stored = int(contacts.rigid_contact_shape1.numpy()[0])
         recovery = contacts._mesh_recovery_contacts
@@ -720,15 +726,15 @@ def test_planar_recovery_overflow(test, device):
         # produce the same number of recovery rows, including on overflow.
         state.body_q.fill_(wp.transform(wp.vec3(-0.0039, 0.0, 0.0), wp.quat_identity()))
         fresh = pipeline.contacts()
-        pipeline.collide(state, fresh)
-        pipeline.collide(state, contacts)
+        pipeline.collide(state, fresh, dt=0.0)
+        pipeline.collide(state, contacts, dt=0.0)
         for data in (recovery, fresh._mesh_recovery_contacts):
             published = data.contacts.numpy()["thickness"] > 0.0
             test.assertEqual(len({1, 2}.intersection(data.keys.numpy()[published])), 1)
 
         # Leave 10 micrometres of overlap against the 1 mm wall.
         state.body_q.fill_(wp.transform(wp.vec3(-0.00399, 0.0, 0.0), wp.quat_identity()))
-        pipeline.collide(state, contacts)
+        pipeline.collide(state, contacts, dt=0.0)
         test.assertEqual(int(recovery.active_slots.numpy()[-1]), 0)
         test.assertGreater(int(contacts.rigid_contact_count.numpy()[0]), 0)
 
@@ -1187,6 +1193,13 @@ add_function_test(
     "test_planar_recovery_overflow",
     test_planar_recovery_overflow,
     devices=get_cuda_test_devices(),
+)
+add_function_test(
+    TestSDFContact,
+    "test_geometric_planar_recovery_overflow",
+    test_planar_recovery_overflow,
+    devices=get_cuda_test_devices(),
+    geometric=True,
 )
 add_function_test(
     TestSDFContact,
