@@ -35,10 +35,21 @@ class TestPhoenXAutoPerformancePolicy(unittest.TestCase):
             "has_deformables": False,
             "has_shapes": True,
             "contact_friction_model": "point",
-            "articulation_mode": "maximal",
+            "joint_mode": "maximal_direct",
         }
         options.update(overrides)
         return _resolve_auto_step_layout(**options)
+
+    def test_maximal_pgs_auto_layout_with_joint(self):
+        builder = newton.ModelBuilder()
+        link = builder.add_link()
+        builder.add_shape_box(link, hx=0.1, hy=0.1, hz=0.1)
+        builder.add_articulation([builder.add_joint_revolute(-1, link)])
+        model = builder.finalize(device="cpu")
+        solver = newton.solvers.SolverPhoenX(model, joint_mode="maximal_pgs")
+        self.assertEqual(solver.world.step_layout, "single_world")
+        with self.assertRaisesRegex(ValueError, "requires single-world"):
+            newton.solvers.SolverPhoenX(model, joint_mode="maximal_pgs", step_layout="multi_world")
 
     def test_large_rigid_contact_world_selects_single_world(self):
         self.assertEqual(self._resolve(), "single_world")

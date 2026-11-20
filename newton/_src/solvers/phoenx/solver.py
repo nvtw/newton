@@ -132,7 +132,7 @@ def _resolve_auto_step_layout(
     has_deformables: bool,
     has_shapes: bool,
     contact_friction_model: str,
-    articulation_mode: str,
+    joint_mode: str,
 ) -> str:
     """Resolve the model-facing PhoenX scheduler policy."""
     if step_layout not in ("auto", "multi_world", "single_world"):
@@ -145,10 +145,10 @@ def _resolve_auto_step_layout(
         and not has_deformables
         and has_shapes
         and contact_friction_model == "point"
-        and articulation_mode == "maximal"
+        and joint_mode == "maximal_direct"
     )
     if step_layout == "auto":
-        return "single_world" if large_rigid_contact_world else "multi_world"
+        return "single_world" if joint_mode == "maximal_pgs" or large_rigid_contact_world else "multi_world"
     return step_layout
 
 
@@ -537,7 +537,7 @@ class SolverPhoenX(SolverBase):
                 Supported values are ``"average"``, ``"min"``, ``"multiply"``,
                 and ``"max"``. Defaults to ``"average"``.
             step_layout: ``"auto"`` keeps the multi-world scheduler except
-                for one rigid contact-only world with at least 2,048 bodies,
+                for maximal PGS joints or one rigid contact-only world with at least 2,048 bodies,
                 where it selects ``"single_world"``. Explicit
                 ``"multi_world"`` and ``"single_world"`` override the policy.
                 The single-world layout colors all constraints together and can
@@ -768,7 +768,7 @@ class SolverPhoenX(SolverBase):
             has_deformables=has_deformables,
             has_shapes=int(model.shape_count) > 0,
             contact_friction_model=contact_friction_model,
-            articulation_mode=articulation_mode,
+            joint_mode=joint_mode,
         )
         if joint_solver == "block_pgs" and (
             articulation_mode != "maximal"
