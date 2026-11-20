@@ -377,6 +377,22 @@ class Example:
         shape_body_phoenx = np.where(shape_body_np < 0, 0, shape_body_np + 1)
         self._shape_body = wp.array(shape_body_phoenx, dtype=wp.int32, device=self.device)
 
+        # CPU uses the ordinary contact sweep. The color-ordered, overflow-only
+        # schedule uses CUDA graph conditionals and a GPU-sized launch grid.
+        cuda_options = {}
+        if self.device.is_cuda:
+            cuda_options = {
+                "max_thread_blocks": 8 * self.device.sm_count,
+                "mass_splitting": ENABLE_MASS_SPLITTING,
+                "max_colored_partitions": MASS_SPLITTING_MAX_COLORED_PARTITIONS,
+                "mass_splitting_unrolled": True,
+                "mass_splitting_overflow_only": ENABLE_MASS_SPLITTING,
+                "mass_splitting_batch_size": 1,
+                "partitioner_algorithm": PARTITIONER_ALGORITHM,
+                "colored_contact_headers": USE_COLORED_CONTACT_HEADERS,
+                "colored_contact_rows": USE_COLORED_CONTACT_ROWS,
+            }
+
         self.world = PhoenXWorld(
             bodies=self.bodies,
             constraints=self.constraints,
@@ -386,19 +402,9 @@ class Example:
             gravity=(0.0, 0.0, -9.81),
             rigid_contact_max=rigid_contact_max,
             step_layout=STEP_LAYOUT,
-            # Scale the latency-hiding grid with the GPU. Color-ordered rows
-            # make its result independent of launch geometry.
-            max_thread_blocks=8 * self.device.sm_count,
-            mass_splitting=ENABLE_MASS_SPLITTING,
-            max_colored_partitions=MASS_SPLITTING_MAX_COLORED_PARTITIONS,
-            mass_splitting_unrolled=True,
-            mass_splitting_overflow_only=ENABLE_MASS_SPLITTING,
-            mass_splitting_batch_size=1,
-            partitioner_algorithm=PARTITIONER_ALGORITHM,
-            colored_contact_headers=USE_COLORED_CONTACT_HEADERS,
-            colored_contact_rows=USE_COLORED_CONTACT_ROWS,
             sor_boost=1.0,
             device=self.device,
+            **cuda_options,
         )
 
         self.viewer.set_model(self.model)
@@ -444,7 +450,7 @@ class Example:
                 [self._camera_collider_initial_pos],
                 dtype=wp.vec3f,
                 device="cpu",
-                pinned=True,
+                pinned=self.device.is_cuda,
             )
             # ``numpy()`` on a pinned CPU array returns an aliased
             # view, so in-place writes to this handle mutate the
@@ -575,7 +581,7 @@ class Example:
         )
 
     def _update_camera_collider(self) -> None:
-        """Stage the camera position into the pinned host buffer.
+        """Stage the camera position into the host buffer.
 
         The captured graph re-reads the bytes via ``wp.copy`` on each
         replay, so the in-place numpy write is all that's needed
