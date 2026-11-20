@@ -13,6 +13,7 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     _OFF_BODY2,
     _OFF_CONTACT_COUNT,
     _OFF_CONTACT_FIRST,
+    ContactViews,
     contact_column_container_zeros,
 )
 from newton._src.solvers.phoenx.constraints.constraint_contact_solve import _contact_group_is_separated
@@ -75,8 +76,11 @@ class TestTemporalContactGroups(unittest.TestCase):
             count = wp.array([3], dtype=int)
             inputs = [columns, cc, bodies, count, columns.articulation_owner]
             cc.gap.assign(gaps)
-            empty = wp.empty(0, dtype=float)
-            wp.launch(temporal_contact_gap_kernel, (2, 8), inputs=[*inputs, 8, 0.001, 1000.0, 5.0, 2, empty, empty])
+            wp.launch(
+                temporal_contact_gap_kernel,
+                (2, 8),
+                inputs=[*inputs, 8, 0.001, 1000.0, 5.0, 2, ContactViews(), None, 0.002, 1, 2],
+            )
             reference_gaps, reference_biases = cc.gap.numpy(), cc.derived.numpy()[3].copy()
             cc.gap.assign(gaps)
             cc.derived.zero_()

@@ -79,8 +79,13 @@ class TestRestitution(unittest.TestCase):
     def test_swept_eccentric_impact(self):
         """An impulse changes terminal velocity immediately and transports the new motion only after impact."""
         with wp.ScopedDevice("cpu"):
-            for substeps, relax in ((1, 1), (4, 0)):
-                with self.subTest(substeps=substeps, velocity_iterations=relax):
+            for substeps, relax, sweeps, material_arrays, acceleration in (
+                (1, 1, 0, False, 0.0),
+                (4, 0, 0, False, 0.0),
+                (1, 1, 4, True, -8.0),
+                (3, 1, 2, False, 0.0),
+            ):
+                with self.subTest(substeps=substeps, relax=relax, sweeps=sweeps, material_arrays=material_arrays):
                     dt, fraction, speed, coefficient = 1.0 / 240.0, 0.65, 4.0, 0.8
                     radius, offset, inertia = 0.08, 0.2, 0.125
                     builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
@@ -90,7 +95,12 @@ class TestRestitution(unittest.TestCase):
                         mass=1.0,
                         inertia=wp.mat33(inertia, 0.0, 0.0, 0.0, inertia, 0.0, 0.0, 0.0, inertia),
                         lock_inertia=True,
-                        xform=wp.transform(wp.vec3(0.0, 0.0, radius + fraction * speed * dt), wp.quat_identity()),
+                        xform=wp.transform(
+                            wp.vec3(
+                                0.0, 0.0, radius + fraction * speed * dt - 0.5 * acceleration * (fraction * dt) ** 2
+                            ),
+                            wp.quat_identity(),
+                        ),
                     )
                     builder.add_shape_sphere(
                         body,
@@ -100,19 +110,45 @@ class TestRestitution(unittest.TestCase):
                     )
                     model = builder.finalize()
                     pipeline = newton.CollisionPipeline(model, contact_matching="sticky")
+                    temporal = (
+                        {
+                            "temporal_iterations": True,
+                            "solver_iterations": sweeps,
+                            "mass_splitting": False,
+                            "step_layout": "single_world",
+                        }
+                        if sweeps
+                        else {}
+                    )
                     solver = SolverPhoenX(
-                        model, collision_pipeline=pipeline, substeps=substeps, velocity_iterations=relax
+                        model, collision_pipeline=pipeline, substeps=substeps, velocity_iterations=relax, **temporal
                     )
                     initial, final = model.state(), model.state()
                     initial.body_qd.assign(np.array([[0.0, 0.0, -speed, 0.0, 0.0, 0.0]], dtype=np.float32))
-                    contacts = pipeline.contacts()
+                    initial.body_f.assign(np.array([[0.0, 0.0, acceleration, 0.0, 0.0, 0.0]], dtype=np.float32))
+                    contacts = (
+                        newton.Contacts(
+                            pipeline.rigid_contact_max,
+                            pipeline.soft_contact_max,
+                            per_contact_shape_properties=True,
+                            contact_matching=True,
+                        )
+                        if material_arrays
+                        else pipeline.contacts()
+                    )
                     solver.collide(initial, contacts)
                     solver.step(initial, final, None, contacts, dt)
 
-                    impulse = (1.0 + coefficient) * speed / (1.0 + offset * offset / inertia)
-                    vz, wy = impulse - speed, -offset * impulse / inertia
+                    impulse = (
+                        (1.0 + coefficient) * (speed - acceleration * fraction * dt) / (1.0 + offset * offset / inertia)
+                    )
+                    vz, wy = impulse - speed + acceleration * dt, -offset * impulse / inertia
                     remaining = (1.0 - fraction) * dt
                     expected_q = wp.quat_from_axis_angle(wp.vec3(0.0, 1.0, 0.0), wy * remaining)
-                    np.testing.assert_allclose(final.body_q.numpy()[0, 2], radius + vz * remaining, atol=2e-6)
+                    np.testing.assert_allclose(
+                        final.body_q.numpy()[0, 2],
+                        radius + vz * remaining - 0.5 * acceleration * remaining**2,
+                        atol=2e-6 + abs(acceleration) * dt**2 / (2 * max(1, sweeps) * substeps),
+                    )
                     np.testing.assert_allclose(final.body_q.numpy()[0, 3:], np.asarray(expected_q), atol=2e-5)
                     np.testing.assert_allclose(final.body_qd.numpy()[0], (0.0, 0.0, vz, 0.0, wy, 0.0), atol=2e-4)

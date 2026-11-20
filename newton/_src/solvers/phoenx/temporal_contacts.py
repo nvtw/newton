@@ -36,6 +36,7 @@ from newton._src.solvers.phoenx.articulations.direct_equality import _apply_dire
 from newton._src.solvers.phoenx.body import MOTION_DYNAMIC, BodyContainer, mat33_from_sym6
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
     ContactColumnContainer,
+    ContactViews,
     contact_get_body1,
     contact_get_body2,
     contact_get_contact_count,
@@ -54,6 +55,7 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_set_pd_eff_soft,
     cc_set_pd_gamma,
 )
+from newton._src.solvers.phoenx.constraints.contact_restitution import accumulate_impact_delay, impact_sweep
 from newton._src.solvers.phoenx.constraints.contact_warm_start import (
     apply_gathered_contact_impulse,
     gathered_contact_impulse,
@@ -160,8 +162,11 @@ def temporal_contact_gap_kernel(
     idt: wp.float32,
     bias_rate: wp.float32,
     column_stride: wp.int32,
-    stiffness: wp.array[wp.float32],
-    damping: wp.array[wp.float32],
+    views: ContactViews,
+    correction: wp.array[wp.spatial_vector],
+    native_dt: float,
+    sweep: int,
+    sweeps: int,
 ):
     """Advance each ordinary contact row's gap by ``advance_dt`` of relative normal motion; refresh its bias.
 
@@ -169,6 +174,9 @@ def temporal_contact_gap_kernel(
     the approach that closes its gap within one contact substep. Authored material
     coefficients use that same timestep and the updated penetration depth.
     """
+    previous_start = native_dt * float(wp.max(0, sweep - 1)) / float(sweeps)
+    stiffness = views.rigid_contact_stiffness
+    damping = views.rigid_contact_damping
     first_column, lane = wp.tid()
     for cid in range(first_column, column_count[0], column_stride):
         if owner[cid] >= wp.int32(0):
@@ -186,6 +194,23 @@ def temporal_contact_gap_kernel(
 
             # Contact views and uncolored rows share canonical ordering, also
             # when compound-body grouping sorts the input material arrays.
+            if views.restitution_target.shape[0] > k:
+                target = views.restitution_target[k]
+                arrival = target[1]
+                if target[0] > 0.0 or arrival != 0.0:
+                    event = impact_sweep(arrival, native_dt, sweeps)
+                    if advance_dt > 0.0 and arrival != 0.0 and event == sweep - 1:
+                        accumulate_impact_delay(views, bodies, cc, correction, k, arrival - previous_start)
+                    if event == sweep:
+                        cc_set_bias(cc, k, 0.0)
+                        cc_set_pd_gamma(cc, k, 0.0)
+                        cc_set_pd_bias(cc, k, target[0])
+                        cc_set_pd_eff_soft(cc, k, cc_get_eff_n(cc, k))
+                    else:
+                        cc_set_pd_eff_soft(cc, k, 0.0)
+                    continue
+                if target[0] < 0.0:
+                    cc_set_pd_eff_soft(cc, k, 0.0)
             if stiffness.shape[0] > k or damping.shape[0] > k:
                 k_n = wp.float32(0.0)
                 c_n = wp.float32(0.0)

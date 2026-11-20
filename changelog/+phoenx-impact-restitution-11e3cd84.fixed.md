@@ -1,1 +1,1 @@
-Honor rigid shape restitution in PhoenX and account for the time of impact when advancing the colliding bodies.
+Honor rigid shape restitution in PhoenX and account for the time of impact when advancing the colliding bodies. Apply rebound during the temporal sweep containing the impact and account for forces already applied to each body.

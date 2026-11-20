@@ -749,6 +749,7 @@ class PhoenXWorld:
         self._temporal_local_joints = None
         self._temporal_outer_joint_placeholder = wp.empty(0, dtype=wp.bool, device=self.device)
         self._temporal_velocity_sum = None
+        self._temporal_jointed = None
         if self.temporal_iterations and self.num_bodies > 0:
             self._temporal_velocity_sum = wp.zeros(self.num_bodies, dtype=wp.vec3f, device=self.device)
             self._temporal_angular_velocity_sum = wp.zeros(self.num_bodies, dtype=wp.vec3f, device=self.device)
@@ -2827,8 +2828,11 @@ class PhoenXWorld:
                 wp.float32(sweep_idt),
                 wp.float32(bias_rate),
                 wp.int32(column_stride),
-                self._contact_views.rigid_contact_stiffness,
-                self._contact_views.rigid_contact_damping,
+                self._contact_views,
+                self._restitution_pose_corrections,
+                self.substep_dt,
+                self._temporal_sweep_index + int(advance_dt > 0.0),
+                self.solver_iterations,
             ],
             device=self.device,
         )
@@ -3540,6 +3544,11 @@ class PhoenXWorld:
                         self.gravity,
                         self.substep_dt,
                         self.substep_dt * self.substeps,
+                        self.solver_iterations if self._temporal_velocity_sum is not None else 1,
+                        self._cid_of_contact_cur,
+                        self._contact_cols.articulation_owner,
+                        self._contact_offset,
+                        self._temporal_jointed,
                         self._contact_container,
                     ],
                     outputs=[self._restitution_targets],
@@ -3551,8 +3560,18 @@ class PhoenXWorld:
                 wp.launch(
                     accumulate_impact_pose_corrections,
                     dim=self.rigid_contact_max,
-                    inputs=[self._contact_views, self.bodies, self._contact_container, self._cid_of_contact_cur],
-                    outputs=[self._restitution_pose_corrections],
+                    inputs=[
+                        self._contact_views,
+                        self.bodies,
+                        self._contact_container,
+                        self._cid_of_contact_cur,
+                        self._restitution_pose_corrections,
+                        self._contact_cols.articulation_owner,
+                        self._contact_offset,
+                        self._temporal_contacts_active(),
+                        self.solver_iterations,
+                        self.substep_dt,
+                    ],
                     device=self.device,
                 )
                 wp.launch(

@@ -14,6 +14,25 @@ from newton._src.solvers.phoenx.materials import MaterialData, resolve_restituti
 from newton._src.solvers.phoenx.simulation_kernels import _rotation_quaternion
 
 
+@wp.func
+def impact_sweep(arrival: float, dt: float, count: int):
+    """Assign a boundary impact to the sweep ending at that boundary."""
+    return wp.clamp(int(wp.ceil(arrival * float(count) / dt)) - 1, 0, count - 1)
+
+
+@wp.func
+def _normal_point_acceleration(
+    bodies: BodyContainer, body: int, arm: wp.vec3f, normal: wp.vec3f, gravity: wp.array[wp.vec3f]
+):
+    if bodies.motion_type[body] != MOTION_DYNAMIC or bodies.island_root[body] >= 0:
+        return 0.0
+    linear = bodies.inverse_mass[body] * bodies.force[body]
+    if bodies.affected_by_gravity[body] != 0:
+        linear += gravity[bodies.world_id[body]]
+    angular = mat33_from_sym6(bodies.inverse_inertia_world[body]) * bodies.torque[body]
+    return wp.dot(linear + wp.cross(angular, arm), normal)
+
+
 @wp.kernel(enable_backward=False)
 def prepare_restitution_targets(
     contacts: ContactViews,
@@ -23,6 +42,11 @@ def prepare_restitution_targets(
     gravity: wp.array[wp.vec3f],
     dt: wp.float32,
     detection_interval: wp.float32,
+    sweeps: int,
+    point_constraint: wp.array[int],
+    owner: wp.array[int],
+    offset: int,
+    jointed: wp.array[int],
     points: ContactContainer,
     targets: wp.array[wp.vec2f],
 ):
@@ -54,15 +78,17 @@ def prepare_restitution_targets(
     if gap <= 0.0 and cc_get_normal_lambda(points, k) > 0.0:
         return
 
-    world = wp.max(wp.max(bodies.world_id[b0], bodies.world_id[b1]), 0)
-    normal_gravity = wp.dot(gravity[world], n)
-    acceleration = wp.float32(0.0)
-    if bodies.inverse_mass[b1] > 0.0 and bodies.affected_by_gravity[b1] != 0:
-        acceleration += normal_gravity
-    if bodies.inverse_mass[b0] > 0.0 and bodies.affected_by_gravity[b0] != 0:
-        acceleration -= normal_gravity
-    # The force stage already advanced velocities to the end of the substep.
-    closing = -wp.dot(v1 - v0, n) + acceleration * dt
+    # Undo only the force impulse that each endpoint has already received.
+    a0 = _normal_point_acceleration(bodies, b0, r0, n, gravity)
+    a1 = _normal_point_acceleration(bodies, b1, r1, n, gravity)
+    acceleration = a1 - a0
+    per_sweep = float(0.0)
+    if sweeps > 1:
+        if jointed[b0] == 0:
+            per_sweep -= a0
+        if jointed[b1] == 0:
+            per_sweep += a1
+    closing = -wp.dot(v1 - v0, n) + acceleration * dt - per_sweep * (dt - dt / float(sweeps))
     if closing <= 2.0 * wp.abs(acceleration) * dt:
         return
 
@@ -75,26 +101,28 @@ def prepare_restitution_targets(
             if arrival < -detection_interval:
                 return
             outgoing = restitution * (closing - acceleration * arrival) + acceleration * (dt - arrival)
+            if sweeps > 1:
+                column = point_constraint[k] - offset
+                if column >= 0 and owner[column] < 0:
+                    # The regular contact solves at the end of its impact sweep.
+                    # Subsequent sweeps will apply the remaining external force.
+                    end = dt * float(impact_sweep(arrival, dt, sweeps) + 1) / float(sweeps)
+                    outgoing -= per_sweep * (dt - end)
             targets[k] = wp.vec2f(outgoing, arrival)
             return
     # A distant speculative row permits uninterrupted approach up to contact.
     targets[k] = wp.vec2f(-gap / dt, 0.0)
 
 
-@wp.kernel(enable_backward=False)
-def accumulate_impact_pose_corrections(
+@wp.func
+def accumulate_impact_delay(
     contacts: ContactViews,
     bodies: BodyContainer,
     points: ContactContainer,
-    point_constraint: wp.array[wp.int32],
     corrections: wp.array[wp.spatial_vector],
+    k: int,
+    arrival: float,
 ):
-    k = wp.tid()
-    if k >= contacts.rigid_contact_count[0] or point_constraint[k] < 0:
-        return
-    arrival = contacts.restitution_target[k][1]
-    if arrival == 0.0:
-        return
     # The ordinary integrator transports the solved impulse over a full
     # substep. Subtract its contribution over the time preceding impact.
     impulse_time = _contact_impulse(points, k) * arrival
@@ -111,6 +139,35 @@ def accumulate_impact_pose_corrections(
             linear = bodies.inverse_mass[body] * correction
             angular = mat33_from_sym6(bodies.inverse_inertia_world[body]) * wp.cross(arm, correction)
             wp.atomic_add(corrections, body, wp.spatial_vector(linear, angular))
+
+
+@wp.kernel(enable_backward=False)
+def accumulate_impact_pose_corrections(
+    contacts: ContactViews,
+    bodies: BodyContainer,
+    points: ContactContainer,
+    point_constraint: wp.array[wp.int32],
+    corrections: wp.array[wp.spatial_vector],
+    owner: wp.array[int],
+    offset: int,
+    temporal: bool,
+    sweeps: int,
+    dt: float,
+):
+    k = wp.tid()
+    if k >= contacts.rigid_contact_count[0] or point_constraint[k] < 0:
+        return
+    arrival = contacts.restitution_target[k][1]
+    if arrival == 0.0:
+        return
+    if temporal:
+        column = point_constraint[k] - offset
+        if column >= 0 and owner[column] < 0:
+            # Earlier sweeps already accounted for their impulses at gap refresh.
+            if impact_sweep(arrival, dt, sweeps) < sweeps - 1:
+                return
+            arrival -= dt * float(sweeps - 1) / float(sweeps)
+    accumulate_impact_delay(contacts, bodies, points, corrections, k, arrival)
 
 
 @wp.kernel(enable_backward=False)
