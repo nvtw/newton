@@ -27,6 +27,7 @@ from .active_prefix_sort import (
     radix_sort_prefix,
 )
 from .contact_reduction_global import decode_oct
+from .sdf_planar_recovery import MeshRecoveryData, empty_mesh_recovery, pair_was_recovered
 
 # Sentinel key for unused contact slots.  ``radix_sort_pairs`` treats
 # keys as signed int64, so ``0x7FFF…`` (max positive int64) sorts last.
@@ -218,6 +219,8 @@ class _FullContactArrays:
     sticky_prev_offset0: wp.array[wp.vec2]
     sticky_prev_offset1: wp.array[wp.vec2]
     sticky_prev_normal: wp.array[wp.vec3]
+    sticky_prev_recovered: wp.array[wp.bool]
+    recovery: MeshRecoveryData
     sticky_match_index: wp.array[wp.int32]
     sticky_witness_threshold_sq: float
     has_shape_props: int
@@ -226,20 +229,11 @@ class _FullContactArrays:
 
 
 @wp.kernel(enable_backward=False)
-def _backup_full_kernel(
-    data: _FullContactArrays,
-    count: wp.array[int],
-    sort_keys_src: wp.array[wp.int64],
-    sort_keys_dst: wp.array[wp.int64],
-    sort_indices: wp.array[wp.int32],
-):
-    """Prepare sort keys and copy active contacts into scratch buffers."""
+def _backup_full_kernel(data: _FullContactArrays, count: wp.array[int]):
+    """Copy active contacts into scratch without changing the sort permutation."""
     i = wp.tid()
-    sort_indices[i] = wp.int32(i)
     if i >= count[0]:
-        sort_keys_dst[i] = SORT_KEY_SENTINEL
         return
-    sort_keys_dst[i] = sort_keys_src[i]
     data.shape0_buf[i] = data.shape0[i]
     data.shape1_buf[i] = data.shape1[i]
     data.point0_buf[i] = data.point0[i]
@@ -288,7 +282,10 @@ def _gather_full_kernel(data: _FullContactArrays, perm: wp.array[wp.int32], coun
     if data.has_sticky_history != 0:
         previous = data.sticky_match_index[i]
         if previous >= 0:
-            replay = _sticky_witnesses_valid(data, p, previous)
+            previously_recovered = data.sticky_prev_recovered.shape[0] > 0 and data.sticky_prev_recovered[previous]
+            pair = wp.vec2i(data.shape0_buf[p], data.shape1_buf[p])
+            if not previously_recovered and not pair_was_recovered(data.recovery, pair):
+                replay = _sticky_witnesses_valid(data, p, previous)
     if replay:
         data.point0[i] = data.sticky_prev_point0[previous]
         data.point1[i] = data.sticky_prev_point1[previous]
@@ -310,6 +307,57 @@ def _gather_full_kernel(data: _FullContactArrays, perm: wp.array[wp.int32], coun
         data.friction[i] = data.friction_buf[p]
     if data.has_match_index != 0:
         data.match_index[i] = data.match_index_buf[p]
+
+
+# -----------------------------------------------------------------------
+# Second sort pass for models whose shape indices don't fit in the packed key.
+#
+# The writers then store only the per-pair sub-key.  The first radix pass
+# orders contacts by sub-key; a second stable pass on a ``(shape_a, shape_b)``
+# pair key built from the backed-up shape columns gives the same order as one
+# sort on the packed ``(shape_a, shape_b, sub_key)`` key would.
+# -----------------------------------------------------------------------
+
+
+@wp.func
+def _make_pair_key(shape_a: wp.int32, shape_b: wp.int32, shape_index_bits: int) -> wp.int64:
+    return (wp.int64(shape_a) << wp.int64(shape_index_bits)) | wp.int64(shape_b)
+
+
+@wp.kernel(enable_backward=False)
+def _pair_keys_from_pairs_kernel(
+    pair_buf: wp.array[wp.vec2i],
+    count: wp.array[int],
+    first_pass_perm: wp.array[wp.int32],
+    shape_index_bits: int,
+    pair_keys: wp.array[wp.int64],
+):
+    """Build pair keys in first-pass order from the simple layout's backed-up pairs."""
+    i = wp.tid()
+    p = first_pass_perm[i]
+    if p >= count[0]:
+        pair_keys[i] = SORT_KEY_SENTINEL
+        return
+    pair = pair_buf[p]
+    pair_keys[i] = _make_pair_key(pair[0], pair[1], shape_index_bits)
+
+
+@wp.kernel(enable_backward=False)
+def _pair_keys_from_shapes_kernel(
+    shape0_buf: wp.array[wp.int32],
+    shape1_buf: wp.array[wp.int32],
+    count: wp.array[int],
+    first_pass_perm: wp.array[wp.int32],
+    shape_index_bits: int,
+    pair_keys: wp.array[wp.int64],
+):
+    """Build pair keys in first-pass order from the full layout's backed-up shapes."""
+    i = wp.tid()
+    p = first_pass_perm[i]
+    if p >= count[0]:
+        pair_keys[i] = SORT_KEY_SENTINEL
+        return
+    pair_keys[i] = _make_pair_key(shape0_buf[p], shape1_buf[p], shape_index_bits)
 
 
 @dataclass(frozen=True, slots=True)
@@ -347,6 +395,12 @@ class ContactSorter:
     ``key_bit_count`` limits sorting to the populated low key bits, reducing
     radix passes without changing the full-capacity graph-capture behavior.
 
+    Set ``pair_shape_index_bits`` when two shape indices and the sub-key don't
+    fit in one 63-bit key.  The sort keys then hold only the sub-key, and a
+    second stable radix pass orders contacts by a ``(shape_a, shape_b)`` pair
+    key with ``pair_shape_index_bits`` per shape, read from the contact shape
+    columns.  :attr:`sorted_keys_view` then holds the sorted pair keys.
+
     Set ``allocate_simple_scratch=False`` for a sorter used only by
     :meth:`sort_full` to avoid allocating the unused simple-layout scratch.
     Scratch allocation is fixed at construction time.
@@ -368,17 +422,22 @@ class ContactSorter:
         compact_suffix_shape_start: int = 0,
         compact_subkey_bits: int = 0,
         compact_key_bits: int = 0,
+        pair_shape_index_bits: int = 0,
         per_contact_shape_properties: bool = False,
         allocate_simple_scratch: bool = True,
         device: Devicelike = None,
     ):
         compact_sort = compact_shape_rank is not None
+        if compact_sort and pair_shape_index_bits:
+            raise ValueError("compact sort requires packed shape-pair keys")
         if not 1 <= key_bit_count <= 64:
             raise ValueError(f"key_bit_count must be in [1, 64], got {key_bit_count}")
         if compact_sort != (compact_shape_pair_base is not None):
             raise ValueError("compact shape rank and pair base must be provided together")
         if compact_sort and not (1 <= compact_subkey_bits < compact_key_bits <= 30):
             raise ValueError("compact sort requires 1 <= subkey_bits < key_bits <= 30")
+        if not 0 <= pair_shape_index_bits <= 31:
+            raise ValueError(f"pair_shape_index_bits must be in [0, 31], got {pair_shape_index_bits}")
         with wp.ScopedDevice(device):
             self._capacity = capacity
             self._source_shape_index_bits = int(source_shape_index_bits)
@@ -404,6 +463,11 @@ class ContactSorter:
                 wp.zeros(2 * capacity, dtype=wp.int32) if compact_sort else wp.zeros(0, dtype=wp.int32)
             )
 
+            # Second pass on the shape pair, only for models past the packed key's shape limit.
+            self._pair_shape_index_bits = pair_shape_index_bits
+            pair_capacity = capacity if pair_shape_index_bits > 0 else 0
+            self._pair_keys = wp.zeros(2 * pair_capacity, dtype=wp.int64)
+
             self._has_shape_props = per_contact_shape_properties
 
             # Scratch buffers for the simple gather (NarrowPhase.launch path).
@@ -424,6 +488,7 @@ class ContactSorter:
             self._full_offset0_buf = wp.zeros(capacity, dtype=wp.vec3)
             self._full_offset1_buf = wp.zeros(capacity, dtype=wp.vec3)
             self._sticky_oct_offset_dummy = wp.zeros(1, dtype=wp.vec2)
+            self._sticky_recovered_dummy = wp.empty(0, dtype=wp.bool)
             self._full_normal_buf = wp.zeros(capacity, dtype=wp.vec3)
             self._full_margin0_buf = wp.zeros(capacity, dtype=float)
             self._full_margin1_buf = wp.zeros(capacity, dtype=float)
@@ -521,6 +586,7 @@ class ContactSorter:
             device=device,
         )
         wp.utils.radix_sort_pairs(self._sort_keys_copy, self._sort_indices, n, end_bit=self._key_bit_count)
+        self._sort_pair_pass(_pair_keys_from_pairs_kernel, [data.pair_buf], contact_count, device)
         wp.launch(_gather_simple_kernel, dim=n, inputs=[data, self._sort_indices, contact_count], device=device)
 
     def sort_full(
@@ -549,6 +615,8 @@ class ContactSorter:
         sticky_prev_offset0: wp.array | None = None,
         sticky_prev_offset1: wp.array | None = None,
         sticky_prev_normal: wp.array | None = None,
+        sticky_prev_recovered: wp.array | None = None,
+        recovery: MeshRecoveryData | None = None,
         sticky_match_index: wp.array | None = None,
         sticky_witness_threshold_sq: float = 0.0,
         device: Devicelike = None,
@@ -584,6 +652,8 @@ class ContactSorter:
             sticky_prev_offset0: Optional oct-encoded previous offset direction on shape 0.
             sticky_prev_offset1: Optional oct-encoded previous offset direction on shape 1.
             sticky_prev_normal: Optional previous canonical contact normals.
+            sticky_prev_recovered: Optional previous shape-pair recovery flags.
+            recovery: Certificates for freshly recovered contact pairs.
             sticky_match_index: Optional canonical indices into sticky history.
             sticky_witness_threshold_sq: Maximum squared world-space drift [m^2] between
                 a saved witness and its fresh contact point; larger drift keeps fresh geometry.
@@ -591,7 +661,13 @@ class ContactSorter:
         """
         n = self._capacity
         if not sort_prepared:
-            self.prepare_full_sort(sort_keys, contact_count, device=device)
+            self.prepare_full_sort(
+                sort_keys,
+                contact_count,
+                shape0=self._full_shape0_buf if source_is_buffer else shape0,
+                shape1=self._full_shape1_buf if source_is_buffer else shape1,
+                device=device,
+            )
 
         has_props = self._has_shape_props
         has_match = match_index is not None and match_index.shape[0] > 0
@@ -652,6 +728,10 @@ class ContactSorter:
             sticky_prev_offset1 if sticky_prev_offset1 is not None else self._sticky_oct_offset_dummy
         )
         data.sticky_prev_normal = sticky_prev_normal if sticky_prev_normal is not None else self._full_normal_buf
+        data.sticky_prev_recovered = (
+            sticky_prev_recovered if sticky_prev_recovered is not None else self._sticky_recovered_dummy
+        )
+        data.recovery = recovery if recovery is not None else empty_mesh_recovery(sort_keys.device.alias)
         data.sticky_match_index = sticky_match_index if sticky_match_index is not None else self._full_match_index_buf
         data.sticky_witness_threshold_sq = float(sticky_witness_threshold_sq)
         data.has_shape_props = 1 if has_props else 0
@@ -668,9 +748,35 @@ class ContactSorter:
         else:
             gather(n)
 
-    def prepare_full_sort(self, sort_keys: wp.array, contact_count: wp.array, *, device: Devicelike = None) -> None:
+    def prepare_full_sort(
+        self,
+        sort_keys: wp.array,
+        contact_count: wp.array,
+        *,
+        shape0: wp.array | None = None,
+        shape1: wp.array | None = None,
+        device: Devicelike = None,
+    ) -> None:
         """Prepare the canonical permutation without gathering the full record."""
         self._sort_and_permute(sort_keys, contact_count, device=device)
+        if self._pair_shape_index_bits:
+            if shape0 is None or shape1 is None:
+                raise ValueError("the pair sort requires both source shape columns")
+            self._sort_pair_pass(_pair_keys_from_shapes_kernel, [shape0, shape1], contact_count, device)
+
+    def _sort_pair_pass(self, kernel, shape_inputs, contact_count, device) -> None:
+        bits = self._pair_shape_index_bits
+        if not bits:
+            return
+        n = self._capacity
+        wp.launch(
+            kernel,
+            dim=n,
+            inputs=[*shape_inputs, contact_count, self._sort_indices, bits],
+            outputs=[self._pair_keys],
+            device=device,
+        )
+        wp.utils.radix_sort_pairs(self._pair_keys, self._sort_indices, n, end_bit=2 * bits + 1)
 
     @property
     def sort_indices_view(self) -> wp.array:
@@ -683,13 +789,21 @@ class ContactSorter:
         return self._full_buffer
 
     @property
-    def sorted_keys_view(self) -> wp.array:
+    def pair_shape_index_bits(self) -> int:
+        """Bits per shape index in the second-pass pair key, or 0 for a single packed-key pass."""
+        return self._pair_shape_index_bits
+
+    @property
+    def sorted_keys_view(self) -> wp.array[wp.int64]:
         """View of sorted keys (first half of internal buffer).
 
         Valid only after :meth:`sort_simple` or :meth:`sort_full` returns.
         The array has ``capacity`` elements; active entries are
-        ``sorted_keys_view[:contact_count]``.
+        ``sorted_keys_view[:contact_count]``.  With a second pair pass these
+        are the sorted ``(shape_a, shape_b)`` pair keys.
         """
+        if self._pair_shape_index_bits > 0:
+            return self._pair_keys[: self._capacity]
         return self._sort_keys_copy[: self._capacity]
 
     @property
@@ -740,7 +854,12 @@ class ContactSorter:
         # Buffers are sized for the worst case; a captured graph can branch to the smallest
         # prefix that holds the contacts, which the keys' sentinel tail allows. Outside a
         # capture the branch would read its predicate back from the device.
-        if self._prefix_flags.shape[0] > 1 and keys.device.is_cuda and keys.device.is_capturing:
+        if (
+            not self._pair_shape_index_bits
+            and self._prefix_flags.shape[0] > 1
+            and keys.device.is_cuda
+            and keys.device.is_capturing
+        ):
             radix_sort_active_prefix(keys, self._sort_indices, contact_count, self._prefix_flags, end_bit=end_bit)
         else:
             wp.utils.radix_sort_pairs(keys, self._sort_indices, n, end_bit=end_bit)
@@ -773,7 +892,7 @@ class ContactSorter:
                 device=device,
             )
             self._radix_sort(self._compact_sort_keys, contact_count, self._compact_key_bits + 1)
-        elif self._launch_over_active(n, sort_keys.device):
+        elif not self._pair_shape_index_bits and self._launch_over_active(n, sort_keys.device):
 
             def prepare_and_sort(dim: int) -> None:
                 # The keys get their sentinel behind the contacts within the size class, which

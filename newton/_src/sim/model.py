@@ -22,7 +22,7 @@ from ..exceptions import NewtonDeprecationWarning, NewtonWarning
 from ..geometry.deformable_visual import DeformableVisualMesh, _DeformableVisualSkinBatches
 from ..geometry.flags import ShapeFlags
 from ..geometry.inertia import _inverse_inertia_wp
-from ..utils.deprecation import RemovedAttribute, warn_deprecation
+from ..utils.deprecation import warn_deprecation
 from ..utils.mesh import MeshAdjacency, MeshAdjacencyData
 from .contacts import Contacts
 from .control import Control
@@ -31,12 +31,6 @@ from .shape_contact_pairs import _ShapeContactPairs
 from .state import State
 
 logger = logging.getLogger(__name__)
-
-_JOINT_TWIST_LIMIT_DEPRECATION_MSG = (
-    "Model.joint_twist_lower and Model.joint_twist_upper are deprecated in Newton 1.7 and will be removed "
-    "in a future release. They were never populated or used by any solver; limit joint rotations with the "
-    "per-DOF Model.joint_limit_lower and Model.joint_limit_upper instead."
-)
 
 _COLLISION_EDGE_DEPRECATION_MSG = (
     "Model.{name} is deprecated in Newton 1.8 and will be removed in Newton 1.9. "
@@ -746,8 +740,6 @@ class Model:
         "joint_X_c": AttributeSpec(AttributeFrequency.JOINT),
         "joint_dof_dim": AttributeSpec(AttributeFrequency.JOINT),
         "joint_enabled": AttributeSpec(AttributeFrequency.JOINT),
-        "joint_twist_lower": AttributeSpec(AttributeFrequency.JOINT, deprecated=True),
-        "joint_twist_upper": AttributeSpec(AttributeFrequency.JOINT, deprecated=True),
         "joint_label": AttributeSpec(AttributeFrequency.JOINT),
         "joint_world": AttributeSpec(AttributeFrequency.JOINT, references=AttributeFrequency.WORLD),
         "joint_q_start": AttributeSpec(
@@ -1656,8 +1648,6 @@ class Model:
         """Joint position limit stiffness [N/m or N·m/rad, depending on joint type] (used by :class:`~newton.solvers.SolverSemiImplicit` and :class:`~newton.solvers.SolverFeatherstone`), shape [joint_dof_count], float."""
         self.joint_limit_kd: wp.array[wp.float32] | None = None
         """Joint position limit damping [N·s/m or N·m·s/rad, depending on joint type] (used by :class:`~newton.solvers.SolverSemiImplicit` and :class:`~newton.solvers.SolverFeatherstone`), shape [joint_dof_count], float."""
-        self._deprecated_joint_twist_lower: wp.array[wp.float32] | None = None
-        self._deprecated_joint_twist_upper: wp.array[wp.float32] | None = None
         self.joint_q_start: wp.array[wp.int32] | None = None
         """Start index of the first position coordinate per joint (last value is a sentinel for dimension queries), shape [joint_count + 1], int."""
         self.joint_qd_start: wp.array[wp.int32] | None = None
@@ -1969,7 +1959,6 @@ class Model:
 
         self._requested_state_attributes: set[str] = set()
         self._collision_pipeline: CollisionPipeline | None = None
-        # cached collision pipeline
         self._requested_contact_attributes: set[str] = set()
 
         self.attribute_specs: dict[str, Model.AttributeSpec] = dict(Model._CORE_ATTRIBUTE_SPECS)
@@ -2183,13 +2172,6 @@ class Model:
         """Resolve existing built-in aliases without changing the supplied declaration."""
         return Model._REFERENCE_ALIASES.get(references, references)
 
-    # ----- Removed joint-target aliases -------------------------------------
-    # Tombstones so that assigning the 1.3-era names fails loudly instead of
-    # creating an unused instance attribute whose targets are never applied.
-
-    joint_target_pos = RemovedAttribute("joint_target_q", removed_in="1.5")
-    joint_target_vel = RemovedAttribute("joint_target_qd", removed_in="1.5")
-
     @property
     def mesh_edge_indices(self) -> wp.array[wp.vec2i] | None:
         """Packed collision-edge vertex pairs, shape [total_edge_count].
@@ -2267,36 +2249,6 @@ class Model:
         """Replace shape edge ranges through the deprecated public alias."""
         warn_deprecation(_COLLISION_EDGE_DEPRECATION_MSG.format(name="shape_edge_range"))
         self._shape_edge_range = value
-
-    @property
-    def joint_twist_lower(self) -> wp.array[wp.float32] | None:
-        """Joint lower twist limit [rad], shape [joint_count], float. Never populated.
-
-        .. deprecated:: 1.7
-            Limit joint rotations with the per-DOF :attr:`joint_limit_lower` instead.
-        """
-        warnings.warn(_JOINT_TWIST_LIMIT_DEPRECATION_MSG, NewtonDeprecationWarning, stacklevel=2)
-        return self._deprecated_joint_twist_lower
-
-    @joint_twist_lower.setter
-    def joint_twist_lower(self, value: wp.array[wp.float32] | None) -> None:
-        warnings.warn(_JOINT_TWIST_LIMIT_DEPRECATION_MSG, NewtonDeprecationWarning, stacklevel=2)
-        self._deprecated_joint_twist_lower = value
-
-    @property
-    def joint_twist_upper(self) -> wp.array[wp.float32] | None:
-        """Joint upper twist limit [rad], shape [joint_count], float. Never populated.
-
-        .. deprecated:: 1.7
-            Limit joint rotations with the per-DOF :attr:`joint_limit_upper` instead.
-        """
-        warnings.warn(_JOINT_TWIST_LIMIT_DEPRECATION_MSG, NewtonDeprecationWarning, stacklevel=2)
-        return self._deprecated_joint_twist_upper
-
-    @joint_twist_upper.setter
-    def joint_twist_upper(self, value: wp.array[wp.float32] | None) -> None:
-        warnings.warn(_JOINT_TWIST_LIMIT_DEPRECATION_MSG, NewtonDeprecationWarning, stacklevel=2)
-        self._deprecated_joint_twist_upper = value
 
     @property
     def joint_target_q_start(self) -> wp.array | None:

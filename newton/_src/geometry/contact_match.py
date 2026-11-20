@@ -20,6 +20,7 @@ from ..core.types import Devicelike
 from .active_prefix_sort import ACTIVE_DISPATCH_MIN_ITEMS, active_prefix_sort_levels, dispatch_active_prefix
 from .contact_reduction_global import encode_oct
 from .contact_sort import SORT_KEY_SENTINEL
+from .sdf_planar_recovery import MeshRecoveryData, empty_mesh_recovery, pair_was_recovered
 
 MATCH_NOT_FOUND = wp.constant(wp.int32(-1))
 """Sentinel: no matching key found in last frame's contacts."""
@@ -91,30 +92,16 @@ def _float_flip(f: float) -> wp.uint32:
 
 
 @wp.func
-def _pack_claim(dist_sq: float, key_low32: wp.int64) -> wp.int64:
-    """Pack ``(dist_sq, sort_key_low32)`` into a single int64 for ``atomic_min``.
+def _pack_claim(dist_sq: float, sorted_row: wp.int64) -> wp.int64:
+    """Pack distance and a unique sorted row index for ``atomic_min``.
 
     High 32 bits: ``float_flip(dist_sq)`` — ascending by distance.
-    Low 32 bits:  the low 32 bits of the contact's sort key — deterministic
-        tie-break (smallest wins).  Using the sort key (rather than the
-        unsorted thread id) keeps the resolution invariant under
-        non-deterministic narrow-phase slot assignment: two new contacts
-        racing for the same prev contact get the same packed claim
-        regardless of which unsorted slot the narrow phase happened to
-        hand them this run.
-
-    Within a single shape pair the upper 40 bits of every contact's sort
-    key are identical, so the low 32 bits hold the (shape_b LSBs +
-    sort_sub_key) which uniquely identifies each contact in the pair as
-    long as ``sort_sub_key`` is unique per contact within the pair.
-
-    Reduced contacts can share a fingerprint. The duplicate-ownership pass
-    below disambiguates those claims using their full distance/key priority,
-    then fresh geometry. Canonical rank breaks ties only when the current
-    contacts have identical keys and geometry.
+    Low 32 bits store the canonical row for split pair keys, or the
+    packed sub-key for single-pass keys. Packed collisions are resolved
+    by comparing fresh contact geometry before transferring history.
     """
     flipped = wp.int64(_float_flip(dist_sq))
-    return (flipped << wp.int64(32)) | (key_low32 & wp.int64(0xFFFFFFFF))
+    return (flipped << wp.int64(32)) | (sorted_row & wp.int64(0xFFFFFFFF))
 
 
 # ------------------------------------------------------------------
@@ -277,6 +264,8 @@ def _match_contacts_kernel(data: _MatchData):
         return
 
     target_key = data.new_keys[source]
+    if data.pair_key_stride == wp.int64(1):
+        target_key = data.new_keys[tid]
 
     # World-space witnesses of the new contact; see _match_distance_sq.
     p0 = data.new_point0[source]
@@ -335,11 +324,12 @@ def _match_contacts_kernel(data: _MatchData):
     if best_idx >= 0:
         data.match_index[tid] = wp.int32(best_idx)
         # Race for ownership of prev[best_idx] with a single atomic_min.
-        # Closest distance wins; ties resolved by smallest sort_key low
-        # 32 bits.  Using the sort key (instead of ``tid``) keeps the
-        # winner invariant under the non-deterministic unsorted slot
-        # assignment that the narrow phase gives us via ``wp.atomic_add``.
-        wp.atomic_min(data.prev_claim, best_idx, _pack_claim(best_dist_sq, target_key))
+        # Matching runs after sorting: row IDs follow sub-key order within
+        # each pair and remain unique even when fingerprints collide.
+        claim_key = target_key
+        if data.pair_key_stride == wp.int64(1):
+            claim_key = wp.int64(tid)
+        wp.atomic_min(data.prev_claim, best_idx, _pack_claim(best_dist_sq, claim_key))
     else:
         # Pair range exists but no contact within thresholds.
         data.match_index[tid] = MATCH_BROKEN
@@ -375,6 +365,7 @@ def _clear_prev_claim_kernel(
 def _resolve_claims_kernel(
     match_index: wp.array[wp.int32],
     sort_keys: wp.array[wp.int64],
+    pair_key_stride: wp.int64,
     prev_claim: wp.array[wp.int64],
     prev_was_matched: wp.array[wp.int32],
     new_count: wp.array[wp.int32],
@@ -385,8 +376,7 @@ def _resolve_claims_kernel(
     """Pass 2: keep winners, demote losers to :data:`MATCH_BROKEN`.
 
     The low 32 bits of ``prev_claim[cand]`` identify the winning
-    contact by the low 32 bits of its sort key (deterministic per
-    contact, invariant under unsorted slot reordering); everyone else
+    contact by its sorted row index; everyone else
     who staked a claim on the same ``cand`` becomes :data:`MATCH_BROKEN`
     (no second-closest fallback).
     """
@@ -406,10 +396,12 @@ def _resolve_claims_kernel(
         return  # already MATCH_NOT_FOUND or MATCH_BROKEN
 
     winner_key_low = prev_claim[cand] & wp.int64(0xFFFFFFFF)
-    source = tid
-    if use_permutation != 0:
-        source = canonical_to_source[tid]
-    my_key_low = sort_keys[source] & wp.int64(0xFFFFFFFF)
+    my_key_low = wp.int64(tid)
+    if pair_key_stride != wp.int64(1):
+        source = tid
+        if use_permutation != 0:
+            source = canonical_to_source[tid]
+        my_key_low = sort_keys[source] & wp.int64(0xFFFFFFFF)
     if winner_key_low == my_key_low:
         if has_report != 0:
             prev_was_matched[cand] = wp.int32(1)
@@ -538,6 +530,7 @@ class _SaveStateData:
     src_normal: wp.array[wp.vec3]
     src_count: wp.array[wp.int32]
     src_generation: wp.array[wp.int32]
+    recovery: MeshRecoveryData
     buffer_id: int
 
     body_q: wp.array[wp.transform]
@@ -554,6 +547,7 @@ class _SaveStateData:
     dst_offset0: wp.array[wp.vec2]
     dst_offset1: wp.array[wp.vec2]
     save_sticky: int
+    dst_recovered: wp.array[wp.bool]
     dst_count: wp.array[wp.int32]
     dst_frame: wp.array[wp.int32]
     dst_claim: wp.array[wp.int64]
@@ -625,6 +619,7 @@ def _save_sorted_state_kernel(data: _SaveStateData, reset_world_mask: wp.array[w
             data.dst_separation[i] = p1w - p0w
             data.dst_offset0[i] = encode_oct(data.src_offset0[i])
             data.dst_offset1[i] = encode_oct(data.src_offset1[i])
+            data.dst_recovered[i] = pair_was_recovered(data.recovery, wp.vec2i(data.src_shape0[i], data.src_shape1[i]))
 
 
 # ------------------------------------------------------------------
@@ -786,6 +781,7 @@ class ContactMatcher:
                 self._prev_separation = wp.zeros(capacity, dtype=wp.vec3)
                 self._prev_offset0 = wp.zeros(capacity, dtype=wp.vec2)
                 self._prev_offset1 = wp.zeros(capacity, dtype=wp.vec2)
+                self._prev_recovered = wp.zeros(capacity, dtype=wp.bool)
             else:
                 self._prev_point0 = None
                 self._prev_point1 = None
@@ -794,6 +790,7 @@ class ContactMatcher:
                 self._prev_separation = None
                 self._prev_offset0 = None
                 self._prev_offset1 = None
+                self._prev_recovered = wp.zeros(0, dtype=wp.bool)
 
     # ------------------------------------------------------------------
     # Properties
@@ -959,6 +956,7 @@ class ContactMatcher:
                 inputs=[
                     match_index_out,
                     sort_keys,
+                    self._pair_key_stride,
                     self._prev_claim,
                     self._prev_was_matched,
                     contact_count,
@@ -969,22 +967,23 @@ class ContactMatcher:
                 device=device,
             )
 
-            # Fingerprints can collide after contact reduction. Repair duplicate
-            # ownership before any sticky geometry or solver history is transferred.
-            head = self._match_claim_head if dim == self._capacity else self._match_claim_head[:dim]
-            head.fill_(wp.int32(-1))
-            wp.launch(
-                _build_match_claim_lists_kernel,
-                dim=dim,
-                inputs=[data, self._match_next_claim, self._match_claim_head],
-                device=device,
-            )
-            wp.launch(
-                _resolve_duplicate_claims_kernel,
-                dim=dim,
-                inputs=[data, self._match_next_claim, self._match_claim_head],
-                device=device,
-            )
+            if self._pair_key_stride != 1:
+                # Fingerprints can collide after contact reduction. Repair duplicate
+                # ownership before any sticky geometry or solver history is transferred.
+                head = self._match_claim_head if dim == self._capacity else self._match_claim_head[:dim]
+                head.fill_(wp.int32(-1))
+                wp.launch(
+                    _build_match_claim_lists_kernel,
+                    dim=dim,
+                    inputs=[data, self._match_next_claim, self._match_claim_head],
+                    device=device,
+                )
+                wp.launch(
+                    _resolve_duplicate_claims_kernel,
+                    dim=dim,
+                    inputs=[data, self._match_next_claim, self._match_claim_head],
+                    device=device,
+                )
 
         if self._launch_over_active():
             # The size class covers the previous contacts too: their match indices return to
@@ -1015,7 +1014,7 @@ class ContactMatcher:
         )
 
     @property
-    def sticky_history_arrays(self) -> tuple[wp.array, wp.array, wp.array, wp.array, wp.array]:
+    def sticky_history_arrays(self) -> tuple[wp.array, wp.array, wp.array, wp.array, wp.array, wp.array]:
         """Previous sticky points, oct-encoded offset directions, and normals."""
         if not self._sticky:
             raise ValueError("sticky history requires sticky matching")
@@ -1025,6 +1024,7 @@ class ContactMatcher:
             self._prev_offset0,
             self._prev_offset1,
             self._prev_normal,
+            self._prev_recovered,
         )
 
     def save_sorted_state(
@@ -1043,6 +1043,7 @@ class ContactMatcher:
         contact_generation: wp.array[wp.int32],
         sorted_offset0: wp.array[wp.vec3] | None = None,
         sorted_offset1: wp.array[wp.vec3] | None = None,
+        recovery: MeshRecoveryData | None = None,
         device: Devicelike = None,
     ) -> None:
         """Save canonical matching state and optional sticky geometry."""
@@ -1059,6 +1060,7 @@ class ContactMatcher:
         data.src_normal = sorted_normal
         data.src_count = contact_count
         data.src_generation = contact_generation
+        data.recovery = recovery or empty_mesh_recovery(sorted_keys.device.alias)
         data.buffer_id = int(buffer_id)
         data.body_q = body_q
         data.shape_body = shape_body
@@ -1076,6 +1078,7 @@ class ContactMatcher:
         data.dst_count = self._prev_count
         data.dst_frame = self._prev_frame
         data.dst_claim = self._prev_claim
+        data.dst_recovered = self._prev_recovered
         data.dst_prev_was_matched = self._prev_was_matched
         data.has_report = 1 if self._has_report else 0
 

@@ -15,16 +15,6 @@ GENERATION_SENTINEL = -1
 
 
 @wp.kernel(enable_backward=False)
-def _increment_contact_generation(generation: wp.array[wp.int32]):
-    g = generation[0]
-    if g == 2147483647:
-        g = 0
-    else:
-        g = g + 1
-    generation[0] = g
-
-
-@wp.kernel(enable_backward=False)
 def _clear_counters_and_bump_generation(
     counters: wp.array[wp.int32],
     generation: wp.array[wp.int32],
@@ -222,6 +212,7 @@ class Contacts:
         # Penetration-free motion certification data, attached by a CollisionPipeline
         # configured with ``penetration_free``. Solvers that cannot honor it must reject it.
         self._penetration_free = None
+        self._mesh_recovery_contacts = None
         with wp.ScopedDevice(device):
             # Two contact counts, [0] rigid and [1] soft, plus overflow flags:
             # [2] global contact reduction and [3] a coupled source's soft-contact buffer.
