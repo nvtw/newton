@@ -43,6 +43,7 @@ from .constraints.constraint_container import (
 )
 from .helpers.math_helpers import create_orthonormal, rotate_inertia
 from .materials import MaterialData
+from .sleeping_kernels import _self_wake_body
 
 __all__ = [
     "BodyDesc",
@@ -294,6 +295,8 @@ class DynamicsData:
     world_count: wp.int32
     body_count: wp.int32
 
+    #: Runtime parent exclusions used by the collision pipeline.
+    body_filter_parent: wp.array[wp.int32]
     #: Model body worlds, assigned when a body is added so shapes can follow in the same kernel.
     body_world: wp.array[wp.int32]
     #: Model shape types, to check mesh prototypes.
@@ -498,9 +501,22 @@ def add_joint(dyn: DynamicsData, desc: JointDesc) -> wp.int32:
 
 
 @wp.func
+def _release_joint(dyn: DynamicsData, joint: wp.int32) -> wp.bool:
+    if not _pool_release(dyn.joint_pool, joint):
+        return False
+    slot = joint - dyn.joint_pool.start
+    if dyn.joint_pool.state[slot] == _REMOVED:
+        # Restore this pair before collision or before a replacement joint installs its filter.
+        desc = dyn.staged_joints[slot]
+        if not desc.collide_parent:
+            wp.atomic_cas(dyn.body_filter_parent, desc.child, desc.parent, _NO_FILTER)
+    return True
+
+
+@wp.func
 def remove_joint(dyn: DynamicsData, joint: wp.int32) -> wp.bool:
     """Remove a runtime joint at the next :meth:`~newton.solvers.SolverPhoenX.step`; ``False`` if not removable."""
-    if _pool_release(dyn.joint_pool, joint):
+    if _release_joint(dyn, joint):
         _drop_tree(dyn, dyn.joint_articulation, joint - dyn.joint_pool.start)
         return True
     wp.atomic_add(dyn.error_count, 0, 1)
@@ -1294,15 +1310,44 @@ def _cascade_joints_kernel(dyn: DynamicsData, joint_parent: wp.array[wp.int32], 
         parent = dyn.staged_joints[slot].parent
         child = dyn.staged_joints[slot].child
     if _pool_removed(dyn.body_pool, parent) or _pool_removed(dyn.body_pool, child):
-        _pool_release(dyn.joint_pool, joint)
+        _release_joint(dyn, joint)
+
+
+@wp.kernel(enable_backward=False)
+def _self_wake_with_joint_edits(
+    bodies: BodyContainer,
+    body_aabb_diagonal: wp.array[wp.float32],
+    threshold: wp.float32,
+    wake_flag: wp.array[wp.int32],
+    state: wp.array[wp.int32],
+    joints: wp.array[JointDesc],
+    include_body_inputs: bool,
+):
+    i = wp.tid()
+    if include_body_inputs and i < bodies.island_root.shape[0]:
+        _self_wake_body(i, bodies, body_aabb_diagonal, threshold, wake_flag)
+    if i < state.shape[0] and (state[i] == _ADDED or state[i] == _REMOVED):
+        a = joints[i].parent + 1
+        b = joints[i].child + 1
+        if a > 0 and bodies.island_root[a] >= 0:
+            wp.atomic_max(wake_flag, bodies.island_root[a], 1)
+        if b > 0 and bodies.island_root[b] >= 0:
+            wp.atomic_max(wake_flag, bodies.island_root[b], 1)
 
 
 @wp.kernel(enable_backward=False)
 def _commit_joints_kernel(
-    dyn: DynamicsData, rows: _JointRows, block: _BlockRows, active: wp.array[wp.int32], free: wp.array[wp.int32]
+    dyn: DynamicsData,
+    rows: _JointRows,
+    block: _BlockRows,
+    active: wp.array[wp.int32],
+    free: wp.array[wp.int32],
+    resolved: wp.array[wp.int32],
 ):
     slot = wp.tid()
     old = _resolve(dyn.joint_pool, slot, active, free)
+    if slot < resolved.shape[0]:
+        resolved[slot] = old
     joint = dyn.joint_pool.start + slot
     if old == _ADDED:
         _write_joint(rows, block, joint, dyn.staged_joints[slot])
@@ -1316,9 +1361,6 @@ def _commit_joints_kernel(
         block.generic_angular_count[joint] = 0
         for k in range(_ROWS):
             block.row_dynamic[joint * _ROWS + k] = False
-        child = rows.child[joint]
-        if block.body_filter_parent[child] == rows.parent[joint]:
-            block.body_filter_parent[child] = _NO_FILTER
 
 
 @wp.kernel(enable_backward=False)
@@ -1786,7 +1828,12 @@ class Dynamics:
         d = DynamicsData()
         d.body_pool = self.bodies.data
         d.shape_pool = self.shapes.data
+        d.body_filter_parent = solver._body_filter_parent
         d.joint_pool = self.joints.data
+        # The next in-step wake uses the edits that _resolve has already committed.
+        self._resolved_joint_state = wp.empty(self.joints.capacity if self._sleeping else 0, dtype=int, device=device)
+        if self.joints.capacity and self._sleeping:
+            solver.world._runtime_joint_wake = self
         d.articulation_pool = self.articulations.data
         d.error_count = wp.zeros(1, dtype=wp.int32, device=device)
         d.world_count = wp.int32(max(1, int(model.world_count)))
@@ -2123,6 +2170,23 @@ class Dynamics:
         """Device counter of failed ``add_*`` and ``remove_*`` requests since construction."""
         return self.data.error_count
 
+    def _mark_joint_wake(self, world, flags, *, pending, include_body_inputs=True):
+        state = self.joints.data.state if pending else self._resolved_joint_state
+        wp.launch(
+            _self_wake_with_joint_edits,
+            dim=max(world.num_bodies, self.joints.capacity) if include_body_inputs else self.joints.capacity,
+            inputs=[
+                world.bodies,
+                world._body_aabb_diagonal,
+                wp.float32(world._sleeping_velocity_threshold),
+                flags,
+                state,
+                self.data.staged_joints,
+                include_body_inputs,
+            ],
+            device=world.device,
+        )
+
     def _commit(self) -> None:
         """Write staged additions and apply removals at the start of a step, one thread per slot."""
         d = self.data
@@ -2195,7 +2259,14 @@ class Dynamics:
             wp.launch(
                 _commit_joints_kernel,
                 dim=self.joints.capacity,
-                inputs=[d, self._joint_rows, self._block_rows, self.joints.active, self.joints.free],
+                inputs=[
+                    d,
+                    self._joint_rows,
+                    self._block_rows,
+                    self.joints.active,
+                    self.joints.free,
+                    self._resolved_joint_state,
+                ],
                 device=device,
             )
             self.joints.rebuild_lists()

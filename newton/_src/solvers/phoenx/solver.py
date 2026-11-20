@@ -1915,6 +1915,7 @@ class SolverPhoenX(SolverBase):
         """
         if self._collision_pipeline is None:
             raise RuntimeError("SolverPhoenX.collide() requires a collision pipeline.")
+        self.world._wake_pending_joint_edits()
         self._update_local_joint_enabled()
         if self._has_deformable_collision:
             self._import_particle_state(state, force=True)
@@ -2034,7 +2035,7 @@ class SolverPhoenX(SolverBase):
 
     def wake_on_external_input(self, state_in: State) -> None:
         """Wake sleeping islands affected by velocity edits, external wrenches,
-        or changed kinematic contact targets, *before* the host
+        changed kinematic contact targets, or staged runtime joints, *before* the host
         calls ``CollisionPipeline.collide(...)``.
 
         The per-step sleeping pass inside :meth:`step` cannot drive

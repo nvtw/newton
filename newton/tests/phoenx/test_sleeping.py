@@ -9,7 +9,134 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton.solvers import SolverPhoenX
+from newton.solvers import SolverPhoenX, phoenx
+
+
+@wp.kernel
+def _attach_box(dynamics: phoenx.DynamicsData, ids: wp.array[int], height: float, cancel: bool):
+    pose = wp.transform(wp.vec3(0.0, 0.0, height), wp.quat_identity())
+    desc = phoenx.joint_desc(-1, 0, pose, wp.transform_identity())
+    ids[0] = phoenx.add_joint(dynamics, desc)
+    if cancel:
+        phoenx.remove_joint(dynamics, ids[0])
+
+
+@wp.kernel
+def _detach_box(dynamics: phoenx.DynamicsData, ids: wp.array[int]):
+    phoenx.remove_joint(dynamics, ids[0])
+
+
+class TestSleepingRuntimeJoint(unittest.TestCase):
+    def test_runtime_joint_changes_cpu(self):
+        self._check_runtime_joint_changes("cpu")
+
+    @unittest.skipUnless(wp.is_cuda_available(), "CUDA device required")
+    def test_runtime_joint_changes_cuda(self):
+        self._check_runtime_joint_changes("cuda:0")
+
+    def _check_runtime_joint_changes(self, device):
+        """Wake a sleeping box on attachment and release, preserving unrelated sleepers and canceled edits."""
+        with wp.ScopedDevice(device):
+            builder = newton.ModelBuilder()
+            for x in (0.0, 2.0):
+                box = builder.add_body(xform=wp.transform(wp.vec3(x, 0.0, 0.1), wp.quat_identity()))
+                builder.add_shape_box(box, hx=0.1, hy=0.1, hz=0.1)
+            builder.add_ground_plane()
+            builder.reserve_dynamic_capacity(joints=2)
+            model = builder.finalize()
+            pipeline = newton.CollisionPipeline(model, contact_matching="sticky")
+            solver = SolverPhoenX(
+                model,
+                collision_pipeline=pipeline,
+                joint_mode="maximal_pgs",
+                step_layout="single_world",
+                direct_joint_mask=np.zeros(model.joint_count, dtype=bool),
+                substeps=3,
+                solver_iterations=4,
+                temporal_iterations=True,
+                sleeping_motion_threshold=0.0003,
+                sleeping_velocity_threshold=0.02,
+                sleeping_frames_required=2,
+            )
+            state, control, contacts = model.state(), model.control(), pipeline.contacts()
+            ids = wp.zeros(1, dtype=int)
+
+            def simulate():
+                solver.wake_on_external_input(state)
+                solver.collide(state, contacts, dt=1 / 120)
+                solver.step(state, state, control, contacts, 1 / 120)
+
+            graph = None
+            if wp.get_device().is_cuda:
+                with wp.ScopedCapture() as capture:
+                    simulate()
+                graph = capture.graph
+
+            def advance(frames=1):
+                for _ in range(frames):
+                    if graph is None:
+                        simulate()
+                    else:
+                        wp.capture_launch(graph)
+
+            def attach(height, *, cancel=False):
+                wp.launch(_attach_box, dim=1, inputs=[solver.dynamics.data, ids, height, cancel])
+
+            def detach():
+                wp.launch(_detach_box, dim=1, inputs=[solver.dynamics.data, ids])
+
+            advance(60)
+            roots = solver.bodies.island_root
+            self.assertTrue(np.all(roots.numpy()[1:] >= 0))
+            attach(0.4, cancel=True)
+            advance()
+            self.assertTrue(np.all(roots.numpy()[1:] >= 0))
+            canceled = int(ids.numpy()[0])
+            self.assertGreaterEqual(canceled, 0)
+
+            # The slot is available again after its canceled edit is committed.
+            advance()
+            attach(0.4)
+            advance()
+            self.assertEqual(int(ids.numpy()[0]), canceled)
+            self.assertLess(int(roots.numpy()[1]), 0)
+            self.assertGreaterEqual(int(roots.numpy()[2]), 0)
+            self.assertGreater(float(state.body_q.numpy()[0, 2]), 0.11)
+            advance(120)
+            self.assertTrue(np.all(roots.numpy()[1:] >= 0))
+            height = float(state.body_q.numpy()[0, 2])
+            self.assertAlmostEqual(height, 0.4, delta=0.005)
+
+            # An edit after collision must still wake the island during the step.
+            solver.collide(state, contacts, dt=1 / 120)
+            detach()
+            solver.step(state, state, control, contacts, 1 / 120)
+            self.assertLess(int(roots.numpy()[1]), 0)
+            self.assertLess(float(state.body_qd.numpy()[0, 2]), -0.01)
+            self.assertGreaterEqual(int(roots.numpy()[2]), 0)
+            # Releasing a world joint also restores contacts excluded by the joint.
+            advance(120)
+            attach(0.1)
+            advance(60)
+            self.assertTrue(np.all(roots.numpy()[1:] >= 0))
+            detach()
+            solver.collide(state, contacts, dt=1 / 120)
+            self.assertGreater(int(contacts.rigid_contact_count.numpy()[0]), 0)
+            self.assertGreaterEqual(int(roots.numpy()[2]), 0)
+            # Replace a later slot with an earlier one in the same commit.
+            advance(2)
+            attach(0.1, cancel=True)
+            attach(0.1)
+            later_slot = int(ids.numpy()[0])
+            advance(2)
+            detach()
+            attach(0.1)
+            advance()
+            self.assertLess(int(ids.numpy()[0]), later_slot)
+            self.assertLess(int(roots.numpy()[1]), 0)
+            solver.collide(state, contacts, dt=1 / 120)
+            self.assertEqual(int(contacts.rigid_contact_count.numpy()[0]), 0)
+            self.assertEqual(int(solver.dynamics.error_count.numpy()[0]), 0)
 
 
 class TestSleepingKinematicContact(unittest.TestCase):

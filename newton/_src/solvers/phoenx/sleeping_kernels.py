@@ -540,15 +540,15 @@ def _phoenx_propagate_sleep_to_bodies_kernel(
 # ---------------------------------------------------------------------------
 
 
-@wp.kernel(enable_backward=False)
-def _phoenx_self_wake_fanin_kernel(
+@wp.func
+def _self_wake_body(
+    b: int,
     bodies: BodyContainer,
     body_aabb_diagonal: wp.array[wp.float32],
     sleeping_velocity_threshold: wp.float32,
     wake_flag: wp.array[wp.int32],
 ):
     """Wake sleeping islands with an applied wrench or an above-threshold body velocity."""
-    b = wp.tid()
     if bodies.motion_type[b] != MOTION_DYNAMIC:
         return
     root = bodies.island_root[b]
@@ -560,6 +560,16 @@ def _phoenx_self_wake_fanin_kernel(
     has_wrench = wp.length_sq(bodies.force[b]) > 0.0 or wp.length_sq(bodies.torque[b]) > 0.0
     if score >= sleeping_velocity_threshold or has_wrench:
         wp.atomic_max(wake_flag, root, wp.int32(1))
+
+
+@wp.kernel(enable_backward=False)
+def _phoenx_self_wake_fanin_kernel(
+    bodies: BodyContainer,
+    body_aabb_diagonal: wp.array[wp.float32],
+    sleeping_velocity_threshold: wp.float32,
+    wake_flag: wp.array[wp.int32],
+):
+    _self_wake_body(wp.tid(), bodies, body_aabb_diagonal, sleeping_velocity_threshold, wake_flag)
 
 
 @wp.kernel(enable_backward=False)

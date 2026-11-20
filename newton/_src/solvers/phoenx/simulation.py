@@ -1475,6 +1475,7 @@ class PhoenXWorld:
         #     sleeping bodies whose own predicted score exceeds the
         #     sleep threshold (host-side velocity / force injection).
         self._island_has_external_input: wp.array[wp.int32] | None = None
+        self._runtime_joint_wake = None
         self._wake_flag: wp.array[wp.int32] | None = None
         # Per-compact-island scratch populated by
         # ``_phoenx_compute_island_root_per_compact_kernel`` (atomic_min
@@ -4120,6 +4121,28 @@ class PhoenXWorld:
                 self.device,
             )
 
+    def _wake_pending_joint_edits(self):
+        flags = self._island_has_external_input
+        if self._runtime_joint_wake is None or flags is None:
+            return
+        flags.zero_()
+        self._runtime_joint_wake._mark_joint_wake(self, flags, pending=True, include_body_inputs=False)
+        wp.launch(
+            _phoenx_apply_island_wake_kernel, dim=self.num_bodies, inputs=[self.bodies, flags], device=self.device
+        )
+
+    def _self_wake_fanin(self, flags, *, pending):
+        if self._runtime_joint_wake is not None:
+            self._runtime_joint_wake._mark_joint_wake(self, flags, pending=pending)
+        else:
+            wp.launch(
+                _phoenx_self_wake_fanin_kernel,
+                dim=self.num_bodies,
+                inputs=[self.bodies, self._body_aabb_diagonal, wp.float32(self._sleeping_velocity_threshold)],
+                outputs=[flags],
+                device=self.device,
+            )
+
     def wake_on_external_input(self) -> None:
         """Wake islands with edited velocity, a user wrench, or moving kinematic support,
         *before* ``CollisionPipeline.collide()`` runs the broad phase.
@@ -4144,13 +4167,7 @@ class PhoenXWorld:
         if self._island_has_external_input is None:
             return
         self._island_has_external_input.zero_()
-        wp.launch(
-            _phoenx_self_wake_fanin_kernel,
-            dim=self.num_bodies,
-            inputs=[self.bodies, self._body_aabb_diagonal, wp.float32(self._sleeping_velocity_threshold)],
-            outputs=[self._island_has_external_input],
-            device=self.device,
-        )
+        self._self_wake_fanin(self._island_has_external_input, pending=True)
         if self._ingest_scratch is not None and self.max_contact_columns > 0:
             # These are the preceding collision's edges. Wake now, before a
             # departing kinematic support disappears from the next broad phase.
@@ -4320,17 +4337,7 @@ class PhoenXWorld:
 
         # --- Self-wake: velocity / force injection. ---
         if self._wake_flag is not None:
-            wp.launch(
-                _phoenx_self_wake_fanin_kernel,
-                dim=self.num_bodies,
-                inputs=[
-                    self.bodies,
-                    self._body_aabb_diagonal,
-                    wp.float32(self._sleeping_velocity_threshold),
-                ],
-                outputs=[self._wake_flag],
-                device=self.device,
-            )
+            self._self_wake_fanin(self._wake_flag, pending=False)
             wp.launch(
                 _phoenx_activity_wake_kernel,
                 dim=self.num_bodies,
