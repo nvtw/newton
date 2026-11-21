@@ -8,7 +8,7 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton._src.solvers.phoenx.islands.iteration_schedule import _take_color_runs
+from newton._src.solvers.phoenx.islands.iteration_schedule import _index_colors, _take_color_runs
 from newton._src.solvers.phoenx.tests.test_parallel_prepare_sleeping import _build_model
 
 
@@ -28,6 +28,27 @@ class TestIslandIterationSchedule(unittest.TestCase):
             np.testing.assert_array_equal(large.numpy(), expected_large)
             np.testing.assert_array_equal(small.numpy(), expected_small)
             self.assertEqual(int(cursor.numpy()[0]), remaining)
+
+    def test_color_index_covers_the_entire_island(self):
+        """Index every live slot so the small-color sweep can seek past skipped colors."""
+        device = "cpu"
+        keys = wp.array([0, 0, 0, 0, 1, 2], dtype=int, device=device)
+        slots = wp.array([0, 1, 3, 4, 7, 8], dtype=int, device=device)
+        island_ends = wp.array([4, 5], dtype=int, device=device)
+        starts = wp.array([0, 2, 3, 5, 8], dtype=int, device=device)
+        num_colors = wp.array([4], dtype=int, device=device)
+        families = wp.empty(0, dtype=int, device=device)
+        colors = wp.full(6, -1, dtype=int, device=device)
+        ends = wp.full_like(colors, -1)
+        count = wp.array([2, 0], dtype=int, device=device)
+        wp.launch(
+            _index_colors,
+            dim=len(keys),
+            inputs=[keys, slots, island_ends, 2, starts, num_colors, families, False, colors, ends, families, count],
+            device=device,
+        )
+        np.testing.assert_array_equal(colors.numpy(), [0, 0, 2, 2, 3, -1])
+        np.testing.assert_array_equal(ends.numpy(), [2, -1, 4, -1, 5, -1])
 
     @unittest.skipUnless(wp.is_cuda_available(), "Island iteration scheduling requires CUDA")
     def test_mixed_islands_in_captured_sweeps(self):

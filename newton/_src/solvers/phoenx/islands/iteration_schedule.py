@@ -189,10 +189,10 @@ def _index_colors(
         return
     slot = slots[i]
     color = wp.lower_bound(starts, 1, num_colors[0] + 1, slot + 1) - 1
+    colors[i] = color
     if i > 0 and keys[i - 1] == root and slots[i - 1] >= starts[color]:
         return
     end = _first_slot_at_least(slots, i, island_ends[root], starts[color + 1])
-    colors[i] = color
     ends[i] = end
     if mixed:
         family = wp.static(_PER_WORLD_FAST_FAMILIES)
@@ -270,6 +270,8 @@ def _get_island_iteration(axes, *, small_colors: bool = False):
         num_blocks: int,
     ):
         block, lane = wp.tid()
+        if interval[0] >= interval[1]:
+            return
         total = count[0]
         large = total - count[1]
         for index in range(block, total, num_blocks):
@@ -278,7 +280,10 @@ def _get_island_iteration(axes, *, small_colors: bool = False):
                 slot = roots.shape[0] - 1 - (index - large)
             root = roots[slot]
             i = starts[root]
-            while i < ends[root]:
+            end_of_island = ends[root]
+            if wp.static(small_colors) and i < end_of_island and colors[i] < interval[0]:
+                i = _first_slot_at_least(colors, i, end_of_island, interval[0])
+            while i < end_of_island:
                 color = colors[i]
                 if color >= interval[1]:
                     break
