@@ -43,6 +43,30 @@ from newton.viewer import ViewerNull
 
 @requires("pxr.Usd")
 class TestBottlingPlant(unittest.TestCase):
+    def test_wrapper_checks_actual_carton_corner_speed(self):
+        """Admit a seated carton only when every corner meets the motion limit."""
+        signs = np.array([(x, y, z) for x in (-1, 1) for y in (-1, 1) for z in (-1, 1)])
+        corners = 0.1 * signs
+        controller = SimpleNamespace(
+            carton_roots=np.array([1]),
+            pallet_corners={0: signs * [0.4, 0.3, 0.1]},
+            carton_corners=np.array([corners]),
+            layer_heights=np.array([0.1]),
+            body_com=np.zeros((2, 3)),
+            data={"sealed": np.ones(1), "claimed": np.zeros(2)},
+            wrapped=set(),
+        )
+        heading = wp.quat_from_axis_angle(wp.vec3(0, 0, 1), 1.0)
+        displacement = np.asarray(wp.quat_rotate(heading, wp.vec3(0.05, 0, 0.2)))
+        poses = np.array([[0.0, 0.0, 0.0, *heading], [*displacement, *heading]])
+        velocities = np.array([[0.1, 0.0, 0.0, 0.0, 0.0, 0.5]] * 2)
+        velocities[1, :3] += np.cross(velocities[0, 3:], displacement)
+        velocities[1, 5] += 0.05
+        np.testing.assert_array_equal(WrapperController._load(controller, {"pallet": 0}, poses, velocities), [0])
+
+        velocities[1, 5] += 0.03
+        self.assertIsNone(WrapperController._load(controller, {"pallet": 0}, poses, velocities))
+
     def test_loaded_transfer_contact_ownership(self):
         fleet = "/Plant/Logistics/Fleet/"
         joints = [

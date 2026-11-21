@@ -88,6 +88,13 @@ def _rotation_profile(time, distance, speed, acceleration):
     return angle, velocity, duration
 
 
+def _rotate_vectors(quaternion, vectors):
+    """Rotate NumPy batches by the simulation's xyzw quaternions."""
+    xyz = quaternion[..., :3]
+    twice_cross = 2.0 * np.cross(xyz, vectors)
+    return vectors + quaternion[..., 3:] * twice_cross + np.cross(xyz, twice_cross)
+
+
 def _payload_seated(lower, upper, deck, pallet_lo, pallet_hi, layer_heights):
     """Require a complete footprint-contained stack supported from the deck up."""
     if not np.isfinite(lower).all() or not np.isfinite(upper).all():
@@ -218,6 +225,7 @@ class WrapperController:
                 )
             points = np.asarray(points)
             self.carton_corners.append(points.min(0) + signs * (points.max(0) - points.min(0)))
+        self.carton_corners = np.asarray(self.carton_corners)
         qstarts, dstarts = model.joint_q_start.numpy(), model.joint_qd_start.numpy()
         target_starts = model.joint_target_q_start.numpy()
         initial = model.body_q.numpy()
@@ -281,10 +289,11 @@ class WrapperController:
     def _load(self, line, poses, velocities):
         """Validate measured sealed cartons, never substitute layout stand-ins."""
         body = line["pallet"]
-        pose = wp.transform(poses[body, :3], poses[body, 3:])
-        inverse = wp.transform_inverse(pose)
+        pallet_pose = poses[body]
+        pallet_rotation = pallet_pose[3:]
+        inverse_rotation = pallet_rotation * [-1, -1, -1, 1]
         roots = self.carton_roots
-        local = np.asarray([np.asarray(wp.transform_point(inverse, wp.vec3(p))) for p in poses[roots, :3]])
+        local = _rotate_vectors(inverse_rotation, poses[roots, :3] - pallet_pose[:3])
         pallet = self.pallet_corners[body]
         lo, hi = pallet.min(0), pallet.max(0)
         near = np.all((local[:, :2] > lo[:2] - 0.2) & (local[:, :2] < hi[:2] + 0.2), axis=1)
@@ -292,31 +301,28 @@ class WrapperController:
         selected = np.flatnonzero(near)
         if len(selected) != len(self.layer_heights):
             return None
-        if np.any(self.data["sealed"][selected] == 0) or np.any(self.data["claimed"][roots[selected]] != 0):
+        cartons = roots[selected]
+        if np.any(self.data["sealed"][selected] == 0) or np.any(self.data["claimed"][cartons] != 0):
             return None
-        lower, upper = [], []
-        normal = np.asarray(wp.quat_rotate(pose.q, wp.vec3(0, 0, 1)))
-        coms = self.body_com
-        pallet_com = np.asarray(wp.transform_point(pose, wp.vec3(coms[body])))
-        for index in selected:
-            root = roots[index]
-            carton = wp.transform(poses[root, :3], poses[root, 3:])
-            if np.dot(normal, np.asarray(wp.quat_rotate(carton.q, wp.vec3(0, 0, 1)))) < np.cos(np.radians(3.0)):
-                return None
-            relative = wp.transform_multiply(inverse, carton)
-            points = np.asarray(
-                [np.asarray(wp.transform_point(relative, wp.vec3(p))) for p in self.carton_corners[index]]
-            )
-            lower.append(points.min(0))
-            upper.append(points.max(0))
-            delta = np.asarray(wp.transform_point(carton, wp.vec3(coms[root]))) - pallet_com
-            speed = velocities[root, :3] - velocities[body, :3] - np.cross(velocities[body, 3:], delta)
-            angular = velocities[root, 3:] - velocities[body, 3:]
-            if np.linalg.norm(speed) + np.linalg.norm(np.ptp(points, axis=0)) * np.linalg.norm(angular) > 0.01:
-                return None
-        if not _payload_seated(np.asarray(lower), np.asarray(upper), hi[2], lo, hi, self.layer_heights):
+        carton_rotation = poses[cartons, 3:]
+        up = np.array([0.0, 0.0, 1.0])
+        normal = _rotate_vectors(pallet_rotation, up)
+        if not np.all(_rotate_vectors(carton_rotation, up) @ normal >= np.cos(np.radians(3.0))):
             return None
-        if any(int(roots[i]) in self.wrapped for i in selected):
+        corners = _rotate_vectors(carton_rotation[:, None], self.carton_corners[selected])
+        carton_com = _rotate_vectors(carton_rotation, self.body_com[cartons])
+        pallet_com = _rotate_vectors(pallet_rotation, self.body_com[body])
+        delta = (poses[cartons, :3] - pallet_pose[:3]) + carton_com - pallet_com
+        speed = velocities[cartons, :3] - velocities[body, :3] - np.cross(velocities[body, 3:], delta)
+        angular = velocities[cartons, 3:] - velocities[body, 3:]
+        # Rigid point velocity is affine, so its maximum norm on the carton is at a corner.
+        corner_velocities = speed[:, None] + np.cross(angular[:, None], corners - carton_com[:, None])
+        if not np.all(np.linalg.norm(corner_velocities, axis=2) <= 0.01):
+            return None
+        points = local[selected, None] + _rotate_vectors(inverse_rotation, corners)
+        if not _payload_seated(points.min(1), points.max(1), hi[2], lo, hi, self.layer_heights):
+            return None
+        if any(int(carton) in self.wrapped for carton in cartons):
             return None
         return selected
 
