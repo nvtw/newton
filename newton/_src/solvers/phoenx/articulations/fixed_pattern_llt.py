@@ -1066,7 +1066,10 @@ def _mark_changed_panels_kernel(
     mechanism_dirty: wp.array[wp.int32],
 ):
     entry = wp.tid()
-    if matrix_bits[entry] != factored_bits[entry]:
+    bits = matrix_bits[entry]
+    if bits != factored_bits[entry]:
+        # Each entry owns its history slot, so it can be saved during comparison.
+        factored_bits[entry] = bits
         mechanism = panel_mechanism[entry / panel_entries]
         if mechanism >= 0:
             mechanism_dirty[mechanism] = wp.int32(1)
@@ -1438,7 +1441,6 @@ class FixedPatternPanelLLT:
             device=self.device,
         )
         self.compute()
-        wp.copy(self._factored_matrix_bits, self._matrix_bits)
         self.mechanism_dirty.fill_(1)
 
     def compute(self) -> None:
