@@ -2988,25 +2988,6 @@ def _merge_g1_stats(
     )
 
 
-def _rollout_metrics(
-    buffer: BufferRollout, command_x: float, target_distance: float, *, use_observed_command: bool = False
-) -> tuple[float, float, float, float, float, float]:
-    rewards = buffer.rewards.numpy()
-    dones = buffer.dones.numpy()
-    successes = buffer.successes.numpy()
-    obs = buffer.obs.numpy()
-    forward_velocity = obs[:, 0]
-    target_forward_velocity = obs[:, 9] if use_observed_command else command_x
-    return (
-        float(np.mean(rewards)),
-        float(np.mean(dones)),
-        float(np.mean(successes)),
-        float(target_distance),
-        float(np.mean(forward_velocity)),
-        float(np.mean(np.abs(forward_velocity - target_forward_velocity))),
-    )
-
-
 def _merge_stats(
     iteration: int,
     rollout_metrics: tuple[float, float, float, float, float, float],

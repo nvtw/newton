@@ -831,29 +831,6 @@ def _batch_norm_inv_std_relu_kernel(
 
 
 @wp.kernel
-def _batch_norm_training_kernel(
-    x: wp.array2d[Any],
-    count: wp.int32,
-    scale: wp.array[wp.float32],
-    bias: wp.array[wp.float32],
-    eps: wp.float32,
-    out: wp.array2d[Any],
-):
-    row, col = wp.tid()
-    total = wp.float32(0.0)
-    for sample in range(count):
-        total += x[sample, col]
-    mean = total / wp.float32(count)
-    squared = wp.float32(0.0)
-    for sample in range(count):
-        delta = x[sample, col] - mean
-        squared += delta * delta
-    variance = squared / wp.float32(count)
-    normalized = (wp.float32(x[row, col]) - mean) / wp.sqrt(variance + eps)
-    out[row, col] = normalized * scale[col] + bias[col]
-
-
-@wp.kernel
 def _relu_kernel(x: wp.array2d[Any], out: wp.array2d[Any]):
     row, col = wp.tid()
     out[row, col] = wp.max(x[row, col], wp.float32(0.0))
