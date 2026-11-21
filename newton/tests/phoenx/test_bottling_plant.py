@@ -24,6 +24,7 @@ from newton.examples.phoenx._bottling_io import (
     _photoeyes,
     _valves,
 )
+from newton.examples.phoenx._bottling_process import add_filling_transport
 from newton.examples.phoenx._bottling_scene import PlantScene, load_plant
 from newton.examples.phoenx._bottling_transport import _carton_support_quadrants, _placement_motions
 from newton.examples.phoenx._bottling_wrap import (
@@ -43,6 +44,24 @@ from newton.viewer import ViewerNull
 
 @requires("pxr.Usd")
 class TestBottlingPlant(unittest.TestCase):
+    def test_filling_keeper_engages_before_crossbelt(self):
+        with wp.ScopedDevice("cpu"):
+            scene = SimpleNamespace(builder=newton.ModelBuilder(), belts=[], metadata={})
+            path = np.array([[0.0, 0.0, 0.95], [7.0, 0.0, 0.95]])
+            add_filling_transport(scene, path, motor_off=False, inlet_speed=0.14)
+
+        crossbelt = scene.metadata["process_pool_crossbelt"]
+        lateral_start = min(
+            mesh.vertices[np.linalg.norm(crossbelt[label], axis=1) > 0.0, 0].min()
+            for mesh, _, label in scene.belts
+            if label.endswith("/Deck") and label in crossbelt
+        )
+        (keeper,) = (mesh for mesh, _, label in scene.belts if label.endswith("/UpperGuide"))
+        vertices = keeper.vertices
+        seated_start = vertices[np.isclose(vertices[:, 2], vertices[:, 2].min()), 0].min()
+        self.assertLess(seated_start, lateral_start)
+        self.assertGreater(vertices[:, 0].max(), path[-1, 0])
+
     def test_wrapper_checks_actual_carton_corner_speed(self):
         """Admit a seated carton only when every corner meets the motion limit."""
         signs = np.array([(x, y, z) for x in (-1, 1) for y in (-1, 1) for z in (-1, 1)])

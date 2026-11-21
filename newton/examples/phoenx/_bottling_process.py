@@ -21,7 +21,7 @@ _POOL_LENGTH = 5.3425  # m, from the source table's start to the IFM transfer pl
 _POOL_HALF_WIDTH = 0.245  # m, across six native IFM strands.
 _POOL_SLOWDOWN = 1.8025  # m, from the crossbelt drive section to the transfer plate.
 _POOL_RUNOUT = 0.6  # m, at the receiving strand speed before crossing the seam.
-_POOL_UPPER_GUIDE = 2.10  # m, upstream engagement of the upper support belt.
+_POOL_UPPER_GUIDE = 4.00  # m, engage the cap before the crossbelt ramp.
 POOL_SWEEP_PERIOD = 6.4  # s, for the oscillating crossbelt.
 IFM_ENTRY_SPEED_RATIO = 1.4
 
