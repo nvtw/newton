@@ -51,6 +51,18 @@ from newton.geometry import BroadPhaseImplicitTree
 from newton.solvers import SolverPhoenX
 
 
+def _fleet_direct_contact_mask(joint_labels: list[str], exact: np.ndarray) -> np.ndarray | None:
+    """Select fleet mechanisms for projected contact solves."""
+    if not np.any(exact):
+        return None
+    fleet = "/Plant/Logistics/Fleet/"
+    loaded_transfer = (fleet + "ab_U/", fleet + "ab_D/")
+    # Keep fork support in the same temporal sweeps as the carton stack.
+    return exact & np.asarray(
+        [label.startswith(fleet) and not label.startswith(loaded_transfer) for label in joint_labels], dtype=bool
+    )
+
+
 def _local_fixture_drives(builder: newton.ModelBuilder) -> list[int]:
     """Use the contact timestep for independent rollers and stops on world-fixed packing fixtures."""
     incident = [[] for _ in builder.body_flags]
@@ -283,14 +295,7 @@ class Example:
                 step_layout="single_world",
                 joint_mode="maximal_pgs",
                 direct_joint_mask=exact,
-                direct_contact_mask=(
-                    exact
-                    & np.asarray(
-                        [label.startswith("/Plant/Logistics/Fleet/") for label in self.model.joint_label], dtype=bool
-                    )
-                    if np.any(exact)
-                    else None
-                ),
+                direct_contact_mask=_fleet_direct_contact_mask(self.model.joint_label, exact),
                 velocity_iterations=1,
                 enable_body_pair_grouping=True,
                 parallel_contact_prepare=self.model.device.is_cuda and not mass_splitting,

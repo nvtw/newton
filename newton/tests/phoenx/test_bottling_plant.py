@@ -32,13 +32,35 @@ from newton.examples.phoenx._bottling_wrap import (
     correct_wrapper_frame,
     mesh_components,
 )
-from newton.examples.phoenx.example_phoenx_bottling_plant import Example, _local_fixture_drives
+from newton.examples.phoenx.example_phoenx_bottling_plant import (
+    Example,
+    _fleet_direct_contact_mask,
+    _local_fixture_drives,
+)
 from newton.tests.unittest_utils import requires
 from newton.viewer import ViewerNull
 
 
 @requires("pxr.Usd")
 class TestBottlingPlant(unittest.TestCase):
+    def test_loaded_transfer_contact_ownership(self):
+        fleet = "/Plant/Logistics/Fleet/"
+        joints = [
+            fleet + "ab_U/lift_joint",
+            fleet + "ab_U/back_wheel_joints/back_wheel_drive",
+            fleet + "ab_D/lift_joint",
+            fleet + "ab_D/back_wheel_joints/back_wheel_drive",
+            fleet + "c_U/lift_joint",
+            fleet + "c_D/lift_joint",
+            fleet + "c_D/disabled_joint",
+            "/Plant/Line/Palletizers/PZ1/drive_joint",
+        ]
+        exact = np.array([True, True, True, True, True, True, False, True])
+        contacts = _fleet_direct_contact_mask(joints, exact)
+        np.testing.assert_array_equal(contacts, [False, False, False, False, True, True, False, False])
+        np.testing.assert_array_equal(exact, [True, True, True, True, True, True, False, True])
+        self.assertIsNone(_fleet_direct_contact_mask(joints, np.zeros_like(exact)))
+
     def test_packing_fixture_drive_ownership(self):
         """Only independent roller and stop axes on a world-fixed mount use local contact steps."""
         builder = newton.ModelBuilder()
