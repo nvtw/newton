@@ -54,12 +54,14 @@ class SingleWorldDispatcher:
             if self._island_schedule is not None and w._current_substep_index == 0:
                 self._island_schedule.build(w)
             if w._refresh_prepare_this_substep():
-                w._partitioner.begin_sweep()
+                prepare_schedule = self._island_schedule if w.parallel_contact_prepare else None
+                if prepare_schedule is None:
+                    w._partitioner.begin_sweep()
                 w._singleworld_head_plus_tail_sweep(
                     prepare_head,
                     prepare_fused,
                     idt,
-                    island_schedule=self._island_schedule if w.parallel_contact_prepare else None,
+                    island_schedule=prepare_schedule,
                 )
             else:
                 w._run_cached_prepare_bookkeeping(idt)
@@ -77,7 +79,8 @@ class SingleWorldDispatcher:
                 last = iteration == w.solver_iterations - 1
                 if temporal and iteration > 0:
                     w._temporal_next_sweep(idt)
-                w._partitioner.begin_sweep()
+                if self._island_schedule is None:
+                    w._partitioner.begin_sweep()
                 w._singleworld_head_plus_tail_sweep(
                     iterate_head, iterate_fused, idt, island_schedule=self._island_schedule
                 )
@@ -112,7 +115,8 @@ class SingleWorldDispatcher:
         if w._regular_pgs_active_this_step and w._active_velocity_iterations > 0:
             _, _, _, _, relax_head, relax_fused = w._singleworld_kernels()
             for _ in range(w._active_velocity_iterations):
-                w._partitioner.begin_sweep()
+                if self._island_schedule is None:
+                    w._partitioner.begin_sweep()
                 w._singleworld_head_plus_tail_sweep(relax_head, relax_fused, idt, island_schedule=self._island_schedule)
                 if direct is not None and direct.enabled:
                     direct.solve(use_bias=False)

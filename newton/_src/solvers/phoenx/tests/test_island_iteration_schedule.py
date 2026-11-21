@@ -8,11 +8,28 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton._src.solvers.phoenx.islands.iteration_schedule import _take_color_runs
 from newton._src.solvers.phoenx.tests.test_parallel_prepare_sleeping import _build_model
 
 
-@unittest.skipUnless(wp.is_cuda_available(), "Island iteration scheduling requires CUDA")
 class TestIslandIterationSchedule(unittest.TestCase):
+    def test_forward_sweep_ignores_previous_cursor(self):
+        """A new sweep starts at the first color after the previous sweep drains."""
+        starts = wp.array([0, 4, 5, 12, 13], dtype=int, device="cpu")
+        count = wp.array([4], dtype=int, device="cpu")
+        cursor = wp.zeros(1, dtype=int, device="cpu")
+        large = wp.empty(2, dtype=int, device="cpu")
+        small = wp.empty_like(large)
+        for first, expected_large, expected_small, remaining in (
+            (True, [0, 1], [1, 2], 2),
+            (False, [2, 3], [3, 4], 0),
+        ):
+            wp.launch(_take_color_runs, 1, [starts, count, cursor, 2, first, large, small], device="cpu")
+            np.testing.assert_array_equal(large.numpy(), expected_large)
+            np.testing.assert_array_equal(small.numpy(), expected_small)
+            self.assertEqual(int(cursor.numpy()[0]), remaining)
+
+    @unittest.skipUnless(wp.is_cuda_available(), "Island iteration scheduling requires CUDA")
     def test_mixed_islands_in_captured_sweeps(self):
         """Preserve poses and impulses through multiple warm starts on the same island schedule."""
         # The stack and anchored pendulum share the static world body. Their

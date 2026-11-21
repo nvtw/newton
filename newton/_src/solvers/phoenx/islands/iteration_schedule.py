@@ -206,11 +206,12 @@ def _take_color_runs(
     num_colors: wp.array[int],
     cursor: wp.array[int],
     threshold: int,
+    from_start: bool,
     large: wp.array[int],
     small: wp.array[int],
 ):
     count = num_colors[0]
-    color = count - cursor[0]
+    color = 0 if from_start else count - cursor[0]
     large[0] = color
     if threshold < 0:
         large[1] = count
@@ -424,7 +425,7 @@ class IslandIterationSchedule:
         # Relaxation uses identical rigid point and joint math for both color sizes.
         threshold = -1 if tail is None else world._fuse_threshold
 
-        def advance():
+        def advance(from_start=False):
             wp.launch(
                 _take_color_runs,
                 1,
@@ -433,6 +434,7 @@ class IslandIterationSchedule:
                     partition.num_colors,
                     partition.color_cursor,
                     threshold,
+                    from_start,
                     self.interval,
                     self.small_interval,
                 ],
@@ -442,7 +444,8 @@ class IslandIterationSchedule:
             if tail is not None:
                 self._launch_interval(world, tail, idt, self.small_interval, small_colors=True)
 
-        advance()
+        # Island iteration accepts only forward sweeps, so the first launch owns the reset.
+        advance(True)
         if tail is not None:
             wp.capture_while(partition.color_cursor, advance)
 

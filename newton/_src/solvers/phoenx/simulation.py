@@ -3015,15 +3015,17 @@ class PhoenXWorld:
         tail = get_singleworld_kernel(phase="joint_project", fused=True, **options)
         # This projection belongs to the current sweep; do not advance its
         # configured symmetric direction a second time.
-        wp.copy(self._partitioner.color_cursor, self._partitioner.num_colors)
+        island_schedule = None
+        if self._regular_pgs_active_this_step:
+            island_schedule = getattr(self._dispatcher, "_island_schedule", None)
+        if island_schedule is None:
+            wp.copy(self._partitioner.color_cursor, self._partitioner.num_colors)
         self._singleworld_head_plus_tail_sweep(
             head,
             tail,
             wp.float32(1.0 / self.substep_dt),
             structural_projection=True,
-            island_schedule=getattr(self._dispatcher, "_island_schedule", None)
-            if self._regular_pgs_active_this_step
-            else None,
+            island_schedule=island_schedule,
         )
 
     def _temporal_end_sweep(self, last: bool) -> None:
