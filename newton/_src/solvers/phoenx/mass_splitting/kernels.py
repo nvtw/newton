@@ -66,19 +66,6 @@ _ACCESS_MODE_VELOCITY_LEVEL = wp.constant(wp.int32(ACCESS_MODE_VELOCITY_LEVEL))
 
 
 @wp.func
-def _section_range(copy_state: CopyStateContainer, node_id: wp.int32):
-    """Return ``(start, end)`` slot indices for a node, or ``(0, 0)``
-    when ``node_id`` has no slots."""
-    if node_id < 0 or node_id >= copy_state.section_end.shape[0]:
-        return wp.int32(0), wp.int32(0)
-    start = wp.int32(0)
-    if node_id > 0:
-        start = copy_state.section_end[node_id - 1]
-    end = copy_state.section_end[node_id]
-    return start, end
-
-
-@wp.func
 def initialize_rigid_overflow_copy(
     copy_state: CopyStateContainer,
     bodies: BodyContainer,
