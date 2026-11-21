@@ -554,6 +554,7 @@ class SolverPhoenX(SolverBase):
             max_thread_blocks: Optional cap on the single-world PGS grid.
             velocity_readout: ``"substep_end"`` (default, bit-faithful),
                 ``"finite_difference"``, or ``"substep_average"``.
+                Sleeping bodies report a zero twist in the substep readouts.
             mass_splitting: Enable the graph-colored mass-splitting tail.
             max_colored_partitions: True GS colors retained before the
                 mass-splitting tail. Defaults to 12.
@@ -2019,6 +2020,8 @@ class SolverPhoenX(SolverBase):
                     self.bodies.position,
                     self.bodies.orientation,
                     self.model.body_com,
+                    self.bodies.island_root,
+                    self._sleeping_enabled,
                     self._substep_vel_accum,
                     self._substep_omega_accum,
                     wp.float32(inv_dt),
@@ -2036,6 +2039,8 @@ class SolverPhoenX(SolverBase):
                     self.bodies.velocity,
                     self.bodies.angular_velocity,
                     self.model.body_com,
+                    self.bodies.island_root,
+                    self._sleeping_enabled,
                 ],
                 outputs=[
                     state_out.body_q,

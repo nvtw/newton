@@ -201,6 +201,8 @@ def _export_body_state_kernel(
     velocity: wp.array[wp.vec3f],
     angular_velocity: wp.array[wp.vec3f],
     body_com: wp.array[wp.vec3f],
+    island_root: wp.array[wp.int32],
+    sleeping_enabled: bool,
     # Newton State outputs (length N = model.body_count).
     body_q: wp.array[wp.transform],
     body_qd: wp.array[wp.spatial_vector],
@@ -213,7 +215,11 @@ def _export_body_state_kernel(
     com_world = position[src]
     origin = com_world - wp.quat_rotate(rot, body_com[tid])
     body_q[tid] = wp.transform(origin, rot)
-    body_qd[tid] = wp.spatial_vector(velocity[src], angular_velocity[src])
+    # A dormant body holds its pose even if its last solved twist was nonzero.
+    if sleeping_enabled and island_root[src] >= 0:
+        body_qd[tid] = wp.spatial_vector()
+    else:
+        body_qd[tid] = wp.spatial_vector(velocity[src], angular_velocity[src])
 
 
 @wp.kernel(enable_backward=False)
@@ -222,6 +228,8 @@ def _export_body_state_avg_kernel(
     position: wp.array[wp.vec3f],
     orientation: wp.array[wp.quatf],
     body_com: wp.array[wp.vec3f],
+    island_root: wp.array[wp.int32],
+    sleeping_enabled: bool,
     # Time-integrated velocity accumulators (length = N).
     vel_accum: wp.array[wp.vec3f],
     omega_accum: wp.array[wp.vec3f],
@@ -238,9 +246,12 @@ def _export_body_state_avg_kernel(
     com_world = position[src]
     origin = com_world - wp.quat_rotate(rot, body_com[tid])
     body_q[tid] = wp.transform(origin, rot)
-    v_avg = vel_accum[tid] * inv_dt
-    w_avg = omega_accum[tid] * inv_dt
-    body_qd[tid] = wp.spatial_vector(v_avg, w_avg)
+    if sleeping_enabled and island_root[src] >= 0:
+        body_qd[tid] = wp.spatial_vector()
+    else:
+        v_avg = vel_accum[tid] * inv_dt
+        w_avg = omega_accum[tid] * inv_dt
+        body_qd[tid] = wp.spatial_vector(v_avg, w_avg)
 
 
 @wp.kernel(enable_backward=False)
