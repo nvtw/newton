@@ -138,6 +138,7 @@ from newton._src.solvers.phoenx.contact_endpoints import (
     SHAPE_ENDPOINT_KIND_SOFT_TETRAHEDRON,
 )
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
+    GREEDY_MAX_COLORS,
     MAX_BODIES,
     ElementInteractionData,
     _endpoint_owner_priority,
@@ -724,18 +725,16 @@ _PER_WORLD_FREE_COLOR_FLIP = wp.constant(wp.int64(-1))
 
 @functools.cache
 def get_per_world_greedy_coloring_kernel(
-    group_families: bool, spill_overflow: bool = False, spread_worlds: bool = False
+    group_families: bool, mass_split_overflow: bool = False, spread_worlds: bool = False
 ):
     """Build the shared world-greedy colorer with optional family grouping.
 
     When ``spread_worlds`` is true, each world occupies its own warp so many
     independent serial passes can hide memory latency.
 
-    When ``spill_overflow`` is true, rows that cannot use one of the
-    ``max_colors`` independent-set colours are retained in colour
-    ``max_colors``. That final bucket is intentionally not an independent
-    set; mass splitting gives each batch private body state while it is
-    solved.
+    Rows that exhaust the mask go into the final bucket. Regular PGS
+    processes that bucket serially, while mass splitting assigns its rows
+    private body state.
     """
 
     @wp.kernel(enable_backward=False, module="unique")
@@ -748,15 +747,15 @@ def get_per_world_greedy_coloring_kernel(
         elements: wp.array[ElementInteractionData],
         element_family: wp.array[wp.int32],
         node_color_mask: wp.array[wp.uint64],  # one 64-color bit mask per body/particle
-        max_colors: wp.int32,  # = GREEDY_MAX_COLORS, kept for parity with JP variant
-        # scratch (caller zeros each step)
-        assigned: wp.array[wp.int32],  # [capacity] 0 unassigned, (c+1) = coloured
-        color_family_count: wp.array2d[wp.int32],  # [nw, GREEDY_MAX_COLORS * _PER_WORLD_FAST_FAMILIES]
-        color_family_offsets: wp.array2d[wp.int32],  # [nw, GREEDY_MAX_COLORS * _PER_WORLD_FAST_FAMILIES]
+        max_colors: wp.int32,  # regular palette size
+        # scratch
+        assigned: wp.array[wp.int32],  # [capacity] one-based colour
+        color_family_count: wp.array2d[wp.int32],  # [nw, (GREEDY_MAX_COLORS+1) * _PER_WORLD_FAST_FAMILIES]
+        color_family_offsets: wp.array2d[wp.int32],  # [nw, (GREEDY_MAX_COLORS+1) * _PER_WORLD_FAST_FAMILIES]
         # outputs
         world_element_ids_by_color: wp.array[wp.int32],  # [total] sorted-by-colour per world
         world_color_starts: wp.array2d[wp.int32],  # [nw, MAX_COLORS+1] per-world prefix
-        world_color_family_starts: wp.array2d[wp.int32],  # [nw, GREEDY_MAX_COLORS * _PER_WORLD_FAST_FAMILIES]
+        world_color_family_starts: wp.array2d[wp.int32],  # [nw, (GREEDY_MAX_COLORS+1) * _PER_WORLD_FAST_FAMILIES]
         world_num_colors: wp.array[wp.int32],  # [nw]
         overflow_flag: wp.array[wp.int32],  # [1] set if any world exceeds GREEDY_MAX_COLORS
     ):
@@ -781,14 +780,6 @@ def get_per_world_greedy_coloring_kernel(
             world_color_starts[w, 0] = wp.int32(0)
             return
 
-        # Only active elements need reset; full-capacity clears are deliberately
-        # avoided because each world owns and immediately consumes this slice.
-        offset = wp.int32(0)
-        while offset < count:
-            eid = world_elements[base + offset]
-            assigned[eid] = wp.int32(0)
-            offset += wp.int32(1)
-
         num_colors = wp.int32(0)
         offset = wp.int32(0)
         while offset < count:
@@ -802,43 +793,38 @@ def get_per_world_greedy_coloring_kernel(
 
             color = _lowest_set_bit(wp.int64(forbidden_mask) ^ _PER_WORLD_FREE_COLOR_FLIP)
             if color < wp.int32(0) or color >= max_colors:
-                if wp.static(spill_overflow):
-                    color = max_colors
-                else:
-                    overflow_flag[0] = wp.int32(1)
-                    assigned[eid] = wp.int32(-1)
-            if color >= wp.int32(0) and (color < max_colors or wp.static(spill_overflow)):
-                # Smallest-free greedy produces a contiguous color range. Initialize
-                # a bucket exactly once when its first element appears.
-                if color >= num_colors:
-                    c = num_colors
-                    while c <= color:
-                        family_base = c * wp.int32(_PER_WORLD_FAST_FAMILIES)
-                        family_count = wp.int32(1)
-                        if wp.static(group_families):
-                            family_count = wp.int32(_PER_WORLD_FAST_FAMILIES)
-                        for f in range(_PER_WORLD_FAST_FAMILIES):
-                            if wp.int32(f) < family_count:
-                                family_slot = family_base + wp.int32(f)
-                                color_family_count[w, family_slot] = wp.int32(0)
-                                color_family_offsets[w, family_slot] = wp.int32(0)
-                                world_color_family_starts[w, family_slot] = wp.int32(0)
-                        c += wp.int32(1)
-                    num_colors = color + wp.int32(1)
+                color = max_colors
+            # Smallest-free greedy produces a contiguous color range. Initialize
+            # a bucket exactly once when its first element appears.
+            if color >= num_colors:
+                c = num_colors
+                while c <= color:
+                    family_base = c * wp.int32(_PER_WORLD_FAST_FAMILIES)
+                    family_count = wp.int32(1)
+                    if wp.static(group_families):
+                        family_count = wp.int32(_PER_WORLD_FAST_FAMILIES)
+                    for f in range(_PER_WORLD_FAST_FAMILIES):
+                        if wp.int32(f) < family_count:
+                            family_slot = family_base + wp.int32(f)
+                            color_family_count[w, family_slot] = wp.int32(0)
+                            color_family_offsets[w, family_slot] = wp.int32(0)
+                            world_color_family_starts[w, family_slot] = wp.int32(0)
+                    c += wp.int32(1)
+                num_colors = color + wp.int32(1)
 
-                assigned[eid] = color + wp.int32(1)
-                if color < max_colors:
-                    color_bit = wp.uint64(1) << wp.uint64(color)
-                    for j in range(MAX_BODIES):
-                        node = elements[eid].bodies[j]
-                        if node < wp.int32(0):
-                            break
-                        node_color_mask[node] |= color_bit
-                family = wp.int32(0)
-                if wp.static(group_families):
-                    family = _element_fast_family(element_family[eid])
-                family_slot = color * wp.int32(_PER_WORLD_FAST_FAMILIES) + family
-                color_family_count[w, family_slot] += wp.int32(1)
+            assigned[eid] = color + wp.int32(1)
+            if color < max_colors:
+                color_bit = wp.uint64(1) << wp.uint64(color)
+                for j in range(MAX_BODIES):
+                    node = elements[eid].bodies[j]
+                    if node < wp.int32(0):
+                        break
+                    node_color_mask[node] |= color_bit
+            family = wp.int32(0)
+            if wp.static(group_families):
+                family = _element_fast_family(element_family[eid])
+            family_slot = color * wp.int32(_PER_WORLD_FAST_FAMILIES) + family
+            color_family_count[w, family_slot] += wp.int32(1)
             offset += wp.int32(1)
 
         # Build color/family prefixes, retaining one mutable cursor per family for
@@ -863,20 +849,21 @@ def get_per_world_greedy_coloring_kernel(
             color += wp.int32(1)
         world_color_starts[w, num_colors] = running
         world_num_colors[w] = num_colors
+        if wp.static(not mass_split_overflow) and num_colors > max_colors:
+            wp.atomic_max(overflow_flag, 0, wp.int32(1))
 
         # Stable world/cid order inside every family bucket.
         offset = wp.int32(0)
         while offset < count:
             eid = world_elements[base + offset]
             color = assigned[eid] - wp.int32(1)
-            if color >= wp.int32(0):
-                family = wp.int32(0)
-                if wp.static(group_families):
-                    family = _element_fast_family(element_family[eid])
-                family_slot = color * wp.int32(_PER_WORLD_FAST_FAMILIES) + family
-                local_slot = color_family_offsets[w, family_slot]
-                color_family_offsets[w, family_slot] = local_slot + wp.int32(1)
-                world_element_ids_by_color[base + local_slot] = eid
+            family = wp.int32(0)
+            if wp.static(group_families):
+                family = _element_fast_family(element_family[eid])
+            family_slot = color * wp.int32(_PER_WORLD_FAST_FAMILIES) + family
+            local_slot = color_family_offsets[w, family_slot]
+            color_family_offsets[w, family_slot] = local_slot + wp.int32(1)
+            world_element_ids_by_color[base + local_slot] = eid
             offset += wp.int32(1)
 
     return kernel
@@ -1258,6 +1245,14 @@ def _make_multiworld_rigid_iterate_dispatch_funcs(
     return _dispatch_iterate_cid, _dispatch_iterate_joint, _dispatch_iterate_contact
 
 
+@wp.func
+def _per_world_color_lanes(lane: int, stride: int, color: int, count: int, serialize_overflow: bool):
+    # Only lane zero may mutate bodies in the final greedy bucket.
+    if serialize_overflow and color == GREEDY_MAX_COLORS:
+        return wp.where(lane == 0, 0, count), 1
+    return lane, stride
+
+
 @functools.cache
 def _make_fast_tail_prepare_plus_iterate_kernel(
     *,
@@ -1274,6 +1269,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
     fixed_tpw: int = 0,
     guard_tpw: bool = True,
     family_split: bool = False,
+    serialize_overflow: bool = False,
     solve_joint_inner_sweeps: int = _FAST_TAIL_SOLVE_JOINT_INNER_SWEEPS,
     solve_contact_inner_sweeps: int = _FAST_TAIL_SOLVE_CONTACT_INNER_SWEEPS,
     solve_outer_iteration_chunk: int = _FAST_TAIL_SOLVE_OUTER_ITERATION_CHUNK,
@@ -1403,6 +1399,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
         while c < n_colors:
             start = world_base + world_color_starts[world_id, c]
             end = world_base + world_color_starts[world_id, c + 1]
+            lane, stride = _per_world_color_lanes(local_tid, tpw, c, end - start, wp.static(serialize_overflow))
 
             if wp.static(family_split):
                 family_base = c * wp.int32(_PER_WORLD_FAST_FAMILIES)
@@ -1417,7 +1414,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                             )
                         family_count = family_end - family_start
 
-                        base = local_tid
+                        base = lane
                         while base < family_count:
                             cid = world_element_ids_by_color[family_start + base]
                             _dispatch_prepare_any_cid(
@@ -1441,7 +1438,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                                 family_start + base,
                                 wp.int32(0),
                             )
-                            base += tpw
+                            base += stride
                         family += wp.int32(1)
                 else:
                     joint_start = world_base + world_color_family_starts[world_id, family_base]
@@ -1449,7 +1446,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                     count_joints = contact_start - joint_start
 
                     if wp.static(not skip_joint_pgs):
-                        base = local_tid
+                        base = lane
                         while base < count_joints:
                             cid = world_element_ids_by_color[joint_start + base]
                             if joint_pgs_enabled[cid] != wp.int32(0):
@@ -1462,10 +1459,10 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                                     idt,
                                     cid,
                                 )
-                            base += tpw
+                            base += stride
 
                     count_contacts = end - contact_start
-                    base = local_tid
+                    base = lane
                     while base < count_contacts:
                         cid = world_element_ids_by_color[contact_start + base]
                         _dispatch_prepare_contact(
@@ -1479,10 +1476,10 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                             idt,
                             cid - num_joints,
                         )
-                        base += tpw
+                        base += stride
             else:
                 count = end - start
-                base = local_tid
+                base = lane
                 while base < count:
                     cid = world_element_ids_by_color[start + base]
                     if wp.static(cloth_support):
@@ -1522,7 +1519,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                             num_joints,
                             joint_pgs_enabled,
                         )
-                    base += tpw
+                    base += stride
 
             _sync_warp_mask(sync_mask)
             c += 1
@@ -1538,6 +1535,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                     color = n_colors - wp.int32(1) - c
                 start = world_base + world_color_starts[world_id, color]
                 end = world_base + world_color_starts[world_id, color + 1]
+                lane, stride = _per_world_color_lanes(local_tid, tpw, color, end - start, wp.static(serialize_overflow))
                 count = end - start
 
                 if wp.static(family_split):
@@ -1553,7 +1551,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                                 )
                             family_count = family_end - family_start
 
-                            base = local_tid
+                            base = lane
                             while base < family_count:
                                 cid = world_element_ids_by_color[family_start + base]
                                 _dispatch_iterate_any_cid(
@@ -1577,7 +1575,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                                     family_start + base,
                                     wp.int32(0),
                                 )
-                                base += tpw
+                                base += stride
                             family += wp.int32(1)
                     else:
                         joint_start = world_base + world_color_family_starts[world_id, family_base]
@@ -1585,7 +1583,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                         count_joints = contact_start - joint_start
 
                         if wp.static(not skip_joint_pgs):
-                            base = local_tid
+                            base = lane
                             while base < count_joints:
                                 cid = world_element_ids_by_color[joint_start + base]
                                 if joint_pgs_enabled[cid] == wp.int32(1):
@@ -1600,10 +1598,10 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                                         cid,
                                         wp.int32(solve_joint_inner_sweeps),
                                     )
-                                base += tpw
+                                base += stride
 
                         count_contacts = end - contact_start
-                        base = local_tid
+                        base = lane
                         while base < count_contacts:
                             cid = world_element_ids_by_color[contact_start + base]
                             local_cid = cid - num_joints
@@ -1620,9 +1618,9 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                                 local_cid,
                                 wp.int32(solve_contact_inner_sweeps),
                             )
-                            base += tpw
+                            base += stride
                 else:
-                    base = local_tid
+                    base = lane
                     while base < count:
                         cid = world_element_ids_by_color[start + base]
                         if wp.static(cloth_support):
@@ -1690,7 +1688,7 @@ def _make_fast_tail_prepare_plus_iterate_kernel(
                                     cid - num_joints,
                                     wp.int32(solve_contact_inner_sweeps),
                                 )
-                        base += tpw
+                        base += stride
 
                 _sync_warp_mask(sync_mask)
                 c += 1
@@ -1715,6 +1713,7 @@ def _make_fast_tail_relax_kernel(
     fixed_tpw: int = 0,
     guard_tpw: bool = True,
     family_split: bool = False,
+    serialize_overflow: bool = False,
     use_bias: bool = False,
 ):
     """Build a multi-world iterate kernel with global color sweep order."""
@@ -1824,6 +1823,7 @@ def _make_fast_tail_relax_kernel(
                     color = n_colors - wp.int32(1) - c
                 start = world_base + world_color_starts[world_id, color]
                 end = world_base + world_color_starts[world_id, color + 1]
+                lane, stride = _per_world_color_lanes(local_tid, tpw, color, end - start, wp.static(serialize_overflow))
                 if wp.static(family_split):
                     family_base = color * wp.int32(_PER_WORLD_FAST_FAMILIES)
                     if wp.static(cloth_support):
@@ -1837,7 +1837,7 @@ def _make_fast_tail_relax_kernel(
                                 )
                             family_count = family_end - family_start
 
-                            base = local_tid
+                            base = lane
                             while base < family_count:
                                 cid = world_element_ids_by_color[family_start + base]
                                 _dispatch_relax_any_cid(
@@ -1861,7 +1861,7 @@ def _make_fast_tail_relax_kernel(
                                     family_start + base,
                                     wp.int32(0),
                                 )
-                                base += tpw
+                                base += stride
                             family += wp.int32(1)
                     else:
                         joint_start = world_base + world_color_family_starts[world_id, family_base]
@@ -1869,7 +1869,7 @@ def _make_fast_tail_relax_kernel(
                         count_joints = contact_start - joint_start
 
                         if wp.static(not skip_joint_pgs):
-                            base = local_tid
+                            base = lane
                             while base < count_joints:
                                 cid = world_element_ids_by_color[joint_start + base]
                                 if joint_pgs_enabled[cid] == wp.int32(1):
@@ -1884,10 +1884,10 @@ def _make_fast_tail_relax_kernel(
                                         cid,
                                         sweeps_per_dispatch,
                                     )
-                                base += tpw
+                                base += stride
 
                         count_contacts = end - contact_start
-                        base = local_tid
+                        base = lane
                         while base < count_contacts:
                             cid = world_element_ids_by_color[contact_start + base]
                             local_cid = cid - num_joints
@@ -1904,11 +1904,11 @@ def _make_fast_tail_relax_kernel(
                                 local_cid,
                                 sweeps_per_dispatch,
                             )
-                            base += tpw
+                            base += stride
                 else:
                     count = end - start
 
-                    base = local_tid
+                    base = lane
                     while base < count:
                         cid = world_element_ids_by_color[start + base]
                         if wp.static(cloth_support):
@@ -1950,7 +1950,7 @@ def _make_fast_tail_relax_kernel(
                                 joint_pgs_enabled,
                                 sweeps_per_dispatch,
                             )
-                        base += tpw
+                        base += stride
 
                 _sync_warp_mask(sync_mask)
                 c += 1
@@ -1971,6 +1971,7 @@ def _make_block_world_prepare_plus_iterate_kernel(
     cached_prepare: bool = False,
     enable_column_timers: bool = False,
     block_dim: int = 128,
+    serialize_overflow: bool = False,
     solve_inner_sweeps: int = 1,
 ):
     """Build a multi-world kernel where one physical block owns one world."""
@@ -2036,8 +2037,11 @@ def _make_block_world_prepare_plus_iterate_kernel(
         while c < n_colors:
             start = world_base + world_color_starts[world_id, c]
             end = world_base + world_color_starts[world_id, c + wp.int32(1)]
+            lane, stride = _per_world_color_lanes(
+                local_tid, wp.int32(block_dim), c, end - start, wp.static(serialize_overflow)
+            )
             count = end - start
-            base = local_tid
+            base = lane
             while base < count:
                 cid = world_element_ids_by_color[start + base]
                 _dispatch_prepare_cid(
@@ -2054,7 +2058,7 @@ def _make_block_world_prepare_plus_iterate_kernel(
                     num_joints,
                     joint_pgs_enabled,
                 )
-                base += wp.int32(block_dim)
+                base += stride
 
             if wp.static(block_dim == 32):
                 _sync_warp()
@@ -2078,9 +2082,12 @@ def _make_block_world_prepare_plus_iterate_kernel(
                     color = n_colors - wp.int32(1) - c
                 start = world_base + world_color_starts[world_id, color]
                 end = world_base + world_color_starts[world_id, color + wp.int32(1)]
+                lane, stride = _per_world_color_lanes(
+                    local_tid, wp.int32(block_dim), color, end - start, wp.static(serialize_overflow)
+                )
 
                 count = end - start
-                base = local_tid
+                base = lane
                 while base < count:
                     cid = world_element_ids_by_color[start + base]
                     _dispatch_iterate_cid(
@@ -2099,7 +2106,7 @@ def _make_block_world_prepare_plus_iterate_kernel(
                         joint_pgs_enabled,
                         sweeps,
                     )
-                    base += wp.int32(block_dim)
+                    base += stride
 
                 if wp.static(block_dim == 32):
                     _sync_warp()
@@ -2122,6 +2129,7 @@ def _make_block_world_relax_kernel(
     patch_friction: bool = False,
     enable_column_timers: bool = False,
     block_dim: int = 128,
+    serialize_overflow: bool = False,
     use_bias: bool = False,
 ):
     """Build a multi-world iterate kernel with one block per world."""
@@ -2181,9 +2189,12 @@ def _make_block_world_relax_kernel(
                     color = n_colors - wp.int32(1) - c
                 start = world_base + world_color_starts[world_id, color]
                 end = world_base + world_color_starts[world_id, color + wp.int32(1)]
+                lane, stride = _per_world_color_lanes(
+                    local_tid, wp.int32(block_dim), color, end - start, wp.static(serialize_overflow)
+                )
 
                 count = end - start
-                base = local_tid
+                base = lane
                 while base < count:
                     cid = world_element_ids_by_color[start + base]
                     _dispatch_iterate_cid(
@@ -2202,7 +2213,7 @@ def _make_block_world_relax_kernel(
                         joint_pgs_enabled,
                         wp.int32(1),
                     )
-                    base += wp.int32(block_dim)
+                    base += stride
 
                 if wp.static(block_dim == 32):
                     _sync_warp()
@@ -2327,6 +2338,7 @@ def get_block_world_kernel(
     patch_friction: bool = False,
     cached_prepare: bool = False,
     enable_column_timers: bool = False,
+    serialize_overflow: bool = False,
     block_dim: int = 128,
     solve_inner_sweeps: int = 1,
 ):
@@ -2346,6 +2358,7 @@ def get_block_world_kernel(
             patch_friction=patch_friction,
             cached_prepare=cached_prepare,
             enable_column_timers=enable_column_timers,
+            serialize_overflow=serialize_overflow,
             block_dim=block_dim,
             solve_inner_sweeps=solve_inner_sweeps,
         )
@@ -2358,6 +2371,7 @@ def get_block_world_kernel(
             has_soft_contact_pd=has_soft_contact_pd,
             patch_friction=patch_friction,
             enable_column_timers=enable_column_timers,
+            serialize_overflow=serialize_overflow,
             block_dim=block_dim,
             use_bias=kind == "iterate",
         )
@@ -2376,6 +2390,7 @@ def get_fast_tail_kernel(
     soft_tet_neohookean: bool = False,
     cached_prepare: bool = False,
     enable_column_timers: bool = False,
+    serialize_overflow: bool = False,
     patch_friction: bool = False,
     fixed_tpw: int = 0,
     guard_tpw: bool = True,
@@ -2401,6 +2416,7 @@ def get_fast_tail_kernel(
             soft_tet_neohookean=soft_tet_neohookean,
             cached_prepare=cached_prepare,
             enable_column_timers=enable_column_timers,
+            serialize_overflow=serialize_overflow,
             patch_friction=patch_friction,
             fixed_tpw=fixed_tpw,
             guard_tpw=guard_tpw,
@@ -2419,6 +2435,7 @@ def get_fast_tail_kernel(
             cloth_support=cloth_support,
             soft_tet_neohookean=soft_tet_neohookean,
             enable_column_timers=enable_column_timers,
+            serialize_overflow=serialize_overflow,
             patch_friction=patch_friction,
             fixed_tpw=fixed_tpw,
             guard_tpw=guard_tpw,

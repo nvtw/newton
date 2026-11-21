@@ -1285,13 +1285,12 @@ class PhoenXWorld:
         self._per_world_node_color_mask: wp.array[wp.uint64] = wp.zeros(
             max(1, self.num_bodies + self.num_particles), dtype=wp.uint64, device=self.device
         )
-        # Greedy per-world scratch. overflow flag is surfaced via step_report
-        # but not raised mid-step (fallback is to flip _use_greedy_coloring off).
         #: Blocks the per-world coloring sorts the rows into: the worlds, or in one world the
         #: groups its islands are spread over, see :meth:`_group_rows_by_island`.
         self._partition_count = 0
         self._body_group: wp.array[wp.int32] = wp.empty(0, dtype=wp.int32, device=self.device)
         self._allocate_partition(nw)
+        # Diagnostic flag for the serial greedy overflow bucket.
         self._per_world_greedy_overflow: wp.array[wp.int32] = wp.zeros(1, dtype=wp.int32, device=self.device)
 
         # Contact state split across two narrow containers:
@@ -3475,7 +3474,6 @@ class PhoenXWorld:
                         on_true=self._rebuild_rigid_partition_conditional,
                         on_false=None,
                     )
-                    self._maybe_fallback_from_per_world_greedy_overflow(self._partition_count)
                 else:
                     self._rebuild_partition()
 
@@ -4791,8 +4789,9 @@ class PhoenXWorld:
         self._world_color_starts: wp.array2d[wp.int32] = wp.zeros(
             (nw, MAX_COLORS + 1), dtype=wp.int32, device=self.device
         )
+        family_width = (int(GREEDY_MAX_COLORS) + 1) * int(_PER_WORLD_FAST_FAMILIES)
         self._world_color_family_starts: wp.array2d[wp.int32] = wp.zeros(
-            (nw, int(GREEDY_MAX_COLORS) * int(_PER_WORLD_FAST_FAMILIES)),
+            (nw, family_width),
             dtype=wp.int32,
             device=self.device,
         )
@@ -4808,51 +4807,13 @@ class PhoenXWorld:
             2 * scan_blocks, dtype=wp.int32, device=self.device
         )
         self._per_world_greedy_color_family_count: wp.array2d[wp.int32] = wp.zeros(
-            (nw, int(GREEDY_MAX_COLORS) * int(_PER_WORLD_FAST_FAMILIES)),
+            (nw, family_width),
             dtype=wp.int32,
             device=self.device,
         )
         self._per_world_greedy_color_family_offsets: wp.array2d[wp.int32] = wp.zeros(
-            (nw, int(GREEDY_MAX_COLORS) * int(_PER_WORLD_FAST_FAMILIES)),
+            (nw, family_width),
             dtype=wp.int32,
-            device=self.device,
-        )
-
-    def _maybe_fallback_from_per_world_greedy_overflow(self, nw: int) -> None:
-        """Multi-world analogue of
-        :meth:`_maybe_fallback_from_greedy_overflow`. Flips the
-        instance flag and re-runs the per-world JP coloring if any
-        world's greedy build hit the 64-colour cap.
-        """
-        flag = self._per_world_greedy_overflow
-        device = flag.device
-        if device.is_cuda and device.is_capturing:
-            return
-        if int(flag.numpy()[0]) == 0:
-            return
-        self._use_greedy_coloring = False
-        self._reuse_rigid_coloring = False
-        self._partitioner.reset(self._elements, self._num_active_constraints)
-        wp.launch_tiled(
-            _per_world_jp_coloring_kernel,
-            dim=[nw],
-            inputs=[
-                self._per_world_element_offsets,
-                self._per_world_element_count,
-                self._per_world_elements,
-                self._elements,
-                self._partitioner._adjacency_section_end_indices,
-                self._partitioner._vertex_to_adjacent_elements,
-                self._partitioner._packed_priorities,
-                int(MAX_COLORS),
-            ],
-            outputs=[
-                self._per_world_assigned,
-                self._world_element_ids_by_color,
-                self._world_color_starts,
-                self._world_num_colors,
-            ],
-            block_dim=_PER_WORLD_COLORING_BLOCK_DIM,
             device=self.device,
         )
 
@@ -4862,7 +4823,6 @@ class PhoenXWorld:
         The CID stream is split into monotone world-id runs and stable-merged
         in original order. Worlds are disjoint after static-null-out.
         """
-        nw = self._partition_count
         cap = self._constraint_capacity
 
         self._per_world_element_count.zero_()
@@ -4904,8 +4864,6 @@ class PhoenXWorld:
                 on_true=self._finish_per_world_coloring,
                 on_false=None,
             )
-        if self._use_greedy_coloring and not unconditional_finish:
-            self._maybe_fallback_from_per_world_greedy_overflow(nw)
 
     def _finish_per_world_coloring(self) -> None:
         """Merge deterministic world streams and color changed topology."""
@@ -6167,6 +6125,7 @@ class PhoenXWorld:
             "fixed_tpw": int(fixed_tpw),
             "guard_tpw": self._tpw_auto,
             "family_split": self._fast_tail_family_split(),
+            "serialize_overflow": self._use_greedy_coloring and not self.mass_splitting_enabled,
             "solve_joint_inner_sweeps": joint_sweeps,
             "solve_contact_inner_sweeps": contact_sweeps,
             "solve_outer_iteration_chunk": outer_chunk,
@@ -6189,6 +6148,7 @@ class PhoenXWorld:
             "enable_column_timers": dispatch_kw["enable_column_timers"],
             "block_dim": int(block_dim),
             "solve_inner_sweeps": int(_BLOCK_WORLD_SOLVE_INNER_SWEEPS),
+            "serialize_overflow": self._use_greedy_coloring and not self.mass_splitting_enabled,
         }
         if cached_prepare is not None:
             kw["cached_prepare"] = bool(cached_prepare)

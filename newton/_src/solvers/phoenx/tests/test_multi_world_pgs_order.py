@@ -398,17 +398,6 @@ class TestMultiWorldColoringContract(unittest.TestCase):
         launch_idx = source.index("get_per_world_greedy_coloring_kernel")
         self.assertLess(clear_idx, launch_idx)
 
-    def test_direct_greedy_path_skips_adjacency_but_fallback_rebuilds_it(self) -> None:
-        rebuild_source = inspect.getsource(simulation.PhoenXWorld._rebuild_partition)
-        self.assertIn(
-            'if self.step_layout == "single_world" or not self._use_greedy_coloring:',
-            rebuild_source,
-        )
-        fallback_source = inspect.getsource(simulation.PhoenXWorld._maybe_fallback_from_per_world_greedy_overflow)
-        reset_idx = fallback_source.index("self._partitioner.reset")
-        fallback_idx = fallback_source.index("_per_world_jp_coloring_kernel")
-        self.assertLess(reset_idx, fallback_idx)
-
 
 class TestMultiWorldFastTailSolveContract(unittest.TestCase):
     def test_solve_schedule_traverses_all_colors_per_iteration(self) -> None:
@@ -546,6 +535,58 @@ class TestMultiWorldPgsOrder(unittest.TestCase):
         # The comparison is only meaningful while the amplified round-off stays small.
         self.assertLess(q_bound, 1.0e-3)
         self.assertLess(qd_bound, 1.0e-2)
+
+    def test_captured_greedy_overflow_solves_every_contact(self) -> None:
+        device = wp.get_preferred_device()
+        if not wp.is_conditional_graph_supported():
+            self.skipTest("Requires CUDA conditional graphs")
+
+        template = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
+        num_leaves = int(GREEDY_MAX_COLORS) + 8
+        shape_cfg = newton.ModelBuilder.ShapeConfig(gap=0.0)
+        center = template.add_body()
+        template.add_shape_sphere(center, radius=2.0, cfg=shape_cfg)
+        for leaf in range(num_leaves):
+            angle = 2.0 * math.pi * leaf / num_leaves
+            position = wp.vec3(2.025 * math.cos(angle), 2.025 * math.sin(angle), 0.0)
+            body = template.add_body(xform=wp.transform(position, wp.quat_identity()))
+            template.add_shape_sphere(body, radius=0.05, cfg=shape_cfg)
+
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
+        builder.replicate(template, 2)
+        model = builder.finalize(device=device)
+        pipeline = newton.CollisionPipeline(
+            model, rigid_contact_max=2 * num_leaves, contact_matching="sticky", deterministic=True
+        )
+        contacts = pipeline.contacts()
+        state_in = model.state()
+        control = model.control()
+        pipeline.collide(state_in, contacts)
+        self.assertEqual(int(contacts.rigid_contact_count.numpy()[0]), 2 * num_leaves)
+
+        for scheduler in ("fast_tail", "block_world"):
+            with self.subTest(scheduler=scheduler):
+                state_out = model.state()
+                solver = newton.solvers.SolverPhoenX(
+                    model,
+                    substeps=1,
+                    solver_iterations=2,
+                    velocity_iterations=1,
+                    step_layout="multi_world",
+                    multi_world_scheduler=scheduler,
+                )
+                world = solver.world
+                self.assertTrue(world._conditional_world_coloring)
+                with wp.ScopedCapture(device=device) as capture:
+                    solver.step(state_in, state_out, control, contacts, 1.0 / 60.0)
+                wp.capture_launch(capture.graph)
+
+                counts = world._world_num_colors.numpy()
+                starts = world._world_color_starts.numpy()
+                expected_counts = np.diff(world._world_csr_offsets.numpy())
+                np.testing.assert_array_equal(starts[np.arange(len(counts)), counts], expected_counts)
+                velocities = state_out.body_qd.numpy().reshape(2, num_leaves + 1, 6)[:, 1:, :3]
+                self.assertGreater(float(np.linalg.norm(velocities, axis=-1).min()), 0.0)
 
     def test_stable_rigid_coloring_matches_forced_rebuild(self) -> None:
         """Cached coloring must preserve an evolving deterministic solve."""
