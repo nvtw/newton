@@ -165,6 +165,45 @@ def is_pair_excluded(
     return False
 
 
+@wp.struct
+class PairExclusionIndex:
+    """Sorted shape partners and the start of each first shape's span."""
+
+    offsets: wp.array[wp.int32]
+    partners: wp.array[wp.int32]
+
+
+def build_pair_exclusion_index(sorted_pairs: np.ndarray, shape_count: int, device: wp.Device) -> PairExclusionIndex:
+    """Index immutable, lexicographically sorted model exclusions by their first shape."""
+    counts = np.bincount(sorted_pairs[:, 0], minlength=shape_count)
+    offsets = np.empty(shape_count + 1, dtype=np.int32)
+    offsets[0] = 0
+    np.cumsum(counts, out=offsets[1:])
+    index = PairExclusionIndex()
+    index.offsets = wp.array(offsets, dtype=wp.int32, device=device)
+    index.partners = wp.array(np.ascontiguousarray(sorted_pairs[:, 1]), dtype=wp.int32, device=device)
+    return index
+
+
+@wp.func
+def is_pair_excluded(pair: wp.vec2i, index: PairExclusionIndex, num_filter_pairs: int) -> bool:
+    owner = pair[0]
+    if owner < 0 or owner >= index.offsets.shape[0] - 1:
+        return False
+    low = index.offsets[owner]
+    high = wp.min(index.offsets[owner + 1], num_filter_pairs) - 1
+    while low <= high:
+        middle = low + ((high - low) >> 1)
+        partner = index.partners[middle]
+        if pair[1] == partner:
+            return True
+        if pair[1] < partner:
+            high = middle - 1
+        else:
+            low = middle + 1
+    return False
+
+
 @wp.func
 def is_shape_pair_immovable_filtered(
     shape_a: int,

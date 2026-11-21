@@ -8,6 +8,7 @@ import unittest
 import numpy as np
 import warp as wp
 
+from newton._src.geometry.broad_phase_common import build_pair_exclusion_index
 from newton._src.geometry.broad_phase_implicit_tree import BroadPhaseImplicitTree
 from newton._src.geometry.broad_phase_nxn import BroadPhaseAllPairs
 from newton._src.geometry.broad_phase_sap import BroadPhaseSAP
@@ -171,6 +172,60 @@ class TestBroadPhaseImplicitTree(unittest.TestCase):
             )
             self.assertEqual(int(counts[i].numpy()[0]), len(expected) + 1)
             self.assertEqual({tuple(p) for p in pairs[i].numpy()[1 : len(expected) + 1]}, expected)
+
+    def test_indexed_exclusions_match_sorted_prefix(self):
+        model_shapes, shapes = 12, 15
+        # Include sparse rows, a missing first shape, and extra runtime shape ids.
+        exclusions = np.array(
+            [(a, b) for a in range(model_shapes) if a % 3 != 1 for b in range(a + 1, model_shapes)], dtype=np.int32
+        )
+
+        def check(device):
+            lower = wp.full(shapes, wp.vec3(-1.0), dtype=wp.vec3, device=device)
+            upper = wp.full(shapes, wp.vec3(1.0), dtype=wp.vec3, device=device)
+            worlds = wp.zeros(shapes, dtype=wp.int32, device=device)
+            groups = wp.ones(shapes, dtype=wp.int32, device=device)
+            storage = wp.empty(shapes * shapes, dtype=wp.vec2i, device=device)
+            count = wp.zeros(1, dtype=wp.int32, device=device)
+            tree = BroadPhaseImplicitTree(worlds, device=device)
+            index = build_pair_exclusion_index(exclusions, model_shapes, device)
+            flat = wp.array(exclusions, dtype=wp.vec2i, device=device)
+
+            def visit(filter_pairs, size):
+                tree.launch(
+                    lower,
+                    upper,
+                    None,
+                    groups,
+                    worlds,
+                    shapes,
+                    storage,
+                    count,
+                    filter_pairs=filter_pairs,
+                    num_filter_pairs=size,
+                    device=device,
+                )
+
+            def pairs():
+                size = int(count.numpy()[0])
+                found = {tuple(pair) for pair in storage.numpy()[:size]}
+                self.assertEqual(len(found), size)
+                return found
+
+            for size in (0, len(exclusions) // 2, None):
+                visit(flat, size)
+                expected = pairs()
+                visit(index, size)
+                self.assertEqual(pairs(), expected)
+                if device.is_cuda:
+                    with wp.ScopedCapture(device=device) as captured:
+                        visit(index, size)
+                    wp.capture_launch(captured.graph)
+                    self.assertEqual(pairs(), expected)
+
+        for device in wp.get_devices():
+            with self.subTest(device=device):
+                check(device)
 
 
 if __name__ == "__main__":

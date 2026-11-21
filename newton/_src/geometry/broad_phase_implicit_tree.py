@@ -17,7 +17,7 @@ from typing import Any
 import numpy as np
 import warp as wp
 
-from .broad_phase_common import EmptyFilterData, keep_all_filter, precompute_world_map
+from .broad_phase_common import EmptyFilterData, PairExclusionIndex, keep_all_filter, precompute_world_map
 from .broad_phase_sap import _make_sap_process_pair_func
 from .flags import ShapeFlags
 from .implicit_bvh import (
@@ -135,7 +135,7 @@ def _make_pair_kernels(filter_func: Any, filter_data_type: Any):
         shape_displacement: wp.array[wp.vec3],
         collision_group: wp.array[int],
         shape_world: wp.array[int],
-        filter_pairs: wp.array[wp.vec2i],
+        filter_pairs: Any,
         num_filter_pairs: int,
         shape_body: wp.array[int],
         body_flags: wp.array[int],
@@ -288,7 +288,7 @@ class BroadPhaseImplicitTree:
         candidate_pair: wp.array[wp.vec2i],
         candidate_pair_count: wp.array[int],
         device: wp.Device | str | None = None,
-        filter_pairs: wp.array[wp.vec2i] | None = None,
+        filter_pairs: wp.array[wp.vec2i] | PairExclusionIndex | None = None,
         num_filter_pairs: int | None = None,
         skip_count_zero: bool = False,
         filter_data: Any | None = None,
@@ -314,7 +314,12 @@ class BroadPhaseImplicitTree:
         shape_body = shape_body if shape_body is not None else wp.empty(0, dtype=wp.int32, device=device)
         body_flags = body_flags if body_flags is not None else wp.empty(0, dtype=wp.int32, device=device)
         filter_pairs = filter_pairs if filter_pairs is not None else wp.empty(0, dtype=wp.vec2i, device=device)
-        n_filter = num_filter_pairs if num_filter_pairs is not None else filter_pairs.shape[0]
+        n_filter = num_filter_pairs
+        if n_filter is None:
+            if isinstance(filter_pairs, wp.array):
+                n_filter = filter_pairs.shape[0]
+            else:
+                n_filter = filter_pairs.partners.shape[0]
         pair_data = filter_data if self._has_custom_filter else self._empty_filter_data
         wp.launch(
             _tree_keys,

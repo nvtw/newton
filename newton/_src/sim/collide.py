@@ -13,6 +13,7 @@ import warp as wp
 
 from ..core.reset import normalize_reset_world_mask
 from ..exceptions import NewtonWarning
+from ..geometry.broad_phase_common import PairExclusionIndex, build_pair_exclusion_index
 from ..geometry.broad_phase_grid import BroadPhaseGrid
 from ..geometry.broad_phase_implicit_tree import BroadPhaseImplicitTree
 from ..geometry.broad_phase_nxn import BroadPhaseAllPairs, BroadPhaseExplicit
@@ -2486,10 +2487,16 @@ class CollisionPipeline:
             else:
                 self.shape_pairs_filtered = None
                 self.shape_pairs_max = _resolve_shape_pairs_max(model, None, self.extra_shape_count)
-                self.shape_pairs_excluded = self._build_excluded_pairs(model)
-                self.shape_pairs_excluded_count = (
-                    self.shape_pairs_excluded.shape[0] if self.shape_pairs_excluded is not None else 0
+                self.shape_pairs_excluded = self._build_excluded_pairs(
+                    model, indexed=isinstance(self.broad_phase, BroadPhaseImplicitTree)
                 )
+                excluded = self.shape_pairs_excluded
+                if excluded is None:
+                    self.shape_pairs_excluded_count = 0
+                elif isinstance(excluded, wp.array):
+                    self.shape_pairs_excluded_count = excluded.shape[0]
+                else:
+                    self.shape_pairs_excluded_count = excluded.partners.shape[0]
 
             if deterministic and not narrow_phase.deterministic:
                 raise ValueError(
@@ -3695,10 +3702,13 @@ class CollisionPipeline:
             cached_sampling.reset()
 
     @staticmethod
-    def _build_excluded_pairs(model: Model) -> wp.array[wp.vec2i] | None:
+    def _build_excluded_pairs(model: Model, *, indexed: bool = False) -> wp.array[wp.vec2i] | PairExclusionIndex | None:
         sorted_pairs = model.shape_collision_filter_pairs_array()
         if sorted_pairs.shape[0] == 0:
             return None
+        # Only use the dense row offsets when the index also reduces storage.
+        if indexed and len(sorted_pairs) > model.shape_count + 1:
+            return build_pair_exclusion_index(sorted_pairs, model.shape_count, model.device)
         return wp.array(
             sorted_pairs,
             dtype=wp.vec2i,
