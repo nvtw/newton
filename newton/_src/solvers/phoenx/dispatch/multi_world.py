@@ -53,7 +53,6 @@ class MultiWorldDispatcher:
                 # solves so contacts see mechanism-level mobility.
                 if not self._world._combine_direct_prepare_projection:
                     direct.solve(use_bias=False)
-                    direct.resolve_bounded_drives(idt, use_bias=False)
                 if block_world:
                     self._world._solve_main_block_world(num_iterations=0, solve_direct=False)
                 else:
@@ -62,8 +61,8 @@ class MultiWorldDispatcher:
                     direct.wait_factor()
                 self._world._warm_start_owned_contacts()
                 direct.solve(use_bias=False)
-                if self._world._combine_direct_prepare_projection:
-                    direct.resolve_bounded_drives(idt, use_bias=False)
+                # Test drive bounds only once contact warm starts load the mechanisms.
+                direct.resolve_bounded_drives(idt, use_bias=False)
                 for iteration in range(self._world.solver_iterations):
                     if block_world:
                         self._world._iterate_main_block_world(iteration)

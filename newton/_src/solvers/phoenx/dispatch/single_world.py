@@ -48,7 +48,6 @@ class SingleWorldDispatcher:
         if w._regular_pgs_active_this_step:
             if direct is not None and direct.enabled and not w._combine_direct_prepare_projection:
                 direct.solve(use_bias=False)
-                direct.resolve_bounded_drives(idt, use_bias=False)
             prepare_head, prepare_fused, iterate_head, iterate_fused, _, _ = w._singleworld_kernels()
             # Contact columns, joint ownership, and sleep states span the native substeps.
             if self._island_schedule is not None and w._current_substep_index == 0:
@@ -70,8 +69,8 @@ class SingleWorldDispatcher:
                 # Project contact/limit warm starts before the first inequality
                 # sweep. The factor is fixed for the entire substep.
                 direct.solve(use_bias=False)
-                if w._combine_direct_prepare_projection:
-                    direct.resolve_bounded_drives(idt, use_bias=False)
+                # Test drive bounds only once contact warm starts load the mechanisms.
+                direct.resolve_bounded_drives(idt, use_bias=False)
             temporal = w.temporal_iterations
             if temporal:
                 w._temporal_begin_sweeps()

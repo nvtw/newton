@@ -4,6 +4,7 @@
 """Check finite-effort drives coupled to hard joint stops."""
 
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import warp as wp
@@ -100,6 +101,66 @@ class TestDriveLimitConsistency(unittest.TestCase):
                             if step >= 47:
                                 np.testing.assert_allclose(position, 0.065, atol=1.0e-5)
                             previous = position
+
+    @unittest.skipUnless(wp.get_cuda_device_count(), "requires CUDA graph capture")
+    def test_loaded_saturated_drive_keeps_its_active_set(self):
+        """Hold a stalled motor at its cap without re-solving the same bound every substep."""
+        from newton._src.solvers.phoenx.articulations.direct_equality import DirectEqualitySystem  # noqa: PLC0415
+
+        @wp.kernel
+        def count_bound_changes(flag: wp.array[wp.int32], changes: wp.array[wp.int32]):
+            changes[0] += flag[0]
+
+        with wp.ScopedDevice("cuda:0"):
+            builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+            builder.add_shape_box(-1, xform=wp.transform((0.3, 0, 0), wp.quat_identity()), hx=0.1, hy=0.2, hz=0.2)
+            slider = builder.add_link(mass=1.0, inertia=wp.mat33(np.eye(3) * 0.01))
+            builder.add_shape_box(slider, hx=0.1, hy=0.1, hz=0.1)
+            joint = builder.add_joint_prismatic(
+                -1,
+                slider,
+                axis=newton.Axis.X,
+                target_kd=1000.0,
+                effort_limit=5.0,
+                actuator_mode=newton.JointTargetMode.VELOCITY,
+            )
+            builder.add_articulation([joint])
+            model = builder.finalize()
+            solver = newton.solvers.SolverPhoenX(
+                model,
+                joint_mode="maximal_pgs",
+                step_layout="single_world",
+                substeps=2,
+                solver_iterations=4,
+                direct_joint_mask=np.ones(model.joint_count, dtype=bool),
+            )
+            state, control = model.state(), model.control()
+            control.joint_target_qd.fill_(0.5)
+            contacts = solver._collision_pipeline.contacts()
+            changes = wp.zeros(1, dtype=wp.int32)
+            find_new_bounds = DirectEqualitySystem._find_new_bounds
+
+            def counted_scan(system, idt, flag):
+                find_new_bounds(system, idt, flag)
+                wp.launch(count_bound_changes, dim=1, inputs=[system.drive_active_set_flag, changes])
+
+            def step():
+                solver.collide(state, contacts, dt=1.0 / 120.0)
+                solver.step(state, state, control, contacts, 1.0 / 120.0)
+
+            with patch.object(DirectEqualitySystem, "_find_new_bounds", counted_scan):
+                step()
+                with wp.ScopedCapture() as capture:
+                    step()
+            for _ in range(120):
+                wp.capture_launch(capture.graph)
+            changes.zero_()
+            for _ in range(60):
+                wp.capture_launch(capture.graph)
+            # The wall carries the full capped motor force once the slider stalls.
+            self.assertEqual(int(changes.numpy()[0]), 0)
+            np.testing.assert_allclose(state.body_qd.numpy()[slider], 0.0, atol=1.0e-3)
+            np.testing.assert_allclose(state.body_q.numpy()[slider, 0], 0.1, atol=2.0e-3)
 
 
 if __name__ == "__main__":

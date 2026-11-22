@@ -1651,13 +1651,14 @@ def _snapshot_direct_dynamic_velocity_kernel(
         seed[row] = accumulated_impulse[row]
     else:
         accumulated_impulse[row] = wp.float32(0.0)
-        drive_saturated[row] = False
         if seed.shape[0] > row:
             if not selected or not microstep_previous[row]:
                 seed[row] = wp.float32(0.0)
             if selected:
                 accumulated_impulse[row] = seed[row]
             microstep_previous[row] = selected
+    if not (row_dynamic[row] and row_direct_drive[row]):
+        drive_saturated[row] = False
     if not row_dynamic[row]:
         dynamic_mass[row] = wp.float32(0.0)
         dynamic_old_velocity[row] = wp.float32(0.0)
@@ -1720,7 +1721,9 @@ def _snapshot_direct_dynamic_velocity_kernel(
                 coordinate = wp.dot(axis, point1 - point0)
         dynamic_coordinate[row] = coordinate
 
-        if advance and drive_saturated[row]:
+        if drive_saturated[row]:
+            # Warm-start the previous step's active set. The bound scan still
+            # releases a cap whose direction no longer matches the motor law.
             cap = wp.abs(gear * effort_limit[dof])
             momentum += dt * wp.where(bound >= wp.float32(0.0), cap, -cap)
         else:
