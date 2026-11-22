@@ -15,7 +15,51 @@ from newton._src.geometry.broad_phase_sap import BroadPhaseSAP
 from newton._src.geometry.flags import ShapeFlags
 
 
+@wp.struct
+class _ShapeActivity:
+    active: wp.array[int]
+
+
+@wp.func
+def _passive(shape: int, data: _ShapeActivity) -> bool:
+    return data.active[shape] == 0
+
+
+@wp.func
+def _has_active_endpoint(pair: wp.vec2i, data: _ShapeActivity) -> int:
+    return int(not (_passive(pair[0], data) and _passive(pair[1], data)))
+
+
 class TestBroadPhaseImplicitTree(unittest.TestCase):
+    def test_active_shape_finds_passive_neighbors_of_any_size(self):
+        """Keep mixed pairs when the active endpoint changes or the filter is removed."""
+        device = wp.get_device("cpu")
+        world = wp.zeros(3, dtype=int, device=device)
+        group = wp.ones_like(world)
+        half = np.array([[0.1] * 3, [1.0] * 3, [2.0e38] * 3], dtype=np.float32)
+        lower = wp.array(-half, dtype=wp.vec3, device=device)
+        upper = wp.array(half, dtype=wp.vec3, device=device)
+        pairs = wp.empty(3, dtype=wp.vec2i, device=device)
+        count = wp.zeros(1, dtype=int, device=device)
+        tree = BroadPhaseImplicitTree(
+            world,
+            device=device,
+            filter_func=_has_active_endpoint,
+            filter_data_type=_ShapeActivity,
+            passive_shape=_passive,
+        )
+        data = _ShapeActivity()
+        data.active = wp.zeros_like(world)
+        for active in ([1, 0, 0], [0, 0, 1], [0, 0, 0]):
+            data.active.assign(np.array(active, dtype=np.int32))
+            tree.launch(lower, upper, None, group, world, 3, pairs, count, device=device, filter_data=data)
+            actual = sorted(map(tuple, pairs.numpy()[: int(count.numpy()[0])]))
+            self.assertEqual(actual, [(a, b) for a, b in [(0, 1), (0, 2), (1, 2)] if active[a] or active[b]])
+
+        tree._set_filter_kernels(None, None)
+        tree.launch(lower, upper, None, group, world, 3, pairs, count, device=device)
+        self.assertEqual(sorted(map(tuple, pairs.numpy()[: int(count.numpy()[0])])), [(0, 1), (0, 2), (1, 2)])
+
     def test_runtime_rows_pair_only_while_their_flags_collide(self):
         if not wp.is_cuda_available():
             self.skipTest("CUDA graph capture requires a CUDA device")

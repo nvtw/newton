@@ -13,6 +13,7 @@ from newton._src.solvers.phoenx.body import MOTION_STATIC
 __all__ = [
     "PhoenXSleepingFilterData",
     "build_phoenx_sleeping_filter_data",
+    "phoenx_passive_shape",
     "phoenx_sleeping_filter",
 ]
 
@@ -39,6 +40,24 @@ class PhoenXSleepingFilterData:
 
 
 @wp.func
+def phoenx_passive_shape(shape: int, data: PhoenXSleepingFilterData) -> bool:
+    """Return whether a shape can rely on active neighbors to initiate broad-phase queries."""
+    if data.enabled == 0:
+        return False
+    body = data.shape_body[shape]
+    slot = wp.int32(0)
+    if body >= 0:
+        slot = body + data.phoenx_body_offset
+    root = data.body_island_root[slot]
+    if root < 0 and data.body_motion_type[slot] != MOTION_STATIC:
+        return False
+    # A belt can wake its sleeping stack only after collision detection.
+    if data.shape_mesh_properties.shape[0] > 0 and (data.shape_mesh_properties[shape] & _SURFACE_VELOCITY) != 0:
+        return False
+    return root < 0 or data.belt_island.shape[0] == 0 or data.belt_island[root] == 0
+
+
+@wp.func
 def phoenx_sleeping_filter(pair: wp.vec2i, data: PhoenXSleepingFilterData) -> wp.int32:
     """Return zero when both shapes belong to frozen rigid bodies or to a filtered joint pair."""
 
@@ -49,30 +68,9 @@ def phoenx_sleeping_filter(pair: wp.vec2i, data: PhoenXSleepingFilterData) -> wp
             return wp.int32(0)
         if body_b >= 0 and data.body_filter_parent[body_b] == body_a:
             return wp.int32(0)
-    if data.enabled == wp.int32(0):
-        return wp.int32(1)
-    slot_a = wp.int32(0)
-    slot_b = wp.int32(0)
-    if body_a >= 0:
-        slot_a = body_a + data.phoenx_body_offset
-    if body_b >= 0:
-        slot_b = body_b + data.phoenx_body_offset
-    frozen_a = (data.body_island_root[slot_a] >= wp.int32(0)) or (data.body_motion_type[slot_a] == MOTION_STATIC)
-    frozen_b = (data.body_island_root[slot_b] >= wp.int32(0)) or (data.body_motion_type[slot_b] == MOTION_STATIC)
-    if not (frozen_a and frozen_b):
-        return wp.int32(1)
-    # Keep every contact of a sleeping stack on a belt: a starting belt wakes
-    # it only after collision detection, when culled pairs cannot be recovered.
-    if data.shape_mesh_properties.shape[0] > 0:
-        surface = _SURFACE_VELOCITY
-        if (data.shape_mesh_properties[pair[0]] & surface) != 0 or (data.shape_mesh_properties[pair[1]] & surface) != 0:
-            return wp.int32(1)
-    if data.belt_island.shape[0] > 0:
-        root_a = data.body_island_root[slot_a]
-        root_b = data.body_island_root[slot_b]
-        if (root_a >= 0 and data.belt_island[root_a] != 0) or (root_b >= 0 and data.belt_island[root_b] != 0):
-            return wp.int32(1)
-    return wp.int32(0)
+    if phoenx_passive_shape(pair[0], data) and phoenx_passive_shape(pair[1], data):
+        return wp.int32(0)
+    return wp.int32(1)
 
 
 def build_phoenx_sleeping_filter_data(

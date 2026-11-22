@@ -65,66 +65,76 @@ def _tree_keys(
     values[leaf] = leaf
 
 
-@wp.kernel(enable_backward=False)
-def _tree_leaves(
-    shape_index: wp.array[int],
-    sorted_values: wp.array[int],
-    lower: wp.array[wp.vec3],
-    upper: wp.array[wp.vec3],
-    gap: wp.array[float],
-    displacement: wp.array[wp.vec3],
-    flags: wp.array[wp.int32],
-    nodes: wp.array[ImplicitBvhNode],
-    leaf_item: wp.array[wp.int32],
-    leaf_base: int,
-    shape_count: int,
-):
-    slot = wp.tid()
-    node = leaf_base + slot
-    record = ImplicitBvhNode()
-    record.lower = wp.vec3(1.0e30, 1.0e30, 1.0e30)
-    record.upper = wp.vec3(-1.0e30, -1.0e30, -1.0e30)
-    record.max_span = wp.float32(-1.0)
-    record.last_leaf = -1
-    leaf_item[slot] = -1
-    if slot >= shape_count:
-        nodes[node] = record
-        return
-    shape = shape_index[sorted_values[slot]]
-    leaf_item[slot] = shape
-    record.last_leaf = slot
-    if flags.shape[0] > 0 and (flags[shape] & wp.static(int(ShapeFlags.COLLIDE_SHAPES))) == 0:
-        # A row for a runtime shape that holds none: a leaf that overlaps nothing.
-        nodes[node] = record
-        return
-    margin = wp.float32(0.0)
-    if gap.shape[0] > 0:
-        margin = gap[shape]
-    shift = wp.vec3(0.0, 0.0, 0.0)
-    if displacement.shape[0] > 0:
-        shift = displacement[shape]
-    expand = wp.vec3(margin, margin, margin)
-    low = wp.min(lower[shape], lower[shape] + shift) - expand
-    high = wp.max(upper[shape], upper[shape] + shift) + expand
-    # At distant world coordinates, float32 rounding can make a swept bound
-    # narrower than the equivalent moving-AABB test (which combines the two
-    # gaps before subtraction). Expand by a few ulps of the coordinate scale;
-    # the shared exact pair filter still decides which contacts are accepted.
-    rounding = wp.vec3(
-        wp.max(wp.abs(low[0]), wp.abs(high[0])) * wp.float32(4.76837158e-7) + wp.float32(1.0e-6),
-        wp.max(wp.abs(low[1]), wp.abs(high[1])) * wp.float32(4.76837158e-7) + wp.float32(1.0e-6),
-        wp.max(wp.abs(low[2]), wp.abs(high[2])) * wp.float32(4.76837158e-7) + wp.float32(1.0e-6),
-    )
-    record.lower = low - rounding
-    record.upper = high + rounding
-    span = record.upper - record.lower
-    record.max_span = wp.max(span[0], wp.max(span[1], span[2]))
-    nodes[node] = record
-
-
-def _make_pair_kernels(filter_func: Any, filter_data_type: Any):
+def _make_pair_kernels(filter_func: Any, filter_data_type: Any, passive_shape: Any = None):
     process_pair = _make_sap_process_pair_func(filter_func)
     module = f"implicit_tree_{filter_func.__name__}_{filter_data_type.__name__}"
+
+    if passive_shape is not None:
+        module += f"_{passive_shape.__name__}"
+
+    @wp.kernel(enable_backward=False, module=module)
+    def leaves(
+        shape_index: wp.array[int],
+        sorted_values: wp.array[int],
+        lower: wp.array[wp.vec3],
+        upper: wp.array[wp.vec3],
+        gap: wp.array[float],
+        displacement: wp.array[wp.vec3],
+        flags: wp.array[wp.int32],
+        nodes: wp.array[ImplicitBvhNode],
+        leaf_item: wp.array[wp.int32],
+        leaf_base: int,
+        shape_count: int,
+        filter_data: Any,
+    ):
+        slot = wp.tid()
+        node = leaf_base + slot
+        record = ImplicitBvhNode()
+        record.lower = wp.vec3(1.0e30, 1.0e30, 1.0e30)
+        record.upper = wp.vec3(-1.0e30, -1.0e30, -1.0e30)
+        record.max_span = wp.float32(-1.0)
+        record.last_leaf = -1
+        leaf_item[slot] = -1
+        if slot >= shape_count:
+            nodes[node] = record
+            return
+        shape = shape_index[sorted_values[slot]]
+        leaf_item[slot] = shape
+        record.last_leaf = slot
+        if flags.shape[0] > 0 and (flags[shape] & wp.static(int(ShapeFlags.COLLIDE_SHAPES))) == 0:
+            # A row for a runtime shape that holds none: a leaf that overlaps nothing.
+            nodes[node] = record
+            return
+        margin = wp.float32(0.0)
+        if gap.shape[0] > 0:
+            margin = gap[shape]
+        shift = wp.vec3(0.0, 0.0, 0.0)
+        if displacement.shape[0] > 0:
+            shift = displacement[shape]
+        expand = wp.vec3(margin, margin, margin)
+        low = wp.min(lower[shape], lower[shape] + shift) - expand
+        high = wp.max(upper[shape], upper[shape] + shift) + expand
+        # At distant world coordinates, float32 rounding can make a swept bound
+        # narrower than the equivalent moving-AABB test (which combines the two
+        # gaps before subtraction). Expand by a few ulps of the coordinate scale;
+        # the shared exact pair filter still decides which contacts are accepted.
+        rounding = wp.vec3(
+            wp.max(wp.abs(low[0]), wp.abs(high[0])) * wp.float32(4.76837158e-7) + wp.float32(1.0e-6),
+            wp.max(wp.abs(low[1]), wp.abs(high[1])) * wp.float32(4.76837158e-7) + wp.float32(1.0e-6),
+            wp.max(wp.abs(low[2]), wp.abs(high[2])) * wp.float32(4.76837158e-7) + wp.float32(1.0e-6),
+        )
+        record.lower = low - rounding
+        record.upper = high + rounding
+        span = record.upper - record.lower
+        record.max_span = wp.max(span[0], wp.max(span[1], span[2]))
+        if wp.static(passive_shape is not None):
+            if passive_shape(shape, filter_data):
+                # Active leaves own pairs with passive leaves regardless of their AABB sizes.
+                record.max_span = wp.inf
+            else:
+                # Finite endpoints can still overflow when subtracting them. Reserve infinity for passive leaves.
+                record.max_span = wp.min(record.max_span, wp.static(float(np.finfo(np.float32).max)))
+        nodes[node] = record
 
     @wp.kernel(enable_backward=False, module=module)
     def query(
@@ -150,6 +160,9 @@ def _make_pair_kernels(filter_func: Any, filter_data_type: Any):
             return
         query_node = tree.leaf_base + leaf
         query_lower, query_upper, query_span, _query_last = _node_load(tree, query_node)
+        if wp.static(passive_shape is not None):
+            if query_span == wp.inf:
+                return
         shape1 = tree.leaf_item[leaf]
         # An ancestor always contains the query leaf, so its bound cannot
         # reject it. Visit only the sibling subtrees along the leaf-to-root
@@ -201,7 +214,7 @@ def _make_pair_kernels(filter_func: Any, filter_data_type: Any):
                 )
                 node = implicit_bvh_next_subtree(node)
 
-    return query
+    return leaves, query
 
 
 _DEFAULT_KERNELS = _make_pair_kernels(keep_all_filter, EmptyFilterData)
@@ -220,9 +233,13 @@ class BroadPhaseImplicitTree:
         filter_func: Any | None = None,
         filter_data_type: Any | None = None,
         dynamic_rows: np.ndarray | None = None,
+        passive_shape: Any | None = None,
     ) -> None:
         """
         Args:
+            passive_shape: Optional Warp predicate taking a shape index and the pair filter's data.
+                Passive shapes are visible to active queries. The pair filter must reject all
+                pairs of passive shapes.
             dynamic_rows: Mask of the shapes whose flags change at runtime. They always have a
                 leaf, which overlaps nothing while ``shape_flags``, then a device array that
                 is read on every launch, does not let the shape collide.
@@ -264,12 +281,18 @@ class BroadPhaseImplicitTree:
         self.values = wp.empty(2 * self.shape_count, dtype=wp.int32, device=device)
         self.leaf_base = self.tree.leaf_base
         self._empty_filter_data = EmptyFilterData()
-        self._set_filter_kernels(filter_func, filter_data_type)
+        self._set_filter_kernels(filter_func, filter_data_type, passive_shape=passive_shape)
 
-    def _set_filter_kernels(self, filter_func: Any | None, filter_data_type: Any | None) -> None:
+    def _set_filter_kernels(
+        self, filter_func: Any | None, filter_data_type: Any | None, *, passive_shape: Any | None = None
+    ) -> None:
+        if passive_shape is not None and filter_func is None:
+            raise ValueError("passive_shape requires a pair filter")
         self._has_custom_filter = filter_func is not None
         self._kernels = (
-            _make_pair_kernels(filter_func, filter_data_type) if self._has_custom_filter else _DEFAULT_KERNELS
+            _make_pair_kernels(filter_func, filter_data_type, passive_shape)
+            if self._has_custom_filter
+            else _DEFAULT_KERNELS
         )
 
     def update_world_map(
@@ -330,7 +353,7 @@ class BroadPhaseImplicitTree:
         )
         wp.utils.radix_sort_pairs(self.keys, self.values, self.shape_count, end_bit=48)
         wp.launch(
-            _tree_leaves,
+            self._kernels[0],
             dim=self.leaf_base,
             inputs=[
                 self.shape_index,
@@ -344,12 +367,13 @@ class BroadPhaseImplicitTree:
                 self.tree.leaf_item,
                 self.leaf_base,
                 self.shape_count,
+                pair_data,
             ],
             device=device,
             record_tape=False,
         )
         self.tree.update_internal_nodes()
-        query = self._kernels
+        query = self._kernels[1]
         pair_inputs = [
             shape_lower,
             shape_upper,

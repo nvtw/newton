@@ -42,6 +42,7 @@ import newton.examples
 from newton._src.solvers.phoenx.sleeping_filter import (
     PhoenXSleepingFilterData,
     build_phoenx_sleeping_filter_data,
+    phoenx_passive_shape,
     phoenx_sleeping_filter,
 )
 from newton.examples.phoenx._bottling_control import PlantController
@@ -111,6 +112,11 @@ class _PlantFilter:
     held_by: wp.array[wp.int32]
     # The solver's filter culls pairs between sleeping bodies.
     sleeping: PhoenXSleepingFilterData
+
+
+@wp.func
+def _passive_shape(shape: int, data: _PlantFilter) -> bool:
+    return phoenx_passive_shape(shape, data.sleeping)
 
 
 @wp.func
@@ -263,6 +269,7 @@ class Example:
                 self.model.shape_world,
                 self.model.shape_flags,
                 dynamic_rows=self.pipeline._dynamic_rows,
+                passive_shape=_passive_shape,
                 filter_func=_filter_pair,
                 filter_data_type=_PlantFilter,
                 device=self.model.device,

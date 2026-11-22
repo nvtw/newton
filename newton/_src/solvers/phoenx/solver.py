@@ -74,6 +74,7 @@ from newton._src.solvers.phoenx.simulation import PhoenXWorld
 from newton._src.solvers.phoenx.sleeping_filter import (
     PhoenXSleepingFilterData,
     build_phoenx_sleeping_filter_data,
+    phoenx_passive_shape,
     phoenx_sleeping_filter,
 )
 from newton._src.solvers.phoenx.sleeping_kernels import _phoenx_joint_activity_kernel
@@ -1125,7 +1126,9 @@ class SolverPhoenX(SolverBase):
                     tree_kwargs = {"dynamic_rows": model._collision_pipeline._dynamic_rows}
                     if uses_broad_phase_filter:
                         tree_kwargs.update(
-                            filter_func=phoenx_sleeping_filter, filter_data_type=PhoenXSleepingFilterData
+                            filter_func=phoenx_sleeping_filter,
+                            filter_data_type=PhoenXSleepingFilterData,
+                            passive_shape=phoenx_passive_shape,
                         )
                     model._collision_pipeline.broad_phase = BroadPhaseImplicitTree(
                         model.shape_world, shape_flags=model.shape_flags, device=model.device, **tree_kwargs
