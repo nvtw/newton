@@ -4,9 +4,8 @@
 
 Only shared writable bodies impose an order between columns. A stable sort of
 the existing color-ordered columns by dynamic component preserves that order
-inside each component. Its block can then advance colors with a block barrier.
-Biased sweeps use separate kernels for large and small colors to preserve
-their arithmetic. Velocity relaxation traverses all colors in one pass.
+inside each component. Its block can then advance colors with a block barrier,
+so one launch traverses all colors without a device-wide boundary between them.
 """
 
 from __future__ import annotations
@@ -200,49 +199,16 @@ def _index_colors(
         families[i * family + 1] = _first_slot_at_least(slots, i, end, family_starts[color * family + 1])
 
 
-@wp.kernel(enable_backward=False)
-def _take_color_runs(
-    starts: wp.array[int],
-    num_colors: wp.array[int],
-    cursor: wp.array[int],
-    threshold: int,
-    from_start: bool,
-    large: wp.array[int],
-    small: wp.array[int],
-):
-    count = num_colors[0]
-    color = 0 if from_start else count - cursor[0]
-    large[0] = color
-    if threshold < 0:
-        large[1] = count
-        small[0] = count
-        small[1] = count
-        cursor[0] = 0
-        return
-    while color < count and starts[color + 1] - starts[color] > threshold:
-        color += 1
-    large[1] = color
-    small[0] = color
-    while color < count and starts[color + 1] - starts[color] <= threshold:
-        color += 1
-    small[1] = color
-    cursor[0] = count - color
-
-
 @functools.cache
-def _get_island_iteration(axes, *, small_colors: bool = False):
-    options = dict(axes)
-    phase = options["phase"]
-    if small_colors:
-        # Match the original fused tail's regular contact dispatcher and precision.
-        options["direct_regular_colors"] = False
-    solve_color = _make_singleworld_head_color_func(**options)
+def _get_island_iteration(axes):
+    phase = dict(axes)["phase"]
+    solve_color = _make_singleworld_head_color_func(**dict(axes))
 
     @wp.kernel(
-        name=f"phoenx_{phase}_islands_small" if small_colors else f"phoenx_{phase}_islands",
+        name=f"phoenx_{phase}_islands",
         enable_backward=False,
         module="unique",
-        module_options={"fast_math": phase == "iterate" and not small_colors},
+        module_options={"fast_math": phase == "iterate"},
         grid_stride=False,
     )
     def iterate(
@@ -258,7 +224,6 @@ def _get_island_iteration(axes, *, small_colors: bool = False):
         joint_enabled: wp.array[int],
         num_bodies: int,
         copies: CopyStateContainer,
-        interval: wp.array[int],
         roots: wp.array[int],
         count: wp.array[int],
         starts: wp.array[int],
@@ -270,8 +235,6 @@ def _get_island_iteration(axes, *, small_colors: bool = False):
         num_blocks: int,
     ):
         block, lane = wp.tid()
-        if interval[0] >= interval[1]:
-            return
         total = count[0]
         large = total - count[1]
         for index in range(block, total, num_blocks):
@@ -281,43 +244,37 @@ def _get_island_iteration(axes, *, small_colors: bool = False):
             root = roots[slot]
             i = starts[root]
             end_of_island = ends[root]
-            if wp.static(small_colors) and i < end_of_island and colors[i] < interval[0]:
-                i = _first_slot_at_least(colors, i, end_of_island, interval[0])
             while i < end_of_island:
-                color = colors[i]
-                if color >= interval[1]:
-                    break
                 end = color_ends[i]
-                if color >= interval[0]:
-                    solve_color(
-                        constraints,
-                        contacts,
-                        bodies,
-                        particles,
-                        idt,
-                        sor,
-                        columns,
-                        families,
-                        colors,
-                        cc,
-                        views,
-                        num_joints,
-                        joint_enabled,
-                        0,
-                        0,
-                        0,
-                        0,
-                        num_bodies,
-                        copies,
-                        1,
-                        i,
-                        end - i,
-                        i,
-                        False,
-                        lane,
-                        wp.static(ONE_LAUNCH_BLOCK_DIM),
-                    )
-                    _sync_threads()
+                solve_color(
+                    constraints,
+                    contacts,
+                    bodies,
+                    particles,
+                    idt,
+                    sor,
+                    columns,
+                    families,
+                    colors,
+                    cc,
+                    views,
+                    num_joints,
+                    joint_enabled,
+                    0,
+                    0,
+                    0,
+                    0,
+                    num_bodies,
+                    copies,
+                    1,
+                    i,
+                    end - i,
+                    i,
+                    False,
+                    lane,
+                    wp.static(ONE_LAUNCH_BLOCK_DIM),
+                )
+                _sync_threads()
                 i = end
 
     return iterate
@@ -344,8 +301,6 @@ class IslandIterationSchedule:
         self.starts = wp.empty_like(self.roots)
         self.ends = wp.empty_like(self.roots)
         self.count = wp.empty(2, dtype=int, device=device)
-        self.interval = wp.empty(2, dtype=int, device=device)
-        self.small_interval = wp.empty_like(self.interval)
         self.blocks = min(self.roots.size, 4 * device.sm_count)
 
     def build(self, world: PhoenXWorld):
@@ -424,39 +379,10 @@ class IslandIterationSchedule:
             device=world.device,
         )
 
-    def iterate(self, world: PhoenXWorld, head, idt: float, *, tail=None):
-        """Advance both color runs independently per island, in their original order."""
-        partition = world._partitioner
-        # Relaxation uses identical rigid point and joint math for both color sizes.
-        threshold = -1 if tail is None else world._fuse_threshold
-
-        def advance(from_start=False):
-            wp.launch(
-                _take_color_runs,
-                1,
-                [
-                    partition.color_starts,
-                    partition.num_colors,
-                    partition.color_cursor,
-                    threshold,
-                    from_start,
-                    self.interval,
-                    self.small_interval,
-                ],
-                device=world.device,
-            )
-            self._launch_interval(world, head, idt, self.interval)
-            if tail is not None:
-                self._launch_interval(world, tail, idt, self.small_interval, small_colors=True)
-
-        # Island iteration accepts only forward sweeps, so the first launch owns the reset.
-        advance(True)
-        if tail is not None:
-            wp.capture_while(partition.color_cursor, advance)
-
-    def _launch_interval(self, world: PhoenXWorld, kernel, idt: float, interval, *, small_colors: bool = False):
+    def iterate(self, world: PhoenXWorld, kernel, idt: float):
+        """Advance every island through all of its colors, in their original order."""
         wp.launch(
-            _get_island_iteration(kernel.phoenx_axes, small_colors=small_colors),
+            _get_island_iteration(kernel.phoenx_axes),
             (self.blocks, ONE_LAUNCH_BLOCK_DIM),
             [
                 world.constraints,
@@ -471,7 +397,6 @@ class IslandIterationSchedule:
                 world._joint_pgs_enabled,
                 world.num_bodies,
                 world._copy_state,
-                interval,
                 self.roots,
                 self.count,
                 self.starts,

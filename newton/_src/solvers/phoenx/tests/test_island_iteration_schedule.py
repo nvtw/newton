@@ -8,29 +8,13 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton._src.solvers.phoenx.islands.iteration_schedule import _index_colors, _take_color_runs
+from newton._src.solvers.phoenx.islands.iteration_schedule import _index_colors
 from newton._src.solvers.phoenx.tests.test_parallel_prepare_sleeping import _build_model
 
 
 class TestIslandIterationSchedule(unittest.TestCase):
-    def test_forward_sweep_ignores_previous_cursor(self):
-        """A new sweep starts at the first color after the previous sweep drains."""
-        starts = wp.array([0, 4, 5, 12, 13], dtype=int, device="cpu")
-        count = wp.array([4], dtype=int, device="cpu")
-        cursor = wp.zeros(1, dtype=int, device="cpu")
-        large = wp.empty(2, dtype=int, device="cpu")
-        small = wp.empty_like(large)
-        for first, expected_large, expected_small, remaining in (
-            (True, [0, 1], [1, 2], 2),
-            (False, [2, 3], [3, 4], 0),
-        ):
-            wp.launch(_take_color_runs, 1, [starts, count, cursor, 2, first, large, small], device="cpu")
-            np.testing.assert_array_equal(large.numpy(), expected_large)
-            np.testing.assert_array_equal(small.numpy(), expected_small)
-            self.assertEqual(int(cursor.numpy()[0]), remaining)
-
     def test_color_index_covers_the_entire_island(self):
-        """Index every live slot so the small-color sweep can seek past skipped colors."""
+        """Index every live slot with its color and the end of that color's run."""
         device = "cpu"
         keys = wp.array([0, 0, 0, 0, 1, 2], dtype=int, device=device)
         slots = wp.array([0, 1, 3, 4, 7, 8], dtype=int, device=device)
@@ -72,8 +56,9 @@ class TestIslandIterationSchedule(unittest.TestCase):
                     island_parallel_iterations=independent,
                 )
                 world = solver.world
-                # Exercise large and small colors on a scene small enough for a unit test.
-                world._fuse_threshold = 1
+                # Island blocks solve every color with the head kernel. Without a
+                # fused tail, the color-ordered sweep uses the same arithmetic.
+                world._fuse_threshold = 0
                 state, control, contacts = model.state(), model.control(), pipeline.contacts()
 
                 def step():
@@ -92,10 +77,7 @@ class TestIslandIterationSchedule(unittest.TestCase):
                 if independent:
                     schedule = world._dispatcher._island_schedule
                     self.assertGreaterEqual(int(schedule.count.numpy()[0]), 2)
-                    starts = world._partitioner.color_starts.numpy()[
-                        : int(world._partitioner.num_colors.numpy()[0]) + 1
-                    ]
-                    self.assertGreater(int(np.diff(starts).max()), world._fuse_threshold)
+                    self.assertGreater(int(world._partitioner.num_colors.numpy()[0]), 1)
                 return history
 
             for reference, actual in zip(run(False), run(True), strict=True):

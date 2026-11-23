@@ -5896,10 +5896,12 @@ class PhoenXWorld:
                 self._launch_singleworld_head(head_kernel, idt, wp.int32(-1), contact_container, step)
             return
 
-        kernel, drain_tail = get_singleworld_one_launch_kernel(head_kernel, tail_kernel)
         if island_schedule is not None:
-            island_schedule.iterate(self, head_kernel, idt, tail=None if drain_tail else tail_kernel)
+            # Each island's block walks all of its colors in order, so the head
+            # handles small colors too and no device-wide boundary separates them.
+            island_schedule.iterate(self, head_kernel, idt)
             return
+        kernel, drain_tail = get_singleworld_one_launch_kernel(head_kernel, tail_kernel)
         if drain_tail:
             self._launch_one_launch_sweep(kernel, idt, contact_container)
             return
