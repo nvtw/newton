@@ -167,8 +167,18 @@ class TestBottlingPlant(unittest.TestCase):
         path = np.array([[0.0, 0.0, 0.95], [8.4, 0.0, 0.95]])
         dt = 1.0 / 120.0
         with wp.ScopedDevice("cuda:0"):
-            _, state, bottles, graph = self._bottle_line(path, layout)
+            scene, state, bottles, graph = self._bottle_line(path, layout)
             start = state.body_q.numpy()[bottles]
+        # Each feed watches its eye on the belt it feeds; on its own belt a
+        # stopped feed would hold its eye blocked and never restart.
+        belts = {label: mesh.vertices for mesh, _, label in scene.belts}
+        for name, (labels, rays) in scene.metadata["process_zones"].items():
+            for start_point, direction, length in rays or ():
+                middle = (np.asarray(start_point) + 0.5 * length * np.asarray(direction))[:2]
+                for label in labels:
+                    low, high = belts[label][:, :2].min(axis=0), belts[label][:, :2].max(axis=0)
+                    self.assertFalse(np.all((low <= middle) & (middle <= high)), f"{name} eye over {label}")
+        with wp.ScopedDevice("cuda:0"):
             filed, emptied, tilt = set(), set(), 0.0
             for frame in range(1, 3000):
                 wp.capture_launch(graph)
