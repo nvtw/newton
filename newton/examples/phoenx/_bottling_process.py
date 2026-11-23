@@ -10,12 +10,18 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton.examples.phoenx._bottling_infeed import add_bottle_shapes, bottle_shape_templates
+from newton.examples.phoenx._bottling_infeed import (
+    BOTTLES_PER_MINUTE,
+    SINGLE_FILE_PITCH,
+    add_bottle_shapes,
+    bottle_shape_templates,
+)
 
 PROCESS_BOTTLES = "/Plant/Process/Product/L1/Bottles"
 _MACHINES = "/Plant/Process/Machines/L1"
 _INLET_PLATE = "/Plant/Line/IFM/Modules/IFM_A/Colliders/DeadPlates/InletPlate"
-_BELT_SPEED = 0.39  # m/s, required by the packers' combined inlet demand.
+# m/s, carries the plant's rated output in single file at the admission pitch.
+_BELT_SPEED = BOTTLES_PER_MINUTE / 60.0 * SINGLE_FILE_PITCH
 _GUIDE_WIDTH = 0.08  # m, at the working faces of the driven bottle guides.
 _POOL_LENGTH = 5.3425  # m, from the source table's start to the IFM transfer plate.
 _POOL_HALF_WIDTH = 0.245  # m, across six native IFM strands.
@@ -266,10 +272,11 @@ def add_filling_bottles(scene, path, *, motor_off=False, inlet_speed=None):
     source = scene.bottle_bodies[0]
     shapes = bottle_shape_templates(builder, source)
     length = np.r_[0.0, np.cumsum(np.linalg.norm(np.diff(path, axis=0), axis=1))]
-    # A small transit inventory keeps the process visible without simulating the
-    # source set's 3,101 decoratively packed bottles. Leave a short clear run into
-    # the live IFM so its original stock can start moving before the handoff.
-    samples = np.arange(0.35, length[-1] - 1.5, 1.0)
+    # Start the line in production: single-file stock at the rated admission
+    # pitch, so the accumulation table receives the rated output from the start
+    # rather than after the transit time. Leave a short clear run into the live
+    # IFM so its original stock can start moving before the handoff.
+    samples = np.arange(0.35, length[-1] - 1.5, SINGLE_FILE_PITCH)
     centers = np.column_stack([np.interp(samples, length, column) for column in path.T])
     tangents = np.gradient(path, length, axis=0)
     direction = np.column_stack([np.interp(samples, length, axis) for axis in tangents.T])

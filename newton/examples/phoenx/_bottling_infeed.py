@@ -13,8 +13,8 @@ from newton.solvers import phoenx
 
 _ROW_SIZE = 7
 _BOTTLE_PITCH = 0.0616  # metres, from the IFM supply interface
-_BOTTLES_PER_MINUTE = 425.0
-_SINGLE_FILE_PITCH = 0.071  # metres, including the upstream clearance check.
+BOTTLES_PER_MINUTE = 425.0  # rated line output, from the source line_full scenario
+SINGLE_FILE_PITCH = 0.071  # metres, including the upstream clearance check.
 
 
 @wp.kernel
@@ -91,7 +91,7 @@ class BottleSupply:
         self.shapes = builder.body_shapes[source]
         self.process_inlet = scene.metadata.get("process_inlet")
         self.row_size = 1 if self.process_inlet is not None else _ROW_SIZE
-        self.period = self.row_size * 60.0 / _BOTTLES_PER_MINUTE
+        self.period = self.row_size * 60.0 / BOTTLES_PER_MINUTE
         self.desc = phoenx.BodyDesc()
         self.desc.mass = builder.body_mass[source]
         self.desc.inertia = builder.body_inertia[source]
@@ -127,7 +127,7 @@ class BottleSupply:
         else:
             self.frame, velocity = self.process_inlet
             self.desc.velocity = wp.spatial_vector(*velocity, 0.0, 0.0, 0.0)
-            self.period = max(self.period, _SINGLE_FILE_PITCH / float(np.linalg.norm(velocity)))
+            self.period = max(self.period, SINGLE_FILE_PITCH / float(np.linalg.norm(velocity)))
         device = plant.model.device
         self.blocked = wp.zeros(1, dtype=int, device=device)
         self.source_shapes = wp.array(self.shapes, dtype=int, device=device)

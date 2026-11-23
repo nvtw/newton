@@ -24,7 +24,7 @@ from newton.examples.phoenx._bottling_io import (
     _photoeyes,
     _valves,
 )
-from newton.examples.phoenx._bottling_process import add_filling_transport
+from newton.examples.phoenx._bottling_process import _arc, add_filling_bottles, add_filling_transport
 from newton.examples.phoenx._bottling_scene import PlantScene, load_plant
 from newton.examples.phoenx._bottling_transport import _carton_support_quadrants, _placement_motions
 from newton.examples.phoenx._bottling_wrap import (
@@ -61,6 +61,71 @@ class TestBottlingPlant(unittest.TestCase):
         seated_start = vertices[np.isclose(vertices[:, 2], vertices[:, 2].min()), 0].min()
         self.assertLess(seated_start, lateral_start)
         self.assertGreater(vertices[:, 0].max(), path[-1, 0])
+
+    @unittest.skipUnless(wp.is_cuda_available(), "CUDA device required")
+    def test_filling_line_delivers_rated_output(self):
+        """Carry production stock upright through a transfer arc at the line's rated output."""
+        with wp.ScopedDevice("cuda:0"):
+            builder = newton.ModelBuilder()
+            builder.add_ground_plane()
+            glass = builder.ShapeConfig(density=850.0, mu=0.16, mu_static=0.2, gap=0.002)
+            source = builder.add_body(xform=wp.transform((0.0, -1.0, 0.0), wp.quat_identity()))
+            builder.add_shape_cylinder(
+                source,
+                xform=wp.transform((0.0, 0.0, 0.115), wp.quat_identity()),
+                radius=0.0305,
+                half_height=0.115,
+                cfg=glass,
+            )
+            scene = SimpleNamespace(builder=builder, belts=[], metadata={}, bodies={}, bottle_bodies=[source])
+            # Enter a 0.2 m pitch-circle transfer, as between the rinser and filler wheels.
+            arc = _arc((1.0, 0.2), 0.2, -0.5 * np.pi, 0.5 * np.pi, 1)
+            xy = np.vstack(((0.0, 0.0), arc, (-2.0, 0.4)))
+            path = np.column_stack((xy, np.full(len(xy), 0.95)))
+            add_filling_transport(scene, path, motor_off=False)
+            add_filling_bottles(scene, path)
+            model = builder.finalize()
+            for mesh, velocity, _ in scene.belts:
+                mesh.mesh.velocities.assign(velocity)
+            solver = newton.solvers.SolverPhoenX(
+                model,
+                substeps=3,
+                solver_iterations=4,
+                temporal_iterations=True,
+                contact_hertz=80.0,
+                step_layout="single_world",
+            )
+            state = model.state()
+            contacts = model._collision_pipeline.contacts()
+            dt = 1.0 / 120.0
+
+            def step():
+                solver.collide(state, contacts, dt=dt)
+                solver.step(state, state, None, contacts, dt)
+
+            with wp.ScopedCapture() as capture:
+                step()
+            bottles = np.asarray(scene.bottle_bodies[1:])
+            gate, passed, crossings = -1.2, np.zeros(len(bottles), dtype=bool), []
+            for frame in range(1, 480):
+                wp.capture_launch(capture.graph)
+                if frame % 4:
+                    continue
+                poses = state.body_q.numpy()[bottles]
+                crossed = (poses[:, 0] < gate) & (poses[:, 1] > 0.2) & ~passed
+                crossings.extend([frame * dt] * int(crossed.sum()))
+                passed |= crossed
+            poses = state.body_q.numpy()[bottles]
+
+        self.assertGreaterEqual(len(crossings), 8)
+        rate = 60.0 * (len(crossings) - 1) / (crossings[-1] - crossings[0])
+        # The single file must carry at least the plant's rated 425 bottles/min.
+        self.assertGreater(rate, 0.95 * 425.0)
+        # Every bottle still on the route stands upright on its deck.
+        route = (poses[:, 1] < 0.2) | (poses[:, 0] > path[-1, 0] + 0.05)
+        self.assertGreater(int(route.sum()), 30)
+        self.assertTrue(np.all(poses[route, 2] > 0.945))
+        self.assertTrue(np.all(np.linalg.norm(poses[route, 3:5], axis=1) < np.sin(np.radians(3.75))))
 
     def test_wrapper_checks_actual_carton_corner_speed(self):
         """Admit a seated carton only when every corner meets the motion limit."""
