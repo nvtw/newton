@@ -655,6 +655,25 @@ def _contact_spring_stable(omega_dt: float, solver_iterations: int, velocity_ite
     return bias_dt * retained <= 1.0 - retained + velocity_iterations / a2
 
 
+@wp.func
+def contact_spring_stable(
+    omega_dt: wp.float32, damping_ratio: wp.float32, solver_iterations: wp.int32, velocity_iterations: wp.int32
+) -> wp.bool:
+    """:func:`_contact_spring_stable` for a spring of any damping ratio.
+
+    An implicit spring-damper row of stiffness ``k``, damping ``d`` and inverse
+    mass ``w`` has ``omega = sqrt(k w)`` and damping ratio ``d w / (2 omega)``.
+    Heavy damping retains more of the warm-started impulse, so it does not
+    stabilize a stiff spring.
+    """
+    a1 = wp.float32(2.0) * damping_ratio + omega_dt
+    a2 = omega_dt * a1
+    if a2 <= wp.float32(0.0):
+        return True
+    retained = wp.pow(a2 / (wp.float32(1.0) + a2), wp.float32(solver_iterations))
+    return omega_dt / a1 * retained <= wp.float32(1.0) - retained + wp.float32(velocity_iterations) / a2
+
+
 @functools.cache
 def contact_spring_omega_dt(solver_iterations: int, velocity_iterations: int) -> float:
     """Stiffest stable contact spring ``omega * dt`` [rad] for a sweep schedule.

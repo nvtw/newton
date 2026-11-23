@@ -3264,12 +3264,25 @@ class PhoenXWorld:
             # Each biased sweep is a contact substep of ``dt / n`` with one sweep and no
             # relax; the substep's prepare, relax, and owned contacts keep the substep spring.
             cc = self._contact_container
-            substep_coefficients = (cc.soft_capped, cc.soft_bias_dt, cc.soft_mass_coeff, cc.soft_impulse_coeff)
+            spring = ("spring_sweeps", "spring_relax", "spring_omega_dt")
+            substep_coefficients = (
+                cc.soft_capped,
+                cc.soft_bias_dt,
+                cc.soft_mass_coeff,
+                cc.soft_impulse_coeff,
+                *(getattr(cc, name) for name in spring),
+            )
             n = self.solver_iterations
             sweep_dt = dt / n
             contact_container_set_sweeps(cc, 1, 0, self.contact_hertz, sweep_dt, step_dt)
             # Kernels scale ``soft_bias_dt`` by the substep rate; express the sweep's rate in it.
-            sweep_coefficients = (1, cc.soft_bias_dt * n, cc.soft_mass_coeff, cc.soft_impulse_coeff)
+            sweep_coefficients = (
+                1,
+                cc.soft_bias_dt * n,
+                cc.soft_mass_coeff,
+                cc.soft_impulse_coeff,
+                *(getattr(cc, name) for name in spring),
+            )
             sweep_bias_rate = float(cc.soft_bias_dt) / sweep_dt
             self._temporal_contact_coefficients = (
                 substep_coefficients,
@@ -3280,12 +3293,20 @@ class PhoenXWorld:
             self._apply_contact_coefficients(substep_coefficients)
 
     def _apply_contact_coefficients(self, coefficients) -> None:
-        """Set ``(capped, bias_dt, mass, impulse)`` soft contact coefficients on the solve containers."""
+        """Set ``(capped, bias_dt, mass, impulse, sweeps, relax, omega_dt)`` soft contact coefficients on the solve containers."""
         containers = [self._contact_container]
         if self._contact_container_solve is not self._contact_container:
             containers.append(self._contact_container_solve)
         for cc in containers:
-            cc.soft_capped, cc.soft_bias_dt, cc.soft_mass_coeff, cc.soft_impulse_coeff = coefficients
+            (
+                cc.soft_capped,
+                cc.soft_bias_dt,
+                cc.soft_mass_coeff,
+                cc.soft_impulse_coeff,
+                cc.spring_sweeps,
+                cc.spring_relax,
+                cc.spring_omega_dt,
+            ) = coefficients
 
     def step(
         self,

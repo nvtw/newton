@@ -933,7 +933,7 @@ def _make_contact_prepare_for_iteration_at(
                 ):
                     if eff_n > 0.0 and solver_gap <= 0.0:
                         pd_gamma_n, pd_bias_n, pd_eff_soft_n = contact_pd_coefficients(
-                            contacts, source_k, -effective_gap, wp.float32(1.0) / eff_n, dt_substep
+                            contacts, source_k, -effective_gap, wp.float32(1.0) / eff_n, dt_substep, cc
                         )
                         cc_set_pd_gamma(cc, k, pd_gamma_n)
                         cc_set_pd_bias(cc, k, pd_bias_n)

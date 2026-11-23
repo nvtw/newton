@@ -1,0 +1,1 @@
+Fix jitter in PhoenX stacks with stiff authored shape contact springs: a spring the sweep schedule cannot keep stable now falls back to the stiffest stable contact spring, never stiffer than authored.

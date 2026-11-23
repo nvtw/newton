@@ -27,9 +27,11 @@ from newton._src.solvers.phoenx.body import (
     mat33_from_sym6,
 )
 from newton._src.solvers.phoenx.constraints.constraint_container import (
+    DEFAULT_DAMPING_RATIO,
     ConstraintBodies,
     assert_constraint_header,
     constraint_bodies_make,
+    contact_spring_stable,
     pd_coefficients,
 )
 from newton._src.solvers.phoenx.constraints.contact_container import (
@@ -775,9 +777,19 @@ def contact_views_make(
 
 @wp.func
 def contact_pd_coefficients(
-    views: ContactViews, row: wp.int32, depth: wp.float32, inverse_mass: wp.float32, dt: wp.float32
+    views: ContactViews,
+    row: wp.int32,
+    depth: wp.float32,
+    inverse_mass: wp.float32,
+    dt: wp.float32,
+    cc: ContactContainer,
 ):
-    """Resolve an explicit contact override or the authored arithmetic-mean shape spring."""
+    """Resolve an explicit contact override or the authored arithmetic-mean shape spring.
+
+    An authored spring the sweep schedule cannot keep stable on a resting stack
+    (:func:`contact_spring_stable`) is replaced by the stiffest stable spring at
+    the default damping ratio, never stiffer than authored.
+    """
     k, d = wp.float32(0.0), wp.float32(0.0)
     if row < views.rigid_contact_stiffness.shape[0]:
         k = views.rigid_contact_stiffness[row]
@@ -794,8 +806,16 @@ def contact_pd_coefficients(
             defaults = views.default_shape_compliance
             if wp.length_sq(first - defaults) != 0.0 or wp.length_sq(second - defaults) != 0.0:
                 coefficients = 0.5 * (first + second)
+                stiffness, damping = coefficients[0], coefficients[1]
+                omega = wp.sqrt(wp.max(stiffness, wp.float32(0.0)) * inverse_mass)
+                if omega > wp.float32(0.0) and not contact_spring_stable(
+                    omega * dt, damping * inverse_mass / (wp.float32(2.0) * omega), cc.spring_sweeps, cc.spring_relax
+                ):
+                    omega = wp.min(omega, cc.spring_omega_dt / dt)
+                    stiffness = omega * omega / inverse_mass
+                    damping = wp.float32(2.0) * DEFAULT_DAMPING_RATIO * omega / inverse_mass
                 # Preserve the physical static deflection F/k at every timestep.
-                return pd_coefficients(coefficients[0], coefficients[1], depth, inverse_mass, dt, wp.float32(0.0))
+                return pd_coefficients(stiffness, damping, depth, inverse_mass, dt, wp.float32(0.0))
     return wp.float32(0.0), wp.float32(0.0), wp.float32(0.0)
 
 

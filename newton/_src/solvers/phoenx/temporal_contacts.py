@@ -217,7 +217,7 @@ def temporal_contact_gap_kernel(
                 gamma, bias, eff_soft = wp.float32(0.0), wp.float32(0.0), wp.float32(0.0)
                 if gap <= 0.0 and eff_n > 0.0:
                     gamma, bias, eff_soft = contact_pd_coefficients(
-                        views, k, -gap, wp.float32(1.0) / eff_n, wp.float32(1.0) / idt
+                        views, k, -gap, wp.float32(1.0) / eff_n, wp.float32(1.0) / idt, cc
                     )
                 cc_set_pd_gamma(cc, k, gamma)
                 cc_set_pd_bias(cc, k, bias)

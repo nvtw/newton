@@ -209,6 +209,12 @@ class ContactContainer:
     soft_impulse_coeff: wp.float32
     #: Requested contact frequency [Hz], or zero when none was requested.
     hertz: wp.float32
+    #: Biased and relax sweeps per substep, and the stiffest spring ``omega * dt``
+    #: they keep stable at the default damping ratio, before any requested
+    #: frequency. Authored contact springs are checked against them.
+    spring_sweeps: wp.int32
+    spring_relax: wp.int32
+    spring_omega_dt: wp.float32
 
 
 @wp.func
@@ -279,6 +285,9 @@ def contact_container_set_sweeps(
     omega_dt = contact_spring_omega_dt(solver_iterations, velocity_iterations)
     if step_dt > 0.0 and dt > 0.0:
         omega_dt = min(omega_dt, 4.0 * math.pi * float(dt) / float(step_dt))
+    cc.spring_sweeps = int(solver_iterations)
+    cc.spring_relax = int(velocity_iterations)
+    cc.spring_omega_dt = float(omega_dt)
     if contact_hertz is not None:
         omega_dt = min(omega_dt, 2.0 * math.pi * float(contact_hertz) * float(dt))
     cc.hertz = 0.0 if contact_hertz is None else float(contact_hertz)
