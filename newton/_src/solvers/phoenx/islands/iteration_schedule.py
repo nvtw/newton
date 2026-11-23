@@ -112,6 +112,8 @@ def _key_columns(
     slots: wp.array[int],
     num_bodies: int,
     sizes: wp.array[int],
+    first_color: wp.array[int],
+    last_color: wp.array[int],
 ):
     slot = wp.tid()
     key = num_bodies + 1
@@ -123,27 +125,31 @@ def _key_columns(
             key = _find(entries, witness)
         if key <= num_bodies:
             wp.atomic_add(sizes, key, 1)
+            color = wp.lower_bound(starts, 1, num_colors[0] + 1, slot + 1) - 1
+            wp.atomic_min(first_color, key, color)
+            wp.atomic_max(last_color, key, color)
     keys[slot] = key
     slots[slot] = slot
 
 
 @wp.kernel(enable_backward=False)
-def _merge_large_islands(keys: wp.array[int], sizes: wp.array[int], num_bodies: int, giant_columns: int):
+def _merge_wide_islands(
+    keys: wp.array[int],
+    sizes: wp.array[int],
+    first_color: wp.array[int],
+    last_color: wp.array[int],
+    num_bodies: int,
+    merge_width: int,
+):
     slot = wp.tid()
     key = keys[slot]
-    # Every large island joins the shared key of the immovable pairs, which
-    # may run in any color group. Sorted by slot, they form one island whose
+    # An island whose colors are on average wider than one block's lanes needs
+    # several block passes per color; narrower, deeper ones would only add grid
+    # barriers. Wide islands join the shared key of the immovable pairs, which
+    # may run in any color group: sorted by slot, they form one island whose
     # color runs span all of them.
-    if key < num_bodies and sizes[key] > giant_columns:
+    if key < num_bodies and sizes[key] > merge_width * (last_color[key] - first_color[key] + 1):
         keys[slot] = num_bodies
-
-
-#: Islands with more columns (16 blocks' worth of lanes) are merged and swept
-#: by the whole grid, one color at a time; smaller ones are each walked by one
-#: block. One block would walk a packed bed of thousands of bottles long after
-#: the others finish, while merging small deep islands (stacked cases) leaves
-#: their long tails of narrow colors to a single block.
-_GIANT_ISLAND_COLUMNS = 4096
 
 # A dozen columns can already span a long sequence of dependent contact colors.
 _LARGE_ISLAND_COLUMNS = wp.constant(12)
@@ -256,7 +262,6 @@ def _get_island_iteration(axes):
         families: wp.array[int],
         num_blocks: int,
         merged: int,
-        giant_columns: int,
         fuse_columns: int,
         barrier: wp.array[wp.int32],
     ):
@@ -267,7 +272,7 @@ def _get_island_iteration(axes):
         # alone walks runs of narrow colors with block barriers, as the
         # one-launch sweep does, while the other blocks go on to the
         # independent small islands.
-        if ends[merged] - starts[merged] > giant_columns:
+        if ends[merged] > starts[merged]:
             i = starts[merged]
             # 0: nothing written, 1: block 0 wrote a narrow color, 2: the grid wrote a wide one.
             pending = int(0)
@@ -327,7 +332,7 @@ def _get_island_iteration(axes):
             root = roots[slot]
             i = starts[root]
             end_of_island = ends[root]
-            if end_of_island - i > giant_columns:
+            if root == merged:
                 continue
             while i < end_of_island:
                 end = color_ends[i]
@@ -387,10 +392,12 @@ class IslandIterationSchedule:
         self.ends = wp.empty_like(self.roots)
         self.count = wp.empty(2, dtype=int, device=device)
         self.sizes = wp.empty(num_bodies + 1, dtype=int, device=device)
+        self.first_color = wp.empty_like(self.sizes)
+        self.last_color = wp.empty_like(self.sizes)
         self.barrier = wp.zeros(3, dtype=wp.int32, device=device)
         self._blocks = {}
-        #: Islands with more columns are merged and solved by the whole grid.
-        self.giant_columns = _GIANT_ISLAND_COLUMNS
+        #: Islands with more columns per color are merged and swept by the grid.
+        self.merge_width = ONE_LAUNCH_BLOCK_DIM
         #: Colors of the merged island with more columns use the whole grid;
         #: ``None`` uses the one-launch sweep's fuse threshold.
         self.fuse_columns = None
@@ -420,6 +427,8 @@ class IslandIterationSchedule:
             device=world.device,
         )
         self.sizes.zero_()
+        self.first_color.fill_(2**31 - 1)
+        self.last_color.fill_(-1)
         wp.launch(
             _key_columns,
             capacity,
@@ -432,13 +441,15 @@ class IslandIterationSchedule:
                 self.slots,
                 num_bodies,
                 self.sizes,
+                self.first_color,
+                self.last_color,
             ],
             device=world.device,
         )
         wp.launch(
-            _merge_large_islands,
+            _merge_wide_islands,
             capacity,
-            [self.keys, self.sizes, num_bodies, int(self.giant_columns)],
+            [self.keys, self.sizes, self.first_color, self.last_color, num_bodies, int(self.merge_width)],
             device=world.device,
         )
         # The merged island keeps no stale range when this step has none.
@@ -532,7 +543,6 @@ class IslandIterationSchedule:
                 self.families,
                 blocks,
                 world.num_bodies,
-                int(self.giant_columns),
                 int(world._fuse_threshold if self.fuse_columns is None else self.fuse_columns),
                 self.barrier,
             ],

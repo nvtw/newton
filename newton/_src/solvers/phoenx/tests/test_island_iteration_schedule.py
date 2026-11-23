@@ -62,7 +62,7 @@ class TestIslandIterationSchedule(unittest.TestCase):
                 if giant:
                     # Every island is solved by the whole grid, one color at a time.
                     schedule = world._dispatcher._island_schedule
-                    schedule.giant_columns = 0
+                    schedule.merge_width = 0
                     # Block 0 walks the narrow colors, the grid the wide ones.
                     schedule.fuse_columns = 1
                 state, control, contacts = model.state(), model.control(), pipeline.contacts()
