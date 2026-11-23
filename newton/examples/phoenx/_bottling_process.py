@@ -6,8 +6,8 @@
 Single files run at the speed that carries the plant's rated output at the
 admission pitch. The pasteuriser infeed and outfeed tables and the
 accumulation table before the IFM carry packed beds across their source mat
-tops. The closed pasteuriser tunnel between its tables is not simulated; see
-:class:`PasteuriserTunnel`.
+tops. The pasteuriser tunnel carries its bed between its tables at the
+tables' width.
 """
 
 import math
@@ -29,6 +29,9 @@ _MACHINES = "/Plant/Process/Machines/L1"
 _INLET_PLATE = "/Plant/Line/IFM/Modules/IFM_A/Colliders/DeadPlates/InletPlate"
 # m/s, carries the plant's rated output in single file at the admission pitch.
 _BELT_SPEED = BOTTLES_PER_MINUTE / 60.0 * SINGLE_FILE_PITCH
+# m/s, behind the pasteuriser's single filer. A single filer must pull bottles
+# away faster than they arrive abreast; its discharge conveyors run 50 % faster.
+_FILER_SPEED = 1.5 * _BELT_SPEED
 _GUIDE_WIDTH = 0.08  # m, at the working faces of the driven bottle guides.
 _POOL_MAT = "/Plant/Blockout/Pool/mattop"
 _WET_END_MAT = "/Plant/Blockout/WetEnd/mattop"
@@ -40,6 +43,11 @@ _TABLES = {
 _PACK_PITCH = 0.063  # m, centre spacing of the source's mass-packed table placements
 _PACK_AREA = 0.5 * math.sqrt(3.0) * _PACK_PITCH**2  # m^2 of deck per bottle in a packed bed
 _POOL_STOCK = 1000  # bottles held by the accumulation table in production
+# The source authors no pasteuriser rating. Tunnel pasteurisers are sized
+# above the filler, commonly by about 10 %, so the bed never limits the line.
+PASTEURISER_CAPACITY = 1.1
+_FILER_FUNNEL_ANGLE = 22.0  # degrees, of the filer's left rail stepping in, above glass-on-rail friction
+_CHUTE_MARGIN = 2.0  # outfeed funnel and chute speed over mass flow, for the looser flowing stream
 # m above the deck, from the IFM's RailsOuter colliders that continue the neck.
 _GUARD_BANDS = ((0.018, 0.043), (0.088, 0.113))
 _EYE = (0.065, 0.19)  # m above the deck, body and neck beams of the IFM's inlet eye
@@ -184,11 +192,9 @@ def wet_end_layout(stage, cache, path):
 
     Returns the outlines (stations and half-widths) of the pasteuriser infeed
     and outfeed tables, with their chutes and funnels, and of the accumulation
-    table with its railed neck; the end of the outfeed conveyor at the dryer;
-    and the source's production placements on the pasteuriser tables.
+    table with its railed neck; and the end of the outfeed conveyor at the
+    dryer.
     """
-    from pxr import Usd, UsdGeom  # noqa: PLC0415 - USD is optional.
-
     center = path[-1, 1]
     layout = {name: _outline(_deck_points(stage, cache, prim), center) for name, prim in _TABLES.items()}
     # The outfeed conveyor continues the outfeed table to the dryer.
@@ -196,16 +202,6 @@ def wet_end_layout(stage, cache, path):
     start = layout["outfeed"][0][-1]
     on_line = np.abs(conveyors[:, 1] - center) < layout["outfeed"][1][-1] + 0.2
     layout["combiner_end"] = conveyors[on_line & (conveyors[:, 0] > start + 1.0e-3), 0].min()
-    instancer = UsdGeom.PointInstancer(stage.GetPrimAtPath(PROCESS_BOTTLES))
-    world = cache.GetLocalToWorldTransform(instancer.GetPrim())
-    transforms = instancer.ComputeInstanceTransformsAtTime(Usd.TimeCode.Default(), Usd.TimeCode.Default())
-    placements = np.array([np.asarray((matrix * world).ExtractTranslation())[:2] for matrix in transforms])
-    inside = np.zeros(len(placements), dtype=bool)
-    for name in ("infeed", "outfeed"):
-        x, half = layout[name]
-        width = np.interp(placements[:, 0], x, half, left=-1.0, right=-1.0)
-        inside |= np.abs(placements[:, 1] - center) < width
-    layout["placements"] = placements[inside]
     return layout
 
 
@@ -214,14 +210,13 @@ def _mass_flow_speed(width):
     return BOTTLES_PER_MINUTE / 60.0 * _PACK_AREA / width
 
 
-def _pool_field(outline, center, count):
-    """Hexagonally packed production stock, filled from the IFM transfer back over the table."""
+def _packed_field(outline, center, count=None, clearance=0.0):
+    """Hexagonally packed stock within an outline, filled from its downstream end backwards."""
     x_stations, half = outline
     radius = 0.5 * _PACK_PITCH
     rows = []
-    # Leave one row clear of the IFM transfer plate.
-    x = x_stations[-1] - radius - _PACK_PITCH
-    while x - radius >= x_stations[0] and sum(map(len, rows)) < count:
+    x = x_stations[-1] - radius - clearance
+    while x - radius >= x_stations[0] and (count is None or sum(map(len, rows)) < count):
         # The narrower of the row's edges bounds it where the outline steps in.
         width = min(np.interp(x - radius, x_stations, half), np.interp(x + radius, x_stations, half)) - radius
         # Keep one lattice across the outline steps.
@@ -234,35 +229,41 @@ def _pool_field(outline, center, count):
     return np.vstack(rows)[:count]
 
 
-def _add_table(
-    scene, name, outline, center, speed, *, inflow, outflow=None, split=None, motor_off, deck_cfg, guard_cfg
-):
+def pasteuriser_outline(layout):
+    """Join the infeed table, the tunnel deck at the tables' width, and the outfeed table."""
+    infeed, outfeed = layout["infeed"], layout["outfeed"]
+    return np.r_[infeed[0], outfeed[0]], np.r_[infeed[1], outfeed[1]]
+
+
+def _add_table(scene, name, outline, center, speed, *, inflow, outflow=None, splits=(), motor_off, deck_cfg, guard_cfg):
     """Add a straight mass-flow table along +x with guards along its outline.
 
-    ``speed`` maps stations to belt speeds [m/s], either one per station or
-    ``(right, left)`` edge speeds for graded lanes. ``inflow`` is the half-width
+    ``outline`` holds stations and half-widths, or stations with right and
+    left half-widths for an asymmetric table. ``speed`` maps stations to belt
+    speeds [m/s], either one per station or ``(right, left)`` edge speeds for
+    graded lanes. ``inflow`` is the half-width
     of the single-file opening in the upstream end; zero closes it. The
     downstream end stays open into the next conveyor unless ``outflow`` gives
-    a narrower opening there. ``split`` divides the deck into separately
-    driven upstream and downstream belts at that station. Returns the deck
-    labels in flow order.
+    a narrower opening there. ``splits`` divide the deck into separately
+    driven belts at those stations. Returns the deck labels in flow order.
     """
     builder = scene.builder
-    x_stations, half_stations = outline
+    x_stations, right_stations, left_stations = (*outline, outline[-1])[:3]
     # Subdivide the deck so its surface velocity follows the speed profile.
     x = np.unique(np.r_[x_stations, np.arange(x_stations[0], x_stations[-1], 0.1)])
-    half = np.interp(x, x_stations, half_stations)
+    right, left = np.interp(x, x_stations, right_stations), np.interp(x, x_stations, left_stations)
     y, z = center[1], center[2]
     label = f"/Plant/Process/Transport/{name}"
-    parts = [x] if split is None else [x[x <= split], x[x >= split]]
+    bounds = np.r_[x[0], splits, x[-1]]
+    parts = [x[(x >= a) & (x <= b)] for a, b in pairwise(bounds)]
     decks = []
     for part, xs in enumerate(parts):
-        hs = np.interp(xs, x_stations, half_stations)
+        rs, ls = np.interp(xs, x_stations, right_stations), np.interp(xs, x_stations, left_stations)
         vertices, indices = _strip(
-            np.column_stack((xs, y - hs, np.full_like(xs, z))), np.column_stack((xs, y + hs, np.full_like(xs, z)))
+            np.column_stack((xs, y - rs, np.full_like(xs, z))), np.column_stack((xs, y + ls, np.full_like(xs, z)))
         )
         deck = newton.Mesh(vertices, indices, compute_inertia=False, enable_surface_velocity=not motor_off)
-        decks.append(f"{label}/Deck" + (f"_{part}" if split is not None else ""))
+        decks.append(f"{label}/Deck" + (f"_{part}" if splits else ""))
         builder.add_shape_mesh(-1, mesh=deck, cfg=deck_cfg, label=decks[-1] + "/collision")
         if not motor_off:
             velocity = np.zeros((len(vertices), 3), dtype=np.float32)
@@ -270,10 +271,17 @@ def _add_table(
             velocity[:, 0] = (lanes if lanes.ndim == 2 else np.column_stack((lanes, lanes))).ravel()
             scene.belts.append((deck, velocity, decks[-1]))
     # Each guard keeps the table on its right in traversal order.
-    outflow = half[-1] if outflow is None else outflow
     guards = (
-        np.r_[[[x[0], y + inflow]], np.column_stack((x, y + half)), [[x[-1], y + outflow]]],
-        np.r_[[[x[-1], y - outflow]], np.column_stack((x, y - half))[::-1], [[x[0], y - inflow]]],
+        np.r_[
+            [[x[0], y + inflow]],
+            np.column_stack((x, y + left)),
+            [[x[-1], y + (left[-1] if outflow is None else outflow)]],
+        ],
+        np.r_[
+            [[x[-1], y - (right[-1] if outflow is None else outflow)]],
+            np.column_stack((x, y - right))[::-1],
+            [[x[0], y - inflow]],
+        ],
     )
     for side, corners in zip(("left", "right"), guards, strict=True):
         line = np.column_stack((corners, np.full(len(corners), z)))
@@ -293,16 +301,15 @@ def add_filling_transport(scene, path, *, motor_off, layout=None, inlet_speed=No
     """Create contact-driven transport under the source process visuals.
 
     With ``layout`` (see :func:`wet_end_layout`), the route's final straight
-    carries packed beds over the pasteuriser tables and the accumulation
-    table. The closed tunnel between the pasteuriser tables is
-    :class:`PasteuriserTunnel`. The accumulation table runs with the IFM infeed
-    drive at ``inlet_speed``.
+    carries packed beds through the pasteuriser and over the accumulation
+    table, which runs with the IFM's infeed drive at ``inlet_speed``.
     """
     builder = scene.builder
     length = np.r_[0.0, np.cumsum(np.linalg.norm(np.diff(path, axis=0), axis=1))]
     sections = [np.linspace(a, b, max(2, math.ceil((b - a) / 0.4) + 1))[:-1] for a, b in pairwise(length)]
     samples = np.concatenate([*sections, length[-1:]])
     runs = [(0.0, length[-1])]
+    speeds = [_BELT_SPEED]
     if layout is not None:
         start = np.flatnonzero(path[:, 0] < layout["infeed"][0][0])[-1]
         if np.ptp(path[start:, 1]) > 1.0e-6 or np.any(np.diff(path[start:, 0]) <= 0.0):
@@ -312,6 +319,7 @@ def add_filling_transport(scene, path, *, motor_off, layout=None, inlet_speed=No
             (0.0, _straight(path, length, layout["infeed"][0][0])),
             (_straight(path, length, layout["combiner_end"]), _straight(path, length, layout["pool"][0][0])),
         ]
+        speeds = [_BELT_SPEED, _FILER_SPEED]
     belt_cfg = builder.ShapeConfig(density=0.0, mu=0.18, mu_static=0.2, gap=0.001, is_visible=False)
     rail_cfg = builder.ShapeConfig(density=0.0, mu=0.30, mu_static=0.35, gap=0.001, is_visible=False)
     guide_width = _GUIDE_WIDTH / 2.0
@@ -322,7 +330,7 @@ def add_filling_transport(scene, path, *, motor_off, layout=None, inlet_speed=No
     guide_base, guide_top = np.array([0.0, 0.0, 0.07]), np.array([0.0, 0.0, 0.098])
     section = 0
     zones = []
-    for begin_length, end_length in runs:
+    for (begin_length, end_length), file_speed in zip(runs, speeds, strict=True):
         zone = []
         zones.append(zone)
         inner = samples[(begin_length + 1.0e-4 < samples) & (samples < end_length - 1.0e-4)]
@@ -351,7 +359,7 @@ def add_filling_transport(scene, path, *, motor_off, layout=None, inlet_speed=No
             belt = newton.Mesh(vertices, indices, compute_inertia=False, enable_surface_velocity=not motor_off)
             builder.add_shape_mesh(-1, mesh=belt, cfg=belt_cfg, label=label + "/Deck/collision")
             if not motor_off:
-                velocity = np.repeat(tangent[region] * _BELT_SPEED, 2, axis=0).astype(np.float32)
+                velocity = np.repeat(tangent[region] * file_speed, 2, axis=0).astype(np.float32)
                 scene.belts.append((belt, velocity, label + "/Deck"))
                 zone.append(label + "/Deck")
             for side in (-1, 1):
@@ -369,76 +377,75 @@ def add_filling_transport(scene, path, *, motor_off, layout=None, inlet_speed=No
         return
     outlet = path[-1]
     cfg = {"motor_off": motor_off, "deck_cfg": belt_cfg, "guard_cfg": rail_cfg}
+    # The pasteuriser's infeed table, tunnel deck and outfeed table form one
+    # bed, which runs at PASTEURISER_CAPACITY times the rated output. Its
+    # chutes and funnels run at twice mass flow: the streams that fill and
+    # drain the bed pack at about 55 % of a standing bed. The outfeed conveyor
+    # files the chute's stream into the dryer's guides.
+    outline = pasteuriser_outline(layout)
+    body, funnel = layout["infeed"][0][2], layout["outfeed"][0][1]
+    chute, end = layout["outfeed"][0][-1], layout["combiner_end"]
+    # The single filer's left rail steps in to the single file's left guide
+    # and then runs straight; its right rail closes the chute over the whole
+    # filer. The left lane runs fastest, so the slanting right rail feeds
+    # bottles one by one into the left lane, as in a staged-lane combiner.
+    step = chute + (outline[1][-1] - guide_width) / math.tan(math.radians(_FILER_FUNNEL_ANGLE))
+    stations = np.r_[outline[0], step, end]
+    combined = (
+        stations,
+        np.r_[outline[1], np.interp(step, (chute, end), (outline[1][-1], guide_width)), guide_width],
+        np.r_[outline[1], guide_width, guide_width],
+    )
+    chute_speed = _CHUTE_MARGIN * _mass_flow_speed(2.0 * outline[1][-1])
 
-    def bed_speed(outline, margin=1.0):
-        # Each section of a table carries the rated output as a packed bed.
-        return lambda x: np.minimum(margin * _mass_flow_speed(2.0 * np.interp(x, *outline)), _BELT_SPEED)
+    def pasteuriser_speed(x):
+        # Chutes and funnels carry a loose stream; the bed between them is packed.
+        margin = np.where((body <= x) & (x < funnel), PASTEURISER_CAPACITY, _CHUTE_MARGIN)
+        bed = np.minimum(margin * _mass_flow_speed(2.0 * np.interp(x, *outline)), _BELT_SPEED)
+        # The lanes run from the chute's speed at the right rail to the single
+        # file's speed at the left rail; no lane runs slower than its feed.
+        fast = chute_speed * (_FILER_SPEED / chute_speed) ** np.clip((x - chute) / (end - chute), 0.0, 1.0)
+        return np.where(x <= chute, bed, np.stack((np.full_like(x, chute_speed), fast))).T
 
-    infeed = layout["infeed"]
-    _add_table(scene, "PasteuriserInfeed", infeed, outlet, bed_speed(infeed), inflow=guide_width, outflow=0.0, **cfg)
-    # The outfeed conveyor first accelerates the chute's stream geometrically
-    # to the single-file speed, which thins it to single-file spacing, and only
-    # then narrows it into the dryer's guides. Narrowing a packed stream would
-    # wedge bottles two abreast.
-    outfeed = layout["outfeed"]
-    chute, end = outfeed[0][-1], layout["combiner_end"]
-    middle = 0.5 * (chute + end)
-    combined = (np.r_[outfeed[0], middle, end], np.r_[outfeed[1], outfeed[1][-1], guide_width])
-    # A flowing bed packs much looser than a standing one, so the outfeed runs
-    # 60 % above mass flow to deliver the rated output and keep the tunnel exit clear.
-    margin = 1.6
-    chute_speed = margin * _mass_flow_speed(2.0 * outfeed[1][-1])
-
-    def outfeed_speed(x):
-        ramp = chute_speed * (_BELT_SPEED / chute_speed) ** np.clip((x - chute) / (middle - chute), 0.0, 1.0)
-        bed = bed_speed(outfeed, margin)(x)
-        # Graded lanes, as single filers use, shear pairs of bottles apart
-        # before the guides narrow; the right lane runs at 60 %.
-        return np.where(x <= chute, bed, np.stack((0.6 * ramp, ramp))).T
-
-    _, filer = _add_table(scene, "PasteuriserOutfeed", combined, outlet, outfeed_speed, inflow=0.0, split=chute, **cfg)
+    bed, filer = _add_table(
+        scene, "Pasteuriser", combined, outlet, pasteuriser_speed, inflow=guide_width, splits=(chute,), **cfg
+    )
     pool = layout["pool"]
     (table,) = _add_table(
         scene, "AccumulationTable", pool, outlet, lambda x: np.full_like(x, inlet_speed), inflow=guide_width, **cfg
     )
 
-    # Each single-file feed stops while a standing queue holds the eye at its
-    # table's entrance, like the source IFM's "may feed" permit: the body beam
+    # Each feed stops while a standing queue holds the eye at the entrance of
+    # what it feeds, like the source IFM's "may feed" permit: the body beam
     # stays blocked and the neck beam, which flickers between the necks of a
-    # moving file, stays unchanged. The eyes sit on the tables' moving belts,
-    # so a stopped feed cannot hold its own eye. A full table therefore stops
-    # its feed instead of letting the belts slip under a queue that presses
-    # into it. The accumulation table feeds the IFM at the IFM's own infeed
-    # speed and follows its drive M1, so it never packs its field into the
-    # infeed faster than the infeed carries it, and it waits for the IFM's
-    # permit eye PE-A1, so it never presses its field into a full infeed.
+    # moving file, stays unchanged. Eyes sit on the receiving belts, so a
+    # stopped feed cannot hold its own eye. A full section therefore stops its
+    # feed instead of letting the belts slip under a queue that presses into
+    # it. The accumulation table feeds the IFM at the IFM's own infeed speed
+    # and follows its drive M1, so it never packs its field into the infeed
+    # faster than the infeed carries it, and it waits for the IFM's permit eye
+    # PE-A1, so it never presses its field into a full infeed.
     def eye(x, half):
         start = (x, outlet[1] - half - 0.01, outlet[2])
         return [((start[0], start[1], start[2] + height), (0.0, 1.0, 0.0), 2.0 * half + 0.02) for height in _EYE]
 
     scene.metadata["process_zones"] = {
-        "infeed_line": (zones[0], eye(infeed[0][0] + 0.15, infeed[1][0])),
+        "infeed_line": (zones[0], eye(outline[0][0] + 0.15, outline[1][0])),
+        "pasteuriser": ([bed], eye(chute - 0.15, outline[1][-1])),
         # The single filer stops with the file it feeds.
         "pool_line": (zones[1] + [filer], eye(pool[0][0] + 0.1, guide_width + 0.02)),
         "pool": ([table], None),
     }
     scene.metadata["process_handoff"] = (outlet, outlet[0] - pool[0][0], pool[1].max() + 0.03)
-    scene.metadata["process_tunnel"] = {
-        "intake": infeed[0][-1],
-        "exit": outfeed[0][0],
-        "half_width": min(infeed[1][-1], outfeed[1][0]),
-        "center": outlet[1],
-        "deck": outlet[2],
-        "speed": float(bed_speed(outfeed, margin)(outfeed[0][0])),
-    }
 
 
 def add_filling_bottles(scene, path, *, motor_off=False, layout=None):
     """Seed production stock with the same material and collision geometry as the IFM.
 
-    Single files carry stock at the rated admission pitch. With ``layout``, the
-    pasteuriser tables hold the source's production placements and the
-    accumulation table holds a packed field against its IFM outlet.
+    Single files carry stock at the rated admission pitch. With ``layout``, a
+    packed bed fills the pasteuriser from its infeed funnel to its outfeed
+    funnel, and the accumulation table holds a packed field against its IFM
+    outlet.
     """
     builder = scene.builder
     source = scene.bottle_bodies[0]
@@ -463,12 +470,20 @@ def add_filling_bottles(scene, path, *, motor_off=False, layout=None):
     direction /= np.linalg.norm(direction, axis=1, keepdims=True)
     velocities = direction * _BELT_SPEED
     if layout is not None:
-        stock = np.vstack((layout["placements"], _pool_field(layout["pool"], path[-1, 1], _POOL_STOCK)))
+        x, half = pasteuriser_outline(layout)
+        # The chutes stay clear; the funnels and everything between are full.
+        bed = (x[1:-1], half[1:-1])
+        stock = np.vstack(
+            (
+                _packed_field(bed, path[-1, 1]),
+                _packed_field(layout["pool"], path[-1, 1], _POOL_STOCK, clearance=_PACK_PITCH),
+            )
+        )
         centers = np.vstack((centers, np.column_stack((stock, np.full(len(stock), path[-1, 2])))))
         velocities = np.vstack((velocities, np.zeros((len(stock), 3))))
     for index, position in enumerate(centers):
         position[2] += 0.001
-        label = f"/Plant/Sim/Product/Bottles/WetEnd_{index:04d}"
+        label = f"/Plant/Sim/Product/Bottles/WetEnd_{index:05d}"
         body = builder.add_link(
             xform=wp.transform(position, wp.quat_identity()),
             com=builder.body_com[source],
@@ -483,161 +498,6 @@ def add_filling_bottles(scene, path, *, motor_off=False, layout=None):
             builder.body_qd[body] = wp.spatial_vector(*velocities[index], 0.0, 0.0, 0.0)
         add_bottle_shapes(builder, body, label, shapes)
     scene.metadata["process_bottles"] = len(centers)
-
-
-@wp.kernel
-def _tunnel_intake(
-    poses: wp.array[wp.transform],
-    bottles: wp.array[int],
-    count: wp.array[int],
-    clock: wp.array[float],
-    time: float,
-    period: float,
-    intake: float,
-    y0: float,
-    y1: float,
-    deck: float,
-    taken: wp.array[int],
-    taken_count: wp.array[int],
-):
-    i = wp.tid()
-    if i >= count[0] or time - clock[0] < period:
-        return
-    body = bottles[i]
-    p = wp.transform_get_translation(poses[body])
-    # The tunnel deck takes the front row standing against its entrance.
-    if (
-        intake - wp.static(_PACK_PITCH) < p[0]
-        and p[0] < intake
-        and y0 < p[1]
-        and p[1] < y1
-        and wp.abs(p[2] - deck) < 0.02
-    ):
-        slot = wp.atomic_add(taken_count, 0, 1)
-        if slot < taken.shape[0]:
-            taken[slot] = body
-
-
-@wp.kernel
-def _tunnel_exit_check(
-    poses: wp.array[wp.transform],
-    bottles: wp.array[int],
-    count: wp.array[int],
-    taken: wp.array[int],
-    taken_count: wp.array[int],
-    mirror: float,
-    exit_x: float,
-    blocked: wp.array[int],
-):
-    i = wp.tid()
-    if i >= count[0]:
-        return
-    p = wp.transform_get_translation(poses[bottles[i]])
-    if p[0] < exit_x - 0.1 or p[0] > exit_x + 3.0 * wp.static(_PACK_PITCH):
-        return
-    for j in range(wp.min(taken_count[0], taken.shape[0])):
-        q = wp.transform_get_translation(poses[taken[j]])
-        if wp.length(wp.vec2(mirror - q[0] - p[0], q[1] - p[1])) < wp.static(_PACK_PITCH):
-            wp.atomic_max(blocked, 0, 1)
-
-
-@wp.kernel
-def _tunnel_release(
-    poses: wp.array[wp.transform],
-    velocities: wp.array[wp.spatial_vector],
-    taken: wp.array[int],
-    taken_count: wp.array[int],
-    blocked: wp.array[int],
-    clock: wp.array[float],
-    time: float,
-    mirror: float,
-    speed: float,
-):
-    j = wp.tid()
-    n = wp.min(taken_count[0], taken.shape[0])
-    if blocked[0] != 0 or j >= n:
-        return
-    if j == 0:
-        clock[0] = time
-    body = taken[j]
-    pose = poses[body]
-    p = wp.transform_get_translation(pose)
-    # Reflect the row about the tunnel's midplane so it leaves in the packing it entered with.
-    poses[body] = wp.transform(wp.vec3(mirror - p[0], p[1], p[2]), wp.transform_get_rotation(pose))
-    velocities[body] = wp.spatial_vector(wp.vec3(speed, 0.0, 0.0), wp.vec3(0.0))
-
-
-class PasteuriserTunnel:
-    """Carry bottles through the closed pasteuriser tunnel as a packed bed.
-
-    The tunnel interior is opaque and its bed is not simulated: about 23,000
-    bottles on 21.6 m x 3.66 m, a residence time of about 54 minutes at the
-    rated output. In production the bed is full and moves one row at a time:
-    as a row of bottles enters from the infeed table, an identical row leaves
-    onto the outfeed table. Bottles carry no identity, so the row that enters
-    is reused for the row that leaves; the bottle count is conserved. A row
-    moves at most at the rated output and only when the outfeed table has
-    room for it at the tunnel exit.
-    """
-
-    def __init__(self, layout, bottles, count):
-        self.bottles = bottles
-        self.count = count
-        self.intake, self.exit = layout["intake"], layout["exit"]
-        self.y = (layout["center"] - layout["half_width"], layout["center"] + layout["half_width"])
-        self.deck = layout["deck"]
-        self.speed = layout["speed"]
-        # One packed row across the bed at the rated output.
-        self.period = (self.y[1] - self.y[0]) / _PACK_PITCH / (BOTTLES_PER_MINUTE / 60.0)
-        device = bottles.device
-        self.taken = wp.zeros(2 * math.ceil((self.y[1] - self.y[0]) / _PACK_PITCH), dtype=int, device=device)
-        self.taken_count = wp.zeros(1, dtype=int, device=device)
-        self.blocked = wp.zeros(1, dtype=int, device=device)
-        self.clock = wp.array([-self.period], dtype=float, device=device)
-
-    def advance(self, state, time):
-        """Move the next row through the tunnel when it is due and the exit has room."""
-        self.taken_count.zero_()
-        self.blocked.zero_()
-        mirror = self.intake + self.exit
-        n = len(self.bottles)
-        wp.launch(
-            _tunnel_intake,
-            n,
-            inputs=[
-                state.body_q,
-                self.bottles,
-                self.count,
-                self.clock,
-                time,
-                self.period,
-                self.intake,
-                *self.y,
-                self.deck,
-            ],
-            outputs=[self.taken, self.taken_count],
-        )
-        wp.launch(
-            _tunnel_exit_check,
-            n,
-            inputs=[state.body_q, self.bottles, self.count, self.taken, self.taken_count, mirror, self.exit],
-            outputs=[self.blocked],
-        )
-        wp.launch(
-            _tunnel_release,
-            len(self.taken),
-            inputs=[
-                state.body_q,
-                state.body_qd,
-                self.taken,
-                self.taken_count,
-                self.blocked,
-                self.clock,
-                time,
-                mirror,
-                self.speed,
-            ],
-        )
 
 
 def _shorten_box(prim, top):

@@ -8,11 +8,9 @@ factory keeps its source geometry, rigid bodies, mass properties, colliders,
 joint frames, and drive settings. Meshes are shared between repeated parts.
 With ``--filling-room-physics``, rigid bottles follow the wet-end belt and
 carousel route through the filling room and retain their source mass. The
-line starts in production at its rated 425 bottles/min: packed beds cover the
-pasteuriser infeed and outfeed tables (the source's placements) and the
-accumulation table before the IFM. The closed pasteuriser tunnel is opaque;
-its bed of about 23,000 bottles is not simulated and moves row by row between
-its tables.
+line starts in production at its rated 425 bottles/min: a packed bed fills the
+pasteuriser from its infeed table through the tunnel to its outfeed table, and
+a packed field waits on the accumulation table before the IFM.
 The source assets remain outside the repository and require NVIDIA Storage
 access; see ``newton/examples/assets/bottling_plant/README.md``.
 
@@ -54,7 +52,6 @@ from newton._src.solvers.phoenx.sleeping_filter import (
 )
 from newton.examples.phoenx._bottling_control import PlantController
 from newton.examples.phoenx._bottling_infeed import BOTTLES_PER_MINUTE, BottleSupply
-from newton.examples.phoenx._bottling_process import PasteuriserTunnel
 from newton.examples.phoenx._bottling_scene import load_plant
 from newton.geometry import BroadPhaseImplicitTree
 from newton.solvers import SolverPhoenX
@@ -267,8 +264,8 @@ class Example:
         self.pipeline = newton.CollisionPipeline(
             self.model,
             contact_matching="sticky",
-            # The filling room's packed tables add about 4,000 bottles in contact.
-            rigid_contact_max=500_000 if args.filling_room_physics else 250_000,
+            # Each bottle of the filling room's packed beds touches about six others.
+            rigid_contact_max=250_000 + 64 * self.scene.metadata.get("process_bottles", 0),
             broad_phase="sap" if self.model.device.is_cuda or self.supply is not None else "nxn",
             speculative_contact_gap_max=0.005,
             broad_phase_filter=(_filter_pair, _PlantFilter),
@@ -370,14 +367,6 @@ class Example:
                 self.filter_data.held_by,
                 self.supply,
             )
-        self.tunnel = None
-        if "process_tunnel" in self.scene.metadata and not args.motor_off:
-            if self.controller is not None:
-                bottles, count = self.controller.bottles, self.controller.bottle_count
-            else:
-                bottles = wp.array(self.scene.bottle_bodies, dtype=int, device=self.model.device)
-                count = wp.array([len(bottles)], dtype=int, device=self.model.device)
-            self.tunnel = PasteuriserTunnel(self.scene.metadata["process_tunnel"], bottles, count)
         self.joint_axes = self.model.joint_axis.numpy()
         self.joint_dofs = self.model.joint_qd_start.numpy()
         self.initial_poses = self.state_0.body_q.numpy()
@@ -469,8 +458,6 @@ class Example:
     def step(self):
         if self.supply is not None:
             self.supply.admit()
-        if self.tunnel is not None:
-            self.tunnel.advance(self.state_0, self.sim_time)
         if self.graph is None:
             self.simulate()
         else:

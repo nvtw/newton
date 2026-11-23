@@ -25,9 +25,8 @@ from newton.examples.phoenx._bottling_io import (
     _valves,
 )
 from newton.examples.phoenx._bottling_process import (
-    PasteuriserTunnel,
+    PASTEURISER_CAPACITY,
     _arc,
-    _pool_field,
     add_filling_bottles,
     add_filling_transport,
 )
@@ -157,45 +156,41 @@ class TestBottlingPlant(unittest.TestCase):
 
     @unittest.skipUnless(wp.is_cuda_available(), "CUDA device required")
     def test_wet_end_tables_carry_packed_beds(self):
-        """Move packed beds through the pasteuriser tables, tunnel, single filer and accumulation table."""
+        """Carry a packed bed through the pasteuriser, its single filer and the accumulation table."""
         # The source's chute, funnel and table outlines, scaled down in width and length.
         layout = {
-            "infeed": (np.array([1.0, 1.3, 1.6, 2.8]), np.array([0.12, 0.12, 0.35, 0.35])),
-            "outfeed": (np.array([3.2, 4.0, 4.3, 4.6]), np.array([0.35, 0.35, 0.12, 0.12])),
-            "combiner_end": 6.0,
-            "pool": (np.array([6.4, 7.4, 7.45, 8.0]), np.array([0.35, 0.35, 0.15, 0.15])),
+            "infeed": (np.array([1.0, 1.3, 1.6, 2.0]), np.array([0.12, 0.12, 0.35, 0.35])),
+            "outfeed": (np.array([4.0, 4.4, 4.7, 5.0]), np.array([0.35, 0.35, 0.12, 0.12])),
+            "combiner_end": 6.4,
+            "pool": (np.array([6.8, 7.8, 7.85, 8.4]), np.array([0.35, 0.35, 0.15, 0.15])),
         }
-        infeed_bed = _pool_field((np.array([1.6, 2.8]), np.array([0.35, 0.35])), 0.0, 1000)
-        outfeed_bed = _pool_field((np.array([3.2, 4.0]), np.array([0.35, 0.35])), 0.0, 1000)
-        layout["placements"] = np.vstack((infeed_bed, outfeed_bed))
-        path = np.array([[0.0, 0.0, 0.95], [8.0, 0.0, 0.95]])
+        path = np.array([[0.0, 0.0, 0.95], [8.4, 0.0, 0.95]])
         dt = 1.0 / 120.0
         with wp.ScopedDevice("cuda:0"):
-            scene, state, bottles, graph = self._bottle_line(path, layout)
-            tunnel = PasteuriserTunnel(
-                scene.metadata["process_tunnel"], wp.array(bottles, dtype=int), wp.array([len(bottles)], dtype=int)
-            )
+            _, state, bottles, graph = self._bottle_line(path, layout)
             start = state.body_q.numpy()[bottles]
             filed, emptied, tilt = set(), set(), 0.0
             for frame in range(1, 3000):
-                tunnel.advance(state, frame * dt)
                 wp.capture_launch(graph)
                 if frame % 30 == 0:
                     poses = state.body_q.numpy()[bottles]
                     # Bottles tip once they drop off the open outlet; judge the line before it.
                     on_line = (poses[:, 0] < path[-1, 0] - 0.1) & (poses[:, 2] > 0.9)
                     tilt = max(tilt, float(np.linalg.norm(poses[on_line, 3:5], axis=1).max()))
-                    if frame * dt > 15.0:
-                        filed.update(np.flatnonzero(on_line & (poses[:, 0] > 6.2) & (poses[:, 0] < 6.4)))
+                    if frame * dt > 10.0:
+                        filed.update(np.flatnonzero(on_line & (poses[:, 0] > 6.6) & (poses[:, 0] < 6.8)))
                     emptied.update(np.flatnonzero(poses[:, 0] > path[-1, 0]))
             poses = state.body_q.numpy()[bottles]
 
-        tunnelled = (start[:, 0] < 2.8) & (poses[:, 0] > 3.2)
-        # The tunnel moves rows from the infeed table's front to the outfeed table.
-        self.assertGreater(int(tunnelled.sum()), 50)
-        # Once the outfeed bed reaches its chute, the single filer feeds the
-        # accumulation table at about the rated output.
-        self.assertGreater(len(filed), 0.7 * 425.0 / 60.0 * 10.0)
+        # The pasteuriser starts full and its bed advances at its rated speed.
+        tunnel = (start[:, 0] > 2.0) & (start[:, 0] < 4.0)
+        self.assertGreater(int(tunnel.sum()), 300)
+        speed = PASTEURISER_CAPACITY * 425.0 / 60.0 * 0.5 * np.sqrt(3.0) * 0.063**2 / 0.7
+        advance = poses[tunnel, 0] - start[tunnel, 0]
+        self.assertGreater(float(np.median(advance)), 0.9 * speed * 3000 * dt)
+        # The bed feeds the single filer, which files it for the accumulation
+        # table at the rated output or above.
+        self.assertGreater(len(filed), 0.9 * 425.0 / 60.0 * 15.0)
         # The accumulation table discharges its packed field through the neck.
         self.assertGreater(len(emptied), 100)
         # Bottles on every table and conveyor stay upright, and none leaves the line.
