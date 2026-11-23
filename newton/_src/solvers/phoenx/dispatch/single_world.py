@@ -1,9 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Single-world dispatcher (mass splitting OFF): per-substep PGS via
-persistent-grid head + single-block fused tail, with ``wp.capture_while``
-draining all colours. Mass-splitting variant in
+"""Single-world dispatcher (mass splitting OFF): per-substep PGS, each sweep
+one co-resident launch over all colours. Mass-splitting variant in
 :mod:`single_world_mass_splitting`."""
 
 from __future__ import annotations
@@ -12,8 +11,6 @@ from typing import TYPE_CHECKING
 
 import warp as wp
 
-from newton._src.solvers.phoenx.islands.iteration_schedule import IslandIterationSchedule
-
 if TYPE_CHECKING:
     from newton._src.solvers.phoenx.simulation import PhoenXWorld
 
@@ -21,13 +18,10 @@ if TYPE_CHECKING:
 class SingleWorldDispatcher:
     """Single-world PGS dispatcher (mass splitting OFF)."""
 
-    __slots__ = ("_island_schedule", "_world")
+    __slots__ = ("_world",)
 
-    def __init__(self, world: PhoenXWorld, *, island_parallel_iterations: bool = False) -> None:
+    def __init__(self, world: PhoenXWorld) -> None:
         self._world = world
-        self._island_schedule = (
-            IslandIterationSchedule(world) if island_parallel_iterations and world._constraint_capacity else None
-        )
 
     def begin_step(self) -> None:
         # No-op: only mass splitting rebuilds an interaction graph.
@@ -49,19 +43,9 @@ class SingleWorldDispatcher:
             if direct is not None and direct.enabled and not w._combine_direct_prepare_projection:
                 direct.solve(use_bias=False)
             prepare_head, prepare_fused, iterate_head, iterate_fused, _, _ = w._singleworld_kernels()
-            # Contact columns, joint ownership, and sleep states span the native substeps.
-            if self._island_schedule is not None and w._current_substep_index == 0:
-                self._island_schedule.build(w)
             if w._refresh_prepare_this_substep():
-                prepare_schedule = self._island_schedule if w.parallel_contact_prepare else None
-                if prepare_schedule is None:
-                    w._partitioner.begin_sweep()
-                w._singleworld_head_plus_tail_sweep(
-                    prepare_head,
-                    prepare_fused,
-                    idt,
-                    island_schedule=prepare_schedule,
-                )
+                w._partitioner.begin_sweep()
+                w._singleworld_head_plus_tail_sweep(prepare_head, prepare_fused, idt)
             else:
                 w._run_cached_prepare_bookkeeping(idt)
             if direct is not None and direct.enabled:
@@ -78,11 +62,8 @@ class SingleWorldDispatcher:
                 last = iteration == w.solver_iterations - 1
                 if temporal and iteration > 0:
                     w._temporal_next_sweep(idt)
-                if self._island_schedule is None:
-                    w._partitioner.begin_sweep()
-                w._singleworld_head_plus_tail_sweep(
-                    iterate_head, iterate_fused, idt, island_schedule=self._island_schedule
-                )
+                w._partitioner.begin_sweep()
+                w._singleworld_head_plus_tail_sweep(iterate_head, iterate_fused, idt)
                 if direct is not None and direct.enabled:
                     # Every temporal sweep is a contact substep whose motion enters the
                     # integrated positions, so each one carries the joint recovery bias.
@@ -114,9 +95,8 @@ class SingleWorldDispatcher:
         if w._regular_pgs_active_this_step and w._active_velocity_iterations > 0:
             _, _, _, _, relax_head, relax_fused = w._singleworld_kernels()
             for _ in range(w._active_velocity_iterations):
-                if self._island_schedule is None:
-                    w._partitioner.begin_sweep()
-                w._singleworld_head_plus_tail_sweep(relax_head, relax_fused, idt, island_schedule=self._island_schedule)
+                w._partitioner.begin_sweep()
+                w._singleworld_head_plus_tail_sweep(relax_head, relax_fused, idt)
                 if direct is not None and direct.enabled:
                     direct.solve(use_bias=False)
                     direct.resolve_bounded_drives(idt, use_bias=False)
