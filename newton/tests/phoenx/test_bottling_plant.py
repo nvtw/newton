@@ -15,7 +15,7 @@ import warp as wp
 import newton
 from newton.examples.phoenx._bottling_control import _Belt, _belt_speeds, _seal_cases, _target_coordinates
 from newton.examples.phoenx._bottling_fleet import FleetController, _Transfer
-from newton.examples.phoenx._bottling_infeed import BottleSupply, StandingQueue
+from newton.examples.phoenx._bottling_infeed import BottleSupply, InfeedController, StandingQueue
 from newton.examples.phoenx._bottling_io import (
     _CASE_PHOTOEYE_BATCH_SIZE,
     _PHOTOEYE_BATCH_SIZE,
@@ -86,6 +86,31 @@ class TestBottlingPlant(unittest.TestCase):
             solver.collide(state, contacts, dt=1.0 / 120.0)
             solver.step(state, state, None, contacts, 1.0 / 120.0)
         return scene, state, np.asarray(scene.bottle_bodies[1:]), capture.graph
+
+    def test_accumulation_table_feeds_the_ifm_with_its_drive(self):
+        """Run the IFM's feed with its infeed drive and stop it for a standing mass at PE-A1."""
+        infeed = SimpleNamespace(
+            sensor_slices={"PE-A1": slice(0, 2)},
+            zone_eyes={"line": 2, "pool": 0},
+            zone_monitor={"line": StandingQueue(), "pool": StandingQueue()},
+            zone_speed={"line": 0.0, "pool": 0.0},
+        )
+        hits = np.zeros(4, dtype=bool)
+        speeds = []
+        for frame in range(6 * 60):
+            time = frame / 60.0
+            # A moving mass passes PE-A1 for 3 s; then it stands while M1 is stopped.
+            moving = time < 3.0
+            hits[0], hits[1] = True, (frame // 4) % 2 == 0 if moving else True
+            InfeedController.update_zones(infeed, time, hits, 0.5 if moving else 0.0)
+            speeds.append((infeed.zone_speed["pool"], infeed.zone_speed["line"]))
+        speeds = np.asarray(speeds)
+        # The table follows the half-speed infeed drive through its 1 s ramp,
+        # then stops with M1 and stays stopped while the mass at PE-A1 stands.
+        np.testing.assert_allclose(speeds[60:180, 0], 0.5)
+        np.testing.assert_allclose(speeds[250:, 0], 0.0)
+        # A zone with its own clear eye runs at full speed.
+        np.testing.assert_allclose(speeds[60:, 1], 1.0)
 
     def test_feed_zone_stops_only_for_a_standing_queue(self):
         """Keep a feed running past a dense moving file and stop it for a standing queue."""

@@ -294,11 +294,12 @@ class InfeedController:
                 directions.append(np.asarray(ray["direction"]) @ matrix[:3, :3])
                 distances.append(ray["distance"])
             self.sensor_slices[name] = slice(start, len(origins))
-        # Process feed zones watch their own body and neck beams.
+        # Process feed zones watch their own body and neck beams. A zone without
+        # an eye feeds the IFM and uses its permit eye PE-A1 (body, neck).
         self.zone_eyes = {}
         for name, (_, eye) in plant.scene.metadata.get("process_zones", {}).items():
-            self.zone_eyes[name] = len(origins)
-            for origin, direction, distance in eye:
+            self.zone_eyes[name] = self.sensor_slices["PE-A1"].start if eye is None else len(origins)
+            for origin, direction, distance in eye or ():
                 origins.append(np.asarray(origin))
                 directions.append(np.asarray(direction))
                 distances.append(distance)
@@ -369,12 +370,7 @@ class InfeedController:
         )
         for channel, drive, nominal in self.belt_records:
             multipliers[channel] = output["speeds"][drive] / nominal
-        # A process feed zone stops while its eye has seen a standing queue for
-        # 1.5 s: body beam blocked, neck beam unchanged. Its drive ramps like a VFD.
-        for name, ray in self.zone_eyes.items():
-            stop = self.zone_monitor[name].update(time, hits[ray], hits[ray + 1])
-            step = (1.0 / 60.0) / _ZONE_RAMP
-            self.zone_speed[name] = float(np.clip(self.zone_speed[name] + (-step if stop else step), 0.0, 1.0))
+        self.update_zones(time, hits, output["speeds"]["M1"] / self.interface["speeds_mps"]["A_S"])
         for name, channel in self.lane_channels.items():
             command = commands[name]
             if command["packer_backlog"] or not command["packer_ready"]:
@@ -389,6 +385,22 @@ class InfeedController:
         self.plc.events.clear()
         if len(self.plc.history) > 2000:
             del self.plc.history[:1000]
+
+    def update_zones(self, time, hits, m1):
+        """Run each process feed zone unless its eye has seen a standing queue for 1.5 s.
+
+        A standing queue blocks the body beam and leaves the neck beam
+        unchanged. The zone that feeds the IFM watches PE-A1 and runs with the
+        IFM's infeed drive at ``m1`` of its nominal speed, so it never packs
+        its field into the infeed faster than the infeed carries it. Zone
+        drives ramp like VFDs.
+        """
+        permit = self.sensor_slices["PE-A1"].start
+        step = (1.0 / 60.0) / _ZONE_RAMP
+        for name, ray in self.zone_eyes.items():
+            stop = self.zone_monitor[name].update(time, hits[ray], hits[ray + 1])
+            target = 0.0 if stop else (m1 if ray == permit else 1.0)
+            self.zone_speed[name] = float(np.clip(target, self.zone_speed[name] - step, self.zone_speed[name] + step))
 
     def simulate(self):
         control = self.plant.control

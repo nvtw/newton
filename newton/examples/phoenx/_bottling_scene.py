@@ -24,7 +24,6 @@ import newton.usd
 from newton._src.solvers.phoenx.materials import CombineMode
 from newton.examples.phoenx._bottling_dispenser import disable_owned_proxies, prepare_dispensers
 from newton.examples.phoenx._bottling_process import (
-    IFM_ENTRY_SPEED_RATIO,
     IFM_RECEIVING_BELT,
     PROCESS_BOTTLES,
     add_filling_bottles,
@@ -650,15 +649,6 @@ def load_plant(
         # Newton rotates and scales vertex velocities. Undo the shape transform
         # so the authored speed remains in metres per second in the body frame.
         speeds = np.asarray(linear) + np.cross(np.asarray(angular), points)
-        if process_path is not None and belt_label.startswith("/Plant/Line/IFM/Modules/IFM_A/Belts/S"):
-            belt_pose, _ = transform(cache.GetLocalToWorldTransform(stage.GetPrimAtPath(belt_label)))
-            axis = np.asarray(wp.quat_to_matrix(belt_pose.q)).reshape(3, 3)[0]
-            leading_edge = process_path[-1, 0]
-            distance = points @ axis + belt_pose.p[0] - leading_edge
-            # Accelerate the receiving strands at the pool transfer. The
-            # downstream half returns to the source PLC's nominal speed.
-            ratio = np.interp(distance, (0.0, 0.748, 1.496), (IFM_ENTRY_SPEED_RATIO, IFM_ENTRY_SPEED_RATIO, 1.0))
-            speeds *= ratio[:, None]
         speeds = (speeds @ rotation) / np.asarray(scale)
         scene.belts.append((mesh, speeds.astype(np.float32), belt_label))
         return mesh
@@ -996,9 +986,7 @@ def load_plant(
     case_layouts = {}
     if process_path is not None:
         receiving_belt = nominal.get(IFM_RECEIVING_BELT)
-        inlet_speed = (
-            0.14 if receiving_belt is None else IFM_ENTRY_SPEED_RATIO * float(np.linalg.norm(receiving_belt[0]))
-        )
+        inlet_speed = 0.1 if receiving_belt is None else float(np.linalg.norm(receiving_belt[0]))
         add_filling_transport(scene, process_path, motor_off=motor_off, layout=layout, inlet_speed=inlet_speed)
         add_filling_bottles(scene, process_path, motor_off=motor_off, layout=layout)
     for instancer in instancers:

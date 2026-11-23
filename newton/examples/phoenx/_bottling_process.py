@@ -43,7 +43,6 @@ _POOL_STOCK = 1000  # bottles held by the accumulation table in production
 # m above the deck, from the IFM's RailsOuter colliders that continue the neck.
 _GUARD_BANDS = ((0.018, 0.043), (0.088, 0.113))
 _EYE = (0.065, 0.19)  # m above the deck, body and neck beams of the IFM's inlet eye
-IFM_ENTRY_SPEED_RATIO = 1.4
 IFM_RECEIVING_BELT = "/Plant/Line/IFM/Modules/IFM_A/Belts/S2"
 
 
@@ -296,8 +295,8 @@ def add_filling_transport(scene, path, *, motor_off, layout=None, inlet_speed=No
     With ``layout`` (see :func:`wet_end_layout`), the route's final straight
     carries packed beds over the pasteuriser tables and the accumulation
     table. The closed tunnel between the pasteuriser tables is
-    :class:`PasteuriserTunnel`. The accumulation table runs at the IFM entry
-    speed ``inlet_speed``.
+    :class:`PasteuriserTunnel`. The accumulation table runs with the IFM infeed
+    drive at ``inlet_speed``.
     """
     builder = scene.builder
     length = np.r_[0.0, np.cumsum(np.linalg.norm(np.diff(path, axis=0), axis=1))]
@@ -399,7 +398,7 @@ def add_filling_transport(scene, path, *, motor_off, layout=None, inlet_speed=No
 
     _, filer = _add_table(scene, "PasteuriserOutfeed", combined, outlet, outfeed_speed, inflow=0.0, split=chute, **cfg)
     pool = layout["pool"]
-    _add_table(
+    (table,) = _add_table(
         scene, "AccumulationTable", pool, outlet, lambda x: np.full_like(x, inlet_speed), inflow=guide_width, **cfg
     )
 
@@ -409,8 +408,10 @@ def add_filling_transport(scene, path, *, motor_off, layout=None, inlet_speed=No
     # moving file, stays unchanged. The eyes sit on the tables' moving belts,
     # so a stopped feed cannot hold its own eye. A full table therefore stops
     # its feed instead of letting the belts slip under a queue that presses
-    # into it. The accumulation table itself runs on and presses its field
-    # into the IFM, which throttles it.
+    # into it. The accumulation table feeds the IFM at the IFM's own infeed
+    # speed and follows its drive M1, so it never packs its field into the
+    # infeed faster than the infeed carries it, and it waits for the IFM's
+    # permit eye PE-A1, so it never presses its field into a full infeed.
     def eye(x, half):
         start = (x, outlet[1] - half - 0.01, outlet[2])
         return [((start[0], start[1], start[2] + height), (0.0, 1.0, 0.0), 2.0 * half + 0.02) for height in _EYE]
@@ -419,6 +420,7 @@ def add_filling_transport(scene, path, *, motor_off, layout=None, inlet_speed=No
         "infeed_line": (zones[0], eye(infeed[0][0] + 0.15, infeed[1][0])),
         # The single filer stops with the file it feeds.
         "pool_line": (zones[1] + [filer], eye(pool[0][0] + 0.1, guide_width + 0.02)),
+        "pool": ([table], None),
     }
     scene.metadata["process_handoff"] = (outlet, outlet[0] - pool[0][0], pool[1].max() + 0.03)
     scene.metadata["process_tunnel"] = {
