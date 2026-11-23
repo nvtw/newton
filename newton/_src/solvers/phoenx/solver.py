@@ -1282,6 +1282,7 @@ class SolverPhoenX(SolverBase):
             contact_chunk_size=contact_chunk_size,
             device=self.device,
         )
+        self._bind_model_gravity()
         if getattr(getattr(model, "_collision_pipeline", None), "_rigid_contact_surface_velocity", False):
             self.world._enable_contact_surface_velocity()
         if dynamic_capacity is not None:
@@ -2276,6 +2277,18 @@ class SolverPhoenX(SolverBase):
             return model.gravity.numpy()
         return np.asarray([[0.0, 0.0, -9.81]], dtype=np.float32)
 
+    def _bind_model_gravity(self) -> None:
+        """Read gravity from ``model.gravity`` itself, as the reduced paths do.
+
+        :meth:`Model.set_gravity` writes that array in place, so the solve
+        and any captured graph see the new value without a reallocation.
+        """
+        gravity = self.model.gravity
+        if gravity is not None:
+            self.world.gravity = gravity
+        else:
+            self.world.gravity = wp.array(self._read_model_gravity_np(self.model), dtype=wp.vec3f, device=self.device)
+
     def _launch_init_phoenx_bodies(self, model) -> None:
         """Refresh the PhoenX :class:`BodyContainer` from a Newton
         :class:`Model`. Same kernel + inputs/outputs at ``__init__`` and
@@ -2349,7 +2362,7 @@ class SolverPhoenX(SolverBase):
         if cable_rest_changed and self._direct_equality_system is not None:
             self._direct_equality_system.refresh_cable_rest_state()
         if flags & int(ModelFlags.MODEL_PROPERTIES):
-            self.world.gravity = wp.array(self._read_model_gravity_np(self.model), dtype=wp.vec3f, device=self.device)
+            self._bind_model_gravity()
         # Single body refresh kernel covers both BODY_PROPERTIES and
         # BODY_INERTIAL_PROPERTIES. Maximal-coordinate armature lives in the
         # rebuilt joint rows above and does not mutate body inertia.
