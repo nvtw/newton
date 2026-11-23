@@ -1335,6 +1335,39 @@ def Xform "Plant" {
             stopped_scene = load_plant(root, visuals=False, motor_off=True)
             np.testing.assert_array_equal(stopped_scene.belts[0][1], 0.0)
 
+    def test_optix_capacity_covers_the_plant(self):
+        """Size OptiX instances for the plant's shapes in both modes and refuse a capacity that is too small."""
+        from pxr import Usd, UsdGeom, UsdPhysics
+
+        # Shapes the full plant builds with visuals (example log, 2026-11-23).
+        logged = {False: 276_775, True: 592_302}
+        parser = Example.create_parser
+        for filling, shapes in logged.items():
+            flag = ["--filling-room-physics"] if filling else []
+            self.assertGreaterEqual(parser().parse_args(flag).optix_max_instances, 1.2 * shapes)
+        # A capacity the caller chooses stays, in either order.
+        for argv in (
+            ["--filling-room-physics", "--optix-max-instances", "123"],
+            ["--optix-max-instances", "123", "--filling-room-physics"],
+        ):
+            self.assertEqual(parser().parse_args(argv).optix_max_instances, 123)
+
+        with tempfile.TemporaryDirectory() as directory, wp.ScopedDevice("cpu"):
+            root = Path(directory)
+            path = root / "scenarios/line_sim/line_sim.usda"
+            path.parent.mkdir(parents=True)
+            stage = Usd.Stage.CreateNew(str(path))
+            UsdGeom.SetStageMetersPerUnit(stage, 1.0)
+            UsdGeom.SetStageUpAxis(stage, "Z")
+            for label in ("/Plant/Line/A", "/Plant/Line/B"):
+                cube = UsdGeom.Cube.Define(stage, label)
+                cube.CreateSizeAttr(0.2)
+                UsdPhysics.CollisionAPI.Apply(cube.GetPrim())
+            stage.GetRootLayer().Save()
+            argv = ["--asset-root", str(root), "--viewer", "optix", "--no-controllers", "--motor-off"]
+            with self.assertRaisesRegex(ValueError, "shapes, more than --optix-max-instances"):
+                Example(ViewerNull(), parser().parse_args([*argv, "--optix-max-instances", "1"]))
+
     def test_authored_collision_groups(self):
         """Keep vehicle obstacles while honoring the line's USD exclusions."""
         from pxr import Usd, UsdGeom, UsdPhysics

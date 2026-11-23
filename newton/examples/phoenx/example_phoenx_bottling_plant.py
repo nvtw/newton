@@ -59,6 +59,23 @@ from newton.solvers import SolverPhoenX
 _PRODUCTION_SECONDS = 330.0  # s, the bottling benchmark's default run length
 
 
+# OptiX allocates an instance for every shape, hidden colliders included.
+# With visuals the plant builds 276,775 shapes, and 592,302 with the filling
+# room's packed beds (measured 2026-11-23); each capacity leaves headroom.
+OPTIX_INSTANCES = {False: 400_000, True: 800_000}
+
+
+class _FillingRoomAction(argparse.BooleanOptionalAction):
+    """Toggle filling-room physics and size the OptiX instance capacity for it."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        super().__call__(parser, namespace, values, option_string)
+        enabled = bool(getattr(namespace, self.dest))
+        # Keep a capacity the caller chose; replace only the other mode's default.
+        if getattr(namespace, "optix_max_instances", None) == OPTIX_INSTANCES[not enabled]:
+            namespace.optix_max_instances = OPTIX_INSTANCES[enabled]
+
+
 def _fleet_direct_contact_mask(joint_labels: list[str], exact: np.ndarray) -> np.ndarray | None:
     """Select fleet mechanisms for projected contact solves."""
     if not np.any(exact):
@@ -220,6 +237,11 @@ class Example:
         if args.temporal_iterations and args.joint_mode == "maximal_pgs" and not args.motor_off:
             local_drives = _local_fixture_drives(self.scene.builder)
         self.model = self.scene.builder.finalize(skip_validation_inertia=not args.correct_inertia)
+        if args.viewer == "optix" and self.model.shape_count > args.optix_max_instances:
+            raise ValueError(
+                f"The plant has {self.model.shape_count} shapes, more than --optix-max-instances "
+                f"{args.optix_max_instances} OptiX instances"
+            )
         initial_state = self.model.state()
         newton.eval_ik(self.model, initial_state, self.model.joint_q, self.model.joint_qd)
         coordinates = self.model.joint_q.numpy()
@@ -661,7 +683,7 @@ class Example:
     def create_parser():
         parser = newton.examples.create_parser()
         # OptiX also allocates instances for hidden collision geometry.
-        parser.set_defaults(viewer="optix", optix_max_instances=400_000)
+        parser.set_defaults(viewer="optix", optix_max_instances=OPTIX_INSTANCES[False])
         parser.add_argument(
             "--asset-root",
             default=newton.examples.get_local_asset_directory("bottling_plant"),
@@ -698,7 +720,7 @@ class Example:
         parser.add_argument("--diagnostics", action="store_true")
         parser.add_argument(
             "--filling-room-physics",
-            action=argparse.BooleanOptionalAction,
+            action=_FillingRoomAction,
             default=False,
             help="Enable physical bottle transport from the depalletiser through the filling room to the IFM.",
         )
