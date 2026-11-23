@@ -12,6 +12,7 @@ PhoenX slot 0 is the static world anchor; pass ``substeps=1`` to substep outside
 from __future__ import annotations
 
 import fnmatch
+import math
 import warnings
 from collections.abc import Sequence
 
@@ -401,6 +402,7 @@ class SolverPhoenX(SolverBase):
         colored_contact_rows: bool = False,
         colored_singleton_contact_lanes: bool | None = None,
         enable_column_timers: bool = False,
+        length_scale: float | None = None,
         sor_boost: float = 1.0,
         sleeping_velocity_threshold: float = 0.0,
         sleeping_frames_required: int = 30,
@@ -589,6 +591,11 @@ class SolverPhoenX(SolverBase):
                 selects automatically; ``False`` disables this optimization.
             enable_column_timers: Collect per-constraint-column timing
                 counters for diagnostics. Defaults to ``False``.
+            length_scale: Scene length units per metre [1/m], which scale the contact
+                rows' few metric constants (push-out speed cap, friction slop and
+                engagement gaps). ``None`` infers it from the magnitude of
+                ``model.gravity`` over standard gravity, so scenes authored in
+                centimetres or millimetres need nothing; zero gravity infers 1.
             sor_boost: Per-impulse SOR factor. 1.0 = vanilla PGS;
                 1.1-1.5 typical; ``>= 2.0`` diverges.
             sleeping_velocity_threshold: Per-island sleep cutoff
@@ -1283,6 +1290,9 @@ class SolverPhoenX(SolverBase):
             device=self.device,
         )
         self._bind_model_gravity()
+        self.world._set_contact_length_scale(
+            self._infer_length_scale(self._read_model_gravity_np(model)) if length_scale is None else length_scale
+        )
         if getattr(getattr(model, "_collision_pipeline", None), "_rigid_contact_surface_velocity", False):
             self.world._enable_contact_surface_velocity()
         if dynamic_capacity is not None:
@@ -2281,6 +2291,21 @@ class SolverPhoenX(SolverBase):
         if model.gravity is not None:
             return model.gravity.numpy()
         return np.asarray([[0.0, 0.0, -9.81]], dtype=np.float32)
+
+    @staticmethod
+    def _infer_length_scale(gravity: np.ndarray) -> float:
+        """Scene length units per metre: the power of ten that relates the gravity magnitude to
+        standard gravity, as in scenes authored in metres, centimetres or millimetres.
+
+        Returns 1 without gravity or when the magnitude is no decimal multiple of standard
+        gravity, such as another planet's gravity in metres.
+        """
+        magnitude = float(np.linalg.norm(np.asarray(gravity, dtype=np.float64).reshape(-1, 3), axis=1).max(initial=0.0))
+        if magnitude <= 0.0:
+            return 1.0
+        exponent = math.log10(magnitude / 9.80665)
+        decade = round(exponent)
+        return 10.0**decade if abs(exponent - decade) < math.log10(1.2) else 1.0
 
     def _bind_model_gravity(self) -> None:
         """Read gravity from ``model.gravity`` itself, as the reduced paths do.

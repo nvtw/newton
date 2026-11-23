@@ -215,6 +215,9 @@ class ContactContainer:
     spring_sweeps: wp.int32
     spring_relax: wp.int32
     spring_omega_dt: wp.float32
+    #: Scene length units per metre. Scales the contact rows' few metric
+    #: constants (push-out speed cap, friction slop and engagement gaps).
+    length_scale: wp.float32
 
 
 @wp.func
@@ -781,6 +784,7 @@ def contact_container_zeros(
     spring (:func:`contact_container_set_sweeps`)."""
     n = max(1, int(rigid_contact_max))
     cc = ContactContainer()
+    cc.length_scale = 1.0
     cc.impulses = wp.zeros((CC_IMPULSE_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
     cc.prev_impulses = wp.zeros((CC_IMPULSE_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
     cc.lambdas = wp.zeros(contact_tile_shape(CC_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
@@ -806,6 +810,7 @@ def contact_solve_container_zeros(
     """Allocate only the rows consumed by rigid contact iterate/relax."""
     n = max(1, int(rigid_contact_max))
     cc = ContactContainer()
+    cc.length_scale = 1.0
     cc.impulses = wp.zeros((CC_IMPULSE_DWORDS_PER_CONTACT, n), dtype=wp.float32, device=device)
     cc.prev_impulses = wp.zeros((1, 1), dtype=wp.float32, device=device)
     cc.prev_lambdas = wp.zeros((1, 1), dtype=wp.float32, device=device)

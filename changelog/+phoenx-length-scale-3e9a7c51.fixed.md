@@ -1,0 +1,1 @@
+Fix PhoenX contacts in scenes authored in centimetres or millimetres: the push-out speed cap and the friction anchor lengths now follow the scene's length unit, inferred from gravity or set with the new ``length_scale`` solver option.

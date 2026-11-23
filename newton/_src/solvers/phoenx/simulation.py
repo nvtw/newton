@@ -4639,6 +4639,15 @@ class PhoenXWorld:
         self._static_contact_keys = wp.empty(2 * columns, dtype=wp.int64, device=self.device)
         self._static_contact_values = wp.empty(2 * columns, dtype=int, device=self.device)
 
+    def _set_contact_length_scale(self, length_scale: float) -> None:
+        """Set the scene length units per metre used by the contact rows' metric constants."""
+        if not math.isfinite(length_scale) or length_scale <= 0.0:
+            raise ValueError(f"length_scale must be finite and positive, got {length_scale}")
+        for name in ("_contact_container", "_contact_container_solve"):
+            container = getattr(self, name, None)
+            if container is not None:
+                container.length_scale = float(length_scale)
+
     def _set_angular_friction(self, coefficients: np.ndarray) -> None:
         """Solve torsional and rolling friction with per-shape ``(mu_torsional, mu_rolling)`` [m].
 

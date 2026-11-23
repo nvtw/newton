@@ -189,19 +189,27 @@ __all__ = [
 
 #: Maximum speed [m/s] added by penetration recovery.
 _CONTACT_MAX_PUSH_SPEED = wp.constant(wp.float32(2.0))
+#: Friction anchors: largest drift [m] the positional bias corrects, drift [m]
+#: past which the anchor follows the contact, and the gap [m] below which a
+#: speculative row already carries friction.
+_FRICTION_SLOP = wp.constant(wp.float32(0.001))
+_FRICTION_SLIP = wp.constant(wp.float32(0.002))
+_FRICTION_GAP = wp.constant(wp.float32(0.002))
 
 
 @wp.func
-def contact_normal_bias(gap: wp.float32, idt: wp.float32, bias_rate: wp.float32) -> wp.float32:
-    """Normal velocity bias [m/s] of a contact row with signed ``gap`` [m].
+def contact_normal_bias(
+    gap: wp.float32, idt: wp.float32, bias_rate: wp.float32, length_scale: wp.float32
+) -> wp.float32:
+    """Normal velocity bias of a contact row with signed ``gap``, in scene units.
 
     A separated (speculative) row admits the approach speed that closes the
     gap within the substep; a penetrating row pushes out at the soft-contact
-    rate.
+    rate. ``length_scale`` is the scene's length units per metre.
     """
     if gap > wp.float32(0.0):
         return gap * idt
-    return wp.max(gap * bias_rate, -_CONTACT_MAX_PUSH_SPEED)
+    return wp.max(gap * bias_rate, -_CONTACT_MAX_PUSH_SPEED * length_scale)
 
 
 # The uncapped default contact hertz is Nyquist-clamped whenever idt <= 2*hertz.
@@ -396,7 +404,7 @@ def rebase_ordinary_contact_relax_kernel(
                 moved2 = wp.quat_rotate(rotation2, r2) - r2 - shift2
                 gap = cc.gap[k] + wp.dot(moved2 - moved1, cc_get_normal(cc, k))
                 cc.gap[k] = gap
-                cc_set_bias(cc, k, contact_normal_bias(gap, idt, bias_rate))
+                cc_set_bias(cc, k, contact_normal_bias(gap, idt, bias_rate, cc.length_scale))
         if not rebase_levers:
             continue
         factor1 = wp.float32(1.0)
@@ -511,8 +519,8 @@ def _make_contact_prepare_for_iteration_at(
         # Friction bias + speed caps. Scale-invariant; numeric caps would
         # need scaling for scene_scale >> 1.
         friction_bias_factor = wp.float32(0.08)
-        friction_slop = wp.float32(0.001)
-        slip_threshold = wp.float32(0.002)
+        friction_slop = _FRICTION_SLOP * cc.length_scale
+        slip_threshold = _FRICTION_SLIP * cc.length_scale
 
         mu_s_col = contact_get_friction(constraints, cid)
 
@@ -811,8 +819,10 @@ def _make_contact_prepare_for_iteration_at(
             # speculative contact from activating during later substeps.
             solver_gap = effective_gap
             use_start_gap = _contact_uses_stale_anchor_start_gap(contacts, k)
-            friction_inactive = (use_start_gap and solver_gap > wp.float32(0.0)) or effective_gap > wp.float32(0.002)
-            bias_val = contact_normal_bias(effective_gap, idt, bias_rate)
+            friction_inactive = (
+                use_start_gap and solver_gap > wp.float32(0.0)
+            ) or effective_gap > _FRICTION_GAP * cc.length_scale
+            bias_val = contact_normal_bias(effective_gap, idt, bias_rate, cc.length_scale)
             if cc.gap.shape[0] > 0:
                 cc.gap[k] = effective_gap
 
@@ -1738,9 +1748,9 @@ def _make_contact_iterate_at(
                 eff_n = cc_get_eff_n(cc, k)
                 bias_val = cc_get_bias(cc, k)
                 speculative_bias = bias_val
-                friction_in_range = speculative_bias <= idt * wp.float32(0.002)
+                friction_in_range = speculative_bias <= idt * _FRICTION_GAP * cc.length_scale
                 if cc.gap.shape[0] > 0:
-                    friction_in_range = cc.gap[k] <= wp.float32(0.002)
+                    friction_in_range = cc.gap[k] <= _FRICTION_GAP * cc.length_scale
                 bias_t1_val = wp.float32(0.0)
                 bias_t2_val = wp.float32(0.0)
                 if not normal_only:

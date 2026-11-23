@@ -83,7 +83,7 @@ def _advance_temporal_gap(
         relative = v2 + wp.cross(w2, cc_get_r1(cc, k)) - v1 - wp.cross(w1, cc_get_r0(cc, k))
         gap = gap + advance_dt * wp.dot(relative, cc_get_normal(cc, k))
         cc.gap[k] = gap
-    bias = contact_normal_bias(gap, idt, bias_rate)
+    bias = contact_normal_bias(gap, idt, bias_rate, cc.length_scale)
     cc_set_bias(cc, k, bias)
     return gap, bias
 
