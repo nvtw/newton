@@ -19,6 +19,10 @@ from newton._src.solvers.phoenx.articulations.fixed_pattern_llt import (
     GROUPED_RHS_ITEMS_PER_TASK,
 )
 from newton._src.solvers.phoenx.body import MOTION_KINEMATIC, BodyContainer, mat33_from_sym6
+from newton._src.solvers.phoenx.constraints.constraint_block import (
+    BLOCK_LAMBDA_INF,
+    block_solve_accumulated_inverse_bounded_1,
+)
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
     ContactColumnContainer,
     contact_get_body1,
@@ -54,10 +58,7 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     cc_set_tangent1_lambda,
     cc_set_tangent2_lambda,
 )
-from newton._src.solvers.phoenx.constraints.contact_projection import (
-    _contact_project_friction_metric_float32,
-    contact_project_normal_velocity_update,
-)
+from newton._src.solvers.phoenx.constraints.contact_projection import _contact_project_friction_metric_float32
 from newton._src.solvers.phoenx.helpers.scan_and_sort import sort_variable_length_int64
 from newton._src.solvers.phoenx.islands.island_builder import UnionFindIslandBuilder
 
@@ -208,19 +209,37 @@ def _relax_direct_contact_point(
     vanishes exactly when the unsplit Gauss-Seidel update does. Returns the
     impulse change applied to side 1.
     """
+    # Load every row of the point before the first store: the stores alias the
+    # contact arrays, so loads after them would wait for each round trip in turn.
     normal = cc_get_normal(contacts, contact)
     tangent0 = cc_get_tangent1(contacts, contact)
-    tangent1 = wp.cross(normal, tangent0)
     r0 = cc_get_r0(contacts, contact)
     r1 = cc_get_r1(contacts, contact)
+    normal_mobility = response.mobility[0, contact]
+    bias = cc_get_bias(contacts, contact)
+    eff_n = cc_get_eff_n(contacts, contact)
+    pd_eff = cc_get_pd_eff_soft(contacts, contact)
+    pd_gamma = cc_get_pd_gamma(contacts, contact)
+    pd_bias = cc_get_pd_bias(contacts, contact)
+    surface_target = cc_get_surface_target(contacts, contact)
+    lambda_n_old = cc_get_normal_lambda(contacts, contact)
+    coupling0 = response.mobility[3, contact]
+    coupling1 = response.mobility[4, contact]
+    bias_t1 = cc_get_bias_t1(contacts, contact)
+    bias_t2 = cc_get_bias_t2(contacts, contact)
+    cosine = response.mobility[6, contact]
+    sine = response.mobility[7, contact]
+    mobility0 = response.mobility[8, contact]
+    mobility1 = response.mobility[9, contact]
+    tangent_old = wp.vec2f(cc_get_tangent1_lambda(contacts, contact), cc_get_tangent2_lambda(contacts, contact))
+
+    tangent1 = wp.cross(normal, tangent0)
     relative_velocity = (
         wp.spatial_top(velocity_body1)
         + wp.cross(wp.spatial_bottom(velocity_body1), r1)
         - wp.spatial_top(velocity_body0)
         - wp.cross(wp.spatial_bottom(velocity_body0), r0)
     )
-    normal_mobility = response.mobility[0, contact]
-    bias = cc_get_bias(contacts, contact)
     speculative = bias > wp.float32(0.0)
     if not use_bias:
         bias = wp.float32(0.0)
@@ -229,7 +248,7 @@ def _relax_direct_contact_point(
         # Enforcing the full recovery speed along a nearly blocked normal
         # turns small overlaps into large joint motions. Physical velocity
         # impulses below still use the constrained effective mass.
-        bias *= wp.min(wp.float32(1.0), cc_get_eff_n(contacts, contact) / normal_mobility)
+        bias *= wp.min(wp.float32(1.0), eff_n / normal_mobility)
     if not use_bias and speculative:
         return wp.vec3(0.0)
     row_mass_coeff = mass_coeff
@@ -237,53 +256,48 @@ def _relax_direct_contact_point(
     if speculative or not use_bias:
         row_mass_coeff = wp.float32(1.0)
         row_impulse_coeff = wp.float32(0.0)
-    pd_eff = cc_get_pd_eff_soft(contacts, contact)
-    pd_gamma = cc_get_pd_gamma(contacts, contact)
-    pd_bias = cc_get_pd_bias(contacts, contact)
     if pd_eff > wp.float32(0.0):
         pd_eff = wp.float32(0.0)
         if normal_mobility > wp.float32(1.0e-12):
             pd_eff = wp.float32(1.0) / ((wp.float32(1.0) / normal_mobility + pd_gamma) * split)
-    surface_target = cc_get_surface_target(contacts, contact)
-    normal_impulse = -cc_get_normal_lambda(contacts, contact) * normal
+    normal_impulse = -lambda_n_old * normal
+    normal_load = wp.float32(0.0)
     if normal_mobility > wp.float32(1.0e-12):
-        normal_impulse = contact_project_normal_velocity_update(
-            contacts,
-            contact,
-            normal,
-            wp.dot(relative_velocity, normal) + surface_target[2],
-            normal_mobility / split,
-            bias,
-            row_mass_coeff,
-            row_impulse_coeff,
+        # The normal row of :func:`contact_project_normal_velocity_update`.
+        inverse_response = normal_mobility / split
+        rhs = wp.dot(relative_velocity, normal) + surface_target[2] + bias
+        normal_mass_coeff = row_mass_coeff
+        normal_impulse_coeff = row_impulse_coeff
+        if pd_eff > wp.float32(0.0):
+            inverse_response = pd_eff
+            rhs = wp.dot(relative_velocity, normal) + surface_target[2] - pd_bias + pd_gamma * lambda_n_old
+            normal_mass_coeff = wp.float32(1.0)
+            normal_impulse_coeff = wp.float32(0.0)
+        update = block_solve_accumulated_inverse_bounded_1(
+            inverse_response,
+            rhs,
+            lambda_n_old,
+            normal_mass_coeff,
+            normal_impulse_coeff,
             sor_boost,
-            pd_eff,
-            pd_gamma,
-            pd_bias,
+            wp.float32(0.0),
+            BLOCK_LAMBDA_INF,
         )
-    else:
-        cc_set_normal_lambda(contacts, contact, wp.float32(0.0))
+        normal_load = update.lambda_new
+        normal_impulse = update.delta * normal
     normal_delta = wp.dot(normal_impulse, normal)
-    normal_load = cc_get_normal_lambda(contacts, contact)
-    rhs0 = (
-        wp.dot(relative_velocity, tangent0) + surface_target[0] + split * response.mobility[3, contact] * normal_delta
-    )
-    rhs1 = (
-        wp.dot(relative_velocity, tangent1) + surface_target[1] + split * response.mobility[4, contact] * normal_delta
-    )
+    rhs0 = wp.dot(relative_velocity, tangent0) + surface_target[0] + split * coupling0 * normal_delta
+    rhs1 = wp.dot(relative_velocity, tangent1) + surface_target[1] + split * coupling1 * normal_delta
     if use_bias:
-        rhs0 += cc_get_bias_t1(contacts, contact)
-        rhs1 += cc_get_bias_t2(contacts, contact)
+        rhs0 += bias_t1
+        rhs1 += bias_t2
     # Solve the Coulomb disk in the precomputed eigenframe of the tangent
     # inverse mass. The disk is rotation invariant and the diagonal metric
     # needs no float64 fallback for nearly rank-one blocks.
-    cosine = response.mobility[6, contact]
-    sine = response.mobility[7, contact]
-    tangent_old = wp.vec2f(cc_get_tangent1_lambda(contacts, contact), cc_get_tangent2_lambda(contacts, contact))
     tangent_rotated = _contact_project_friction_metric_float32(
-        split * response.mobility[8, contact],
+        split * mobility0,
         wp.float32(0.0),
-        split * response.mobility[9, contact],
+        split * mobility1,
         (cosine * rhs0 + sine * rhs1) * sor_boost,
         (cosine * rhs1 - sine * rhs0) * sor_boost,
         cosine * tangent_old[0] + sine * tangent_old[1],
@@ -295,6 +309,7 @@ def _relax_direct_contact_point(
         cosine * tangent_rotated[0] - sine * tangent_rotated[1],
         sine * tangent_rotated[0] + cosine * tangent_rotated[1],
     )
+    cc_set_normal_lambda(contacts, contact, normal_load)
     cc_set_tangent1_lambda(contacts, contact, tangent_new[0])
     cc_set_tangent2_lambda(contacts, contact, tangent_new[1])
     tangent_delta = tangent_new - tangent_old
