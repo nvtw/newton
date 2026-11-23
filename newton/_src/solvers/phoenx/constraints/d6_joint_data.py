@@ -83,8 +83,13 @@ def build_d6_inequality_data(
     joint_idx_to_cid: np.ndarray,
     joint_friction_model: Literal["hard", "mujoco"] = "hard",
     friction_dof_owned: np.ndarray | None = None,
+    limit_dof_owned: np.ndarray | None = None,
 ) -> tuple[D6JointData, np.ndarray]:
-    """Pack active D6 inequalities without inflating every joint column."""
+    """Pack active D6 inequalities without inflating every joint column.
+
+    ``friction_dof_owned`` and ``limit_dof_owned`` mark DoFs whose friction or
+    bounds an exact mechanism solves instead of these inequality rows.
+    """
     if joint_friction_model not in ("hard", "mujoco"):
         raise ValueError('joint_friction_model must be "hard" or "mujoco"')
     cid_count = max(int(joint_idx_to_cid.max(initial=-1)) + 1, 1)
@@ -114,6 +119,9 @@ def build_d6_inequality_data(
     upper = np.asarray(model.joint_limit_upper.numpy(), dtype=np.float32)
     velocity = np.asarray(model.joint_velocity_limit.numpy(), dtype=np.float32)
     friction = np.asarray(model.joint_friction.numpy(), dtype=np.float32)
+    limit_dof_owned = (
+        np.zeros_like(lower, dtype=bool) if limit_dof_owned is None else np.asarray(limit_dof_owned, dtype=bool)
+    )
     if friction_dof_owned is None:
         friction_dof_owned = np.zeros_like(friction, dtype=bool)
     else:
@@ -179,15 +187,17 @@ def build_d6_inequality_data(
             dof = start + local
             if float(lower[dof]) > float(upper[dof]):
                 continue
-            finite_limit = float(lower[dof]) > -1.0e5 or float(upper[dof]) < 1.0e5
+            # An exact mechanism that owns this bound enforces it as a factored row.
+            limit_owned = bool(limit_dof_owned[dof])
+            finite_limit = not limit_owned and (float(lower[dof]) > -1.0e5 or float(upper[dof]) < 1.0e5)
             speed_limit = float(velocity[dof]) if np.isfinite(velocity[dof]) and 0.0 < velocity[dof] < 1.0e5 else 0.0
             axis_friction = 0.0 if friction_dof_owned[dof] else max(float(friction[dof]), 0.0)
             if not finite_limit and speed_limit == 0.0 and axis_friction == 0.0:
                 continue
             row = int(counts[cid])
             row_axis[cid, row] = local
-            lower_rows[cid, row] = lower[dof]
-            upper_rows[cid, row] = upper[dof]
+            lower_rows[cid, row] = -1.0e10 if limit_owned else lower[dof]
+            upper_rows[cid, row] = 1.0e10 if limit_owned else upper[dof]
             velocity_rows[cid, row] = speed_limit
             friction_rows[cid, row] = axis_friction
             if friction_solref is not None and friction_solimp is not None:

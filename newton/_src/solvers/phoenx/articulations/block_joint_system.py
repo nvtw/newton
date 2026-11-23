@@ -712,6 +712,10 @@ class MixedJointSystem:
         return self.blocks.direct_friction_dof_mask | self.exact.direct_friction_dof_mask
 
     @property
+    def direct_limit_dof_mask(self) -> np.ndarray:
+        return self.blocks.direct_limit_dof_mask | self.exact.direct_limit_dof_mask
+
+    @property
     def has_bounded_drives(self) -> bool:
         return any(part.has_bounded_drives for part in self._parts)
 
@@ -814,8 +818,8 @@ class MixedJointSystem:
             self._forward("resolve_bounded_drives", idt, use_bias=use_bias)
             return
         self._any_bound_flag.zero_()
-        self.blocks._find_new_bounds(idt, self._any_bound_flag)
-        self.exact._find_new_bounds(idt, self._any_bound_flag)
+        self.blocks._find_new_bounds(idt, self._any_bound_flag, use_bias=use_bias)
+        self.exact._find_new_bounds(idt, self._any_bound_flag, use_bias=use_bias)
 
         def correct():
             self.blocks._correct_new_bounds(idt, use_bias=use_bias)

@@ -27,6 +27,17 @@ def _make_body(builder: newton.ModelBuilder) -> int:
     return body
 
 
+def _assert_direct_limits(test: unittest.TestCase, solver, dofs, lower, upper) -> None:
+    """Check that the exact mechanism, not an inequality row, owns these joint bounds."""
+    direct = solver._direct_equality_system
+    np.testing.assert_array_equal(np.flatnonzero(direct.direct_limit_dof_mask), dofs)
+    rows = np.flatnonzero(direct.row_limited.numpy())
+    np.testing.assert_array_equal(np.asarray(direct.topology.row_dof)[rows], dofs)
+    np.testing.assert_allclose(direct.row_limit_lower.numpy()[rows], lower, atol=1.0e-6)
+    np.testing.assert_allclose(direct.row_limit_upper.numpy()[rows], upper, atol=1.0e-6)
+    test.assertEqual(int(solver.world.constraints.d6.row_count.numpy()[0]), 0)
+
+
 def _mode_for(model: newton.Model) -> int:
     solver = newton.solvers.SolverPhoenX(model, substeps=5, joint_mode="maximal_direct")
     return int(solver._joint_constraints.joint_mode.numpy()[0])
@@ -247,11 +258,7 @@ class TestD6DirectDispatch(unittest.TestCase):
         solver = newton.solvers.SolverPhoenX(model, substeps=5, joint_mode="maximal_direct")
 
         self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_GENERIC_D6))
-        data = solver.world.constraints.d6
-        self.assertEqual(int(data.row_count.numpy()[0]), 3)
-        np.testing.assert_array_equal(data.row_axis.numpy()[0, :3], [0, 1, 2])
-        np.testing.assert_allclose(data.lower.numpy()[0, :3], [-1.0, -1.0, -1.0], atol=1.0e-6)
-        np.testing.assert_allclose(data.upper.numpy()[0, :3], [1.0, 1.0, 1.0], atol=1.0e-6)
+        _assert_direct_limits(self, solver, [0, 1, 2], [-1.0, -1.0, -1.0], [1.0, 1.0, 1.0])
 
     def test_angular_two_axis_d6_uses_common_rows_with_limits(self) -> None:
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
@@ -267,11 +274,7 @@ class TestD6DirectDispatch(unittest.TestCase):
         solver = newton.solvers.SolverPhoenX(model, substeps=5, joint_mode="maximal_direct")
 
         self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_GENERIC_D6))
-        data = solver.world.constraints.d6
-        self.assertEqual(int(data.row_count.numpy()[0]), 2)
-        np.testing.assert_array_equal(data.row_axis.numpy()[0, :2], [0, 1])
-        np.testing.assert_allclose(data.lower.numpy()[0, :2], [-0.8, -1.3], atol=1.0e-6)
-        np.testing.assert_allclose(data.upper.numpy()[0, :2], [0.8, 0.5], atol=1.0e-6)
+        _assert_direct_limits(self, solver, [0, 1], [-0.8, -1.3], [0.8, 0.5])
 
     def test_angular_two_axis_d6_limit_row_reacts_to_violation(self) -> None:
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
@@ -295,11 +298,14 @@ class TestD6DirectDispatch(unittest.TestCase):
         state_0.body_q.assign(body_q)
         state_0.body_qd.assign(np.zeros((1, 6), dtype=np.float32))
 
-        state_0.clear_forces()
-        solver.step(state_0, state_1, model.control(), None, 1.0 / 60.0)
+        # An exact mechanism recovers a violated bound at its drift rate.
+        for _ in range(20):
+            state_0.clear_forces()
+            solver.step(state_0, state_1, model.control(), None, 1.0 / 60.0)
+            state_0, state_1 = state_1, state_0
 
-        body_q = state_1.body_q.numpy()[0]
-        body_qd = state_1.body_qd.numpy()[0]
+        body_q = state_0.body_q.numpy()[0]
+        body_qd = state_0.body_qd.numpy()[0]
         angle_x = 2.0 * np.arctan2(float(body_q[3]), float(body_q[6]))
         self.assertAlmostEqual(angle_x, 0.25, delta=5.0e-4)
         self.assertAlmostEqual(float(body_qd[3]), 0.0, delta=1.0e-4)
@@ -330,7 +336,7 @@ class TestD6DirectDispatch(unittest.TestCase):
                     velocity_iterations=1,
                     joint_mode="maximal_direct",
                 )
-                self.assertEqual(int(solver.world.constraints.d6.row_count.numpy()[0]), 1)
+                _assert_direct_limits(self, solver, [0], [-0.1], [0.1])
                 state = model.state()
                 newton.eval_fk(model, model.joint_q, model.joint_qd, state)
                 poses = state.body_q.numpy()
@@ -341,8 +347,10 @@ class TestD6DirectDispatch(unittest.TestCase):
                     poses[0, 0] = 0.25
                 state.body_q.assign(poses)
                 state.body_qd.zero_()
-                state.clear_forces()
-                solver.step(state, state, model.control(), None, 1.0 / 60.0)
+                # An exact mechanism recovers a violated bound at its drift rate.
+                for _ in range(10):
+                    state.clear_forces()
+                    solver.step(state, state, model.control(), None, 1.0 / 60.0)
                 joint_q = wp.zeros_like(model.joint_q)
                 joint_qd = wp.zeros_like(model.joint_qd)
                 newton.eval_ik(model, state, joint_q, joint_qd)
@@ -370,8 +378,7 @@ class TestD6DirectDispatch(unittest.TestCase):
         self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_GENERIC_D6))
         self.assertEqual(int(solver._direct_equality_system.generic_linear_count.numpy()[0]), 3)
         self.assertEqual(int(solver._direct_equality_system.generic_angular_count.numpy()[0]), 2)
-        self.assertEqual(int(solver.world.constraints.d6.row_count.numpy()[0]), 1)
-        self.assertEqual(int(solver.world.constraints.d6.row_axis.numpy()[0, 0]), 0)
+        _assert_direct_limits(self, solver, [0], [-0.25], [0.5])
 
     def test_linear_one_axis_d6_uses_common_rows(self) -> None:
         builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
@@ -385,8 +392,7 @@ class TestD6DirectDispatch(unittest.TestCase):
         self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_GENERIC_D6))
         self.assertEqual(int(solver._direct_equality_system.generic_linear_count.numpy()[0]), 2)
         self.assertEqual(int(solver._direct_equality_system.generic_angular_count.numpy()[0]), 3)
-        self.assertEqual(int(solver.world.constraints.d6.row_count.numpy()[0]), 1)
-        self.assertEqual(int(solver.world.constraints.d6.row_axis.numpy()[0, 0]), 0)
+        _assert_direct_limits(self, solver, [0], [-0.2], [0.3])
 
     def test_two_axis_cartesian_d6_uses_common_rows(self) -> None:
         """Preserve only the two authored Cartesian translation directions."""
@@ -557,7 +563,7 @@ class TestD6DirectDispatch(unittest.TestCase):
         np.testing.assert_allclose(torque, 0.0, atol=2.0e-6, rtol=0.0)
 
     def test_cartesian_d6_finite_limit_pushes_back(self) -> None:
-        """Apply a finite Cartesian limit through the common D6 inequality row."""
+        """Push a violated finite Cartesian limit back through the exact mechanism row."""
         builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0), up_axis=newton.Axis.Z)
         body = _make_body(builder)
         axes = [
@@ -574,7 +580,7 @@ class TestD6DirectDispatch(unittest.TestCase):
             joint_mode="maximal_direct",
         )
         self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_GENERIC_D6))
-        self.assertEqual(int(solver.world._joint_pgs_enabled.numpy()[0]), 1)
+        _assert_direct_limits(self, solver, [0], [-0.1], [0.1])
 
         state_0 = model.state()
         state_1 = model.state()
@@ -585,10 +591,15 @@ class TestD6DirectDispatch(unittest.TestCase):
         state_0.body_qd.zero_()
         state_0.clear_forces()
         solver.step(state_0, state_1, model.control(), None, 1.0 / 60.0)
+        position = float(state_1.body_q.numpy()[0, 0])
+        self.assertLess(position, 0.25, msg=f"finite D6 limit did not reduce the violation: x={position}")
+        # An exact mechanism recovers a violated bound at its drift rate.
+        for _ in range(9):
+            state_1.clear_forces()
+            solver.step(state_1, state_1, model.control(), None, 1.0 / 60.0)
 
         position = float(state_1.body_q.numpy()[0, 0])
         velocity = state_1.body_qd.numpy()[0]
-        self.assertLess(position, 0.25, msg=f"finite D6 limit did not reduce the violation: x={position}")
         self.assertAlmostEqual(position, 0.1, delta=5.0e-4)
         self.assertAlmostEqual(float(velocity[0]), 0.0, delta=1.0e-4)
         np.testing.assert_allclose(velocity[1:], 0.0, rtol=0.0, atol=2.0e-4)
@@ -728,6 +739,7 @@ class TestD6DirectDispatch(unittest.TestCase):
         solver = newton.solvers.SolverPhoenX(model, substeps=5, joint_mode="maximal_direct")
         self.assertEqual(int(solver.world.constraints.d6.row_count.numpy()[0]), 0)
         self.assertEqual(int(solver.world._joint_pgs_enabled.numpy()[0]), 0)
+        self.assertFalse(np.any(solver._direct_equality_system.direct_limit_dof_mask))
 
         lower = model.joint_limit_lower.numpy()
         upper = model.joint_limit_upper.numpy()
@@ -735,8 +747,8 @@ class TestD6DirectDispatch(unittest.TestCase):
         model.joint_limit_lower.assign(lower)
         model.joint_limit_upper.assign(upper)
         solver.notify_model_changed(newton.ModelFlags.JOINT_DOF_PROPERTIES)
-        self.assertEqual(int(solver.world.constraints.d6.row_count.numpy()[0]), 1)
-        self.assertEqual(int(solver.world._joint_pgs_enabled.numpy()[0]), 1)
+        _assert_direct_limits(self, solver, [0], [-0.1], [0.1])
+        self.assertEqual(int(solver.world._joint_pgs_enabled.numpy()[0]), 0)
 
         lower[0], upper[0] = -1.0e10, 1.0e10
         model.joint_limit_lower.assign(lower)
@@ -744,6 +756,7 @@ class TestD6DirectDispatch(unittest.TestCase):
         solver.notify_model_changed(newton.ModelFlags.JOINT_DOF_PROPERTIES)
         self.assertEqual(int(solver.world.constraints.d6.row_count.numpy()[0]), 0)
         self.assertEqual(int(solver.world._joint_pgs_enabled.numpy()[0]), 0)
+        self.assertFalse(np.any(solver._direct_equality_system.direct_limit_dof_mask))
 
     def test_cartesian_d6_drive_respects_common_limit(self) -> None:
         """Keep a direct D6 drive and its unilateral bound active together."""
@@ -775,8 +788,7 @@ class TestD6DirectDispatch(unittest.TestCase):
         direct = solver._direct_equality_system
         self.assertTrue(direct.enabled)
         self.assertTrue(bool(direct.direct_drive_joint_mask[0]))
-        self.assertEqual(int(solver.world.constraints.d6.row_count.numpy()[0]), 1)
-        self.assertEqual(int(solver.world._joint_pgs_enabled.numpy()[0]), 1)
+        _assert_direct_limits(self, solver, [0], [-0.1], [0.1])
 
         state = model.state()
         newton.eval_fk(model, model.joint_q, model.joint_qd, state)

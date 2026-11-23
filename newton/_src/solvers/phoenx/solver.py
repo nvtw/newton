@@ -1494,12 +1494,14 @@ class SolverPhoenX(SolverBase):
             self.world._direct_equality_system = self._direct_equality_system
             self._direct_equality_system.bind_constraint_indices(self._joint_constraints.joint_idx_to_cid)
             self._refresh_direct_factor_reuse_eligibility()
-            if np.any(self._direct_equality_system.direct_friction_dof_mask):
+            direct = self._direct_equality_system
+            if np.any(direct.direct_friction_dof_mask) or np.any(direct.direct_limit_dof_mask):
                 d6_data, d6_inequality_count = build_d6_inequality_data(
                     model,
                     joint_idx_to_cid,
                     self._joint_friction_model,
-                    friction_dof_owned=self._direct_equality_system.direct_friction_dof_mask,
+                    friction_dof_owned=direct.direct_friction_dof_mask,
+                    limit_dof_owned=direct.direct_limit_dof_mask,
                 )
                 self.world.constraints.d6 = d6_data
             self._direct_equality_system.d6_inequality_count = d6_inequality_count
@@ -2327,13 +2329,15 @@ class SolverPhoenX(SolverBase):
                 self._direct_equality_system.refresh_joint_properties()
                 self._direct_equality_system.bind_constraint_indices(self._joint_constraints.joint_idx_to_cid)
                 friction_dof_owned = self._direct_equality_system.direct_friction_dof_mask
+                limit_dof_owned = self._direct_equality_system.direct_limit_dof_mask
             else:
-                friction_dof_owned = None
+                friction_dof_owned = limit_dof_owned = None
             d6_data, d6_inequality_count = build_d6_inequality_data(
                 self.model,
                 self._joint_constraints.joint_idx_to_cid.numpy(),
                 self._joint_friction_model,
                 friction_dof_owned=friction_dof_owned,
+                limit_dof_owned=limit_dof_owned,
             )
             self.world.constraints.d6 = d6_data
             if self._direct_equality_system is not None:

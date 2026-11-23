@@ -140,8 +140,8 @@ class TestDriveLimitConsistency(unittest.TestCase):
             changes = wp.zeros(1, dtype=wp.int32)
             find_new_bounds = DirectEqualitySystem._find_new_bounds
 
-            def counted_scan(system, idt, flag):
-                find_new_bounds(system, idt, flag)
+            def counted_scan(system, idt, flag, **kwargs):
+                find_new_bounds(system, idt, flag, **kwargs)
                 wp.launch(count_bound_changes, dim=1, inputs=[system.drive_active_set_flag, changes])
 
             def step():

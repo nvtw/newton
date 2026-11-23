@@ -59,7 +59,12 @@ _FP32_BASE_REGULARIZATION = 3.0e-6
 _FP32_STRUCTURAL_REGULARIZATION = 3.0e-7
 _FP32_RANK_REGULARIZATION = 1.0e-5
 _FP32_REPEATED_PAIR_REGULARIZATION = float(np.sqrt(np.finfo(np.float32).eps))
-_DIRECT_BAUMGARTE = 0.2
+_DIRECT_BAUMGARTE = wp.constant(0.2)
+# Joint limits beyond this magnitude are unbounded, as in the D6 inequality rows.
+_LIMIT_FINITE = 1.0e5
+# Generalized mass of an active limit row: its compliance is negligible beside
+# any physical mobility, so the row holds the bound exactly.
+_LIMIT_ROW_MASS = wp.constant(wp.float32(1.0e10))
 _DIRECT_RELAX_RESIDUAL_TOLERANCE = 1.0e-4
 _PANEL_BLOCK_SIZE = 16
 _WIDE_PANEL_BLOCK_SIZE = 32
@@ -334,6 +339,27 @@ def _dynamic_joint_masks(
             float(armature[dof]) > 0.0 or float(damping[dof]) > 0.0 or drive_dof[dof] for dof in candidates
         )
     return dynamic, direct_drive, bounded_drive
+
+
+def _direct_limit_dof_mask(model: Model, excluded: np.ndarray) -> np.ndarray:
+    """Return the finitely limited D6 DoFs that exact mechanisms solve as rows.
+
+    An active bound is enforced against the mechanism's constrained mobility.
+    A separate inequality sweep with free-body masses fights the mechanism
+    projection and diverges on light links, such as chain pins with lateral play.
+    """
+    mask = np.zeros(int(model.joint_dof_count), dtype=bool)
+    joint_type = np.asarray(model.joint_type.numpy(), dtype=np.int32)
+    qd_start = np.asarray(model.joint_qd_start.numpy(), dtype=np.int32)
+    dof_dim = np.asarray(model.joint_dof_dim.numpy(), dtype=np.int32)
+    lower = np.asarray(model.joint_limit_lower.numpy(), dtype=np.float32)
+    upper = np.asarray(model.joint_limit_upper.numpy(), dtype=np.float32)
+    for joint in np.flatnonzero(~excluded & (joint_type == int(JointType.D6))):
+        start = int(qd_start[joint])
+        for dof in range(start, start + int(dof_dim[joint, 0] + dof_dim[joint, 1])):
+            finite = lower[dof] > -_LIMIT_FINITE or upper[dof] < _LIMIT_FINITE
+            mask[dof] = bool(finite and lower[dof] <= upper[dof])
+    return mask
 
 
 def _active_dynamic_dofs(
@@ -1307,6 +1333,7 @@ def _prepare_direct_equality_diagonal_kernel(
     row_bias: wp.array2d[wp.float32],
     matrix: wp.array[wp.float32],
     row_scale: wp.array[wp.float32],
+    row_limited: wp.array[wp.bool],
 ):
     row = wp.tid()
     joint = row_joint[row]
@@ -1352,10 +1379,11 @@ def _prepare_direct_equality_diagonal_kernel(
                 row_bias[structural, local_row] = row_error[structural, local_row] * bias_factor * idt
     regularization_scale = wp.max(inverse_effective_mass, wp.float32(1.0))
     if row_dynamic[row]:
-        regularization_scale = wp.max(
-            wp.float32(1.0) / wp.max(dynamic_mass[row], wp.float32(1.0e-10)),
-            wp.float32(1.0),
-        )
+        compliance = wp.float32(1.0) / wp.max(dynamic_mass[row], wp.float32(1.0e-10))
+        regularization_scale = wp.max(compliance, wp.float32(1.0))
+        if row_limited[row]:
+            # A rigid active bound keeps the structural rows' relative floor.
+            regularization_scale = wp.max(regularization_scale, inverse_effective_mass)
     value += wp.max(
         row_regularization[row] * regularization_scale,
         wp.float32(1.0e-10),
@@ -1383,6 +1411,7 @@ def _direct_equality_row_rhs(
     bodies: BodyContainer,
     use_bias: wp.bool,
     row_scale: wp.array[wp.float32],
+    row_limit_state: wp.array[wp.int32],
 ) -> wp.float32:
     joint = row_joint[row]
     structural_index = joint_to_structural[joint]
@@ -1396,10 +1425,17 @@ def _direct_equality_row_rhs(
         relative_velocity += wp.dot(row_wrench1[structural_index, local_row], _body_com_twist(bodies, body1))
     value = wp.float32(0.0)
     if row_dynamic[row]:
+        reference = velocity_reference[row]
+        if not use_bias:
+            # An active joint bound keeps its stop but drops the corrective
+            # motion of a violation, like the structural rows' bias.
+            state = row_limit_state[row]
+            if state > wp.int32(0):
+                reference = wp.max(reference, wp.float32(0.0))
+            elif state < wp.int32(0):
+                reference = wp.min(reference, wp.float32(0.0))
         value = row_scale[row] * (
-            velocity_reference[row]
-            - relative_velocity
-            - accumulated_impulse[row] / wp.max(dynamic_mass[row], wp.float32(1.0e-10))
+            reference - relative_velocity - accumulated_impulse[row] / wp.max(dynamic_mass[row], wp.float32(1.0e-10))
         )
     else:
         bias = row_bias[structural_index, local_row] if use_bias else wp.float32(0.0)
@@ -1426,6 +1462,7 @@ def _build_direct_equality_rhs_kernel(
     row_scale: wp.array[wp.float32],
     rhs: wp.array[wp.float32],
     solve_active: wp.array[wp.int32],
+    row_limit_state: wp.array[wp.int32],
 ):
     row = wp.tid()
     value = _direct_equality_row_rhs(
@@ -1445,6 +1482,7 @@ def _build_direct_equality_rhs_kernel(
         bodies,
         use_bias,
         row_scale,
+        row_limit_state,
     )
     rhs[row] = value
     # Primary dynamics and bias impulses must never be thresholded: a
@@ -1597,6 +1635,25 @@ def _direct_drive_response(
     return wp.vec2(dt * damping + dt * dt * stiffness, dt * (stiffness * error + damping * target_velocity))
 
 
+@wp.func
+def _limit_stop_reference(
+    state: wp.int32, coordinate: wp.float32, lower: wp.float32, upper: wp.float32, dt: wp.float32
+):
+    """Return the velocity an active bound holds its row at.
+
+    An equality row must not pull its joint onto the stop: a joint short of
+    the bound holds, and it releases once its impulse pulls. A violated bound
+    recovers like the structural rows' drift; correcting every bound of a
+    closed loop in one step would demand inconsistent motion.
+    """
+    gap = upper - coordinate
+    sign = wp.float32(1.0)
+    if state < wp.int32(0):
+        gap = coordinate - lower
+        sign = wp.float32(-1.0)
+    return sign * wp.min(gap, wp.float32(0.0)) * wp.float32(_DIRECT_BAUMGARTE) / dt
+
+
 @wp.kernel(enable_backward=False)
 def _snapshot_direct_dynamic_velocity_kernel(
     row_joint: wp.array[wp.int32],
@@ -1641,6 +1698,12 @@ def _snapshot_direct_dynamic_velocity_kernel(
     seed: wp.array[wp.float32],
     microstep_previous: wp.array[wp.bool],
     effort_limit: wp.array[wp.float32],
+    row_limited: wp.array[wp.bool],
+    row_limit_state: wp.array[wp.int32],
+    row_limit_lower: wp.array[wp.float32],
+    row_limit_upper: wp.array[wp.float32],
+    limit_free_mass: wp.array[wp.float32],
+    limit_free_reference: wp.array[wp.float32],
 ):
     row = wp.tid()
     selected = microstep_joint.shape[0] > row_joint[row] and microstep_joint[row_joint[row]]
@@ -1657,7 +1720,8 @@ def _snapshot_direct_dynamic_velocity_kernel(
             if selected:
                 accumulated_impulse[row] = seed[row]
             microstep_previous[row] = selected
-    if not (row_dynamic[row] and row_direct_drive[row]):
+    if not (row_dynamic[row] and row_direct_drive[row]) or row_limit_state[row] != wp.int32(0):
+        # An active joint limit holds the row rigid and takes the drive's place.
         drive_saturated[row] = False
     if not row_dynamic[row]:
         dynamic_mass[row] = wp.float32(0.0)
@@ -1686,7 +1750,7 @@ def _snapshot_direct_dynamic_velocity_kernel(
     mass = armature + dt * passive_damping
     momentum = armature * relative_velocity
 
-    if row_direct_drive[row]:
+    if row_direct_drive[row] or row_limited[row]:
         coordinate = dynamic_coordinate[row]
         if advance:
             coordinate += dt * relative_velocity
@@ -1721,6 +1785,7 @@ def _snapshot_direct_dynamic_velocity_kernel(
                 coordinate = wp.dot(axis, point1 - point0)
         dynamic_coordinate[row] = coordinate
 
+    if row_direct_drive[row]:
         if drive_saturated[row]:
             # Warm-start the previous step's active set. The bound scan still
             # releases a cap whose direction no longer matches the motor law.
@@ -1732,7 +1797,7 @@ def _snapshot_direct_dynamic_velocity_kernel(
                 joint_target_mode[dof],
                 joint_target_ke[dof],
                 joint_target_kd[dof],
-                control_target_q[row_target_q[row]] - coordinate,
+                control_target_q[row_target_q[row]] - dynamic_coordinate[row],
                 control_target_qd[dof],
             )
             mass += response[0]
@@ -1740,6 +1805,16 @@ def _snapshot_direct_dynamic_velocity_kernel(
 
     dynamic_mass[row] = wp.max(mass, wp.float32(1.0e-10))
     velocity_reference[row] = momentum / dynamic_mass[row]
+    if row_limited[row]:
+        limit_free_mass[row] = dynamic_mass[row]
+        limit_free_reference[row] = velocity_reference[row]
+        # Warm-start the previous substep's active bound as a rigid predictive stop.
+        state = row_limit_state[row]
+        if state != wp.int32(0):
+            dynamic_mass[row] = _LIMIT_ROW_MASS
+            velocity_reference[row] = _limit_stop_reference(
+                state, dynamic_coordinate[row], row_limit_lower[row], row_limit_upper[row], dt
+            )
 
 
 @wp.kernel(enable_backward=False)
@@ -1776,9 +1851,18 @@ def _activate_bounded_direct_drives_kernel(
     row_mechanism: wp.array[wp.int32],
     changed_mechanism: wp.array[wp.int32],
     any_active_flag: wp.array[wp.int32],
+    row_limited: wp.array[wp.bool],
+    row_limit_state: wp.array[wp.int32],
+    row_limit_lower: wp.array[wp.float32],
+    row_limit_upper: wp.array[wp.float32],
+    limit_free_mass: wp.array[wp.float32],
+    limit_free_reference: wp.array[wp.float32],
+    accumulated_impulse: wp.array[wp.float32],
+    use_bias: wp.bool,
 ):
     row = wp.tid()
-    if not row_bounded_drive[row]:
+    limited = row_limited[row]
+    if not row_bounded_drive[row] and not limited:
         return
 
     joint = row_joint[row]
@@ -1793,6 +1877,42 @@ def _activate_bounded_direct_drives_kernel(
         velocity += wp.dot(row_wrench0[structural_index, local_row], _body_com_twist(bodies, body0))
     if body1 > wp.int32(0):
         velocity += wp.dot(row_wrench1[structural_index, local_row], _body_com_twist(bodies, body1))
+
+    if limited:
+        state = row_limit_state[row]
+        changed = False
+        if state != wp.int32(0) and use_bias:
+            # Positive impulses push the coordinate up. A bound that pulls
+            # the joint into its stop releases to the row's free law. Only a
+            # biased solve's impulse is physical; an unbiased pass merely
+            # removes the correction of a violation, so it never releases.
+            impulse = accumulated_impulse[row]
+            if (state > wp.int32(0) and impulse > wp.float32(0.0)) or (
+                state < wp.int32(0) and impulse < wp.float32(0.0)
+            ):
+                row_limit_state[row] = wp.int32(0)
+                dynamic_mass[row] = limit_free_mass[row]
+                velocity_reference[row] = limit_free_reference[row]
+                changed = True
+        elif state == wp.int32(0):
+            predicted = dynamic_coordinate[row] + dt * velocity
+            if predicted > row_limit_upper[row] or predicted < row_limit_lower[row]:
+                state = wp.where(predicted > row_limit_upper[row], wp.int32(1), wp.int32(-1))
+                row_limit_state[row] = state
+                dynamic_mass[row] = _LIMIT_ROW_MASS
+                velocity_reference[row] = _limit_stop_reference(
+                    state, dynamic_coordinate[row], row_limit_lower[row], row_limit_upper[row], dt
+                )
+                drive_saturated[row] = False
+                changed = True
+        if changed:
+            wp.atomic_max(active_set_flag, wp.int32(0), wp.int32(1))
+            wp.atomic_max(any_active_flag, wp.int32(0), wp.int32(1))
+            if row_mechanism.shape[0] > row:
+                changed_mechanism[row_mechanism[row]] = wp.int32(1)
+        # An active bound holds the row rigid, so the motor law is moot.
+        if changed or row_limit_state[row] != wp.int32(0) or not row_bounded_drive[row]:
+            return
 
     dof = row_dof[row]
     target_mode = joint_target_mode[dof]
@@ -2028,6 +2148,7 @@ def _make_fused_subgroup_projection_kernel(width: int, packed: bool):
         average_copies: wp.bool,
         rhs: wp.array[wp.float32],
         delta: wp.array[wp.float32],
+        row_limit_state: wp.array[wp.int32],
     ):
         task, lane = wp.tid()
         mechanism = mechanisms[task]
@@ -2086,6 +2207,7 @@ def _make_fused_subgroup_projection_kernel(width: int, packed: bool):
                 bodies,
                 use_bias,
                 row_scale,
+                row_limit_state,
             )
             rhs[row] = value
         if not use_bias:
@@ -2312,15 +2434,10 @@ class DirectEqualitySystem:
             friction_joints = friction_joints[active]
             friction_dofs = friction_dofs[active]
             friction_dof_mask[friction_dofs] = True
-        dynamic_joint_mask, direct_drive_joint_mask, bounded_drive_joint_mask = _dynamic_joint_masks(
-            model, joint_dof_start, excluded, drive_dof_mask, bounded_dof_mask
+        dynamic_joint_mask, direct_drive_joint_mask, bounded_drive_joint_mask, dynamic_joint_dofs, limit_dof_mask = (
+            self._dynamic_rows(model, joint_dof_start, excluded, drive_dof_mask, bounded_dof_mask)
         )
-        dynamic_joint_dofs = list(_active_dynamic_dofs(model, joint_dof_start, excluded, drive_dof_mask))
-        for joint in np.flatnonzero(dynamic_joint_mask):
-            if not dynamic_joint_dofs[joint]:
-                dynamic_joint_dofs[joint] = (int(joint_dof_start[joint]),)
-        dynamic_joint_dofs = tuple(dynamic_joint_dofs)
-        dynamic_joint_mask |= np.asarray([bool(dofs) for dofs in dynamic_joint_dofs], dtype=bool)
+        self._limit_dof_candidates = limit_dof_mask
         self._excluded_joint_mask = excluded
         self._joint_dof_start_np = joint_dof_start.copy()
         self._joint_target_start_np = joint_target_start.copy()
@@ -2335,7 +2452,6 @@ class DirectEqualitySystem:
             dofs and joint_types[joint] not in (int(JointType.REVOLUTE), int(JointType.PRISMATIC))
             for joint, dofs in enumerate(dynamic_joint_dofs)
         )
-        self.has_bounded_drives = bool(np.any(bounded_drive_joint_mask))
         if self.fixed_joint_rows:
             # Joints created at runtime may add multi-axis dynamic rows later.
             self.has_dynamic_rows = True
@@ -2353,8 +2469,18 @@ class DirectEqualitySystem:
                 dynamic_joint_dofs=dynamic_joint_dofs,
                 structural_row_counts=structural_row_counts,
             )
+        # Own only the bounds that received a mechanism row; joints without
+        # structural rows stay outside the mechanisms and keep inequality rows.
+        row_dofs = np.asarray(self.topology.row_dof, dtype=np.int64)
+        present = row_dofs[np.asarray(self.topology.row_dynamic, dtype=bool) & (row_dofs >= 0)]
+        self.direct_limit_dof_mask = np.zeros_like(limit_dof_mask)
+        self.direct_limit_dof_mask[present] = limit_dof_mask[present]
+        # Joint limits share the bounded drives' active-set resolution.
+        self.has_bounded_drives = bool(np.any(bounded_drive_joint_mask) or np.any(self.direct_limit_dof_mask))
         self.regularization = float(regularization)
         row_regularization = np.full(len(self.topology.row_joint), self.regularization, dtype=np.float32)
+        limited_rows = np.asarray(self.topology.row_dynamic, dtype=bool) & (row_dofs >= 0)
+        limited_rows[limited_rows] = self.direct_limit_dof_mask[row_dofs[limited_rows]]
         for mechanism, (needs_rank_floor, repeated_pair, has_cycle) in enumerate(
             zip(
                 self.topology.mechanism_requires_rank_floor,
@@ -2375,6 +2501,11 @@ class DirectEqualitySystem:
                 if needs_rank_floor
                 else (self.regularization if has_cycle else min(self.regularization, _FP32_STRUCTURAL_REGULARIZATION))
             )
+        # Bounds active together around a closed loop are redundant and their
+        # reactions statically indeterminate. The redundant-pair floor keeps
+        # each one nearly rigid but lets an inconsistency settle in the
+        # stops rather than open the structural joints.
+        row_regularization[limited_rows] = max(self.regularization, _FP32_REPEATED_PAIR_REGULARIZATION)
         self.row_regularization = wp.array(row_regularization, dtype=wp.float32, device=model.device)
         self.enabled = bool(self.topology.dimensions)
         self.factor_stream = None
@@ -2482,6 +2613,24 @@ class DirectEqualitySystem:
                 row_target_q[row] = int(joint_target_q_start[joint]) + dof - int(model_qd_start[joint])
         self.row_direct_drive = wp.array(row_direct_drive, dtype=wp.bool, device=device)
         self.row_bounded_drive = wp.array(row_bounded_drive, dtype=wp.bool, device=device)
+        row_dofs = np.asarray(self.topology.row_dof, dtype=np.int64)
+        row_limited = np.asarray(self.topology.row_dynamic, dtype=bool) & (row_dofs >= 0)
+        row_limited[row_limited] = self.direct_limit_dof_mask[row_dofs[row_limited]]
+        limit_lower = np.asarray(model.joint_limit_lower.numpy(), dtype=np.float32)
+        limit_upper = np.asarray(model.joint_limit_upper.numpy(), dtype=np.float32)
+        row_lower = np.zeros(row_count, dtype=np.float32)
+        row_upper = np.zeros(row_count, dtype=np.float32)
+        row_lower[row_limited] = limit_lower[row_dofs[row_limited]]
+        row_upper[row_limited] = limit_upper[row_dofs[row_limited]]
+        self.row_limited = wp.array(row_limited, dtype=wp.bool, device=device)
+        self.row_limit_lower = wp.array(row_lower, dtype=wp.float32, device=device)
+        self.row_limit_upper = wp.array(row_upper, dtype=wp.float32, device=device)
+        # Active bound of each limited row: -1 lower, +1 upper, 0 free. It
+        # warm-starts the next substep; the bound scan verifies it after each solve.
+        self.row_limit_state = wp.zeros(row_count, dtype=wp.int32, device=device)
+        # The row's law without its bound, restored when the bound releases.
+        self.limit_free_mass = wp.zeros(row_count, dtype=wp.float32, device=device)
+        self.limit_free_reference = wp.zeros(row_count, dtype=wp.float32, device=device)
         self.row_target_q = wp.array(row_target_q, dtype=wp.int32, device=device)
         self.friction_joints = wp.array(friction_joints, dtype=wp.int32, device=device)
         self.friction_dofs = wp.array(friction_dofs, dtype=wp.int32, device=device)
@@ -2644,6 +2793,32 @@ class DirectEqualitySystem:
             mask[self.topology.joints] = True
         return mask
 
+    def _dynamic_rows(self, model, joint_dof_start, excluded, drive_dof_mask, bounded_dof_mask):
+        """Return dynamic-row joint masks, per-joint row DoFs, and the exact-owned limit DoFs."""
+        dynamic_joint_mask, direct_drive_joint_mask, bounded_drive_joint_mask = _dynamic_joint_masks(
+            model, joint_dof_start, excluded, drive_dof_mask, bounded_dof_mask
+        )
+        dynamic_joint_dofs = list(_active_dynamic_dofs(model, joint_dof_start, excluded, drive_dof_mask))
+        for joint in np.flatnonzero(dynamic_joint_mask):
+            if not dynamic_joint_dofs[joint]:
+                dynamic_joint_dofs[joint] = (int(joint_dof_start[joint]),)
+        # Local block systems keep their inequality rows; only a mechanism factor owns limits.
+        limit_dof_mask = (
+            np.zeros(int(model.joint_dof_count), dtype=bool)
+            if self.fixed_joint_rows
+            else _direct_limit_dof_mask(model, excluded)
+        )
+        qd_start = np.asarray(model.joint_qd_start.numpy(), dtype=np.int32)
+        dof_dim = np.asarray(model.joint_dof_dim.numpy(), dtype=np.int32)
+        for joint in range(len(dynamic_joint_dofs)):
+            start = int(qd_start[joint])
+            limited = np.flatnonzero(limit_dof_mask[start : start + int(dof_dim[joint].sum())]) + start
+            if limited.size:
+                dynamic_joint_dofs[joint] = tuple(sorted(set(dynamic_joint_dofs[joint]) | {int(d) for d in limited}))
+        dynamic_joint_dofs = tuple(dynamic_joint_dofs)
+        dynamic_joint_mask |= np.asarray([bool(dofs) for dofs in dynamic_joint_dofs], dtype=bool)
+        return dynamic_joint_mask, direct_drive_joint_mask, bounded_drive_joint_mask, dynamic_joint_dofs, limit_dof_mask
+
     def refresh_joint_properties(self) -> None:
         """Rebuild topology only when scalar dynamics rows change ownership."""
         drive_dof_mask, bounded_dof_mask = _drive_dof_masks(self.model)
@@ -2663,28 +2838,14 @@ class DirectEqualitySystem:
             valid = (dofs >= 0) & (dofs < len(model_friction))
             dofs = dofs[valid]
             friction_dof_mask[dofs[model_friction[dofs] > 0.0]] = True
-        dynamic_joint_mask, direct_drive_joint_mask, bounded_drive_joint_mask = _dynamic_joint_masks(
-            self.model,
-            self._joint_dof_start_np,
-            self._excluded_joint_mask,
-            drive_dof_mask,
-            bounded_dof_mask,
-        )
-        dynamic_joint_dofs = list(
-            _active_dynamic_dofs(
-                self.model,
-                self._joint_dof_start_np,
-                self._excluded_joint_mask,
-                drive_dof_mask,
+        dynamic_joint_mask, direct_drive_joint_mask, bounded_drive_joint_mask, dynamic_joint_dofs, limit_dof_mask = (
+            self._dynamic_rows(
+                self.model, self._joint_dof_start_np, self._excluded_joint_mask, drive_dof_mask, bounded_dof_mask
             )
         )
-        for joint in np.flatnonzero(dynamic_joint_mask):
-            if not dynamic_joint_dofs[joint]:
-                dynamic_joint_dofs[joint] = (int(self._joint_dof_start_np[joint]),)
-        dynamic_joint_dofs = tuple(dynamic_joint_dofs)
-        dynamic_joint_mask |= np.asarray([bool(dofs) for dofs in dynamic_joint_dofs], dtype=bool)
         if (
-            np.array_equal(dynamic_joint_mask, self.dynamic_joint_mask)
+            np.array_equal(limit_dof_mask, self._limit_dof_candidates)
+            and np.array_equal(dynamic_joint_mask, self.dynamic_joint_mask)
             and dynamic_joint_dofs == self.dynamic_joint_dofs
             and np.array_equal(
                 direct_drive_joint_mask,
@@ -2905,6 +3066,12 @@ class DirectEqualitySystem:
                 self._microstep_seed,
                 self._microstep_previous,
                 self.model.joint_effort_limit,
+                self.row_limited,
+                self.row_limit_state,
+                self.row_limit_lower,
+                self.row_limit_upper,
+                self.limit_free_mass,
+                self.limit_free_reference,
             ],
             device=self.model.device,
         )
@@ -2916,10 +3083,10 @@ class DirectEqualitySystem:
         # A newly clamped drive can expose another bound in a coupled
         # mechanism. Nested conditionals keep the common unsaturated path to
         # one row scan and only perform extra scans after an actual refactor.
-        self._find_new_bounds(idt, self.drive_active_set_flag)
+        self._find_new_bounds(idt, self.drive_active_set_flag, use_bias=use_bias)
         self._correct_new_bounds(idt, use_bias=use_bias)
 
-    def _find_new_bounds(self, idt: wp.float32, any_flag: wp.array) -> None:
+    def _find_new_bounds(self, idt: wp.float32, any_flag: wp.array, *, use_bias: bool = True) -> None:
         """Scan bounded drive rows; ``drive_active_set_flag`` and ``any_flag`` mark a change."""
         dt = wp.float32(1.0) / idt
         self._bound_scan_flags.zero_()
@@ -2959,6 +3126,14 @@ class DirectEqualitySystem:
                 self._bound_row_mechanism,
                 self._bound_changed_mechanism,
                 any_flag,
+                self.row_limited,
+                self.row_limit_state,
+                self.row_limit_lower,
+                self.row_limit_upper,
+                self.limit_free_mass,
+                self.limit_free_reference,
+                self.accumulated_impulse,
+                wp.bool(use_bias),
             ],
             device=self.model.device,
         )
@@ -2970,7 +3145,7 @@ class DirectEqualitySystem:
             self._refactor_changed_bounds(idt)
             self.solve(use_bias=use_bias)
             if remaining_passes > 0:
-                self._find_new_bounds(idt, self.drive_active_set_flag)
+                self._find_new_bounds(idt, self.drive_active_set_flag, use_bias=use_bias)
                 wp.capture_if(
                     self.drive_active_set_flag,
                     on_true=lambda: activate_and_correct(remaining_passes - 1),
@@ -3028,6 +3203,7 @@ class DirectEqualitySystem:
                 self.row_bias,
                 self.matrix,
                 self.row_scale,
+                self.row_limited,
             ],
             device=self.model.device,
         )
@@ -3233,6 +3409,7 @@ class DirectEqualitySystem:
                     wp.bool(average_copies),
                     self.rhs,
                     self.delta,
+                    self.row_limit_state,
                 ],
                 block_dim=128,
                 device=self.model.device,
@@ -3260,6 +3437,7 @@ class DirectEqualitySystem:
                 self.row_scale,
                 self.rhs,
                 self.solve_active,
+                self.row_limit_state,
             ],
             device=self.model.device,
         )

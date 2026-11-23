@@ -337,11 +337,13 @@ class TestD6Detection(unittest.TestCase):
         model = builder.finalize()
         solver = newton.solvers.SolverPhoenX(model, substeps=5)
         self.assertEqual(int(solver._joint_constraints.joint_mode.numpy()[0]), int(JOINT_MODE_GENERIC_D6))
-        data = solver.world.constraints.d6
-        self.assertEqual(int(data.row_count.numpy()[0]), 1)
-        self.assertEqual(int(data.row_axis.numpy()[0, 0]), 0)
-        self.assertAlmostEqual(float(data.lower.numpy()[0, 0]), -0.25, delta=1.0e-6)
-        self.assertAlmostEqual(float(data.upper.numpy()[0, 0]), 0.30, delta=1.0e-6)
+        # The exact mechanism owns the finite bound; the unbounded axis stays free.
+        direct = solver._direct_equality_system
+        np.testing.assert_array_equal(np.flatnonzero(direct.direct_limit_dof_mask), [0])
+        rows = np.flatnonzero(direct.row_limited.numpy())
+        self.assertAlmostEqual(float(direct.row_limit_lower.numpy()[rows[0]]), -0.25, delta=1.0e-6)
+        self.assertAlmostEqual(float(direct.row_limit_upper.numpy()[rows[0]]), 0.30, delta=1.0e-6)
+        self.assertEqual(int(solver.world.constraints.d6.row_count.numpy()[0]), 0)
 
     def test_d6_revolute_pattern_uses_common_d6_rows(self) -> None:
         model = _build_d6_pendulum_revolute_equivalent(free_angular_index=1)
