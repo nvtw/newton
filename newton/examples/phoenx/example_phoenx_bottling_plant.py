@@ -346,6 +346,7 @@ class Example:
                 velocity_iterations=1,
                 enable_body_pair_grouping=True,
                 parallel_contact_prepare=self.model.device.is_cuda and not mass_splitting,
+                island_parallel_iterations=self.model.device.is_cuda and not mass_splitting,
                 mass_splitting=mass_splitting,
                 mass_splitting_overflow_only=mass_splitting,
                 max_colored_partitions=args.max_colored_partitions,
@@ -676,6 +677,7 @@ class Example:
                 np.count_nonzero(self.solver.bodies.island_root.numpy()[1 : self.model.body_count + 1] >= 0)
             ),
             "parallel_contact_prepare": self.solver.world.parallel_contact_prepare,
+            "island_parallel_iterations": self.solver.world.island_parallel_iterations,
             "joint_mode": self.args.joint_mode,
             "warmup_frames": self.args.timing_warmup,
         }

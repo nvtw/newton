@@ -450,6 +450,7 @@ class PhoenXWorld:
         sleeping_motion_threshold: float = 0.0,
         prepare_refresh_stride: int | str = "auto",
         parallel_contact_prepare: bool = False,
+        island_parallel_iterations: bool = False,
         contact_chunk_size: int = 0,
         contact_friction_model: str = "point",
         combine_direct_prepare_projection: bool = False,
@@ -904,6 +905,25 @@ class PhoenXWorld:
                 "symmetric sweeps, or unrolled mass splitting; sor_boost must be 1.0"
             )
         self.parallel_contact_prepare = bool(parallel_contact_prepare)
+        self.island_parallel_iterations = bool(island_parallel_iterations)
+        if island_parallel_iterations and (
+            step_layout != "single_world"
+            or not self.device.is_cuda
+            or self.num_particles
+            or self.num_cloth_triangles
+            or self.num_cloth_bending
+            or self.num_soft_tetrahedra
+            or self.num_soft_hexahedra
+            or contact_friction_model != "point"
+            or colored_contact_headers
+            or colored_contact_rows
+            or mass_splitting
+            or symmetric_color_sweep
+        ):
+            raise ValueError(
+                "island_parallel_iterations requires CUDA single-world forward rigid point-contact sweeps "
+                "without packed rows, mass splitting, or deformables"
+            )
         if self.parallel_contact_prepare and (
             step_layout != "single_world"
             or not self.device.is_cuda
@@ -1540,7 +1560,7 @@ class PhoenXWorld:
                 else:
                     self._dispatcher = SingleWorldMassSplittingDispatcher(self)
             else:
-                self._dispatcher = SingleWorldDispatcher(self)
+                self._dispatcher = SingleWorldDispatcher(self, island_parallel_iterations=island_parallel_iterations)
         else:
             self._dispatcher = (
                 MultiWorldMassSplittingDispatcher(self) if self.mass_splitting_enabled else MultiWorldDispatcher(self)
@@ -2994,12 +3014,17 @@ class PhoenXWorld:
         tail = get_singleworld_kernel(phase="joint_project", fused=True, **options)
         # This projection belongs to the current sweep; do not advance its
         # configured symmetric direction a second time.
-        wp.copy(self._partitioner.color_cursor, self._partitioner.num_colors)
+        island_schedule = None
+        if self._regular_pgs_active_this_step:
+            island_schedule = getattr(self._dispatcher, "_island_schedule", None)
+        if island_schedule is None:
+            wp.copy(self._partitioner.color_cursor, self._partitioner.num_colors)
         self._singleworld_head_plus_tail_sweep(
             head,
             tail,
             wp.float32(1.0 / self.substep_dt),
             structural_projection=True,
+            island_schedule=island_schedule,
         )
 
     def _temporal_end_sweep(self, last: bool) -> None:
@@ -5891,6 +5916,7 @@ class PhoenXWorld:
         *,
         reverse_colors: bool = False,
         structural_projection: bool = False,
+        island_schedule=None,
     ) -> None:
         """Run one colour sweep from the partitioner's cursor.
 
@@ -5902,7 +5928,8 @@ class PhoenXWorld:
         large ones up to the next small colour, and the trailing small ones in
         three launches; only small colours between large ones enter the
         guarded loop. On CPU, launch threads run serially, so each colour gets
-        its own launch.
+        its own launch. With an island schedule, independent components run in
+        separate blocks across both large and small colors.
         """
         heads = self._singleworld_kernels()[::2]
         if head_kernel in heads:
@@ -5926,6 +5953,11 @@ class PhoenXWorld:
                 self._launch_singleworld_head(head_kernel, idt, wp.int32(-1), contact_container, step)
             return
 
+        if island_schedule is not None:
+            # Each island's block walks all of its colors in order, so the head
+            # handles small colors too and no device-wide boundary separates them.
+            island_schedule.iterate(self, head_kernel, idt)
+            return
         kernel, drain_tail = get_singleworld_one_launch_kernel(head_kernel, tail_kernel)
         if drain_tail:
             self._launch_one_launch_sweep(kernel, idt, contact_container)
