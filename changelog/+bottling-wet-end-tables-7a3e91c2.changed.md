@@ -1,0 +1,1 @@
+Model the bottling plant's pasteuriser tables and accumulation table from the source mat tops as packed mass-flow beds seeded in production, with the closed pasteuriser tunnel moving its bed row by row.

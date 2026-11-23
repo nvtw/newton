@@ -15,6 +15,7 @@ _ROW_SIZE = 7
 _BOTTLE_PITCH = 0.0616  # metres, from the IFM supply interface
 BOTTLES_PER_MINUTE = 425.0  # rated line output, from the source line_full scenario
 SINGLE_FILE_PITCH = 0.071  # metres, including the upstream clearance check.
+_ZONE_RAMP = 1.0  # s, for a process feed zone's drive to start or stop
 
 
 @wp.kernel
@@ -229,6 +230,28 @@ def add_bottle_shapes(builder, body, label, templates):
         builder.shape_world[shape] = world
 
 
+class StandingQueue:
+    """Detect a standing queue at a through-beam eye, as the source IFM's motion monitor does.
+
+    The neck beam flickers between the necks of a moving file. A queue stands
+    once the body beam has been blocked and the neck beam unchanged for 1.5 s.
+    """
+
+    def __init__(self):
+        self.covered = None
+        self.neck = None
+        self.changed = 0.0
+
+    def update(self, time, body, neck):
+        if not body:
+            self.covered = None
+        elif self.covered is None:
+            self.covered = time
+        if neck != self.neck:
+            self.neck, self.changed = neck, time
+        return self.covered is not None and time - max(self.covered, self.changed) >= 1.5
+
+
 class InfeedController:
     """Run source splitter oscillators, jam relief, and port backpressure."""
 
@@ -271,6 +294,16 @@ class InfeedController:
                 directions.append(np.asarray(ray["direction"]) @ matrix[:3, :3])
                 distances.append(ray["distance"])
             self.sensor_slices[name] = slice(start, len(origins))
+        # Process feed zones watch their own body and neck beams.
+        self.zone_eyes = {}
+        for name, (_, eye) in plant.scene.metadata.get("process_zones", {}).items():
+            self.zone_eyes[name] = len(origins)
+            for origin, direction, distance in eye:
+                origins.append(np.asarray(origin))
+                directions.append(np.asarray(direction))
+                distances.append(distance)
+        self.zone_monitor = {name: StandingQueue() for name in self.zone_eyes}
+        self.zone_speed = dict.fromkeys(self.zone_eyes, 0.0)
         self.origins = wp.array(origins, dtype=wp.vec3)
         self.directions = wp.array(directions, dtype=wp.vec3)
         self.distances = wp.array(distances, dtype=float)
@@ -336,6 +369,12 @@ class InfeedController:
         )
         for channel, drive, nominal in self.belt_records:
             multipliers[channel] = output["speeds"][drive] / nominal
+        # A process feed zone stops while its eye has seen a standing queue for
+        # 1.5 s: body beam blocked, neck beam unchanged. Its drive ramps like a VFD.
+        for name, ray in self.zone_eyes.items():
+            stop = self.zone_monitor[name].update(time, hits[ray], hits[ray + 1])
+            step = (1.0 / 60.0) / _ZONE_RAMP
+            self.zone_speed[name] = float(np.clip(self.zone_speed[name] + (-step if stop else step), 0.0, 1.0))
         for name, channel in self.lane_channels.items():
             command = commands[name]
             if command["packer_backlog"] or not command["packer_ready"]:

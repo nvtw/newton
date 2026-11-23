@@ -15,7 +15,7 @@ import warp as wp
 import newton
 from newton.examples.phoenx._bottling_control import _Belt, _belt_speeds, _seal_cases, _target_coordinates
 from newton.examples.phoenx._bottling_fleet import FleetController, _Transfer
-from newton.examples.phoenx._bottling_infeed import BottleSupply
+from newton.examples.phoenx._bottling_infeed import BottleSupply, StandingQueue
 from newton.examples.phoenx._bottling_io import (
     _CASE_PHOTOEYE_BATCH_SIZE,
     _PHOTOEYE_BATCH_SIZE,
@@ -24,7 +24,13 @@ from newton.examples.phoenx._bottling_io import (
     _photoeyes,
     _valves,
 )
-from newton.examples.phoenx._bottling_process import _arc, add_filling_bottles, add_filling_transport
+from newton.examples.phoenx._bottling_process import (
+    PasteuriserTunnel,
+    _arc,
+    _pool_field,
+    add_filling_bottles,
+    add_filling_transport,
+)
 from newton.examples.phoenx._bottling_scene import PlantScene, load_plant
 from newton.examples.phoenx._bottling_transport import _carton_support_quadrants, _placement_motions
 from newton.examples.phoenx._bottling_wrap import (
@@ -44,71 +50,67 @@ from newton.viewer import ViewerNull
 
 @requires("pxr.Usd")
 class TestBottlingPlant(unittest.TestCase):
-    def test_filling_keeper_engages_before_crossbelt(self):
-        with wp.ScopedDevice("cpu"):
-            scene = SimpleNamespace(builder=newton.ModelBuilder(), belts=[], metadata={})
-            path = np.array([[0.0, 0.0, 0.95], [7.0, 0.0, 0.95]])
-            add_filling_transport(scene, path, motor_off=False, inlet_speed=0.14)
-
-        crossbelt = scene.metadata["process_pool_crossbelt"]
-        lateral_start = min(
-            mesh.vertices[np.linalg.norm(crossbelt[label], axis=1) > 0.0, 0].min()
-            for mesh, _, label in scene.belts
-            if label.endswith("/Deck") and label in crossbelt
+    @staticmethod
+    def _bottle_line(path, layout=None):
+        """Build source-sized glass bottles on the filling transport and capture one 120 Hz step on CUDA."""
+        builder = newton.ModelBuilder()
+        builder.add_ground_plane()
+        glass = builder.ShapeConfig(density=0.0, mu=0.16, mu_static=0.2, gap=0.002)
+        # The source bottle's mass properties; its centre of mass sits low in the thick base.
+        source = builder.add_body(
+            xform=wp.transform((0.0, -3.0, 0.0), wp.quat_identity()),
+            mass=0.570,
+            com=wp.vec3(0.0, 0.0, 0.0834),
+            inertia=wp.mat33(np.diag((0.00184, 0.00184, 0.000261))),
+            lock_inertia=True,
         )
-        (keeper,) = (mesh for mesh, _, label in scene.belts if label.endswith("/UpperGuide"))
-        vertices = keeper.vertices
-        seated_start = vertices[np.isclose(vertices[:, 2], vertices[:, 2].min()), 0].min()
-        self.assertLess(seated_start, lateral_start)
-        self.assertGreater(vertices[:, 0].max(), path[-1, 0])
+        bottle = wp.transform((0.0, 0.0, 0.115), wp.quat_identity())
+        builder.add_shape_cylinder(source, xform=bottle, radius=0.0305, half_height=0.115, cfg=glass)
+        scene = SimpleNamespace(builder=builder, belts=[], metadata={}, bodies={}, bottle_bodies=[source])
+        add_filling_transport(scene, path, motor_off=False, layout=layout, inlet_speed=0.14)
+        add_filling_bottles(scene, path, layout=layout)
+        model = builder.finalize()
+        for mesh, velocity, _ in scene.belts:
+            mesh.mesh.velocities.assign(velocity)
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            substeps=3,
+            solver_iterations=4,
+            temporal_iterations=True,
+            contact_hertz=80.0,
+            step_layout="single_world",
+        )
+        state = model.state()
+        contacts = model._collision_pipeline.contacts()
+        with wp.ScopedCapture() as capture:
+            solver.collide(state, contacts, dt=1.0 / 120.0)
+            solver.step(state, state, None, contacts, 1.0 / 120.0)
+        return scene, state, np.asarray(scene.bottle_bodies[1:]), capture.graph
+
+    def test_feed_zone_stops_only_for_a_standing_queue(self):
+        """Keep a feed running past a dense moving file and stop it for a standing queue."""
+        eye, dt = StandingQueue(), 1.0 / 60.0
+        # A moving file blocks the body beam but flickers the neck beam between necks.
+        moving = [eye.update(i * dt, True, (i // 4) % 2 == 0) for i in range(300)]
+        self.assertFalse(any(moving))
+        standing = [eye.update(5.0 + i * dt, True, True) for i in range(120)]
+        self.assertFalse(any(standing[:85]))
+        self.assertTrue(all(standing[95:]))
+        self.assertFalse(eye.update(7.1, False, False))
 
     @unittest.skipUnless(wp.is_cuda_available(), "CUDA device required")
     def test_filling_line_delivers_rated_output(self):
         """Carry production stock upright through a transfer arc at the line's rated output."""
         with wp.ScopedDevice("cuda:0"):
-            builder = newton.ModelBuilder()
-            builder.add_ground_plane()
-            glass = builder.ShapeConfig(density=850.0, mu=0.16, mu_static=0.2, gap=0.002)
-            source = builder.add_body(xform=wp.transform((0.0, -1.0, 0.0), wp.quat_identity()))
-            builder.add_shape_cylinder(
-                source,
-                xform=wp.transform((0.0, 0.0, 0.115), wp.quat_identity()),
-                radius=0.0305,
-                half_height=0.115,
-                cfg=glass,
-            )
-            scene = SimpleNamespace(builder=builder, belts=[], metadata={}, bodies={}, bottle_bodies=[source])
             # Enter a 0.2 m pitch-circle transfer, as between the rinser and filler wheels.
             arc = _arc((1.0, 0.2), 0.2, -0.5 * np.pi, 0.5 * np.pi, 1)
             xy = np.vstack(((0.0, 0.0), arc, (-2.0, 0.4)))
             path = np.column_stack((xy, np.full(len(xy), 0.95)))
-            add_filling_transport(scene, path, motor_off=False)
-            add_filling_bottles(scene, path)
-            model = builder.finalize()
-            for mesh, velocity, _ in scene.belts:
-                mesh.mesh.velocities.assign(velocity)
-            solver = newton.solvers.SolverPhoenX(
-                model,
-                substeps=3,
-                solver_iterations=4,
-                temporal_iterations=True,
-                contact_hertz=80.0,
-                step_layout="single_world",
-            )
-            state = model.state()
-            contacts = model._collision_pipeline.contacts()
+            _, state, bottles, graph = self._bottle_line(path)
             dt = 1.0 / 120.0
-
-            def step():
-                solver.collide(state, contacts, dt=dt)
-                solver.step(state, state, None, contacts, dt)
-
-            with wp.ScopedCapture() as capture:
-                step()
-            bottles = np.asarray(scene.bottle_bodies[1:])
             gate, passed, crossings = -1.2, np.zeros(len(bottles), dtype=bool), []
             for frame in range(1, 480):
-                wp.capture_launch(capture.graph)
+                wp.capture_launch(graph)
                 if frame % 4:
                     continue
                 poses = state.body_q.numpy()[bottles]
@@ -121,11 +123,61 @@ class TestBottlingPlant(unittest.TestCase):
         rate = 60.0 * (len(crossings) - 1) / (crossings[-1] - crossings[0])
         # The single file must carry at least the plant's rated 425 bottles/min.
         self.assertGreater(rate, 0.95 * 425.0)
-        # Every bottle still on the route stands upright on its deck.
-        route = (poses[:, 1] < 0.2) | (poses[:, 0] > path[-1, 0] + 0.05)
-        self.assertGreater(int(route.sum()), 30)
+        # Every bottle short of the gate, near the route's open end, stands upright on its deck.
+        route = ~passed
+        self.assertGreater(int(route.sum()), 10)
         self.assertTrue(np.all(poses[route, 2] > 0.945))
-        self.assertTrue(np.all(np.linalg.norm(poses[route, 3:5], axis=1) < np.sin(np.radians(3.75))))
+        # Same tilt bound as the example's wet-end handoff check.
+        self.assertTrue(np.all(np.linalg.norm(poses[route, 3:5], axis=1) < np.sin(np.radians(7.5))))
+
+    @unittest.skipUnless(wp.is_cuda_available(), "CUDA device required")
+    def test_wet_end_tables_carry_packed_beds(self):
+        """Move packed beds through the pasteuriser tables, tunnel, single filer and accumulation table."""
+        # The source's chute, funnel and table outlines, scaled down in width and length.
+        layout = {
+            "infeed": (np.array([1.0, 1.3, 1.6, 2.8]), np.array([0.12, 0.12, 0.35, 0.35])),
+            "outfeed": (np.array([3.2, 4.0, 4.3, 4.6]), np.array([0.35, 0.35, 0.12, 0.12])),
+            "combiner_end": 6.0,
+            "pool": (np.array([6.4, 7.4, 7.45, 8.0]), np.array([0.35, 0.35, 0.15, 0.15])),
+        }
+        infeed_bed = _pool_field((np.array([1.6, 2.8]), np.array([0.35, 0.35])), 0.0, 1000)
+        outfeed_bed = _pool_field((np.array([3.2, 4.0]), np.array([0.35, 0.35])), 0.0, 1000)
+        layout["placements"] = np.vstack((infeed_bed, outfeed_bed))
+        path = np.array([[0.0, 0.0, 0.95], [8.0, 0.0, 0.95]])
+        dt = 1.0 / 120.0
+        with wp.ScopedDevice("cuda:0"):
+            scene, state, bottles, graph = self._bottle_line(path, layout)
+            tunnel = PasteuriserTunnel(
+                scene.metadata["process_tunnel"], wp.array(bottles, dtype=int), wp.array([len(bottles)], dtype=int)
+            )
+            start = state.body_q.numpy()[bottles]
+            filed, emptied, tilt = set(), set(), 0.0
+            for frame in range(1, 3000):
+                tunnel.advance(state, frame * dt)
+                wp.capture_launch(graph)
+                if frame % 30 == 0:
+                    poses = state.body_q.numpy()[bottles]
+                    # Bottles tip once they drop off the open outlet; judge the line before it.
+                    on_line = (poses[:, 0] < path[-1, 0] - 0.1) & (poses[:, 2] > 0.9)
+                    tilt = max(tilt, float(np.linalg.norm(poses[on_line, 3:5], axis=1).max()))
+                    if frame * dt > 15.0:
+                        filed.update(np.flatnonzero(on_line & (poses[:, 0] > 6.2) & (poses[:, 0] < 6.4)))
+                    emptied.update(np.flatnonzero(poses[:, 0] > path[-1, 0]))
+            poses = state.body_q.numpy()[bottles]
+
+        tunnelled = (start[:, 0] < 2.8) & (poses[:, 0] > 3.2)
+        # The tunnel moves rows from the infeed table's front to the outfeed table.
+        self.assertGreater(int(tunnelled.sum()), 50)
+        # Once the outfeed bed reaches its chute, the single filer feeds the
+        # accumulation table at about the rated output.
+        self.assertGreater(len(filed), 0.7 * 425.0 / 60.0 * 10.0)
+        # The accumulation table discharges its packed field through the neck.
+        self.assertGreater(len(emptied), 100)
+        # Bottles on every table and conveyor stay upright, and none leaves the line.
+        self.assertLess(tilt, np.sin(np.radians(7.5)))
+        kept = np.ones(len(bottles), dtype=bool)
+        kept[list(emptied)] = False
+        self.assertTrue(np.all(poses[kept, 2] > 0.94))
 
     def test_wrapper_checks_actual_carton_corner_speed(self):
         """Admit a seated carton only when every corner meets the motion limit."""

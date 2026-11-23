@@ -7,7 +7,12 @@ Read the downloaded plant's composed USD with an example-specific builder. The
 factory keeps its source geometry, rigid bodies, mass properties, colliders,
 joint frames, and drive settings. Meshes are shared between repeated parts.
 With ``--filling-room-physics``, rigid bottles follow the wet-end belt and
-carousel route through the filling room and retain their source mass.
+carousel route through the filling room and retain their source mass. The
+line starts in production at its rated 425 bottles/min: packed beds cover the
+pasteuriser infeed and outfeed tables (the source's placements) and the
+accumulation table before the IFM. The closed pasteuriser tunnel is opaque;
+its bed of about 23,000 bottles is not simulated and moves row by row between
+its tables.
 The source assets remain outside the repository and require NVIDIA Storage
 access; see ``newton/examples/assets/bottling_plant/README.md``.
 
@@ -15,7 +20,8 @@ Success criteria:
 - Body poses and velocities remain finite.
 - Bottles stay off the factory floor, and sealed cases retain all 12 bottles.
 - When enabled, the driven wet end moves bottles toward the packer infeed.
-- With filling-room physics, a 30-second run delivers an upright bottle to the IFM.
+- With filling-room physics, a 30-second run delivers an upright bottle to the IFM,
+  and no bottle tips on the accumulation table or at the IFM handoff.
 - Joint attachments remain within their physical travel.
 - Inlet, case-line, sealer, and palletizer controllers remain free of faults.
 - Runs of at least 22 simulated seconds fill a case at each of the eight packers.
@@ -31,6 +37,7 @@ Runs:
 
 import argparse
 import json
+import math
 import time
 from pathlib import Path
 
@@ -46,10 +53,13 @@ from newton._src.solvers.phoenx.sleeping_filter import (
     phoenx_sleeping_filter,
 )
 from newton.examples.phoenx._bottling_control import PlantController
-from newton.examples.phoenx._bottling_infeed import BottleSupply
+from newton.examples.phoenx._bottling_infeed import BOTTLES_PER_MINUTE, BottleSupply
+from newton.examples.phoenx._bottling_process import PasteuriserTunnel
 from newton.examples.phoenx._bottling_scene import load_plant
 from newton.geometry import BroadPhaseImplicitTree
 from newton.solvers import SolverPhoenX
+
+_PRODUCTION_SECONDS = 330.0  # s, the bottling benchmark's default run length
 
 
 def _fleet_direct_contact_mask(joint_labels: list[str], exact: np.ndarray) -> np.ndarray | None:
@@ -194,7 +204,12 @@ class Example:
             carton_count = sum(len(cases) for cases in self.scene.metadata["case_inventory"].values())
             # Four tape bonds and one wrap bond per carton, plus packer/palletizer grasps.
             joints = max(320, 5 * carton_count + 36)
-            demand = max(0, 12 * carton_count - len(self.scene.bottle_bodies))
+            # The filler runs at its rated output for the whole run, and at least
+            # long enough to fill every carton.
+            duration = max(_PRODUCTION_SECONDS, args.num_frames * self.frame_dt)
+            demand = max(
+                12 * carton_count - len(self.scene.bottle_bodies), math.ceil(BOTTLES_PER_MINUTE / 60.0 * duration)
+            )
             extra = demand if args.extra_bottles is None else min(demand, args.extra_bottles)
             if extra:
                 self.supply = BottleSupply(self.scene, extra, joints)
@@ -252,7 +267,8 @@ class Example:
         self.pipeline = newton.CollisionPipeline(
             self.model,
             contact_matching="sticky",
-            rigid_contact_max=250_000,
+            # The filling room's packed tables add about 4,000 bottles in contact.
+            rigid_contact_max=500_000 if args.filling_room_physics else 250_000,
             broad_phase="sap" if self.model.device.is_cuda or self.supply is not None else "nxn",
             speculative_contact_gap_max=0.005,
             broad_phase_filter=(_filter_pair, _PlantFilter),
@@ -354,6 +370,14 @@ class Example:
                 self.filter_data.held_by,
                 self.supply,
             )
+        self.tunnel = None
+        if "process_tunnel" in self.scene.metadata and not args.motor_off:
+            if self.controller is not None:
+                bottles, count = self.controller.bottles, self.controller.bottle_count
+            else:
+                bottles = wp.array(self.scene.bottle_bodies, dtype=int, device=self.model.device)
+                count = wp.array([len(bottles)], dtype=int, device=self.model.device)
+            self.tunnel = PasteuriserTunnel(self.scene.metadata["process_tunnel"], bottles, count)
         self.joint_axes = self.model.joint_axis.numpy()
         self.joint_dofs = self.model.joint_qd_start.numpy()
         self.initial_poses = self.state_0.body_q.numpy()
@@ -445,6 +469,8 @@ class Example:
     def step(self):
         if self.supply is not None:
             self.supply.admit()
+        if self.tunnel is not None:
+            self.tunnel.advance(self.state_0, self.sim_time)
         if self.graph is None:
             self.simulate()
         else:
@@ -663,7 +689,7 @@ class Example:
             "--extra-bottles",
             type=int,
             default=None,
-            help="Maximum additional bottles admitted at the line entrance. Defaults to the remaining carton demand. Set to zero for the initial stock only.",
+            help="Maximum additional bottles admitted at the line entrance. Defaults to the rated output over the run (at least 330 s) or the remaining carton demand, whichever is larger. Set to zero for the initial stock only.",
         )
         parser.add_argument("--controllers", action=argparse.BooleanOptionalAction, default=True)
         parser.add_argument(

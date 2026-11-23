@@ -4,7 +4,6 @@
 """PhoenX bindings for the plant's inlet PLC and authored KR10 motion library."""
 
 import json
-import math
 import sys
 from types import SimpleNamespace
 
@@ -35,7 +34,6 @@ from newton.examples.phoenx._bottling_io import (
     _photoeyes,
     _valves,
 )
-from newton.examples.phoenx._bottling_process import POOL_SWEEP_PERIOD
 from newton.examples.phoenx._bottling_transport import TransportController
 from newton.examples.phoenx._bottling_wrap import WrapperController
 from newton.solvers import phoenx
@@ -46,8 +44,6 @@ class _Belt:
     velocity: wp.array[wp.vec3]
     nominal: wp.array[wp.vec3]
     channel: int
-    crossbelt: wp.array[wp.vec3]
-    crossbelt_channel: int
 
 
 @wp.kernel
@@ -55,10 +51,7 @@ def _belt_speeds(belts: wp.array[_Belt], multipliers: wp.array[float]):
     belt, vertex = wp.tid()
     item = belts[belt]
     if vertex < item.velocity.shape[0]:
-        speed = item.nominal[vertex] * multipliers[item.channel]
-        if vertex < item.crossbelt.shape[0]:
-            speed += item.crossbelt[vertex] * multipliers[item.crossbelt_channel]
-        item.velocity[vertex] = speed
+        item.velocity[vertex] = item.nominal[vertex] * multipliers[item.channel]
 
 
 @wp.kernel
@@ -745,9 +738,11 @@ class PlantController:
         self.wrapper = WrapperController(
             model, state, control, asset_root, self.wrapper_channels, self.fleet, plant=self
         )
-        crossbelt_fields = scene.metadata.get("process_pool_crossbelt", {})
         channel_count = self.infeed.channel_end + len(self.wrapper_channels)
-        self.crossbelt_channel = channel_count if crossbelt_fields else None
+        # Process feed zones stop while their eye sees a standing queue.
+        zones = scene.metadata.get("process_zones", {})
+        self.zone_channels = {name: channel_count + i for i, name in enumerate(zones)}
+        zone_of = {label: name for name, (labels, _) in zones.items() for label in labels}
         descriptors = []
         self.nominal_arrays = []
         self.belt_channels = []
@@ -762,22 +757,20 @@ class PlantController:
                 channel = self.transport.zone_channels[self.transport.channels[label]]
             if label in self.infeed.channels:
                 channel = self.infeed.channels[label]
+            if label in zone_of:
+                channel = self.zone_channels[zone_of[label]]
             if label in self.wrapper_channels:
                 channel = self.wrapper_channels[label]
             item = _Belt()
             item.velocity = mesh.mesh.velocities
             item.nominal = wp.array(velocities, dtype=wp.vec3)
             item.channel = channel
-            if label in crossbelt_fields:
-                item.crossbelt = wp.array(crossbelt_fields[label], dtype=wp.vec3)
-                item.crossbelt_channel = self.crossbelt_channel
-                self.nominal_arrays.append(item.crossbelt)
             descriptors.append(item)
             self.nominal_arrays.append(item.nominal)
             self.belt_channels.append(channel)
         self.belts = wp.array(descriptors, dtype=_Belt)
         self.max_belt_vertices = max(d.velocity.shape[0] for d in descriptors)
-        multipliers = np.ones(channel_count + bool(crossbelt_fields), dtype=np.float32)
+        multipliers = np.ones(channel_count + len(zones), dtype=np.float32)
         # Infeed starts only after measured placement, truck withdrawal and homing.
         multipliers[self.infeed.channel_end :] = 0.0
         self.multipliers = wp.array(multipliers, dtype=float)
@@ -1085,8 +1078,8 @@ class PlantController:
         self.infeed.before_step(self.case_clock, commands, speed, data)
         self.fleet.before_step(self.case_clock, data)
         self.wrapper.before_step(self.case_clock, speed, data)
-        if self.crossbelt_channel is not None:
-            speed[self.crossbelt_channel] = math.sin(math.tau * self.case_clock / POOL_SWEEP_PERIOD)
+        for name, channel in self.zone_channels.items():
+            speed[channel] = self.infeed.zone_speed[name]
         link = self.link
         link.write(self.multipliers, speed)
         link.write(self.outfeed_ok, [self.transport.can_accept(name) for name in self.names])

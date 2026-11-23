@@ -25,12 +25,14 @@ from newton._src.solvers.phoenx.materials import CombineMode
 from newton.examples.phoenx._bottling_dispenser import disable_owned_proxies, prepare_dispensers
 from newton.examples.phoenx._bottling_process import (
     IFM_ENTRY_SPEED_RATIO,
+    IFM_RECEIVING_BELT,
     PROCESS_BOTTLES,
     add_filling_bottles,
     add_filling_transport,
     filling_route,
     open_pool_passage,
     replace_process_proxies,
+    wet_end_layout,
 )
 from newton.examples.phoenx._bottling_wrap import build_wrapper, correct_wrapper_frame, mesh_components
 from newton.solvers import SolverPhoenX
@@ -444,7 +446,8 @@ def load_plant(
     process_path = filling_route(stage, cache) if filling_room_physics else None
     if process_path is not None:
         replace_process_proxies(stage, cache, process_path[0, 2])
-        open_pool_passage(stage, process_path)
+        layout = wet_end_layout(stage, cache, process_path)
+        open_pool_passage(stage, process_path, layout["pool"][1][-1])
     prims = list(Usd.PrimRange.Stage(stage, Usd.TraverseInstanceProxies()))
     scene = PlantScene(newton.ModelBuilder())
     builder = scene.builder
@@ -992,12 +995,12 @@ def load_plant(
     case_dims = None
     case_layouts = {}
     if process_path is not None:
-        receiving_belt = nominal.get("/Plant/Line/IFM/Modules/IFM_A/Belts/S2")
+        receiving_belt = nominal.get(IFM_RECEIVING_BELT)
         inlet_speed = (
             0.14 if receiving_belt is None else IFM_ENTRY_SPEED_RATIO * float(np.linalg.norm(receiving_belt[0]))
         )
-        add_filling_transport(scene, process_path, motor_off=motor_off, inlet_speed=inlet_speed)
-        add_filling_bottles(scene, process_path, motor_off=motor_off, inlet_speed=inlet_speed)
+        add_filling_transport(scene, process_path, motor_off=motor_off, layout=layout, inlet_speed=inlet_speed)
+        add_filling_bottles(scene, process_path, motor_off=motor_off, layout=layout)
     for instancer in instancers:
         if process_path is not None and str(instancer.GetPath()) == PROCESS_BOTTLES:
             continue
