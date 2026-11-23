@@ -818,8 +818,8 @@ class MixedJointSystem:
             self._forward("resolve_bounded_drives", idt, use_bias=use_bias)
             return
         self._any_bound_flag.zero_()
-        self.blocks._find_new_bounds(idt, self._any_bound_flag, use_bias=use_bias)
-        self.exact._find_new_bounds(idt, self._any_bound_flag, use_bias=use_bias)
+        self.blocks._find_new_bounds(idt, self._any_bound_flag)
+        self.exact._find_new_bounds(idt, self._any_bound_flag)
 
         def correct():
             self.blocks._correct_new_bounds(idt, use_bias=use_bias)

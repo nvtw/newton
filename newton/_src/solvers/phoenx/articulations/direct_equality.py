@@ -1702,11 +1702,10 @@ def _snapshot_direct_dynamic_velocity_kernel(
     row_limit_state: wp.array[wp.int32],
     row_limit_lower: wp.array[wp.float32],
     row_limit_upper: wp.array[wp.float32],
-    limit_free_mass: wp.array[wp.float32],
-    limit_free_reference: wp.array[wp.float32],
 ):
     row = wp.tid()
     selected = microstep_joint.shape[0] > row_joint[row] and microstep_joint[row_joint[row]]
+    previous_impulse = accumulated_impulse[row]
     if advance:
         if not selected:
             return
@@ -1806,10 +1805,22 @@ def _snapshot_direct_dynamic_velocity_kernel(
     dynamic_mass[row] = wp.max(mass, wp.float32(1.0e-10))
     velocity_reference[row] = momentum / dynamic_mass[row]
     if row_limited[row]:
-        limit_free_mass[row] = dynamic_mass[row]
-        limit_free_reference[row] = velocity_reference[row]
-        # Warm-start the previous substep's active bound as a rigid predictive stop.
+        # The active set is fixed for the substep so the factor stays valid. A
+        # bound that pulled its joint into the stop releases; a free joint
+        # that is predicted to cross a bound activates it.
         state = row_limit_state[row]
+        if not advance:
+            if (state > wp.int32(0) and previous_impulse > wp.float32(0.0)) or (
+                state < wp.int32(0) and previous_impulse < wp.float32(0.0)
+            ):
+                state = wp.int32(0)
+            if state == wp.int32(0):
+                predicted = dynamic_coordinate[row] + dt * relative_velocity
+                if predicted > row_limit_upper[row]:
+                    state = wp.int32(1)
+                elif predicted < row_limit_lower[row]:
+                    state = wp.int32(-1)
+            row_limit_state[row] = state
         if state != wp.int32(0):
             dynamic_mass[row] = _LIMIT_ROW_MASS
             velocity_reference[row] = _limit_stop_reference(
@@ -1851,18 +1862,10 @@ def _activate_bounded_direct_drives_kernel(
     row_mechanism: wp.array[wp.int32],
     changed_mechanism: wp.array[wp.int32],
     any_active_flag: wp.array[wp.int32],
-    row_limited: wp.array[wp.bool],
     row_limit_state: wp.array[wp.int32],
-    row_limit_lower: wp.array[wp.float32],
-    row_limit_upper: wp.array[wp.float32],
-    limit_free_mass: wp.array[wp.float32],
-    limit_free_reference: wp.array[wp.float32],
-    accumulated_impulse: wp.array[wp.float32],
-    use_bias: wp.bool,
 ):
     row = wp.tid()
-    limited = row_limited[row]
-    if not row_bounded_drive[row] and not limited:
+    if not row_bounded_drive[row]:
         return
 
     joint = row_joint[row]
@@ -1878,41 +1881,9 @@ def _activate_bounded_direct_drives_kernel(
     if body1 > wp.int32(0):
         velocity += wp.dot(row_wrench1[structural_index, local_row], _body_com_twist(bodies, body1))
 
-    if limited:
-        state = row_limit_state[row]
-        changed = False
-        if state != wp.int32(0) and use_bias:
-            # Positive impulses push the coordinate up. A bound that pulls
-            # the joint into its stop releases to the row's free law. Only a
-            # biased solve's impulse is physical; an unbiased pass merely
-            # removes the correction of a violation, so it never releases.
-            impulse = accumulated_impulse[row]
-            if (state > wp.int32(0) and impulse > wp.float32(0.0)) or (
-                state < wp.int32(0) and impulse < wp.float32(0.0)
-            ):
-                row_limit_state[row] = wp.int32(0)
-                dynamic_mass[row] = limit_free_mass[row]
-                velocity_reference[row] = limit_free_reference[row]
-                changed = True
-        elif state == wp.int32(0):
-            predicted = dynamic_coordinate[row] + dt * velocity
-            if predicted > row_limit_upper[row] or predicted < row_limit_lower[row]:
-                state = wp.where(predicted > row_limit_upper[row], wp.int32(1), wp.int32(-1))
-                row_limit_state[row] = state
-                dynamic_mass[row] = _LIMIT_ROW_MASS
-                velocity_reference[row] = _limit_stop_reference(
-                    state, dynamic_coordinate[row], row_limit_lower[row], row_limit_upper[row], dt
-                )
-                drive_saturated[row] = False
-                changed = True
-        if changed:
-            wp.atomic_max(active_set_flag, wp.int32(0), wp.int32(1))
-            wp.atomic_max(any_active_flag, wp.int32(0), wp.int32(1))
-            if row_mechanism.shape[0] > row:
-                changed_mechanism[row_mechanism[row]] = wp.int32(1)
+    if row_limit_state[row] != wp.int32(0):
         # An active bound holds the row rigid, so the motor law is moot.
-        if changed or row_limit_state[row] != wp.int32(0) or not row_bounded_drive[row]:
-            return
+        return
 
     dof = row_dof[row]
     target_mode = joint_target_mode[dof]
@@ -2475,8 +2446,7 @@ class DirectEqualitySystem:
         present = row_dofs[np.asarray(self.topology.row_dynamic, dtype=bool) & (row_dofs >= 0)]
         self.direct_limit_dof_mask = np.zeros_like(limit_dof_mask)
         self.direct_limit_dof_mask[present] = limit_dof_mask[present]
-        # Joint limits share the bounded drives' active-set resolution.
-        self.has_bounded_drives = bool(np.any(bounded_drive_joint_mask) or np.any(self.direct_limit_dof_mask))
+        self.has_bounded_drives = bool(np.any(bounded_drive_joint_mask))
         self.regularization = float(regularization)
         row_regularization = np.full(len(self.topology.row_joint), self.regularization, dtype=np.float32)
         limited_rows = np.asarray(self.topology.row_dynamic, dtype=bool) & (row_dofs >= 0)
@@ -2505,7 +2475,7 @@ class DirectEqualitySystem:
         # reactions statically indeterminate. The redundant-pair floor keeps
         # each one nearly rigid but lets an inconsistency settle in the
         # stops rather than open the structural joints.
-        row_regularization[limited_rows] = max(self.regularization, _FP32_REPEATED_PAIR_REGULARIZATION)
+        row_regularization[limited_rows] = max(self.regularization, _FP32_RANK_REGULARIZATION)
         self.row_regularization = wp.array(row_regularization, dtype=wp.float32, device=model.device)
         self.enabled = bool(self.topology.dimensions)
         self.factor_stream = None
@@ -2625,12 +2595,9 @@ class DirectEqualitySystem:
         self.row_limited = wp.array(row_limited, dtype=wp.bool, device=device)
         self.row_limit_lower = wp.array(row_lower, dtype=wp.float32, device=device)
         self.row_limit_upper = wp.array(row_upper, dtype=wp.float32, device=device)
-        # Active bound of each limited row: -1 lower, +1 upper, 0 free. It
-        # warm-starts the next substep; the bound scan verifies it after each solve.
+        # Active bound of each limited row: -1 lower, +1 upper, 0 free. Each
+        # substep's snapshot updates it before the factor.
         self.row_limit_state = wp.zeros(row_count, dtype=wp.int32, device=device)
-        # The row's law without its bound, restored when the bound releases.
-        self.limit_free_mass = wp.zeros(row_count, dtype=wp.float32, device=device)
-        self.limit_free_reference = wp.zeros(row_count, dtype=wp.float32, device=device)
         self.row_target_q = wp.array(row_target_q, dtype=wp.int32, device=device)
         self.friction_joints = wp.array(friction_joints, dtype=wp.int32, device=device)
         self.friction_dofs = wp.array(friction_dofs, dtype=wp.int32, device=device)
@@ -3070,8 +3037,6 @@ class DirectEqualitySystem:
                 self.row_limit_state,
                 self.row_limit_lower,
                 self.row_limit_upper,
-                self.limit_free_mass,
-                self.limit_free_reference,
             ],
             device=self.model.device,
         )
@@ -3083,10 +3048,10 @@ class DirectEqualitySystem:
         # A newly clamped drive can expose another bound in a coupled
         # mechanism. Nested conditionals keep the common unsaturated path to
         # one row scan and only perform extra scans after an actual refactor.
-        self._find_new_bounds(idt, self.drive_active_set_flag, use_bias=use_bias)
+        self._find_new_bounds(idt, self.drive_active_set_flag)
         self._correct_new_bounds(idt, use_bias=use_bias)
 
-    def _find_new_bounds(self, idt: wp.float32, any_flag: wp.array, *, use_bias: bool = True) -> None:
+    def _find_new_bounds(self, idt: wp.float32, any_flag: wp.array) -> None:
         """Scan bounded drive rows; ``drive_active_set_flag`` and ``any_flag`` mark a change."""
         dt = wp.float32(1.0) / idt
         self._bound_scan_flags.zero_()
@@ -3126,14 +3091,7 @@ class DirectEqualitySystem:
                 self._bound_row_mechanism,
                 self._bound_changed_mechanism,
                 any_flag,
-                self.row_limited,
                 self.row_limit_state,
-                self.row_limit_lower,
-                self.row_limit_upper,
-                self.limit_free_mass,
-                self.limit_free_reference,
-                self.accumulated_impulse,
-                wp.bool(use_bias),
             ],
             device=self.model.device,
         )
@@ -3145,7 +3103,7 @@ class DirectEqualitySystem:
             self._refactor_changed_bounds(idt)
             self.solve(use_bias=use_bias)
             if remaining_passes > 0:
-                self._find_new_bounds(idt, self.drive_active_set_flag, use_bias=use_bias)
+                self._find_new_bounds(idt, self.drive_active_set_flag)
                 wp.capture_if(
                     self.drive_active_set_flag,
                     on_true=lambda: activate_and_correct(remaining_passes - 1),

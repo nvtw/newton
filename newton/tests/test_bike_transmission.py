@@ -123,18 +123,23 @@ class TestBikeTransmission(unittest.TestCase):
         example = Example(ViewerNull(), args)
         self.assertEqual((example.contact_updates_per_frame, example.substeps), (4, 6))
         max_penetration = 0.0
+        steady_power = []
         for frame in range(360):
             example.step()
             if (frame + 1) % 30 == 0:
                 max_penetration = max(max_penetration, _max_live_contact_penetration(example))
+            if frame >= 240 and frame % 5 == 0:
+                metrics = example.drivetrain_metrics()
+                steady_power.append((metrics["crank_drive_power_w"], metrics["rear_load_power_w"]))
 
         example.test_final()
         metrics = example.drivetrain_metrics()
+        # Chain kinetic energy exchanges power for an instant; compare averages.
+        input_power, rear_power = np.mean(steady_power, axis=0)
         self.assertTrue(np.isfinite(tuple(metrics.values())).all())
-        self.assertGreater(metrics["rear_load_power_w"], 10.0)
-        self.assertGreater(metrics["crank_drive_power_w"], metrics["rear_load_power_w"])
-        self.assertGreater(metrics["drivetrain_efficiency"], 0.5)
-        self.assertLess(metrics["drivetrain_efficiency"], 1.0)
+        self.assertGreater(rear_power, 10.0)
+        self.assertGreater(input_power, rear_power)
+        self.assertGreater(rear_power / input_power, 0.5)
         self.assertGreater(metrics["speed_ratio"], 2.5)
         self.assertLess(metrics["speed_ratio"], 4.5)
         self.assertLess(_chain_lateral_spread(example), _CHAIN_LATERAL_SPREAD)
