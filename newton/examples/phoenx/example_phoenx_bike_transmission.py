@@ -28,6 +28,12 @@ DEFAULT_DENSITY = 1000.0
 # Calibrated at the default rear load. A tension-dependent pin-loss model can
 # replace this constant once joint reaction magnitudes are exposed to examples.
 CHAIN_JOINT_FRICTION = 5.0e-4
+# Lateral play of each chain pin about the two axes normal to it [deg]. Plate
+# and pin clearances let a derailleur chain run at an angle between the guide
+# pulley and a neighboring cog. Rigid hinges cannot follow a shift and lever the
+# chain off the cassette; 2 degrees is the smallest play that shifted cleanly
+# across the cassette and back in both directions.
+CHAIN_LATERAL_PLAY_DEG = 2.0
 DRIVETRAIN_CONTACT_FRICTION = 0.1
 DEFAULT_CADENCE_RPM = 60.0
 DEFAULT_REAR_LOAD_DAMPING = 0.020053523
@@ -129,8 +135,12 @@ def build_scene(
     derailleur_damping_scale=DERAILLEUR_DAMPING_SCALE,
     cadence_rpm=DEFAULT_CADENCE_RPM,
     rear_load_damping=DEFAULT_REAR_LOAD_DAMPING,
+    chain_lateral_play_deg=CHAIN_LATERAL_PLAY_DEG,
 ):
-    """Build the authored closed mechanism with SDF mesh collisions in SI units."""
+    """Build the authored closed mechanism with SDF mesh collisions in SI units.
+
+    Chain pins keep the authored hinge axis and gain bounded lateral play.
+    """
     scene = SCENE
     builder = newton.ModelBuilder(gravity=tuple(scene["gravity"]))
     for body in scene["bodies"]:
@@ -180,6 +190,25 @@ def build_scene(
         mode = newton.JointTargetMode.POSITION if stiffness else newton.JointTargetMode.VELOCITY
         parent, child = joint["parent"], joint["child"]
         parent_frame, child_frame = joint["frames"]
+        if "/Chain/" in joint["label"] and chain_lateral_play_deg > 0.0:
+            # The free pin axis first, then its two normals with bounded play.
+            names = "XYZ"
+            axes = [newton.Axis.from_string(names[(names.index(joint["axis"]) + k) % 3]) for k in range(3)]
+            play = np.radians(chain_lateral_play_deg)
+            dof = newton.ModelBuilder.JointDofConfig
+            return builder.add_joint_d6(
+                parent,
+                child,
+                angular_axes=[
+                    dof(axis=axes[0], friction=chain_joint_friction),
+                    dof(axis=axes[1], limit_lower=-play, limit_upper=play),
+                    dof(axis=axes[2], limit_lower=-play, limit_upper=play),
+                ],
+                parent_xform=_transform(parent_frame),
+                child_xform=_transform(child_frame),
+                collision_filter_parent=True,
+                label=joint["label"],
+            )
         return builder.add_joint_revolute(
             parent,
             child,
@@ -220,6 +249,7 @@ class Example:
         self.frame_dt = 1.0 / 60.0
         self.cadence_rpm = getattr(args, "cadence_rpm", DEFAULT_CADENCE_RPM)
         self.rear_load_damping = getattr(args, "rear_load_damping", DEFAULT_REAR_LOAD_DAMPING)
+        self.chain_lateral_play = getattr(args, "chain_lateral_play", CHAIN_LATERAL_PLAY_DEG)
         self.speculative_contact_gap_max = getattr(args, "speculative_contact_gap_max", SPECULATIVE_CONTACT_GAP_MAX)
         self.startup_ramp_time = getattr(args, "startup_ramp_time", DEFAULT_STARTUP_RAMP_TIME)
         self.contact_updates_per_frame, self.substeps = _simulation_schedule(
@@ -240,10 +270,11 @@ class Example:
             or self.rear_load_damping < 0.0
             or self.speculative_contact_gap_max < 0.0
             or self.startup_ramp_time < 0.0
+            or self.chain_lateral_play < 0.0
         ):
             raise ValueError(
-                "contact chunk size, chain joint friction, rear load damping, speculative contact gap, and startup "
-                "ramp time must be nonnegative; "
+                "contact chunk size, chain joint friction, rear load damping, speculative contact gap, startup "
+                "ramp time, and chain lateral play must be nonnegative; "
                 "cadence and derailleur scales must be positive"
             )
         self.model = build_scene(
@@ -254,6 +285,7 @@ class Example:
             derailleur_damping_scale=args.derailleur_damping_scale,
             cadence_rpm=self.cadence_rpm,
             rear_load_damping=self.rear_load_damping,
+            chain_lateral_play_deg=self.chain_lateral_play,
         ).finalize(skip_validation_joints=True)
         self.state = self.model.state()
         self.control = self.model.control()
@@ -457,6 +489,8 @@ class Example:
         xp, xc = self.model.joint_X_p.numpy(), self.model.joint_X_c.numpy()
         worst = 0.0
         worst_angle = 0.0
+        # Chain pins may tilt by their lateral play about both normals of the pin.
+        play = np.radians(self.chain_lateral_play) * np.sqrt(2.0)
         for i in range(self.model.joint_count):
             a, b = _transform(xp[i]), _transform(xc[i])
             if parent[i] >= 0:
@@ -467,9 +501,11 @@ class Example:
             axis = wp.vec3(*{"X": (1, 0, 0), "Y": (0, 1, 0), "Z": (0, 0, 1)}[SCENE["joints"][i]["axis"]])
             u, v = wp.transform_vector(a, axis), wp.transform_vector(b, axis)
             angle = np.arctan2(float(wp.length(wp.cross(u, v))), float(wp.dot(u, v)))
+            if "/Chain/" in SCENE["joints"][i]["label"]:
+                angle = max(0.0, angle - play)
             worst_angle = max(worst_angle, angle)
         print(f"BikeTransmission maximum joint attachment error: {worst:.6g} m")
-        print(f"BikeTransmission maximum hinge-axis error: {np.rad2deg(worst_angle):.6g} degrees")
+        print(f"BikeTransmission maximum hinge-axis error beyond chain play: {np.rad2deg(worst_angle):.6g} degrees")
         assert worst_angle < 0.02, f"Misaligned transmission hinge: {worst_angle:.6g} rad"
         assert worst < 0.002, f"Broken transmission joint: {worst:.6g} m"
 
@@ -547,6 +583,12 @@ class Example:
             type=float,
             default=CHAIN_JOINT_FRICTION,
             help="Coulomb friction torque at each chain pin in N m.",
+        )
+        parser.add_argument(
+            "--chain-lateral-play",
+            type=float,
+            default=CHAIN_LATERAL_PLAY_DEG,
+            help="Lateral play of each chain pin in degrees (0 keeps rigid hinges, which cannot shift).",
         )
         parser.add_argument(
             "--derailleur-preload-scale",

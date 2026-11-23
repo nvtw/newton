@@ -53,6 +53,21 @@ def _max_live_contact_penetration(example):
     return deepest
 
 
+def _chain_lateral_spread(example):
+    """Return the lateral spread of the chain link centers of mass [m]."""
+    poses = example.state.body_q.numpy()[example.chain_bodies]
+    centers = example.model.body_com.numpy()[example.chain_bodies]
+    lateral = [
+        wp.transform_point(_transform(pose), wp.vec3(*center))[1] for pose, center in zip(poses, centers, strict=True)
+    ]
+    return float(np.ptp(lateral))
+
+
+# The chain runs from the chainring plane to the engaged cog's plane; a chain
+# leaving the 40 mm cassette would exceed this bound.
+_CHAIN_LATERAL_SPREAD = 0.01
+
+
 class TestBikeTransmission(unittest.TestCase):
     def test_measured_solver_defaults(self):
         """Keep the validated low-work solver configuration."""
@@ -88,7 +103,6 @@ class TestBikeTransmission(unittest.TestCase):
         metrics = example.drivetrain_metrics()
         input_power, rear_power = np.mean(steady_power, axis=0)
         average_efficiency = rear_power / input_power
-        chain_y = example.state.body_q.numpy()[example.chain_bodies, 1]
         self.assertTrue(np.isfinite(tuple(metrics.values())).all())
         self.assertGreater(rear_power, 3.0)
         self.assertGreater(input_power, rear_power)
@@ -96,7 +110,7 @@ class TestBikeTransmission(unittest.TestCase):
         self.assertLess(average_efficiency, 1.0)
         self.assertGreater(metrics["speed_ratio"], 2.5)
         self.assertLess(metrics["speed_ratio"], 4.5)
-        self.assertLess(float(np.ptp(chain_y)), 0.005)
+        self.assertLess(_chain_lateral_spread(example), _CHAIN_LATERAL_SPREAD)
 
     def test_loaded_chain_transmits_power_at_high_cadence(self):
         """Keep the drivetrain engaged with cadence-scaled contact refreshes."""
@@ -116,7 +130,6 @@ class TestBikeTransmission(unittest.TestCase):
 
         example.test_final()
         metrics = example.drivetrain_metrics()
-        chain_y = example.state.body_q.numpy()[example.chain_bodies, 1]
         self.assertTrue(np.isfinite(tuple(metrics.values())).all())
         self.assertGreater(metrics["rear_load_power_w"], 10.0)
         self.assertGreater(metrics["crank_drive_power_w"], metrics["rear_load_power_w"])
@@ -124,8 +137,40 @@ class TestBikeTransmission(unittest.TestCase):
         self.assertLess(metrics["drivetrain_efficiency"], 1.0)
         self.assertGreater(metrics["speed_ratio"], 2.5)
         self.assertLess(metrics["speed_ratio"], 4.5)
-        self.assertLess(float(np.ptp(chain_y)), 0.005)
+        self.assertLess(_chain_lateral_spread(example), _CHAIN_LATERAL_SPREAD)
         self.assertLess(max_penetration, 0.003)
+
+    def test_rear_derailleur_shifts_the_loaded_chain(self):
+        """Shift to larger cogs and back while the chain stays joined and engaged."""
+        if not wp.get_device().is_cuda:
+            self.skipTest("PhoenX requires CUDA")
+        if not (ASSETS / SCENE["shapes"][0]["mesh"]).is_file():
+            self.skipTest("BikeTransmission meshes are local copyrighted assets")
+
+        example = Example(ViewerNull(), Example.create_parser().parse_args([]))
+        joint = list(example.model.joint_label).index("/World/Xform/Changer/ShiftLinkA/GearChangeRear")
+        coordinate = int(example.model.joint_target_q_start.numpy()[joint])
+
+        def hold(target, frames):
+            targets = example.control.joint_target_q.numpy()
+            targets[coordinate] = target
+            example.control.joint_target_q.assign(targets)
+            ratios = []
+            for frame in range(frames):
+                example.step()
+                if frame >= frames - 60:
+                    ratios.append(example.drivetrain_metrics()["speed_ratio"])
+            return float(np.mean(ratios))
+
+        base = hold(0.0, 240)
+        shifted = hold(-0.6, 300)
+        self.assertGreater(example.drivetrain_metrics()["rear_rpm"], 30.0, "the chain left the cassette")
+        returned = hold(0.0, 300)
+        example.test_final()
+        # Larger cogs lower the cassette-to-crank speed ratio; shifting back restores it.
+        self.assertLess(shifted, 0.8 * base)
+        self.assertGreater(shifted, 0.3 * base)
+        self.assertAlmostEqual(returned, base, delta=0.15 * base)
 
     def test_derailleur_spring_preload(self):
         """Increase derailleur preload without stiffening its dynamic response."""
