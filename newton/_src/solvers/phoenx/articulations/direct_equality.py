@@ -3052,9 +3052,12 @@ class DirectEqualitySystem:
         self._correct_new_bounds(idt, use_bias=use_bias)
 
     def _find_new_bounds(self, idt: wp.float32, any_flag: wp.array) -> None:
-        """Scan bounded drive rows; ``drive_active_set_flag`` and ``any_flag`` mark a change."""
+        """Scan bounded drive rows; ``drive_active_set_flag`` and ``any_flag`` mark a change.
+
+        The scan flags are zero between scans: only a correction, which consumes them,
+        clears them. A memset node per scan would cost more than the scan itself.
+        """
         dt = wp.float32(1.0) / idt
-        self._bound_scan_flags.zero_()
         wp.launch(
             _activate_bounded_direct_drives_kernel,
             dim=len(self.topology.row_joint),
@@ -3101,6 +3104,7 @@ class DirectEqualitySystem:
 
         def activate_and_correct(remaining_passes: int) -> None:
             self._refactor_changed_bounds(idt)
+            self._bound_scan_flags.zero_()
             self.solve(use_bias=use_bias)
             if remaining_passes > 0:
                 self._find_new_bounds(idt, self.drive_active_set_flag)

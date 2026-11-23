@@ -817,11 +817,12 @@ class MixedJointSystem:
         if not self._joint_bound_scan:
             self._forward("resolve_bounded_drives", idt, use_bias=use_bias)
             return
-        self._any_bound_flag.zero_()
+        # Like the scan flags of both parts, the shared flag is zero between scans.
         self.blocks._find_new_bounds(idt, self._any_bound_flag)
         self.exact._find_new_bounds(idt, self._any_bound_flag)
 
         def correct():
+            self._any_bound_flag.zero_()
             self.blocks._correct_new_bounds(idt, use_bias=use_bias)
             self.exact._correct_new_bounds(idt, use_bias=use_bias)
 

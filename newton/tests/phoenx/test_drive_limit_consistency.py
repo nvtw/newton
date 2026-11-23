@@ -154,6 +154,12 @@ class TestDriveLimitConsistency(unittest.TestCase):
                     step()
             for _ in range(120):
                 wp.capture_launch(capture.graph)
+            # The slider stalls against the wall, so corrections ran. They must
+            # consume their flags: scans rely on finding them cleared.
+            self.assertGreater(int(changes.numpy()[0]), 0)
+            system = solver.world._direct_equality_system
+            system = getattr(system, "exact", system)
+            np.testing.assert_array_equal(system._bound_scan_flags.numpy(), 0)
             changes.zero_()
             for _ in range(60):
                 wp.capture_launch(capture.graph)
