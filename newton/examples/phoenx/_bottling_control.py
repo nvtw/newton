@@ -661,14 +661,10 @@ class PlantController:
         self.origins = wp.array(origins, dtype=wp.vec3)
         self.directions = wp.array(directions, dtype=wp.vec3)
         self.distances = wp.array(distances, dtype=float)
-        body_index = model.shape_body.numpy()
-        flags = model.shape_flags.numpy()
-        shapes = np.flatnonzero(
-            (body_index == scene.bottle_bodies[0]) & ((flags & int(newton.ShapeFlags.COLLIDE_SHAPES)) != 0)
-        )
-        self.hull_mesh = wp.array(model.shape_source_ptr.numpy()[shapes], dtype=wp.uint64)
-        self.hull_xform = wp.array(model.shape_transform.numpy()[shapes], dtype=wp.transform)
-        self.hull_scale = wp.array(model.shape_scale.numpy()[shapes], dtype=wp.vec3)
+        hulls = scene.metadata["bottle_sensor_hulls"]
+        self.hull_mesh = wp.array([mesh.finalize(model.device) for mesh, _, _ in hulls], dtype=wp.uint64)
+        self.hull_xform = wp.array([pose for _, pose, _ in hulls], dtype=wp.transform)
+        self.hull_scale = wp.array([scale for _, _, scale in hulls], dtype=wp.vec3)
         self.arm_dof = wp.array(dofs, dtype=int)
         self.arm_coordinate = wp.array(self.target_coordinates[np.asarray(dofs)], dtype=int)
         self.grippers = wp.array(grippers, dtype=int)

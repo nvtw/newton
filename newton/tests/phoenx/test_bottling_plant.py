@@ -30,7 +30,7 @@ from newton.examples.phoenx._bottling_process import (
     add_filling_bottles,
     add_filling_transport,
 )
-from newton.examples.phoenx._bottling_scene import PlantScene, load_plant
+from newton.examples.phoenx._bottling_scene import PlantScene, add_round_bottle, load_plant
 from newton.examples.phoenx._bottling_transport import _carton_support_quadrants, _placement_motions
 from newton.examples.phoenx._bottling_wrap import (
     WrapperController,
@@ -50,8 +50,11 @@ from newton.viewer import ViewerNull
 @requires("pxr.Usd")
 class TestBottlingPlant(unittest.TestCase):
     @staticmethod
-    def _bottle_line(path, layout=None):
-        """Build source-sized glass bottles on the filling transport and capture one 120 Hz step on CUDA."""
+    def _bottle_line(path, layout=None, shapes=None):
+        """Build source-sized glass bottles on the filling transport and capture one 120 Hz step on CUDA.
+
+        ``shapes(builder, body, cfg)`` replaces the bottle's single cylinder collider.
+        """
         builder = newton.ModelBuilder()
         builder.add_ground_plane()
         glass = builder.ShapeConfig(density=0.0, mu=0.16, mu_static=0.2, gap=0.002)
@@ -63,8 +66,11 @@ class TestBottlingPlant(unittest.TestCase):
             inertia=wp.mat33(np.diag((0.00184, 0.00184, 0.000261))),
             lock_inertia=True,
         )
-        bottle = wp.transform((0.0, 0.0, 0.115), wp.quat_identity())
-        builder.add_shape_cylinder(source, xform=bottle, radius=0.0305, half_height=0.115, cfg=glass)
+        if shapes is None:
+            bottle = wp.transform((0.0, 0.0, 0.115), wp.quat_identity())
+            builder.add_shape_cylinder(source, xform=bottle, radius=0.0305, half_height=0.115, cfg=glass)
+        else:
+            shapes(builder, source, glass)
         scene = SimpleNamespace(builder=builder, belts=[], metadata={}, bodies={}, bottle_bodies=[source])
         add_filling_transport(scene, path, motor_off=False, layout=layout, inlet_speed=0.14)
         add_filling_bottles(scene, path, layout=layout)
@@ -215,6 +221,41 @@ class TestBottlingPlant(unittest.TestCase):
         kept = np.ones(len(bottles), dtype=bool)
         kept[list(emptied)] = False
         self.assertTrue(np.all(poses[kept, 2] > 0.94))
+
+    @unittest.skipUnless(wp.is_cuda_available(), "CUDA device required")
+    def test_single_filer_files_plant_bottles(self):
+        """File the source-scale pasteuriser outfeed with the plant's bottle colliders at the rated output."""
+
+        def plant_bottle(builder, body, cfg):
+            # The base ring, then the plant's collider above it.
+            ring = wp.transform((0.0, 0.0, 0.008), wp.quat_identity())
+            builder.add_shape_cylinder(body, xform=ring, radius=0.0305, half_height=0.008, cfg=cfg)
+            add_round_bottle(builder, body, "/Bottle/Collision", cfg=cfg)
+
+        # The source's outfeed table and funnel to the 0.24 m chute, behind a short bed.
+        layout = {
+            "infeed": (np.array([1.0, 1.3, 2.4, 3.0]), np.array([0.12, 0.12, 1.15, 1.15])),
+            "outfeed": (np.array([3.0, 4.6, 5.7, 6.0]), np.array([1.15, 1.15, 0.12, 0.12])),
+            "combiner_end": 9.2,
+            "pool": (np.array([9.6, 10.6, 10.65, 11.2]), np.array([0.35, 0.35, 0.15, 0.15])),
+        }
+        path = np.array([[0.0, 0.0, 0.95], [11.2, 0.0, 0.95]])
+        with wp.ScopedDevice("cuda:0"):
+            _, state, bottles, graph = self._bottle_line(path, layout, plant_bottle)
+            filed, counts = np.zeros(len(bottles), dtype=bool), {}
+            for frame in range(1, 40 * 120 + 1):
+                wp.capture_launch(graph)
+                if frame % 120 == 0:
+                    poses = state.body_q.numpy()[bottles]
+                    filed |= poses[:, 0] > 9.4
+                    counts[frame // 120] = int(filed.sum())
+
+        # Faceted hulls lock arches where the filer steps in and stop it for
+        # good; round bottles roll apart and keep filing.
+        self.assertGreaterEqual(counts[40] - counts[18], 6.5 * 22.0)
+        # Bottles short of the open line end stand upright.
+        on_line = (poses[:, 0] < 9.4) & (poses[:, 2] > 0.9)
+        self.assertTrue(np.all(np.linalg.norm(poses[on_line, 3:5], axis=1) < np.sin(np.radians(7.5))))
 
     def test_wrapper_checks_actual_carton_corner_speed(self):
         """Admit a seated carton only when every corner meets the motion limit."""
@@ -1357,7 +1398,7 @@ def Xform "Plant" {
         from pxr import Usd, UsdGeom, UsdPhysics
 
         # Shapes the full plant builds with visuals (example log, 2026-11-23).
-        logged = {False: 276_775, True: 592_302}
+        logged = {False: 257_575, True: 498_870}
         parser = Example.create_parser
         for filling, shapes in logged.items():
             flag = ["--filling-room-physics"] if filling else []

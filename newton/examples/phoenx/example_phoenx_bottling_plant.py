@@ -60,7 +60,7 @@ _PRODUCTION_SECONDS = 330.0  # s, the bottling benchmark's default run length
 
 
 # OptiX allocates an instance for every shape, hidden colliders included.
-# With visuals the plant builds 276,775 shapes, and 592,302 with the filling
+# With visuals the plant builds 257,575 shapes, and 498,870 with the filling
 # room's packed beds (measured 2026-11-23); each capacity leaves headroom.
 OPTIX_INSTANCES = {False: 400_000, True: 800_000}
 
