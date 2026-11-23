@@ -4,11 +4,13 @@
 """Regression tests for coupled PhoenX direct joints and contact inequalities."""
 
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import warp as wp
 
 import newton
+from newton._src.solvers.phoenx.articulations import direct_contact_gs
 from newton._src.solvers.phoenx.examples.example_rigid_cloth_rigid_drop import Example
 from newton.viewer import ViewerNull
 
@@ -67,6 +69,39 @@ def _build_floating_tree_on_plane() -> newton.Model:
     builder.add_ground_plane(cfg=newton.ModelBuilder.ShapeConfig(mu=0.7))
     builder.color()
     return builder.finalize(device=wp.get_preferred_device())
+
+
+def _build_closed_chain_on_plane(links: int = 40) -> newton.Model:
+    """Build a closed loop of ``links`` boxes lying on a plane: one large exact mechanism."""
+    builder = newton.ModelBuilder(gravity=(0.0, 0.0, -9.81))
+    cfg = newton.ModelBuilder.ShapeConfig(density=500.0, mu=0.7)
+    previous, joints = -1, []
+    for i in range(links):
+        body = builder.add_link(xform=wp.transform((0.1 * i, 0.0, 0.03), wp.quat_identity()))
+        builder.add_shape_box(body, hx=0.05, hy=0.03, hz=0.02, cfg=cfg)
+        if previous < 0:
+            joints.append(builder.add_joint_free(parent=-1, child=body))
+        else:
+            joints.append(
+                builder.add_joint_revolute(
+                    previous,
+                    body,
+                    axis=newton.Axis.Y,
+                    parent_xform=wp.transform((0.05, 0.0, 0.0), wp.quat_identity()),
+                    child_xform=wp.transform((-0.05, 0.0, 0.0), wp.quat_identity()),
+                )
+            )
+        previous = body
+    builder.add_articulation(joints)
+    builder.add_joint_revolute(
+        previous,
+        0,
+        axis=newton.Axis.Y,
+        parent_xform=wp.transform((0.05, 0.0, 0.0), wp.quat_identity()),
+        child_xform=wp.transform((0.1 * links - 0.05, 0.0, 0.0), wp.quat_identity()),
+    )
+    builder.add_ground_plane(cfg=cfg)
+    return builder.finalize()
 
 
 def _build_parallel_steering_on_plane() -> tuple[newton.Model, tuple[int, int], tuple[int, int]]:
@@ -315,6 +350,33 @@ class TestDirectContactCoupling(unittest.TestCase):
                 body_q = state.body_q.numpy()
                 self.assertTrue(np.isfinite(body_q).all())
                 self.assertGreater(float(np.min(body_q[:, 2])), 0.03)
+
+    def test_large_mechanism_sweep_matches_one_warp(self):
+        """Sweep a mechanism of more than 32 bodies with several warps and the one-warp result."""
+        if not wp.get_device().is_cuda:
+            self.skipTest("PhoenX requires CUDA")
+
+        def run(lanes):
+            with patch.object(direct_contact_gs, "_COLUMN_LANES", lanes):
+                model = _build_closed_chain_on_plane()
+                pipeline = newton.CollisionPipeline(model, contact_matching="sticky")
+                solver = newton.solvers.SolverPhoenX(
+                    model, collision_pipeline=pipeline, substeps=1, solver_iterations=8, joint_mode="maximal_direct"
+                )
+            self.assertEqual(solver._direct_contact_schedule._lanes, min(lanes, 64))
+            state, control, contacts = model.state(), model.control(), pipeline.contacts()
+            newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+            with wp.ScopedCapture(model.device) as capture:
+                pipeline.collide(state, contacts)
+                solver.step(state, state, control, contacts, 1.0 / 240.0)
+            for _ in range(60):
+                wp.capture_launch(capture.graph)
+            return state.body_q.numpy()
+
+        several = run(128)
+        # Lanes past a manifold's points add exact zeros: the sums keep their order.
+        np.testing.assert_array_equal(several, run(32))
+        self.assertGreater(float(several[:, 2].min()), 0.015)
 
 
 if __name__ == "__main__":

@@ -301,7 +301,9 @@ def _relax_direct_contact_point(
     return normal_impulse + tangent_delta[0] * tangent0 + tangent_delta[1] * tangent1
 
 
-_COLUMN_LANES = 32
+#: Most threads one contact-connected component uses: one per mechanism body pushes a
+#: manifold's response in one round.
+_COLUMN_LANES = 128
 
 # Column record layout, one row per scheduled manifold.
 _RECORD_BODY0 = 0
@@ -336,6 +338,34 @@ _record_t = wp.types.vector(length=_RECORD_WIDTH, dtype=wp.int32)
 """
 )
 def _warp_sum_spatial(value: wp.spatial_vector) -> wp.spatial_vector: ...
+
+
+@wp.func_native(
+    """
+#if defined(__CUDA_ARCH__)
+    __shared__ float partial[6 * 32];
+    const int warps = blockDim.x >> 5;
+    if (warps <= 1) return value;
+    __syncthreads();
+    if ((threadIdx.x & 31) == 0) {
+        for (int component = 0; component < 6; ++component) partial[6 * (threadIdx.x >> 5) + component] = value[component];
+    }
+    __syncthreads();
+    wp::spatial_vector result;
+    for (int component = 0; component < 6; ++component) {
+        float sum = 0.0f;
+        for (int warp = 0; warp < warps; ++warp) sum += partial[6 * warp + component];
+        result[component] = sum;
+    }
+    return result;
+#else
+    return value;
+#endif
+"""
+)
+def _combine_warp_sums(value: wp.spatial_vector) -> wp.spatial_vector:
+    """Add each warp's sum across the block; every thread must call it."""
+    ...
 
 
 @wp.func
@@ -573,11 +603,11 @@ _SHARED_TWIST_BYTES = 40 * 1024
 
 
 def _make_twist_state_access(length: int):
-    """Return an accessor for one warp's mechanism twists in shared memory.
+    """Return an accessor for one block's mechanism twists in shared memory.
 
     Warp tiles synchronize the block after every element write. Each twist of
     the ordered sweep is written by exactly one lane and the phases are
-    ordered with ``__syncwarp``, so raw shared storage suffices.
+    ordered with ``__syncthreads``, so raw shared storage suffices.
     """
 
     snippet = f"""
@@ -606,11 +636,11 @@ def _make_twist_state_access(length: int):
 @wp.func_native(
     """
 #if defined(__CUDA_ARCH__)
-    __syncwarp();
+    __syncthreads();
 #endif
 """
 )
-def _sync_warp(): ...
+def _sync_block(): ...
 
 
 _TWIST_READ = 0
@@ -618,12 +648,19 @@ _TWIST_WRITE = 1
 _TWIST_ADD = 2
 
 
+def _component_lanes(max_mechanism_bodies: int, is_cuda: bool) -> int:
+    """Threads per component: whole warps, one per mechanism body up to :data:`_COLUMN_LANES`."""
+    if not is_cuda:
+        return 1
+    return min(_COLUMN_LANES, 32 * max(1, (int(max_mechanism_bodies) + 31) // 32))
+
+
 def make_solve_direct_contact_columns_kernel(body_capacity: int, max_mechanism_bodies: int, *, is_cuda: bool = True):
     """Build the ordered manifold sweep for a response's body capacity."""
     capacity = max(1, int(body_capacity))
     # CPU native warp operations are scalar: visit every point and endpoint
     # serially, using body arrays instead of CUDA-only shared twist storage.
-    lanes = _COLUMN_LANES if is_cuda else 1
+    lanes = _component_lanes(max_mechanism_bodies, is_cuda)
     rounds = max(1, (int(max_mechanism_bodies) + lanes - 1) // lanes)
     shared = is_cuda and 24 * capacity <= _SHARED_TWIST_BYTES
     twist_state = _make_twist_state_access(capacity if shared else 1)
@@ -689,7 +726,7 @@ def make_solve_direct_contact_columns_kernel(body_capacity: int, max_mechanism_b
                 body_end = response.mechanism_body_start[mechanism + wp.int32(1)]
                 for index in range(response.mechanism_body_start[mechanism] + lane, body_end, wp.int32(lanes)):
                     twist_state(index, _body_twist(bodies, response.mechanism_body[index]), _TWIST_WRITE)
-            _sync_warp()
+            _sync_block()
 
         dt = wp.float32(1.0) / inverse_dt
         _, mass_coeff, impulse_coeff = soft_constraint_coefficients(DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, dt)
@@ -740,8 +777,8 @@ def make_solve_direct_contact_columns_kernel(body_capacity: int, max_mechanism_b
                     r1 = cc_get_r1(contacts, contact)
                     wrench0 += _make_spatial_wrench(-impulse, -wp.cross(r0, impulse))
                     wrench1 += _make_spatial_wrench(impulse, wp.cross(r1, impulse))
-                wrench0 = _warp_sum_spatial(wrench0)
-                wrench1 = _warp_sum_spatial(wrench1)
+                wrench0 = _combine_warp_sums(_warp_sum_spatial(wrench0))
+                wrench1 = _combine_warp_sums(_warp_sum_spatial(wrench1))
                 if lane == wp.int32(0):
                     if slot0 >= wp.int32(0):
                         basis_wrench[slot0] += wrench0
@@ -769,7 +806,7 @@ def make_solve_direct_contact_columns_kernel(body_capacity: int, max_mechanism_b
                             add_twist(response, bodies, body_begin1 + local_body, value1)
                     if slot0 >= wp.int32(0) and local_body < body_count0:
                         add_twist(response, bodies, body_begin0 + local_body, value0)
-                _sync_warp()
+                _sync_block()
 
         if wp.static(shared):
             for item in range(mechanism_begin, mechanism_end):
@@ -808,6 +845,7 @@ class DirectContactRunSchedule:
         self.solve_kernel = make_solve_direct_contact_columns_kernel(
             response.body_capacity, response.max_mechanism_bodies, is_cuda=device.is_cuda
         )
+        self._lanes = _component_lanes(response.max_mechanism_bodies, device.is_cuda)
         # The schedule after the candidate pass runs on a private stream.
         self._stream = wp.Stream(device) if device.is_cuda else None
         self._fork_event = wp.Event(device) if device.is_cuda else None
@@ -874,7 +912,7 @@ class DirectContactRunSchedule:
         wp.launch_tiled(
             self.solve_kernel,
             dim=self.section_end.size,
-            block_dim=_COLUMN_LANES if device.is_cuda else 1,
+            block_dim=self._lanes,
             inputs=[
                 self.islands.set_sizes,
                 self.islands.set_sizes_compact,
