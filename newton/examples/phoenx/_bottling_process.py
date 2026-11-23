@@ -49,6 +49,8 @@ _POOL_STOCK = 1000  # bottles held by the accumulation table in production
 # above the filler, commonly by about 10 %, so the bed never limits the line.
 PASTEURISER_CAPACITY = 1.1
 _FILER_FUNNEL_ANGLE = 22.0  # degrees, of the filer's left rail stepping in, above glass-on-rail friction
+# The source's guide rails (the IFM's StubRails, the inlet's Phys_uhmw) are UHMW.
+GUIDE_FRICTION = (0.08, 0.1)  # dynamic and static friction of the process guides and table guards
 _CHUTE_MARGIN = 2.0  # outfeed funnel and chute speed over mass flow, for the looser flowing stream
 # m above the deck, from the IFM's RailsOuter colliders that continue the neck.
 _GUARD_BANDS = ((0.018, 0.043), (0.088, 0.113))
@@ -321,7 +323,9 @@ def add_filling_transport(scene, path, *, motor_off, layout=None, inlet_speed=No
             (_straight(path, length, layout["combiner_end"]), _straight(path, length, layout["pool"][0][0])),
         ]
     belt_cfg = builder.ShapeConfig(density=0.0, mu=0.18, mu_static=0.2, gap=0.001, is_visible=False)
-    rail_cfg = builder.ShapeConfig(density=0.0, mu=0.30, mu_static=0.35, gap=0.001, is_visible=False)
+    rail_cfg = builder.ShapeConfig(
+        density=0.0, mu=GUIDE_FRICTION[0], mu_static=GUIDE_FRICTION[1], gap=0.001, is_visible=False
+    )
     guide_width = _GUIDE_WIDTH / 2.0
     deck_width = guide_width + 0.02
     # Guide the bottle near its centre of mass and leave the heel free as it

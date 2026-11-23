@@ -169,6 +169,13 @@ class TestBottlingPlant(unittest.TestCase):
         with wp.ScopedDevice("cuda:0"):
             scene, state, bottles, graph = self._bottle_line(path, layout)
             start = state.body_q.numpy()[bottles]
+        # Guides and table guards use the source's UHMW guide-rail material.
+        builder = scene.builder
+        guides = [i for i, label in enumerate(builder.shape_label) if "/Guide_" in label or "/Guard_" in label]
+        self.assertGreater(len(guides), 10)
+        for shape in guides:
+            self.assertAlmostEqual(builder.shape_material_mu[shape], 0.08, places=6)
+            self.assertAlmostEqual(builder.shape_material_mu_static[shape], 0.1, places=6)
         # Each feed watches its eye on the belt it feeds; on its own belt a
         # stopped feed would hold its eye blocked and never restart.
         belts = {label: mesh.vertices for mesh, _, label in scene.belts}
