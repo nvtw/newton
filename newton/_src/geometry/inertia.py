@@ -702,20 +702,13 @@ def compute_hollow_mesh_inertia(
 
 
 def _deterministic_sum_per_triangle(per_tri: wp.array) -> tuple[float, wp.vec3, wp.mat33]:
-    """Reduce a ``(13, num_tris)`` per-triangle scratch buffer to scalar
-    totals via per-component inclusive prefix scan.
+    """Reduce a ``(13, num_tris)`` per-triangle scratch buffer to scalar totals.
 
-    ``wp.utils.array_scan`` runs deterministically (single sequential
-    summation tree) so the result is bit-exact reproducible across runs,
-    in contrast to ``wp.atomic_add`` where ordering depends on GPU
-    scheduling. The last entry of each scanned row holds the sum.
+    One copy to the host and a float64 sum in a fixed order make the result
+    bit-exact reproducible across runs, in contrast to ``wp.atomic_add`` where
+    the ordering depends on GPU scheduling.
     """
-    num_tris = per_tri.shape[1]
-    scratch = wp.zeros(num_tris, dtype=float, device=per_tri.device)
-    totals = np.empty(_MESH_INERTIA_NUM_SCALARS, dtype=np.float32)
-    for c in range(_MESH_INERTIA_NUM_SCALARS):
-        wp.utils.array_scan(per_tri[c], scratch, inclusive=True)
-        totals[c] = float(scratch.numpy()[-1])
+    totals = per_tri.numpy().astype(np.float64).sum(axis=1).astype(np.float32)
     V_tot = float(totals[0])
     F_tot = wp.vec3(float(totals[1]), float(totals[2]), float(totals[3]))
     S_tot = wp.mat33(
