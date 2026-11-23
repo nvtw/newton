@@ -1192,19 +1192,14 @@ def contact_angular_friction(
 
     Newton's law bounds the moment about the contact normal by ``mu_torsional * N`` and
     the rolling moment by ``mu_rolling * N``, with ``N`` the column's normal impulse. The
-    normal is the load-weighted mean of the column's contact normals.
+    axis is the first contact's normal: exact for a planar manifold, and an approximation
+    when body-pair grouping bundles shape pairs with different normals into one column.
     """
     mu = constraints.angular_friction[cid]
     load = wp.float32(0.0)
-    axis = wp.vec3f(0.0)
     for i in range(contact_count):
-        k = contact_first + i
-        lambda_n = wp.max(cc_get_normal_lambda(cc, k), wp.float32(0.0))
-        load += lambda_n
-        axis += lambda_n * cc_get_normal(cc, k)
-    if load <= wp.float32(0.0):
-        axis = cc_get_normal(cc, contact_first)
-    n = wp.normalize(axis)
+        load += wp.max(cc_get_normal_lambda(cc, contact_first + i), wp.float32(0.0))
+    n = cc_get_normal(cc, contact_first)
     t1 = wp.normalize(wp.cross(n, wp.vec3f(1.0, 0.0, 0.0)))
     if wp.abs(n[0]) > wp.float32(0.9):
         t1 = wp.normalize(wp.cross(n, wp.vec3f(0.0, 1.0, 0.0)))
