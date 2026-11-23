@@ -435,9 +435,10 @@ def add_filling_transport(scene, path, *, motor_off, layout=None, inlet_speed=No
 
     scene.metadata["process_zones"] = {
         "infeed_line": (zones[0], eye(outline[0][0] + 0.15, outline[1][0])),
-        "pasteuriser": ([bed], eye(end + 0.15, guide_width + 0.02)),
-        # The single filer stops with the file it feeds.
-        "pool_line": (zones[1] + [filer], eye(pool[0][0] + 0.1, guide_width + 0.02)),
+        # The single filer runs with the bed that presses into it, so a stop
+        # downstream never leaves the bed wedging bottles in a standing filer.
+        "pasteuriser": ([bed, filer], eye(end + 0.15, guide_width + 0.02)),
+        "pool_line": (zones[1], eye(pool[0][0] + 0.1, guide_width + 0.02)),
         "pool": ([table], None),
     }
     scene.metadata["process_handoff"] = (outlet, outlet[0] - pool[0][0], pool[1].max() + 0.03)

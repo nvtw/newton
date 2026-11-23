@@ -176,15 +176,15 @@ class TestBottlingPlant(unittest.TestCase):
         for shape in guides:
             self.assertAlmostEqual(builder.shape_material_mu[shape], 0.08, places=6)
             self.assertAlmostEqual(builder.shape_material_mu_static[shape], 0.1, places=6)
-        # Each feed watches its eye on the belt it feeds; on its own belt a
-        # stopped feed would hold its eye blocked and never restart.
+        # Each feed watches its eye just past its own last belt, at the
+        # entrance of what it feeds. On its own belt a stopped feed would hold
+        # its eye blocked and never restart; farther on, a stop between its
+        # belts and the eye would leave it pressing into a standing belt.
         belts = {label: mesh.vertices for mesh, _, label in scene.belts}
         for name, (labels, rays) in scene.metadata["process_zones"].items():
-            for start_point, direction, length in rays or ():
-                middle = (np.asarray(start_point) + 0.5 * length * np.asarray(direction))[:2]
-                for label in labels:
-                    low, high = belts[label][:, :2].min(axis=0), belts[label][:, :2].max(axis=0)
-                    self.assertFalse(np.all((low <= middle) & (middle <= high)), f"{name} eye over {label}")
+            for start_point, _, _ in rays or ():
+                last = max(belts[label][:, 0].max() for label in labels)
+                self.assertTrue(0.0 < start_point[0] - last < 0.3, f"{name} eye {start_point[0]} past {last}")
         with wp.ScopedDevice("cuda:0"):
             filed, emptied, tilt = set(), set(), 0.0
             for frame in range(1, 3000):
