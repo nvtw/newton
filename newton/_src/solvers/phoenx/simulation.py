@@ -6476,10 +6476,6 @@ class PhoenXWorld:
         raw = self.num_worlds * int(tpw_bound)
         return ((raw + block_dim - 1) // block_dim) * block_dim
 
-    def _fast_tail_launch_dim(self) -> int:
-        """Padded launch dim for the current fast-tail tpw upper bound."""
-        return self._fast_tail_launch_dim_for(self._tpw_launch_bound)
-
     def _pick_tpw(self) -> None:
         """Per-step GPU tpw picker: parallel reduction over _world_num_colors,
         then a 1-thread kernel writes _tpw_choice[0]. Captured-graph safe."""
@@ -6619,10 +6615,6 @@ class PhoenXWorld:
             inputs=[self.bodies],
             device=self.device,
         )
-
-    def _gather_column_timers(self, num_contact_columns: int) -> dict[str, float]:
-        """Collect optional per-column timing totals."""
-        return diagnostics.gather_column_timers(self, num_contact_columns)
 
     def _zero_column_timers(self) -> None:
         """Clear optional per-column timers before a measured step."""
