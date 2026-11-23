@@ -28,6 +28,7 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     ContactColumnContainer,
     ContactViews,
     _contact_uses_stale_anchor_start_gap,
+    contact_angular_friction,
     contact_get_body1,
     contact_get_body2,
     contact_get_contact_count,
@@ -2171,6 +2172,12 @@ def _make_contact_iterate_at(
                 )
                 constraints.patch.impulse_world[cid] = (
                     patch_update.lambda_new[0] * patch_tangent1 + patch_update.lambda_new[1] * patch_tangent2
+                )
+
+        if wp.static(not cloth_support and cooperative_lanes == 1):
+            if constraints.angular_impulse.shape[0] > cid:
+                w1, w2 = contact_angular_friction(
+                    constraints, cid, cc, contact_first, contact_count, w1, w2, inv_inertia1, inv_inertia2
                 )
 
         write_owner = True

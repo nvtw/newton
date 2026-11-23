@@ -28,6 +28,8 @@ def _snapshot_active_columns(
     for row in range(columns.data.shape[0]):
         source.data[row, i] = columns.data[row, i]
     source.articulation_owner[i] = columns.articulation_owner[i]
+    if columns.angular_friction.shape[0] > 0:
+        source.angular_friction[i] = columns.angular_friction[i]
     source_pair[i] = pair[i]
 
 
@@ -70,6 +72,8 @@ def _split_columns(
         for row in range(source.data.shape[0]):
             target.data[row, out] = source.data[row, i]
         target.articulation_owner[out] = source.articulation_owner[i]
+        if target.angular_friction.shape[0] > 0:
+            target.angular_friction[out] = source.angular_friction[i]
         target_pair[out] = source_pair[i]
         chunk_first = first + chunk * chunk_size
         chunk_count = wp.min(chunk_size, count - chunk * chunk_size)
@@ -114,7 +118,12 @@ class ContactChunkScratch:
 
     def __init__(self, capacity: int, columns: ContactColumnContainer, device):
         self.capacity = capacity
-        self.source = contact_column_container_zeros(capacity, device=device, data_dwords=columns.data.shape[0])
+        self.source = contact_column_container_zeros(
+            capacity,
+            device=device,
+            data_dwords=columns.data.shape[0],
+            angular_friction=columns.angular_friction.shape[0] > 0,
+        )
         self.source_pair = wp.zeros(capacity, dtype=wp.int32, device=device)
         self.counts = wp.zeros(capacity, dtype=wp.int32, device=device)
         self.offsets = wp.zeros_like(self.counts)

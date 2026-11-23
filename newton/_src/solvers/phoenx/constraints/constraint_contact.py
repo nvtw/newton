@@ -91,6 +91,7 @@ __all__ = [
     "ContactConstraintData",
     "ContactViews",
     "contact_accumulate_time_us",
+    "contact_angular_friction",
     "contact_build_colored_row_offsets",
     "contact_column_container_zeros",
     "contact_gather_colored_rows",
@@ -276,6 +277,14 @@ class ContactColumnContainer:
     #: Dynamic body that solves this rigid contact against a static body on
     #: its full mass after each mass-splitting average, or ``-1``.
     static_owner: wp.array[wp.int32]
+    #: Per column, the torsional and rolling friction coefficients [m] of the
+    #: shape pair, or empty when no shape has either.
+    angular_friction: wp.array[wp.vec2f]
+    #: Per column, the world angular friction impulse accumulated in the substep.
+    angular_impulse: wp.array[wp.vec3f]
+    #: Per shape, the torsional and rolling friction coefficients [m]; a
+    #: column takes the mean of its two shapes. Empty when every one is zero.
+    shape_angular_friction: wp.array[wp.vec2f]
 
 
 def contact_column_container_zeros(
@@ -284,12 +293,17 @@ def contact_column_container_zeros(
     *,
     enable_patch_friction: bool = False,
     data_dwords: int = CONTACT_DWORDS,
+    angular_friction: bool = False,
 ) -> ContactColumnContainer:
     """Allocate a zero-initialised :class:`ContactColumnContainer`."""
     c = ContactColumnContainer()
     c.data = wp.zeros((int(data_dwords), int(num_columns)), dtype=wp.float32, device=device)
     c.articulation_owner = wp.full(int(num_columns), -1, dtype=wp.int32, device=device)
     c.static_owner = wp.full(int(num_columns), -1, dtype=wp.int32, device=device)
+    angular_columns = int(num_columns) if angular_friction else 0
+    c.angular_friction = wp.zeros(angular_columns, dtype=wp.vec2f, device=device)
+    c.angular_impulse = wp.zeros(angular_columns, dtype=wp.vec3f, device=device)
+    c.shape_angular_friction = wp.empty(0, dtype=wp.vec2f, device=device)
     patch_capacity = num_columns if enable_patch_friction else 1
     c.patch = contact_patch_friction_zeros(patch_capacity, device=device)
     return c
@@ -1162,6 +1176,75 @@ def contact_set_side1_counts_extra(c: ContactColumnContainer, local_cid: wp.int3
 # ---------------------------------------------------------------------------
 
 
+@wp.func
+def contact_angular_friction(
+    constraints: ContactColumnContainer,
+    cid: wp.int32,
+    cc: ContactContainer,
+    contact_first: wp.int32,
+    contact_count: wp.int32,
+    w1: wp.vec3f,
+    w2: wp.vec3f,
+    inv_inertia1: wp.mat33f,
+    inv_inertia2: wp.mat33f,
+):
+    """Solve a column's torsional and rolling friction; return the new angular velocities.
+
+    Newton's law bounds the moment about the contact normal by ``mu_torsional * N`` and
+    the rolling moment by ``mu_rolling * N``, with ``N`` the column's normal impulse. The
+    normal is the load-weighted mean of the column's contact normals.
+    """
+    mu = constraints.angular_friction[cid]
+    load = wp.float32(0.0)
+    axis = wp.vec3f(0.0)
+    for i in range(contact_count):
+        k = contact_first + i
+        lambda_n = wp.max(cc_get_normal_lambda(cc, k), wp.float32(0.0))
+        load += lambda_n
+        axis += lambda_n * cc_get_normal(cc, k)
+    if load <= wp.float32(0.0):
+        axis = cc_get_normal(cc, contact_first)
+    n = wp.normalize(axis)
+    t1 = wp.normalize(wp.cross(n, wp.vec3f(1.0, 0.0, 0.0)))
+    if wp.abs(n[0]) > wp.float32(0.9):
+        t1 = wp.normalize(wp.cross(n, wp.vec3f(0.0, 1.0, 0.0)))
+    t2 = wp.cross(n, t1)
+    mobility = inv_inertia1 + inv_inertia2
+    accumulated = constraints.angular_impulse[cid]
+
+    # Torsion about the normal.
+    torsion_old = wp.dot(accumulated, n)
+    torsion = torsion_old
+    k_n = wp.dot(n, mobility * n)
+    if k_n > wp.float32(0.0):
+        limit = mu[0] * load
+        torsion = wp.clamp(torsion_old - wp.dot(w2 - w1, n) / k_n, -limit, limit)
+        delta = (torsion - torsion_old) * n
+        w1 = w1 - inv_inertia1 * delta
+        w2 = w2 + inv_inertia2 * delta
+
+    # Rolling on the tangent plane: one 2x2 block clamped to a disk.
+    rolling_old = wp.vec2f(wp.dot(accumulated, t1), wp.dot(accumulated, t2))
+    rolling = rolling_old
+    a = wp.dot(t1, mobility * t1)
+    b = wp.dot(t1, mobility * t2)
+    c = wp.dot(t2, mobility * t2)
+    det = a * c - b * b
+    if det > wp.float32(0.0):
+        relative = w2 - w1
+        u = wp.vec2f(wp.dot(relative, t1), wp.dot(relative, t2))
+        rolling = rolling_old - wp.vec2f(c * u[0] - b * u[1], a * u[1] - b * u[0]) / det
+        limit = mu[1] * load
+        magnitude = wp.length(rolling)
+        if magnitude > limit:
+            rolling = rolling * (limit / magnitude)
+        delta = (rolling[0] - rolling_old[0]) * t1 + (rolling[1] - rolling_old[1]) * t2
+        w1 = w1 - inv_inertia1 * delta
+        w2 = w2 + inv_inertia2 * delta
+    constraints.angular_impulse[cid] = torsion * n + rolling[0] * t1 + rolling[1] * t2
+    return w1, w2
+
+
 def _make_contact_iterate_at_multi(has_soft_contact_pd: bool):
     @wp.func
     def impl(
@@ -1330,6 +1413,10 @@ def _make_contact_iterate_at_multi(has_soft_contact_pd: bool):
                 w1 = update.w_a
                 v2 = update.v_b
                 w2 = update.w_b
+            if constraints.angular_impulse.shape[0] > cid:
+                w1, w2 = contact_angular_friction(
+                    constraints, cid, cc, contact_first, contact_count, w1, w2, inv_inertia1, inv_inertia2
+                )
             it += 1
 
         # Direct SoA writes -- fast-tail-only function (no mass splitting).

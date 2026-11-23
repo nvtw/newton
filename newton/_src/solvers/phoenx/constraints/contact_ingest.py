@@ -903,6 +903,10 @@ def _contact_pack_columns_kernel(
 
     contact_set_friction(contact_cols, tid, mu_static)
     contact_set_friction_dynamic(contact_cols, tid, mu_dynamic)
+    if contact_cols.angular_friction.shape[0] > tid:
+        contact_cols.angular_friction[tid] = 0.5 * (
+            contact_cols.shape_angular_friction[sa] + contact_cols.shape_angular_friction[sb]
+        )
     contact_set_contact_first(contact_cols, tid, first)
     contact_set_contact_count(contact_cols, tid, count)
     contact_set_slot1(contact_cols, tid, wp.int32(-1))

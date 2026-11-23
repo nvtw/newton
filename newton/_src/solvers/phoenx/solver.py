@@ -1707,6 +1707,11 @@ class SolverPhoenX(SolverBase):
                 wp.array(coefficients, dtype=wp.vec2f, device=self.device),
                 wp.vec2f(*default_coefficients),
             )
+        self.world._set_angular_friction(
+            np.column_stack(
+                (self.model.shape_material_mu_torsional.numpy(), self.model.shape_material_mu_rolling.numpy())
+            ).astype(np.float32)
+        )
         mu_np = self.model.shape_material_mu.numpy()
         mu_static_np = self.model.shape_material_mu_static.numpy()
         restitution = (

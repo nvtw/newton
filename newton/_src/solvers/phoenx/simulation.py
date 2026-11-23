@@ -3585,6 +3585,9 @@ class PhoenXWorld:
                     outputs=[self._restitution_targets],
                     device=self.device,
                 )
+            if self.max_contact_columns > 0 and self._contact_cols.angular_impulse.shape[0] > 0:
+                # The rows start cold in each substep: one row per column converges in a sweep.
+                self._contact_cols.angular_impulse.zero_()
             self._dispatcher.solve(idt)
             if self._restitution_targets is not None and self._contact_views is not None:
                 self._scatter_colored_contact_rows()
@@ -4635,6 +4638,30 @@ class PhoenXWorld:
         self._static_contact_links = wp.full(columns, -1, dtype=int, device=self.device)
         self._static_contact_keys = wp.empty(2 * columns, dtype=wp.int64, device=self.device)
         self._static_contact_values = wp.empty(2 * columns, dtype=int, device=self.device)
+
+    def _set_angular_friction(self, coefficients: np.ndarray) -> None:
+        """Solve torsional and rolling friction with per-shape ``(mu_torsional, mu_rolling)`` [m].
+
+        Columns get the arrays only when a shape has a nonzero coefficient.
+        """
+        columns = getattr(self, "_contact_cols", None)
+        if columns is None:
+            return
+        enabled = bool(np.any(coefficients > 0.0))
+        count = columns.data.shape[1] if enabled else 0
+        containers = [columns]
+        scratch = getattr(self, "_contact_chunk_scratch", None)
+        if scratch is not None:
+            containers.append(scratch.source)
+        for container in containers:
+            size = container.data.shape[1] if enabled else 0
+            container.angular_friction = wp.zeros(size, dtype=wp.vec2f, device=self.device)
+            container.angular_impulse = wp.zeros(size, dtype=wp.vec3f, device=self.device)
+        columns.shape_angular_friction = (
+            wp.array(coefficients, dtype=wp.vec2f, device=self.device)
+            if count
+            else wp.empty(0, dtype=wp.vec2f, device=self.device)
+        )
 
     def _enable_contact_surface_velocity(self) -> None:
         """Carry the target slips of conveyor contacts in the contact container.
