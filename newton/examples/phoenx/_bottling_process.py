@@ -29,8 +29,10 @@ _MACHINES = "/Plant/Process/Machines/L1"
 _INLET_PLATE = "/Plant/Line/IFM/Modules/IFM_A/Colliders/DeadPlates/InletPlate"
 # m/s, carries the plant's rated output in single file at the admission pitch.
 _BELT_SPEED = BOTTLES_PER_MINUTE / 60.0 * SINGLE_FILE_PITCH
-# m/s, behind the pasteuriser's single filer. A single filer must pull bottles
-# away faster than they arrive abreast; its discharge conveyors run 50 % faster.
+# m/s, of the single filer's fastest lane. A single filer must pull bottles away
+# faster than they arrive abreast, so its lane runs 50 % faster than the file it
+# discharges to; the file then closes up at the line's speed and meets the
+# accumulation table without slamming its bottles over.
 _FILER_SPEED = 1.5 * _BELT_SPEED
 _GUIDE_WIDTH = 0.08  # m, at the working faces of the driven bottle guides.
 _POOL_MAT = "/Plant/Blockout/Pool/mattop"
@@ -309,7 +311,6 @@ def add_filling_transport(scene, path, *, motor_off, layout=None, inlet_speed=No
     sections = [np.linspace(a, b, max(2, math.ceil((b - a) / 0.4) + 1))[:-1] for a, b in pairwise(length)]
     samples = np.concatenate([*sections, length[-1:]])
     runs = [(0.0, length[-1])]
-    speeds = [_BELT_SPEED]
     if layout is not None:
         start = np.flatnonzero(path[:, 0] < layout["infeed"][0][0])[-1]
         if np.ptp(path[start:, 1]) > 1.0e-6 or np.any(np.diff(path[start:, 0]) <= 0.0):
@@ -319,7 +320,6 @@ def add_filling_transport(scene, path, *, motor_off, layout=None, inlet_speed=No
             (0.0, _straight(path, length, layout["infeed"][0][0])),
             (_straight(path, length, layout["combiner_end"]), _straight(path, length, layout["pool"][0][0])),
         ]
-        speeds = [_BELT_SPEED, _FILER_SPEED]
     belt_cfg = builder.ShapeConfig(density=0.0, mu=0.18, mu_static=0.2, gap=0.001, is_visible=False)
     rail_cfg = builder.ShapeConfig(density=0.0, mu=0.30, mu_static=0.35, gap=0.001, is_visible=False)
     guide_width = _GUIDE_WIDTH / 2.0
@@ -330,7 +330,7 @@ def add_filling_transport(scene, path, *, motor_off, layout=None, inlet_speed=No
     guide_base, guide_top = np.array([0.0, 0.0, 0.07]), np.array([0.0, 0.0, 0.098])
     section = 0
     zones = []
-    for (begin_length, end_length), file_speed in zip(runs, speeds, strict=True):
+    for begin_length, end_length in runs:
         zone = []
         zones.append(zone)
         inner = samples[(begin_length + 1.0e-4 < samples) & (samples < end_length - 1.0e-4)]
@@ -359,7 +359,7 @@ def add_filling_transport(scene, path, *, motor_off, layout=None, inlet_speed=No
             belt = newton.Mesh(vertices, indices, compute_inertia=False, enable_surface_velocity=not motor_off)
             builder.add_shape_mesh(-1, mesh=belt, cfg=belt_cfg, label=label + "/Deck/collision")
             if not motor_off:
-                velocity = np.repeat(tangent[region] * file_speed, 2, axis=0).astype(np.float32)
+                velocity = np.repeat(tangent[region] * _BELT_SPEED, 2, axis=0).astype(np.float32)
                 scene.belts.append((belt, velocity, label + "/Deck"))
                 zone.append(label + "/Deck")
             for side in (-1, 1):
