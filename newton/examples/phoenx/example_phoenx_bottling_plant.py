@@ -259,12 +259,17 @@ class Example:
         product = np.zeros(self.model.shape_count, dtype=np.int32)
         groups = np.zeros(self.model.shape_count, dtype=np.int32)
         scopes = sorted(set(self.scene.self_collision_scopes), key=len)
+        group_of = {scope: group for group, scope in enumerate(scopes, 1)}
         for shape, label in enumerate(self.model.shape_label):
             if label.startswith("/Plant/Sim/Product/Bottles/"):
                 product[shape] = 2 if "/Collision/Hull_00/" in label else 1
-            for group, scope in enumerate(scopes, 1):
-                if label.startswith(scope + "/"):
+            # The longest scope that contains the shape owns it.
+            prefix = label
+            while (cut := prefix.rfind("/")) > 0:
+                prefix = prefix[:cut]
+                if group := group_of.get(prefix):
                     groups[shape] = group
+                    break
         self.filter_data = _PlantFilter()
         membership, filtered = self.scene.collision_masks(self.model.shape_label)
         if self.supply is not None:

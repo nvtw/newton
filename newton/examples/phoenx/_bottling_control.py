@@ -836,6 +836,13 @@ class PlantController:
             local = np.asarray((x, y, z)) @ line_rotation + np.asarray(self.request["line_origin"])
             return local @ matrix[:3, :3] + matrix[3, :3]
 
+        cases = "/Plant/Sim/Product/Cases/"
+        case_parts = {}
+        for label, body in scene.bodies.items():
+            if label.startswith(cases):
+                case, inside, _ = label[len(cases) :].partition("/")
+                if inside:
+                    case_parts.setdefault(case, []).append(body)
         for cell, name in enumerate(self.names):
             root = "/Plant/Line/Packers/" + name
             matrix = scene.frames[root]
@@ -852,10 +859,8 @@ class PlantController:
             )
             clamps.append(q_starts[scene.joints[root + "/Line/CC01/Zones/Z3/Joints/P_Clamp"]])
             for box in ["C0", *self.supply[cell]]:
-                prefix = f"/Plant/Sim/Product/Cases/{name}_{box}"
-                ids = [scene.bodies[prefix]] + [
-                    body for label, body in scene.bodies.items() if label.startswith(prefix + "/")
-                ]
+                prefix = f"{cases}{name}_{box}"
+                ids = [scene.bodies[prefix], *case_parts.get(f"{name}_{box}", ())]
                 if len(ids) != 5:
                     raise ValueError(f"Expected a case with four hinged flaps: {prefix}")
                 inverse = wp.transform_inverse(wp.transform(initial[ids[0], :3], initial[ids[0], 3:]))
@@ -892,7 +897,7 @@ class PlantController:
         width = max(1, *(len(row) for row in flap_shapes))
         self.flap_shapes = wp.array([row + [-1] * (width - len(row)) for row in flap_shapes], dtype=int)
         self.flaps_attached = wp.zeros(len(self.case_index), dtype=int)
-        case_bodies = {b for label, b in scene.bodies.items() if label.startswith("/Plant/Sim/Product/Cases/")}
+        case_bodies = {b for label, b in scene.bodies.items() if label.startswith(cases)}
         shapes = [
             i
             for i, body in enumerate(bodies)
