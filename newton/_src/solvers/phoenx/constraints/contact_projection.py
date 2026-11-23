@@ -19,6 +19,9 @@ from newton._src.solvers.phoenx.constraints.constraint_block import (
 )
 from newton._src.solvers.phoenx.constraints.contact_container import (
     ContactContainer,
+    cc_get_mobility_nt1,
+    cc_get_mobility_nt2,
+    cc_get_mobility_t1t2,
     cc_get_normal_lambda,
     cc_get_surface_target,
     cc_get_tangent1_lambda,
@@ -565,13 +568,31 @@ def _make_contact_frame_velocity_update(has_soft_contact_pd: bool):
         # target it leaves impulses that one relax sweep does not take back, and those pump
         # the rocking of a stack. With the soft coefficients of the normal row it is an
         # implicit spring and damper instead; the relax sweeps pass rigid coefficients.
-        d_lambda_t1 = -(eff_t1 * mass_coeff_n * (jv_t1 + bias_t1)) - impulse_coeff_n * lam_t1_old
-        d_lambda_t2 = -(eff_t2 * mass_coeff_n * (jv_t2 + bias_t2)) - impulse_coeff_n * lam_t2_old
+        # The soft unconstrained impulse is (1 - c_i) lambda_old - c_m K^-1 rhs, so the
+        # coupled disk solve takes the scaled old impulse and the scaled velocity. Its
+        # mobility metric keeps sliding friction opposed to the slip; a radial clamp of
+        # per-axis updates turns it toward the stiffer tangent of an off-center contact.
+        rhs_t1 = mass_coeff_n * (jv_t1 + bias_t1 + cc_get_mobility_nt1(cc, k) * normal_update.delta)
+        rhs_t2 = mass_coeff_n * (jv_t2 + bias_t2 + cc_get_mobility_nt2(cc, k) * normal_update.delta)
+        keep = wp.float32(1.0) - impulse_coeff_n
+        mobility_t1 = wp.float32(1.0) / eff_t1 if eff_t1 > wp.float32(0.0) else wp.float32(0.0)
+        mobility_t2 = wp.float32(1.0) / eff_t2 if eff_t2 > wp.float32(0.0) else wp.float32(0.0)
+        friction = contact_project_friction_metric(
+            mobility_t1,
+            cc_get_mobility_t1t2(cc, k),
+            mobility_t2,
+            rhs_t1,
+            rhs_t2,
+            keep * lam_t1_old,
+            keep * lam_t2_old,
+            mu_s * lambda_n_friction,
+            mu_k * lambda_n_friction,
+        )
         tangents = block_project_friction_delta_sor_2(
             lam_t1_old,
             lam_t2_old,
-            d_lambda_t1,
-            d_lambda_t2,
+            friction[0] - lam_t1_old,
+            friction[1] - lam_t2_old,
             sor_boost,
             mu_s * lambda_n_friction,
             mu_k * lambda_n_friction,

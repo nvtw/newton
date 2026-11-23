@@ -565,6 +565,47 @@ class TestContactCoupling(unittest.TestCase):
             self.assertGreater(peak_friction, 1.0e-6)
         np.testing.assert_allclose(_total_momentum(model, state), before, rtol=0.0, atol=2.0e-4)
 
+    def test_pushed_box_slides_along_the_force(self):
+        # Corner contacts of a box have unequal tangent mobilities. Sliding
+        # friction must still oppose the slip, so an off-axis push moves the
+        # box straight along the force instead of veering sideways.
+        if not wp.is_cuda_available():
+            self.skipTest("CUDA required")
+        heading = np.radians(22.5)
+        direction = np.array([np.cos(heading), np.sin(heading)])
+        hx, hy, hz, mass, mu = 0.16, 0.12, 0.08, 1.0, 0.4
+        cfg = newton.ModelBuilder.ShapeConfig(
+            density=mass / (8.0 * hx * hy * hz), mu=mu, restitution=0.0, mu_torsional=0.0, mu_rolling=0.0, gap=0.0
+        )
+        builder = newton.ModelBuilder()
+        builder.add_ground_plane(cfg=cfg)
+        box = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, hz), wp.quat_identity()))
+        builder.add_shape_box(box, hx=hx, hy=hy, hz=hz, cfg=cfg)
+        model = builder.finalize(device="cuda:0")
+        state_0, state_1 = model.state(), model.state()
+        control = model.control()
+        force = 1.5 * mu * mass * 9.81
+        joint_force = np.zeros(model.joint_dof_count, dtype=np.float32)
+        joint_force[:2] = force * direction
+        control.joint_f.assign(joint_force)
+        pipeline = newton.CollisionPipeline(model, contact_matching="sticky")
+        solver = newton.solvers.SolverPhoenX(model, collision_pipeline=pipeline, substeps=1, solver_iterations=8)
+        contacts = pipeline.contacts()
+        start = state_0.body_q.numpy()[box, :2].copy()
+        with wp.ScopedCapture(device=model.device) as capture:
+            for _ in range(2):
+                state_0.clear_forces()
+                pipeline.collide(state_0, contacts)
+                solver.step(state_0, state_1, control, contacts, 1.0 / 960.0)
+                state_0, state_1 = state_1, state_0
+        for _ in range(240):
+            wp.capture_launch(capture.graph)
+        displacement = state_0.body_q.numpy()[box, :2] - start
+        along = float(displacement @ direction)
+        sideways = float(displacement @ np.array([-direction[1], direction[0]]))
+        self.assertGreater(along, 0.05)
+        self.assertLess(abs(sideways), 1.0e-3 * along)
+
     def test_rank_one_tangent_mobility_retains_friction(self):
         cc = ContactContainer()
         cc.impulses = wp.zeros((3, 1), dtype=wp.float32, device="cpu")
