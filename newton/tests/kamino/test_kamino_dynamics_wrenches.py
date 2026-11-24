@@ -166,6 +166,7 @@ def compute_and_compare_dense_sparse_jacobian_wrenches(
     inv_dt_np = model.time.inv_dt.numpy().tolist()
     w_a_i_ref_np = [np.zeros((num_bodies_np[w], 6), dtype=np.float32) for w in range(model.size.num_worlds)]
     w_j_i_ref_np = [np.zeros((num_bodies_np[w], 6), dtype=np.float32) for w in range(model.size.num_worlds)]
+    joint_wrench_magnitudes = []
     w_f_i_ref_np = [np.zeros((num_bodies_np[w], 6), dtype=np.float32) for w in range(model.size.num_worlds)]
     w_l_i_ref_np = [np.zeros((num_bodies_np[w], 6), dtype=np.float32) for w in range(model.size.num_worlds)]
     w_c_i_ref_np = [np.zeros((num_bodies_np[w], 6), dtype=np.float32) for w in range(model.size.num_worlds)]
@@ -194,11 +195,17 @@ def compute_and_compare_dense_sparse_jacobian_wrenches(
             J_cts_e = J_cts_dense[w][effort_cts_start_w:effort_cts_end_w, :]
             w_a_i_ref_np[w][:, :] += inv_dt_np[w] * (J_cts_e.T @ lambdas_e).reshape(num_bodies_np[w], 6)
         w_j_i_ref_np[w][:, :] = inv_dt_np[w] * (J_cts_j.T @ lambdas_j).reshape(num_bodies_np[w], 6)
+        joint_wrench_magnitudes.append(
+            inv_dt_np[w] * (np.abs(J_cts_j).T @ np.abs(lambdas_j)).reshape(num_bodies_np[w], 6)
+        )
         w_f_i_ref_np[w][:, :] = inv_dt_np[w] * (J_cts_f.T @ lambdas_f).reshape(num_bodies_np[w], 6)
         w_l_i_ref_np[w][:, :] = inv_dt_np[w] * (J_cts_l.T @ lambdas_l).reshape(num_bodies_np[w], 6)
         w_c_i_ref_np[w][:, :] = inv_dt_np[w] * (J_cts_c.T @ lambdas_c).reshape(num_bodies_np[w], 6)
     w_a_i_ref_np = wp.array(np.concatenate(w_a_i_ref_np, axis=0), device="cpu")
-    w_j_i_ref_np = wp.array(np.concatenate(w_j_i_ref_np, axis=0), device="cpu")
+    w_j_i_ref_np = np.concatenate(w_j_i_ref_np, axis=0)
+    # Dense, sparse and NumPy reductions can round differently when large
+    # contributions cancel. Bound this error using the componentwise sum of magnitudes.
+    joint_wrench_roundoff = 4.0 * np.finfo(np.float32).eps * np.concatenate(joint_wrench_magnitudes, axis=0)
     w_f_i_ref_np = wp.array(np.concatenate(w_f_i_ref_np, axis=0), device="cpu")
     w_l_i_ref_np = wp.array(np.concatenate(w_l_i_ref_np, axis=0), device="cpu")
     w_c_i_ref_np = wp.array(np.concatenate(w_c_i_ref_np, axis=0), device="cpu")
@@ -228,14 +235,20 @@ def compute_and_compare_dense_sparse_jacobian_wrenches(
 
     # Check that the wrenches computed using the dense Jacobians match the reference wrenches
     np.testing.assert_allclose(w_a_i_dense_np, w_a_i_ref_np, rtol=test_wrench_rtol, atol=test_wrench_atol)
-    np.testing.assert_allclose(w_j_i_dense_np, w_j_i_ref_np, rtol=test_wrench_rtol, atol=test_wrench_atol)
+    np.testing.assert_array_less(
+        np.abs(w_j_i_dense_np - w_j_i_ref_np),
+        test_wrench_atol + test_wrench_rtol * np.abs(w_j_i_ref_np) + joint_wrench_roundoff,
+    )
     np.testing.assert_allclose(w_f_i_dense_np, w_f_i_ref_np, rtol=test_wrench_rtol, atol=test_wrench_atol)
     np.testing.assert_allclose(w_l_i_dense_np, w_l_i_ref_np, rtol=test_wrench_rtol, atol=test_wrench_atol)
     np.testing.assert_allclose(w_c_i_dense_np, w_c_i_ref_np, rtol=test_wrench_rtol, atol=test_wrench_atol)
 
     # Check that the wrenches computed using the dense and sparse Jacobians are close
     np.testing.assert_allclose(w_a_i_sparse_np, w_a_i_dense_np, rtol=test_wrench_rtol, atol=test_wrench_atol)
-    np.testing.assert_allclose(w_j_i_sparse_np, w_j_i_dense_np, rtol=test_wrench_rtol, atol=test_wrench_atol)
+    np.testing.assert_array_less(
+        np.abs(w_j_i_sparse_np - w_j_i_dense_np),
+        test_wrench_atol + test_wrench_rtol * np.abs(w_j_i_dense_np) + joint_wrench_roundoff,
+    )
     np.testing.assert_allclose(w_f_i_sparse_np, w_f_i_dense_np, rtol=test_wrench_rtol, atol=test_wrench_atol)
     np.testing.assert_allclose(w_l_i_sparse_np, w_l_i_dense_np, rtol=test_wrench_rtol, atol=test_wrench_atol)
     np.testing.assert_allclose(w_c_i_sparse_np, w_c_i_dense_np, rtol=test_wrench_rtol, atol=test_wrench_atol)

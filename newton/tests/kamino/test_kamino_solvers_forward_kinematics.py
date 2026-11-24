@@ -74,7 +74,7 @@ def compute_actuated_coords_and_dofs_data(model: ModelKamino):
     coordinates/DoFs, along with the corresponding DoF types.
 
     Returns ``(actuated_coords_offsets, actuated_coords_sizes, actuated_dofs_offsets,
-    actuated_dofs_sizes, actuator_dof_types)``.
+    actuated_dofs_sizes, actuator_dof_types, actuator_angular_counts)``.
     """
     # Retrieve data for all joints (offset arrays include a trailing total)
     coord_offsets = model.joints.coords_offset.numpy()[:-1]
@@ -96,11 +96,24 @@ def compute_actuated_coords_and_dofs_data(model: ModelKamino):
     actuated_dofs_sizes = joint_num_dofs[joint_is_actuator]
     actuator_dof_types = joint_dof_types[joint_is_actuator]
 
-    return actuated_coord_offsets, actuated_coords_sizes, actuated_dof_offsets, actuated_dofs_sizes, actuator_dof_types
+    angular_counts = np.zeros_like(joint_num_dofs)
+    if model.joints.d6_axes.size:
+        angular_counts[:] = model.joints.d6_axes.numpy()["angular_count"]
+    return (
+        actuated_coord_offsets,
+        actuated_coords_sizes,
+        actuated_dof_offsets,
+        actuated_dofs_sizes,
+        actuator_dof_types,
+        angular_counts[joint_is_actuator],
+    )
 
 
 def standardize_actuated_coords(
-    actuator_q: np.ndarray, actuated_coords_sizes: np.ndarray, actuator_dof_types: np.ndarray
+    actuator_q: np.ndarray,
+    actuated_coords_sizes: np.ndarray,
+    actuator_dof_types: np.ndarray,
+    actuator_angular_counts: np.ndarray,
 ) -> np.ndarray:
     """
     Convert actuator coordinates to their canonical, comparable form: angles are mapped to the
@@ -116,18 +129,15 @@ def standardize_actuated_coords(
     res = actuator_q.copy()
     coord_id = 0
     for i, dof_type in enumerate(actuator_dof_types):
-        if dof_type == JointDoFType.CYLINDRICAL:
-            res[coord_id + 1] = standardize_angle(res[coord_id + 1])
+        coord_end = coord_id + actuated_coords_sizes[i]
+        if dof_type == JointDoFType.D6:
+            angular = slice(coord_end - actuator_angular_counts[i], coord_end)
+            res[angular] = standardize_angle(res[angular])
         elif dof_type == JointDoFType.FREE:
             res[coord_id + 3 : coord_id + 7] = standardize_quat(res[coord_id + 3 : coord_id + 7])
-        if dof_type == JointDoFType.REVOLUTE:
-            res[coord_id] = standardize_angle(res[coord_id])
         elif dof_type == JointDoFType.SPHERICAL:
             res[coord_id : coord_id + 4] = standardize_quat(res[coord_id : coord_id + 4])
-        if dof_type == JointDoFType.UNIVERSAL:
-            res[coord_id] = standardize_angle(res[coord_id])
-            res[coord_id + 1] = standardize_angle(res[coord_id + 1])
-        coord_id += actuated_coords_sizes[i]
+        coord_id = coord_end
     return res
 
 
@@ -176,6 +186,7 @@ def solve_and_check_fk_random_poses(
         actuated_dof_offsets,
         actuated_dofs_sizes,
         actuator_dof_types,
+        actuator_angular_counts,
     ) = compute_actuated_coords_and_dofs_data(model)
 
     # Precompute cumulative offsets into the flat reference actuator vectors
@@ -272,6 +283,7 @@ def solve_and_check_fk_random_poses(
         active_dof_offsets = actuated_dof_offsets[actuator_joint_is_active]
         active_dof_sizes = actuated_dofs_sizes[actuator_joint_is_active]
         active_dof_types = actuator_dof_types[actuator_joint_is_active]
+        active_angular_counts = actuator_angular_counts[actuator_joint_is_active]
         active_ref_coord_offsets = ref_coord_offsets[actuator_joint_is_active]
         active_ref_dof_offsets = ref_dof_offsets[actuator_joint_is_active]
 
@@ -287,9 +299,13 @@ def solve_and_check_fk_random_poses(
             logger.error("Large constraint residual (%s) for pose %s", residual_ct_pos, pose_id)
             success_flags[-1] = False
         actuator_q_check = extract_segments(data.joints.q_j.numpy(), active_coord_offsets, active_coord_sizes)
-        actuator_q_check = standardize_actuated_coords(actuator_q_check, active_coord_sizes, active_dof_types)
+        actuator_q_check = standardize_actuated_coords(
+            actuator_q_check, active_coord_sizes, active_dof_types, active_angular_counts
+        )
         actuator_q_ref = extract_segments(actuator_q_np[pose_id], active_ref_coord_offsets, active_coord_sizes)
-        actuator_q_ref = standardize_actuated_coords(actuator_q_ref, active_coord_sizes, active_dof_types)
+        actuator_q_ref = standardize_actuated_coords(
+            actuator_q_ref, active_coord_sizes, active_dof_types, active_angular_counts
+        )
         residual_actuator_q = float(np.max(np.abs(actuator_q_check - actuator_q_ref))) if actuator_q_check.size else 0.0
         if residual_actuator_q > epsilon:
             logger.error(

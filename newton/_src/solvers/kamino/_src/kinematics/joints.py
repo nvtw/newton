@@ -22,10 +22,9 @@ from ..core.joints import (
     JointDoFType,
     clamp_joint_effort_wp,
 )
-from ..core.math import FLOAT32_MAX, quat_left_jacobian_inverse, quat_log, quat_positive, quat_twist_angle
+from ..core.math import FLOAT32_MAX, quat_left_jacobian_inverse, quat_log, quat_positive
 from ..core.model import ModelKamino
 from ..core.types import (
-    vec1f,
     vec6f,
     vec7f,
 )
@@ -53,9 +52,6 @@ wp.set_module_options({"enable_backward": False, "default_grid_stride": False})
 ###
 
 
-DEFAULT_LIMIT_V1F = vec1f(FLOAT32_MAX)
-DEFAULT_LIMIT_V2F = wp.vec2f(FLOAT32_MAX)
-DEFAULT_LIMIT_V3F = wp.vec3f(FLOAT32_MAX)
 DEFAULT_LIMIT_V4F = wp.vec4f(FLOAT32_MAX)
 DEFAULT_LIMIT_V7F = vec7f(FLOAT32_MAX)
 
@@ -71,14 +67,6 @@ def correct_rotational_coord(q_j_in: wp.float32, q_j_ref: wp.float32 = 0.0) -> w
     Corrects a rotational joint coordinate to be as close as possible to a reference coordinate.
     """
     return q_j_in + wp.round((q_j_ref - q_j_in) / wp.tau) * wp.tau  # Note: wp.tau is 2 * pi
-
-
-@wp.func
-def correct_rotational_coord_with_limit(
-    q_j_in: wp.float32, q_j_ref: wp.float32 = 0.0, q_j_limit: wp.float32 = FLOAT32_MAX
-) -> wp.float32:
-    """Corrects a rotational coordinate relative to a reference and wraps it within a limit."""
-    return wp.mod(correct_rotational_coord(q_j_in, q_j_ref), q_j_limit)
 
 
 @wp.func
@@ -103,61 +91,11 @@ def correct_joint_coord_free(q_j_in: vec7f, q_j_ref: vec7f, q_j_limit: vec7f = D
 
 
 @wp.func
-def correct_joint_coord_revolute(q_j_in: vec1f, q_j_ref: vec1f, q_j_limit: vec1f = DEFAULT_LIMIT_V1F) -> vec1f:
-    """Corrects the rotational joint coordinate."""
-    q_j_in[0] = correct_rotational_coord_with_limit(q_j_in[0], q_j_ref[0], q_j_limit[0])
-    return q_j_in
-
-
-@wp.func
-def correct_joint_coord_prismatic(q_j_in: vec1f, q_j_ref: vec1f, q_j_limit: vec1f = DEFAULT_LIMIT_V1F) -> vec1f:
-    """No correction needed for prismatic coordinates."""
-    return q_j_in
-
-
-@wp.func
-def correct_joint_coord_cylindrical(
-    q_j_in: wp.vec2f, q_j_ref: wp.vec2f, q_j_limit: wp.vec2f = DEFAULT_LIMIT_V2F
-) -> wp.vec2f:
-    """Corrects only the rotational joint coordinate."""
-    q_j_in[1] = correct_rotational_coord_with_limit(q_j_in[1], q_j_ref[1], q_j_limit[1])
-    return q_j_in
-
-
-@wp.func
-def correct_joint_coord_universal(
-    q_j_in: wp.vec2f, q_j_ref: wp.vec2f, q_j_limit: wp.vec2f = DEFAULT_LIMIT_V2F
-) -> wp.vec2f:
-    """Corrects each of the two rotational joint coordinates individually."""
-    q_j_in[0] = correct_rotational_coord_with_limit(q_j_in[0], q_j_ref[0], q_j_limit[0])
-    q_j_in[1] = correct_rotational_coord_with_limit(q_j_in[1], q_j_ref[1], q_j_limit[1])
-    return q_j_in
-
-
-@wp.func
-def correct_joint_coord_gimbal(
-    q_j_in: wp.vec3f, q_j_ref: wp.vec3f, q_j_limit: wp.vec3f = DEFAULT_LIMIT_V3F
-) -> wp.vec3f:
-    """Correct each intrinsic Euler coordinate against its previous value."""
-    for i in range(3):
-        q_j_in[i] = correct_rotational_coord_with_limit(q_j_in[i], q_j_ref[i], q_j_limit[i])
-    return q_j_in
-
-
-@wp.func
 def correct_joint_coord_spherical(
     q_j_in: wp.vec4f, q_j_ref: wp.vec4f, q_j_limit: wp.vec4f = DEFAULT_LIMIT_V4F
 ) -> wp.vec4f:
     """Corrects a quaternion joint coordinate to be as close as possible to a reference."""
     return correct_quat_vector_coord(q_j_in, q_j_ref)
-
-
-@wp.func
-def correct_joint_coord_cartesian(
-    q_j_in: wp.vec3f, q_j_ref: wp.vec3f, q_j_limit: wp.vec3f = DEFAULT_LIMIT_V3F
-) -> wp.vec3f:
-    """No correction needed for Cartesian coordinates."""
-    return q_j_in
 
 
 def get_joint_coord_correction_function(dof_type: JointDoFType):
@@ -167,32 +105,10 @@ def get_joint_coord_correction_function(dof_type: JointDoFType):
     """
     if dof_type == JointDoFType.FREE:
         return correct_joint_coord_free
-    elif dof_type == JointDoFType.REVOLUTE:
-        return correct_joint_coord_revolute
-    elif dof_type == JointDoFType.PRISMATIC:
-        return correct_joint_coord_prismatic
-    elif dof_type == JointDoFType.CYLINDRICAL:
-        return correct_joint_coord_cylindrical
-    elif dof_type == JointDoFType.UNIVERSAL:
-        return correct_joint_coord_universal
-    elif dof_type == JointDoFType.GIMBAL:
-        return correct_joint_coord_gimbal
-    elif dof_type == JointDoFType.GIMBAL_LEFT_HANDED:
-        return correct_joint_coord_gimbal
     elif dof_type == JointDoFType.SPHERICAL:
         return correct_joint_coord_spherical
-    elif dof_type == JointDoFType.CARTESIAN:
-        return correct_joint_coord_cartesian
-    elif dof_type == JointDoFType.FIXED:
-        return None
     else:
         raise ValueError(f"Unknown joint DoF type: {dof_type}")
-
-
-@wp.func
-def _correct_rotational_coord_in_place(coords: wp.array[wp.float32], coords_ref: wp.array[wp.float32], slot: wp.int32):
-    """Correct one angular coordinate stored at ``slot`` against its reference (in-place, ±2π)."""
-    coords[slot] = correct_rotational_coord(coords[slot], coords_ref[slot])
 
 
 @wp.func
@@ -218,27 +134,13 @@ def correct_joint_coords_in_place(
     for quaternions. No limit wrapping is applied; use :func:`get_joint_coord_correction_function`
     if bounded wrapping is needed.
 
-    The runtime ``dof_type`` dispatches to the appropriate per-type correction, matching the
-    joint DoF layouts defined in :class:`JointDoFType`. Types with no correction (Cartesian,
-    Fixed, Prismatic) are no-ops, and unrecognized values are also silently skipped to accommodate
-    solver-specific extensions with disjoint coord slots (e.g. FK's Axis type).
+    This dispatch corrects quaternion signs for the spherical, free, and rod layouts.
+    D6 scalar coordinates are corrected using their per-joint axis layout.
     """
-    if dof_type == JointDoFType.CARTESIAN or dof_type == JointDoFType.FIXED or dof_type == JointDoFType.PRISMATIC:
-        return
-    elif dof_type == JointDoFType.CYLINDRICAL:
-        _correct_rotational_coord_in_place(coords, coords_ref, offset + 1)
-    elif dof_type == JointDoFType.FREE or dof_type == JointDoFType.ROD:
+    if dof_type == JointDoFType.FREE or dof_type == JointDoFType.ROD:
         _correct_quat_coord_in_place(coords, coords_ref, offset + 3)
-    elif dof_type == JointDoFType.REVOLUTE:
-        _correct_rotational_coord_in_place(coords, coords_ref, offset)
     elif dof_type == JointDoFType.SPHERICAL:
         _correct_quat_coord_in_place(coords, coords_ref, offset)
-    elif dof_type == JointDoFType.UNIVERSAL:
-        _correct_rotational_coord_in_place(coords, coords_ref, offset)
-        _correct_rotational_coord_in_place(coords, coords_ref, offset + 1)
-    elif dof_type == JointDoFType.GIMBAL or dof_type == JointDoFType.GIMBAL_LEFT_HANDED:
-        for i in range(3):
-            _correct_rotational_coord_in_place(coords, coords_ref, offset + i)
 
 
 @wp.func
@@ -453,69 +355,9 @@ def map_to_joint_coords_free(j_r_j: wp.vec3f, j_q_j: wp.quatf) -> vec7f:
 
 
 @wp.func
-def map_to_joint_coords_revolute(j_r_j: wp.vec3f, j_q_j: wp.quatf) -> vec1f:
-    """Returns the 1D rotation angle about the local X-axis."""
-    # Measure rotation around the x-axis only
-    axis = wp.vec3f(1.0, 0.0, 0.0)
-    return vec1f(quat_twist_angle(j_q_j, axis))
-
-
-@wp.func
-def map_to_joint_coords_prismatic(j_r_j: wp.vec3f, j_q_j: wp.quatf) -> vec1f:
-    """Returns the 1D translation distance along the local X-axis."""
-    return vec1f(j_r_j[0])
-
-
-@wp.func
-def map_to_joint_coords_cylindrical(j_r_j: wp.vec3f, j_q_j: wp.quatf) -> wp.vec2f:
-    """Returns the 2D vector of translation and rotation about the local X-axis."""
-    j_p_j = quat_log(j_q_j)
-    return wp.vec2f(j_r_j[0], j_p_j[0])
-
-
-@wp.func
-def map_to_joint_coords_universal(j_r_j: wp.vec3f, j_q_j: wp.quatf) -> wp.vec2f:
-    """Returns the 2D vector of joint angles for the two revolute DoFs."""
-    # X and Y axis in base frame
-    a_x_B = wp.vec3f(1.0, 0.0, 0.0)
-    a_y_B = wp.vec3f(0.0, 1.0, 0.0)
-
-    # X and Y axis in follower frame
-    a_x_F = wp.quat_rotate(j_q_j, a_x_B)
-    a_y_F = wp.quat_rotate(j_q_j, a_y_B)
-
-    # Extract theta_x, as the angle of the rotation about a_x_B mapping a_y_B to a_y_F
-    theta_x = wp.atan2(a_y_F[2], a_y_F[1])
-
-    # Extract theta_y, as the angle of the rotation about a_y_F mapping a_x_B to a_x_F
-    theta_y = wp.atan2(wp.dot(wp.cross(a_x_B, a_x_F), a_y_F), a_x_F[0])
-
-    return wp.vec2f(theta_x, theta_y)
-
-
-@wp.func
-def map_to_joint_coords_gimbal(j_r_j: wp.vec3f, j_q_j: wp.quatf) -> wp.vec3f:
-    """Return intrinsic XYZ Euler coordinates for a canonical gimbal frame."""
-    return wp.quat_to_euler(j_q_j, 2, 1, 0)
-
-
-@wp.func
-def map_to_joint_coords_gimbal_left_handed(j_r_j: wp.vec3f, j_q_j: wp.quatf) -> wp.vec3f:
-    """Return authored coordinates for a left-handed gimbal frame."""
-    coords = map_to_joint_coords_gimbal(j_r_j, j_q_j)
-    return wp.vec3f(coords[0], coords[1], -coords[2])
-
-
-@wp.func
 def map_to_joint_coords_spherical(j_r_j: wp.vec3f, j_q_j: wp.quatf) -> wp.vec4f:
     """Returns the 4D unit-quaternion representing the joint rotation."""
     return wp.vec4f(*j_q_j)
-
-
-@wp.func
-def map_to_joint_coords_cartesian(j_r_j: wp.vec3f, j_q_j: wp.quatf) -> wp.vec3f:
-    """Returns the 3D translational."""
-    return j_r_j
 
 
 def get_joint_coords_mapping_function(dof_type: JointDoFType):
@@ -525,24 +367,8 @@ def get_joint_coords_mapping_function(dof_type: JointDoFType):
     """
     if dof_type == JointDoFType.FREE:
         return map_to_joint_coords_free
-    elif dof_type == JointDoFType.REVOLUTE:
-        return map_to_joint_coords_revolute
-    elif dof_type == JointDoFType.PRISMATIC:
-        return map_to_joint_coords_prismatic
-    elif dof_type == JointDoFType.CYLINDRICAL:
-        return map_to_joint_coords_cylindrical
-    elif dof_type == JointDoFType.UNIVERSAL:
-        return map_to_joint_coords_universal
-    elif dof_type == JointDoFType.GIMBAL:
-        return map_to_joint_coords_gimbal
-    elif dof_type == JointDoFType.GIMBAL_LEFT_HANDED:
-        return map_to_joint_coords_gimbal_left_handed
     elif dof_type == JointDoFType.SPHERICAL:
         return map_to_joint_coords_spherical
-    elif dof_type == JointDoFType.CARTESIAN:
-        return map_to_joint_coords_cartesian
-    elif dof_type == JointDoFType.FIXED:
-        return None
     else:
         raise ValueError(f"Unknown joint DoF type: {dof_type}")
 
@@ -557,35 +383,6 @@ def joint_constraint_angular_residual_free(j_q_j: wp.quatf) -> wp.vec3f:
     return wp.vec3f(0.0, 0.0, 0.0)
 
 
-@wp.func
-def joint_constraint_angular_residual_revolute(j_q_j: wp.quatf) -> wp.vec3f:
-    """Returns the joint constraint residual for a revolute joint that rotates about the local X-axis."""
-    # x-axis attached to the base body
-    j_x_B = wp.vec3f(1.0, 0.0, 0.0)
-
-    # x-axis attached to the follower body, expressed in the joint frame on the base body.
-    j_x_F = wp.quat_rotate(j_q_j, j_x_B)
-
-    # Residual vector = sin(res_angle) * axis, where axis only has y, and z components.
-    # For small angles this is equal to res_angle * axis
-    return wp.cross(j_x_B, j_x_F)
-
-
-@wp.func
-def joint_constraint_angular_residual_universal(j_q_j: wp.quatf) -> wp.vec3f:
-    """Returns the joint constraint residual for a universal joint."""
-    e_y = wp.vec3f(0.0, 1.0, 0.0)
-    a_x_dot_a_y = wp.quat_rotate(j_q_j, e_y)[0]
-
-    return wp.vec3f(0.0, 0.0, -a_x_dot_a_y)
-
-
-@wp.func
-def joint_constraint_angular_residual_fixed(j_q_j: wp.quatf) -> wp.vec3f:
-    """Returns the joint constraint residual for a fixed joint."""
-    return quat_log(j_q_j)
-
-
 def get_joint_constraint_angular_residual_function(dof_type: JointDoFType):
     """
     Retrieves the function that computes the joint constraint residual as a 6D local vector
@@ -594,46 +391,10 @@ def get_joint_constraint_angular_residual_function(dof_type: JointDoFType):
     # Use the fixed joint residual as the generic implementation.
     if dof_type == JointDoFType.FREE:
         return joint_constraint_angular_residual_free
-    elif dof_type == JointDoFType.REVOLUTE:
-        return joint_constraint_angular_residual_revolute
-    elif dof_type == JointDoFType.PRISMATIC:
-        return joint_constraint_angular_residual_fixed
-    elif dof_type == JointDoFType.CYLINDRICAL:
-        return joint_constraint_angular_residual_revolute
-    elif dof_type == JointDoFType.UNIVERSAL:
-        return joint_constraint_angular_residual_universal
     elif dof_type == JointDoFType.SPHERICAL:
         return joint_constraint_angular_residual_free
-    elif dof_type == JointDoFType.GIMBAL:
-        return joint_constraint_angular_residual_free
-    elif dof_type == JointDoFType.GIMBAL_LEFT_HANDED:
-        return joint_constraint_angular_residual_free
-    elif dof_type == JointDoFType.CARTESIAN:
-        return joint_constraint_angular_residual_fixed
-    elif dof_type == JointDoFType.FIXED:
-        return joint_constraint_angular_residual_fixed
     else:
         raise ValueError(f"Unknown joint DoF type: {dof_type}")
-
-
-@wp.func
-def universal_intermediary_axes(rel_ori_joint: wp.quatf) -> wp.mat33f:
-    """
-    Compute the columns of the universal-joint intermediary body frame, expressed as a rotation
-    matrix in the Base-side joint frame. Column 1 is the x-axis on the Base; column 2 is the y-axis
-    on the Follower (orthogonalized against the Base x-axis in case constraints are violated);
-    column 3 is their cross product.
-
-    Args:
-        rel_ori_joint: Relative orientation of the Follower joint frame w.r.t. the Base joint frame.
-    """
-    e_x = wp.vec3f(1.0, 0.0, 0.0)
-    e_y = wp.vec3f(0.0, 1.0, 0.0)
-    a_x = e_x
-    a_y = wp.quat_rotate(rel_ori_joint, e_y)
-    a_y = wp.normalize(a_y - wp.dot(a_y, a_x) * a_x)
-    a_z = wp.cross(a_x, a_y)
-    return wp.matrix_from_cols(a_x, a_y, a_z)
 
 
 ###
@@ -660,7 +421,6 @@ def make_typed_write_joint_data(dof_type: JointDoFType, correction: JointCorrect
 
     # Define the coordinate bound for correction
     q_j_limit = _coordsvec(dof_type.coords_bound(correction)) if _coordsvec is not None else None
-    third_axis_sign = -1.0 if dof_type == JointDoFType.GIMBAL_LEFT_HANDED else 1.0
 
     # Generate a joint type-specific function to write the
     # computed joint state into the model data arrays
@@ -680,12 +440,6 @@ def make_typed_write_joint_data(dof_type: JointDoFType, correction: JointCorrect
         q_j_out: wp.array[wp.float32],  # Flat array of joint DoF coordinates
         dq_j_out: wp.array[wp.float32],  # Flat array of joint DoF velocities
     ):
-        # Convert angular velocity to intermediary body frame for universal joint
-        if wp.static(dof_type == JointDoFType.UNIVERSAL):
-            axes = universal_intermediary_axes(j_q_j)
-            omega_intermediary = wp.transpose(axes) @ wp.spatial_bottom(j_u_j)
-            j_u_j = wp.spatial_vectorf(*wp.spatial_top(j_u_j), *omega_intermediary)
-
         # Only write the constraint residual and velocity if the joint defines constraints
         # NOTE: This will be disabled for free joints
         if wp.static(num_cts > 0):
@@ -699,18 +453,11 @@ def make_typed_write_joint_data(dof_type: JointDoFType, correction: JointCorrect
                     dr_j_out[cts_offset + j] = j_u_j[cts_axes[j]]
 
         # Only write the DoF coordinates and velocities if the joint defines DoFs
-        # NOTE: This will be disabled for fixed joints
         if wp.static(num_dofs > 0):
             # Map the joint relative pose to joint DoF coordinates
             q_j = wp.static(get_joint_coords_mapping_function(dof_type))(j_r_j, j_q_j)
 
-            if wp.static(dof_type == JointDoFType.GIMBAL or dof_type == JointDoFType.GIMBAL_LEFT_HANDED):
-                q_j_prev = _coordsvec()
-                for j in range(num_coords):
-                    q_j_prev[j] = q_j_p[coords_offset + j]
-                q_j = select_gimbal_coords(j_q_j, q_j_prev, third_axis_sign)
-            # Optionally generate code to correct the joint coordinates
-            elif wp.static(correction != JointCorrectionMode.NONE):
+            if wp.static(correction != JointCorrectionMode.NONE):
                 q_j_prev = _coordsvec()
                 for j in range(num_coords):
                     q_j_prev[j] = q_j_p[coords_offset + j]
@@ -720,13 +467,8 @@ def make_typed_write_joint_data(dof_type: JointDoFType, correction: JointCorrect
             for j in range(num_coords):
                 q_j_out[coords_offset + j] = q_j[j]
             # Store the joint DoF velocities
-            if wp.static(dof_type == JointDoFType.GIMBAL or dof_type == JointDoFType.GIMBAL_LEFT_HANDED):
-                rates = map_gimbal_angular_velocity_to_rates(q_j, wp.spatial_bottom(j_u_j), third_axis_sign)
-                for j in range(3):
-                    dq_j_out[dofs_offset + j] = rates[j]
-            else:
-                for j in range(num_dofs):
-                    dq_j_out[dofs_offset + j] = j_u_j[dof_axes[j]]
+            for j in range(num_dofs):
+                dq_j_out[dofs_offset + j] = j_u_j[dof_axes[j]]
 
     # Return the function
     return _write_typed_joint_data
@@ -796,128 +538,8 @@ def make_write_joint_data(correction: JointCorrectionMode = JointCorrectionMode.
                     axis = d6_locked_axis(axes.linear_count, axes.angular_count, i)
                     data_r_j[cts_offset + i] = values[axis]
                     data_dr_j[cts_offset + i] = rates[axis]
-        elif dof_type == JointDoFType.REVOLUTE:
-            wp.static(make_typed_write_joint_data(JointDoFType.REVOLUTE, correction))(
-                cts_offset,
-                dofs_offset,
-                coords_offset,
-                j_r_j,
-                j_q_j,
-                j_u_j,
-                q_j_p,
-                data_r_j,
-                data_dr_j,
-                data_q_j,
-                data_dq_j,
-            )
-
-        elif dof_type == JointDoFType.PRISMATIC:
-            wp.static(make_typed_write_joint_data(JointDoFType.PRISMATIC))(
-                cts_offset,
-                dofs_offset,
-                coords_offset,
-                j_r_j,
-                j_q_j,
-                j_u_j,
-                q_j_p,
-                data_r_j,
-                data_dr_j,
-                data_q_j,
-                data_dq_j,
-            )
-
-        elif dof_type == JointDoFType.CYLINDRICAL:
-            wp.static(make_typed_write_joint_data(JointDoFType.CYLINDRICAL, correction))(
-                cts_offset,
-                dofs_offset,
-                coords_offset,
-                j_r_j,
-                j_q_j,
-                j_u_j,
-                q_j_p,
-                data_r_j,
-                data_dr_j,
-                data_q_j,
-                data_dq_j,
-            )
-
-        elif dof_type == JointDoFType.UNIVERSAL:
-            wp.static(make_typed_write_joint_data(JointDoFType.UNIVERSAL, correction))(
-                cts_offset,
-                dofs_offset,
-                coords_offset,
-                j_r_j,
-                j_q_j,
-                j_u_j,
-                q_j_p,
-                data_r_j,
-                data_dr_j,
-                data_q_j,
-                data_dq_j,
-            )
-
-        elif dof_type == JointDoFType.GIMBAL:
-            wp.static(make_typed_write_joint_data(JointDoFType.GIMBAL, correction))(
-                cts_offset,
-                dofs_offset,
-                coords_offset,
-                j_r_j,
-                j_q_j,
-                j_u_j,
-                q_j_p,
-                data_r_j,
-                data_dr_j,
-                data_q_j,
-                data_dq_j,
-            )
-
-        elif dof_type == JointDoFType.GIMBAL_LEFT_HANDED:
-            wp.static(make_typed_write_joint_data(JointDoFType.GIMBAL_LEFT_HANDED, correction))(
-                cts_offset,
-                dofs_offset,
-                coords_offset,
-                j_r_j,
-                j_q_j,
-                j_u_j,
-                q_j_p,
-                data_r_j,
-                data_dr_j,
-                data_q_j,
-                data_dq_j,
-            )
-
         elif dof_type == JointDoFType.SPHERICAL:
             wp.static(make_typed_write_joint_data(JointDoFType.SPHERICAL))(
-                cts_offset,
-                dofs_offset,
-                coords_offset,
-                j_r_j,
-                j_q_j,
-                j_u_j,
-                q_j_p,
-                data_r_j,
-                data_dr_j,
-                data_q_j,
-                data_dq_j,
-            )
-
-        elif dof_type == JointDoFType.CARTESIAN:
-            wp.static(make_typed_write_joint_data(JointDoFType.CARTESIAN))(
-                cts_offset,
-                dofs_offset,
-                coords_offset,
-                j_r_j,
-                j_q_j,
-                j_u_j,
-                q_j_p,
-                data_r_j,
-                data_dr_j,
-                data_q_j,
-                data_dq_j,
-            )
-
-        elif dof_type == JointDoFType.FIXED:
-            wp.static(make_typed_write_joint_data(JointDoFType.FIXED))(
                 cts_offset,
                 dofs_offset,
                 coords_offset,

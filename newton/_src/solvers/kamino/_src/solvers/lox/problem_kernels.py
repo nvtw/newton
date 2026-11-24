@@ -1101,9 +1101,7 @@ def make_update_proximal_structural_multipliers_kernel(correction: JointCorrecti
 
         # Evaluate the exact joint residual at the candidate poses
         dof_type = model_joints_dof_type[jid]
-        full_position_block = (
-            dof_type == JointDoFType.FIXED or dof_type == JointDoFType.REVOLUTE or dof_type == JointDoFType.SPHERICAL
-        )
+        full_position_block = dof_type == JointDoFType.SPHERICAL
         a_pose = wp.transform_identity(dtype=wp.float32)
         if bid_a >= 0:
             a_pose = compute_body_pose_update_with_logmap(

@@ -18,7 +18,6 @@ from ..core.joints import D6JointAxes, JointDoFType
 from ..core.math import (
     FLOAT32_MAX,
     FLOAT32_MIN,
-    concat6d,
     contact_wrench_matrix_from_points,
     expand6d,
     screw_transform_matrix_from_points,
@@ -43,8 +42,6 @@ from .joints import (
     d6_angular_reference,
     d6_dof_axis,
     d6_locked_axis,
-    gimbal_reciprocal_axes,
-    universal_intermediary_axes,
 )
 
 ###
@@ -180,46 +177,11 @@ def build_full_joint_jacobian(
         W_j_B = screw_transform_matrix_from_points(r_j, r_B_j)
         W_j_F = screw_transform_matrix_from_points(r_j, r_F_j)
 
-        # General case: Compute the effective projector to joint frame and expand to 6D
-        if (
-            dof_type != JointDoFType.UNIVERSAL
-            and dof_type != JointDoFType.GIMBAL
-            and dof_type != JointDoFType.GIMBAL_LEFT_HANDED
-        ):
-            R_X_bar_j = expand6d(R_X_j)
-        # Universal joint: replace R_X_j with the frame of the intermediate body for rotation constraints
-        elif dof_type == JointDoFType.UNIVERSAL:
-            j_q_j = compute_joint_relative_quaternion(
-                T_B_j, T_F_j, model_joints_X_Bj[joint_id], model_joints_X_Fj[joint_id]
-            )
-            R_X_bar_j = concat6d(R_X_j, R_X_j @ universal_intermediary_axes(j_q_j))
-        # Gimbal joint: replace R_X_j with the frame of the reciprocal axes
-        else:
-            third_axis_sign = -1.0 if dof_type == JointDoFType.GIMBAL_LEFT_HANDED else 1.0
-            coords_offset = model_joints_coords_offset[joint_id]
-            coords = wp.vec3f(
-                state_joints_q[coords_offset], state_joints_q[coords_offset + 1], state_joints_q[coords_offset + 2]
-            )
-            reciprocal = gimbal_reciprocal_axes(coords, third_axis_sign)
-            R_X_bar_j = concat6d(R_X_j, R_X_j @ reciprocal)
+        R_X_bar_j = expand6d(R_X_j)
 
         # Compute the extended jacobians, i.e. without the selection-matrix multiplication
         JT_B_j = -W_j_B @ R_X_bar_j  # Reaction is on the Base body body ; (6 x 6)
         JT_F_j = W_j_F @ R_X_bar_j  # Action is on the Follower body    ; (6 x 6)
-
-        if (
-            dof_type == JointDoFType.PRISMATIC
-            or dof_type == JointDoFType.CYLINDRICAL
-            or dof_type == JointDoFType.CARTESIAN
-        ):
-            follower_anchor = wp.transform_point(T_F_j, model_joints_F_r_Fj[joint_id])
-            for k in range(3):
-                direction = wp.vec3f(R_X_j[:, k])
-                torque_B = wp.cross(follower_anchor - r_B_j, direction)
-                torque_F = wp.cross(follower_anchor - r_F_j, direction)
-                for i in range(3):
-                    JT_B_j[3 + i, k] = -torque_B[i]
-                    JT_F_j[3 + i, k] = torque_F[i]
 
         # Rod joint: measure the shear and stretch at the follower anchor, which the anchor separation in
         # the joint coordinates places away from the joint frame, and replace the angular axes with the
@@ -372,47 +334,8 @@ def store_joint_cts_jacobian_dense(
     Stores the constraints Jacobian block of a joint into the provided flat data array at the given offset.
     """
 
-    if dof_type == JointDoFType.REVOLUTE:
-        wp.static(make_store_joint_jacobian_dense_func(JointDoFType.REVOLUTE.cts_axes))(
-            J_row_offset, num_body_dofs, bid_offset, bid_B, bid_F, JT_B, JT_F, J_data
-        )
-
-    elif dof_type == JointDoFType.PRISMATIC:
-        wp.static(make_store_joint_jacobian_dense_func(JointDoFType.PRISMATIC.cts_axes))(
-            J_row_offset, num_body_dofs, bid_offset, bid_B, bid_F, JT_B, JT_F, J_data
-        )
-
-    elif dof_type == JointDoFType.CYLINDRICAL:
-        wp.static(make_store_joint_jacobian_dense_func(JointDoFType.CYLINDRICAL.cts_axes))(
-            J_row_offset, num_body_dofs, bid_offset, bid_B, bid_F, JT_B, JT_F, J_data
-        )
-
-    elif dof_type == JointDoFType.UNIVERSAL:
-        wp.static(make_store_joint_jacobian_dense_func(JointDoFType.UNIVERSAL.cts_axes))(
-            J_row_offset, num_body_dofs, bid_offset, bid_B, bid_F, JT_B, JT_F, J_data
-        )
-
-    elif dof_type == JointDoFType.SPHERICAL:
+    if dof_type == JointDoFType.SPHERICAL:
         wp.static(make_store_joint_jacobian_dense_func(JointDoFType.SPHERICAL.cts_axes))(
-            J_row_offset, num_body_dofs, bid_offset, bid_B, bid_F, JT_B, JT_F, J_data
-        )
-
-    elif dof_type == JointDoFType.GIMBAL:
-        wp.static(make_store_joint_jacobian_dense_func(JointDoFType.GIMBAL.cts_axes))(
-            J_row_offset, num_body_dofs, bid_offset, bid_B, bid_F, JT_B, JT_F, J_data
-        )
-    elif dof_type == JointDoFType.GIMBAL_LEFT_HANDED:
-        wp.static(make_store_joint_jacobian_dense_func(JointDoFType.GIMBAL_LEFT_HANDED.cts_axes))(
-            J_row_offset, num_body_dofs, bid_offset, bid_B, bid_F, JT_B, JT_F, J_data
-        )
-
-    elif dof_type == JointDoFType.CARTESIAN:
-        wp.static(make_store_joint_jacobian_dense_func(JointDoFType.CARTESIAN.cts_axes))(
-            J_row_offset, num_body_dofs, bid_offset, bid_B, bid_F, JT_B, JT_F, J_data
-        )
-
-    elif dof_type == JointDoFType.FIXED:
-        wp.static(make_store_joint_jacobian_dense_func(JointDoFType.FIXED.cts_axes))(
             J_row_offset, num_body_dofs, bid_offset, bid_B, bid_F, JT_B, JT_F, J_data
         )
 
@@ -433,42 +356,8 @@ def store_joint_dofs_jacobian_dense(
     Stores the DoFs Jacobian block of a joint into the provided flat data array at the given offset.
     """
 
-    if dof_type == JointDoFType.REVOLUTE:
-        wp.static(make_store_joint_jacobian_dense_func(JointDoFType.REVOLUTE.dofs_axes))(
-            J_row_offset, num_body_dofs, bid_offset, bid_B, bid_F, JT_B, JT_F, J_data
-        )
-
-    elif dof_type == JointDoFType.PRISMATIC:
-        wp.static(make_store_joint_jacobian_dense_func(JointDoFType.PRISMATIC.dofs_axes))(
-            J_row_offset, num_body_dofs, bid_offset, bid_B, bid_F, JT_B, JT_F, J_data
-        )
-
-    elif dof_type == JointDoFType.CYLINDRICAL:
-        wp.static(make_store_joint_jacobian_dense_func(JointDoFType.CYLINDRICAL.dofs_axes))(
-            J_row_offset, num_body_dofs, bid_offset, bid_B, bid_F, JT_B, JT_F, J_data
-        )
-
-    elif dof_type == JointDoFType.UNIVERSAL:
-        wp.static(make_store_joint_jacobian_dense_func(JointDoFType.UNIVERSAL.dofs_axes))(
-            J_row_offset, num_body_dofs, bid_offset, bid_B, bid_F, JT_B, JT_F, J_data
-        )
-
-    elif dof_type == JointDoFType.SPHERICAL:
+    if dof_type == JointDoFType.SPHERICAL:
         wp.static(make_store_joint_jacobian_dense_func(JointDoFType.SPHERICAL.dofs_axes))(
-            J_row_offset, num_body_dofs, bid_offset, bid_B, bid_F, JT_B, JT_F, J_data
-        )
-
-    elif dof_type == JointDoFType.GIMBAL:
-        wp.static(make_store_joint_jacobian_dense_func(JointDoFType.GIMBAL.dofs_axes))(
-            J_row_offset, num_body_dofs, bid_offset, bid_B, bid_F, JT_B, JT_F, J_data
-        )
-    elif dof_type == JointDoFType.GIMBAL_LEFT_HANDED:
-        wp.static(make_store_joint_jacobian_dense_func(JointDoFType.GIMBAL_LEFT_HANDED.dofs_axes))(
-            J_row_offset, num_body_dofs, bid_offset, bid_B, bid_F, JT_B, JT_F, J_data
-        )
-
-    elif dof_type == JointDoFType.CARTESIAN:
-        wp.static(make_store_joint_jacobian_dense_func(JointDoFType.CARTESIAN.dofs_axes))(
             J_row_offset, num_body_dofs, bid_offset, bid_B, bid_F, JT_B, JT_F, J_data
         )
 
@@ -513,47 +402,8 @@ def store_joint_cts_jacobian_sparse(
     Stores the constraints Jacobian block of a joint into the provided flat data array at the given offset.
     """
 
-    if dof_type == JointDoFType.REVOLUTE:
-        wp.static(make_store_joint_jacobian_sparse_func(JointDoFType.REVOLUTE.cts_axes))(
-            is_binary, JT_B_j, JT_F_j, J_nzb_offset, J_nzb_values
-        )
-
-    elif dof_type == JointDoFType.PRISMATIC:
-        wp.static(make_store_joint_jacobian_sparse_func(JointDoFType.PRISMATIC.cts_axes))(
-            is_binary, JT_B_j, JT_F_j, J_nzb_offset, J_nzb_values
-        )
-
-    elif dof_type == JointDoFType.CYLINDRICAL:
-        wp.static(make_store_joint_jacobian_sparse_func(JointDoFType.CYLINDRICAL.cts_axes))(
-            is_binary, JT_B_j, JT_F_j, J_nzb_offset, J_nzb_values
-        )
-
-    elif dof_type == JointDoFType.UNIVERSAL:
-        wp.static(make_store_joint_jacobian_sparse_func(JointDoFType.UNIVERSAL.cts_axes))(
-            is_binary, JT_B_j, JT_F_j, J_nzb_offset, J_nzb_values
-        )
-
-    elif dof_type == JointDoFType.SPHERICAL:
+    if dof_type == JointDoFType.SPHERICAL:
         wp.static(make_store_joint_jacobian_sparse_func(JointDoFType.SPHERICAL.cts_axes))(
-            is_binary, JT_B_j, JT_F_j, J_nzb_offset, J_nzb_values
-        )
-
-    elif dof_type == JointDoFType.GIMBAL:
-        wp.static(make_store_joint_jacobian_sparse_func(JointDoFType.GIMBAL.cts_axes))(
-            is_binary, JT_B_j, JT_F_j, J_nzb_offset, J_nzb_values
-        )
-    elif dof_type == JointDoFType.GIMBAL_LEFT_HANDED:
-        wp.static(make_store_joint_jacobian_sparse_func(JointDoFType.GIMBAL_LEFT_HANDED.cts_axes))(
-            is_binary, JT_B_j, JT_F_j, J_nzb_offset, J_nzb_values
-        )
-
-    elif dof_type == JointDoFType.CARTESIAN:
-        wp.static(make_store_joint_jacobian_sparse_func(JointDoFType.CARTESIAN.cts_axes))(
-            is_binary, JT_B_j, JT_F_j, J_nzb_offset, J_nzb_values
-        )
-
-    elif dof_type == JointDoFType.FIXED:
-        wp.static(make_store_joint_jacobian_sparse_func(JointDoFType.FIXED.cts_axes))(
             is_binary, JT_B_j, JT_F_j, J_nzb_offset, J_nzb_values
         )
 
@@ -571,42 +421,8 @@ def store_joint_dofs_jacobian_sparse(
     Stores the DoFs Jacobian block of a joint into the provided flat data array at the given offset.
     """
 
-    if dof_type == JointDoFType.REVOLUTE:
-        wp.static(make_store_joint_jacobian_sparse_func(JointDoFType.REVOLUTE.dofs_axes))(
-            is_binary, JT_B_j, JT_F_j, J_nzb_offset, J_nzb_values
-        )
-
-    elif dof_type == JointDoFType.PRISMATIC:
-        wp.static(make_store_joint_jacobian_sparse_func(JointDoFType.PRISMATIC.dofs_axes))(
-            is_binary, JT_B_j, JT_F_j, J_nzb_offset, J_nzb_values
-        )
-
-    elif dof_type == JointDoFType.CYLINDRICAL:
-        wp.static(make_store_joint_jacobian_sparse_func(JointDoFType.CYLINDRICAL.dofs_axes))(
-            is_binary, JT_B_j, JT_F_j, J_nzb_offset, J_nzb_values
-        )
-
-    elif dof_type == JointDoFType.UNIVERSAL:
-        wp.static(make_store_joint_jacobian_sparse_func(JointDoFType.UNIVERSAL.dofs_axes))(
-            is_binary, JT_B_j, JT_F_j, J_nzb_offset, J_nzb_values
-        )
-
-    elif dof_type == JointDoFType.SPHERICAL:
+    if dof_type == JointDoFType.SPHERICAL:
         wp.static(make_store_joint_jacobian_sparse_func(JointDoFType.SPHERICAL.dofs_axes))(
-            is_binary, JT_B_j, JT_F_j, J_nzb_offset, J_nzb_values
-        )
-
-    elif dof_type == JointDoFType.GIMBAL:
-        wp.static(make_store_joint_jacobian_sparse_func(JointDoFType.GIMBAL.dofs_axes))(
-            is_binary, JT_B_j, JT_F_j, J_nzb_offset, J_nzb_values
-        )
-    elif dof_type == JointDoFType.GIMBAL_LEFT_HANDED:
-        wp.static(make_store_joint_jacobian_sparse_func(JointDoFType.GIMBAL_LEFT_HANDED.dofs_axes))(
-            is_binary, JT_B_j, JT_F_j, J_nzb_offset, J_nzb_values
-        )
-
-    elif dof_type == JointDoFType.CARTESIAN:
-        wp.static(make_store_joint_jacobian_sparse_func(JointDoFType.CARTESIAN.dofs_axes))(
             is_binary, JT_B_j, JT_F_j, J_nzb_offset, J_nzb_values
         )
 

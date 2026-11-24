@@ -259,17 +259,21 @@ class TestGimbal(NewtonTestCase):
             setup_tests(clear_cache=False)
         self.default_device = wp.get_device(test_context.device)
 
-    def test_rotational_d6_converts_to_gimbal(self):
-        """Convert a three-angular-axis D6 joint to GIMBAL."""
+    def test_right_handed_d6_dynamics_layout(self):
+        """Store a right-handed rotational D6 dynamics layout."""
         model, d6 = _build_rotational_d6(_RH_AXES, self.default_device)
         solver = SolverKamino(model)
-        self.assertEqual(solver._model_kamino.joints.dof_type.numpy()[d6], JointDoFType.GIMBAL)
+        joints = solver._model_kamino.joints
+        self.assertEqual(joints.dof_type.numpy()[d6], JointDoFType.D6)
+        self.assertEqual(joints.d6_axes.numpy()["third_axis_sign"][d6], 1.0)
 
-    def test_left_handed_rotational_d6_converts_to_gimbal_left_handed(self):
-        """Classify an X-Z-Y D6 joint as left-handed."""
+    def test_left_handed_d6_dynamics_layout(self):
+        """Store a left-handed rotational D6 dynamics layout."""
         model, d6 = _build_rotational_d6(_LH_AXES, self.default_device)
         solver = SolverKamino(model)
-        self.assertEqual(solver._model_kamino.joints.dof_type.numpy()[d6], JointDoFType.GIMBAL_LEFT_HANDED)
+        joints = solver._model_kamino.joints
+        self.assertEqual(joints.dof_type.numpy()[d6], JointDoFType.D6)
+        self.assertEqual(joints.d6_axes.numpy()["third_axis_sign"][d6], -1.0)
 
     def test_gimbal_rejects_nonorthogonal_axes(self):
         """Reject a gimbal whose axes are not an orthonormal basis."""
@@ -281,7 +285,7 @@ class TestGimbal(NewtonTestCase):
         axes[qd_start + 1] = [1.0, 0.0, 0.0]
         model.joint_axis.assign(axes)
 
-        with self.assertRaisesRegex(ValueError, "gimbal axes must be unit length and orthogonal"):
+        with self.assertRaisesRegex(ValueError, "D6 axes must be unit length and orthogonal"):
             SolverKamino(model)
 
     def test_universal_rejects_nonorthogonal_axes(self):
@@ -307,9 +311,7 @@ class TestGimbal(NewtonTestCase):
         axes[qd_start + 1] = [1.0, 0.0, 0.0]
         model.joint_axis.assign(axes)
 
-        with self.assertRaisesRegex(
-            ValueError, "universal, Cartesian, and gimbal axes must be unit length and orthogonal"
-        ):
+        with self.assertRaisesRegex(ValueError, "D6 axes must be unit length and orthogonal"):
             SolverKamino(model)
 
     def test_cartesian_rejects_invalid_axes(self):
@@ -317,7 +319,7 @@ class TestGimbal(NewtonTestCase):
         cases = {
             "right-handed": (1.0, None),
             "left-handed": (-1.0, None),
-            "not orthogonal": (1.0, "Cartesian, and gimbal axes must be unit length and orthogonal"),
+            "not orthogonal": (1.0, "D6 axes must be unit length and orthogonal"),
         }
         for name, (sign, error) in cases.items():
             with self.subTest(name):
@@ -343,8 +345,7 @@ class TestGimbal(NewtonTestCase):
                     model.joint_axis.assign(axes)
                 if error is None:
                     solver = SolverKamino(model)
-                    expected = JointDoFType.CARTESIAN if sign > 0.0 else JointDoFType.D6
-                    self.assertEqual(solver._model_kamino.joints.dof_type.numpy()[cartesian], expected)
+                    self.assertEqual(solver._model_kamino.joints.dof_type.numpy()[cartesian], JointDoFType.D6)
                 else:
                     with self.assertRaisesRegex(ValueError, error):
                         SolverKamino(model)
@@ -461,17 +462,6 @@ class TestGimbal(NewtonTestCase):
                     np.testing.assert_allclose(j_dofs @ body_twist, qd_expected, atol=1.0e-5)
                     np.testing.assert_allclose(j_cts[:3] @ body_twist, qd_expected, atol=1.0e-5)
                     np.testing.assert_allclose(j_cts[:3], j_dofs, atol=1.0e-6)
-
-    def test_gimbal_metadata(self):
-        """Expose three coordinates, rates, and translational constraints."""
-        self.assertEqual(JointDoFType.GIMBAL.num_coords, 3)
-        self.assertEqual(JointDoFType.GIMBAL.num_dofs, 3)
-        self.assertEqual(JointDoFType.GIMBAL.num_cts, 3)
-        self.assertTrue(JointDoFType.GIMBAL.is_pure_three_dof_rotation)
-        self.assertEqual(JointDoFType.GIMBAL_LEFT_HANDED.num_coords, 3)
-        self.assertEqual(JointDoFType.GIMBAL_LEFT_HANDED.num_dofs, 3)
-        self.assertEqual(JointDoFType.GIMBAL_LEFT_HANDED.num_cts, 3)
-        self.assertTrue(JointDoFType.GIMBAL_LEFT_HANDED.is_pure_three_dof_rotation)
 
     def test_fk_reset_preserves_left_handed_coordinates_and_rates(self):
         """Reset an FK-enabled solver with authored left-handed D6 state."""

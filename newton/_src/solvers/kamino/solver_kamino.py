@@ -1874,9 +1874,6 @@ class SolverKamino(SolverBase, CouplingInterface):
         actuation_joint = violations[self._kamino.StructuralUpdateViolation.ACTUATION_PARTITION]
         invalid_joint = violations[self._kamino.StructuralUpdateViolation.INVALID_TARGET_MODE]
         axis_joint = violations[self._kamino.StructuralUpdateViolation.NONORTHONORMAL_AXES]
-        gimbal_handedness_joint = violations[self._kamino.StructuralUpdateViolation.GIMBAL_HANDEDNESS]
-        cartesian_handedness_joint = violations[self._kamino.StructuralUpdateViolation.CARTESIAN_HANDEDNESS]
-        cylindrical_axes_joint = violations[self._kamino.StructuralUpdateViolation.CYLINDRICAL_AXES]
         immovability_flip_body = violations[self._kamino.StructuralUpdateViolation.IMMOVABILITY_FLIP]
         friction_joint = violations[self._kamino.StructuralUpdateViolation.FRICTION_CTS]
         effort_joint = violations[self._kamino.StructuralUpdateViolation.EFFORT_CTS]
@@ -1928,32 +1925,7 @@ class SolverKamino(SolverBase, CouplingInterface):
             raise ValueError(
                 f"Invalid joint configuration for SolverKamino:\n"
                 f"  - joint {joint} ({self.model.joint_label[joint]!r}): "
-                "universal, Cartesian, and gimbal axes must be unit length and orthogonal. "
-                "D6 linear and angular bases must each be orthonormal."
-            )
-
-        if gimbal_handedness_joint != sentinel:
-            joint = int(gimbal_handedness_joint)
-            raise ValueError(
-                f"Invalid joint configuration for SolverKamino:\n"
-                f"  - joint {joint} ({self.model.joint_label[joint]!r}): "
-                "gimbal axes must preserve the solver's original handedness"
-            )
-
-        if cartesian_handedness_joint != sentinel:
-            joint = int(cartesian_handedness_joint)
-            raise ValueError(
-                f"Invalid joint configuration for SolverKamino:\n"
-                f"  - joint {joint} ({self.model.joint_label[joint]!r}): "
-                "Changing the handedness of this Cartesian basis requires recreating SolverKamino."
-            )
-
-        if cylindrical_axes_joint != sentinel:
-            joint = int(cylindrical_axes_joint)
-            raise ValueError(
-                f"Changing the common axis of cylindrical joint {joint} "
-                f"({self.model.joint_label[joint]!r}) into distinct linear and angular axes "
-                "requires recreating SolverKamino."
+                "D6 axes must be unit length and orthogonal within each linear or angular basis."
             )
 
         if immovability_flip_body != sentinel:

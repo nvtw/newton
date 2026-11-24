@@ -361,8 +361,6 @@ def _compute_fk_joint_frames(
     model_X_Bj: wp.array[wp.mat33f],
     model_X_Fj: wp.array[wp.mat33f],
     fk_dof_type: wp.array[wp.int32],
-    model_dof_type: wp.array[wp.int32],
-    model_d6_dims: wp.array[wp.vec2i],
     model_d6_axes: wp.array[D6JointAxes],
     # Outputs
     fk_B_r_Bj: wp.array[wp.vec3f],
@@ -381,24 +379,7 @@ def _compute_fk_joint_frames(
         fk_X_Bj[fk_joint] = model_X_Bj[model_joint]
         fk_X_Fj[fk_joint] = model_X_Fj[model_joint]
         if fk_dof_type[fk_joint] == FKJointDoFType.D6:
-            if model_dof_type[model_joint] == JointDoFType.D6:
-                fk_d6_axes[fk_joint] = model_d6_axes[model_joint]
-            else:
-                # Specialized axes are already in the FK frames.
-                source_type = model_dof_type[model_joint]
-                dims = model_d6_dims[model_joint]
-                axes = D6JointAxes()
-                axes.linear_count = dims[0]
-                axes.angular_count = dims[1]
-                axes.linear = wp.identity(3, dtype=wp.float32)
-                axes.angular = axes.linear
-                axes.third_axis_sign = -1.0 if source_type == JointDoFType.GIMBAL_LEFT_HANDED else 1.0
-                if source_type == JointDoFType.UNIVERSAL:
-                    # The legacy frame uses X/Y for the active rotations.
-                    axes.angular = wp.matrix_from_cols(
-                        wp.vec3f(1.0, 0.0, 0.0), wp.vec3f(0.0, 0.0, -1.0), wp.vec3f(0.0, 1.0, 0.0)
-                    )
-                fk_d6_axes[fk_joint] = axes
+            fk_d6_axes[fk_joint] = model_d6_axes[model_joint]
     else:
         # FK-added base and axis joints start at identity; axis orientations are
         # overwritten by _compute_fk_axis_joint_frames.

@@ -285,25 +285,8 @@ class ForwardKinematicsSolver:
         joint_bid_F_prev = self.model.joints.bid_F.numpy().copy()
         joints_num_coords_prev = self.model.joints.num_coords.numpy().copy()
         joints_num_dofs_prev = self.model.joints.num_dofs.numpy().copy()
-        # These scalar-coordinate joints use D6 in FK. The source frames
-        # already contain the authored basis for the specialized layouts.
-        layouts = {
-            JointDoFType.FIXED: (0, 0),
-            JointDoFType.PRISMATIC: (1, 0),
-            JointDoFType.REVOLUTE: (0, 1),
-            JointDoFType.CYLINDRICAL: (1, 1),
-            JointDoFType.UNIVERSAL: (0, 2),
-            JointDoFType.CARTESIAN: (3, 0),
-            JointDoFType.GIMBAL: (0, 3),
-            JointDoFType.GIMBAL_LEFT_HANDED: (0, 3),
-        }
-        canonical_d6 = np.isin(joint_dof_type_prev, tuple(layouts))
         linear_counts = np.zeros_like(joints_num_dofs_prev)
         angular_counts = np.zeros_like(linear_counts)
-        for source_type, (linear, angular) in layouts.items():
-            mask = joint_dof_type_prev == source_type
-            linear_counts[mask] = linear
-            angular_counts[mask] = angular
         if d6_layouts is not None:
             general = joint_dof_type_prev == JointDoFType.D6
             linear_counts[general] = d6_layouts["linear_count"][general]
@@ -341,9 +324,7 @@ class ForwardKinematicsSolver:
             for jt_id_prev in world_joint_ids:
                 # Note: we use the fact that integer values of the FK vs Kamino dof type enums
                 # are matched for all joints that are not FK-specific
-                joint_dof_type.append(
-                    FKJointDoFType.D6 if canonical_d6[jt_id_prev] else joint_dof_type_prev[jt_id_prev]
-                )
+                joint_dof_type.append(joint_dof_type_prev[jt_id_prev])
                 joint_act_type.append(joint_act_type_prev[jt_id_prev])
                 joint_bid_B.append(joint_bid_B_prev[jt_id_prev])
                 joint_bid_F.append(joint_bid_F_prev[jt_id_prev])
@@ -369,7 +350,9 @@ class ForwardKinematicsSolver:
                 num_joints_per_body = np.zeros(dtype=np.int32, shape=num_bodies[wd_id])
                 rotation_joints_per_body = [[] for _ in range(num_bodies[wd_id])]
                 for jt_id_prev in world_joint_ids:
-                    is_rotation = JointDoFType(joint_dof_type_prev[jt_id_prev]).is_pure_three_dof_rotation
+                    is_rotation = joint_dof_type_prev[jt_id_prev] == JointDoFType.SPHERICAL or (
+                        angular_counts[jt_id_prev] == 3 and linear_counts[jt_id_prev] == 0
+                    )
                     bid_B = joint_bid_B_prev[jt_id_prev]
                     if bid_B >= 0:
                         bid_B -= bodies_offset[wd_id]
@@ -598,7 +581,6 @@ class ForwardKinematicsSolver:
             self.data.joints.d6_axes = wp.empty(
                 self.data.dimensions.num_joints_tot if FKJointDoFType.D6 in joint_dof_type else 0, dtype=D6JointAxes
             )
-            self._source_d6_dims = wp.array(np.column_stack((linear_counts, angular_counts)), dtype=wp.vec2i)
             self.data.joints.source_id = to_warp_int32_array(joints_source_id)
             self.data.joints.world_id = to_warp_int32_array(joint_world_id)
             self.data.joints.axis_joint_id = to_warp_int32_array(axis_joint_d)
@@ -1080,8 +1062,6 @@ class ForwardKinematicsSolver:
                 self.model.joints.X_Bj,
                 self.model.joints.X_Fj,
                 self.data.joints.dof_type,
-                self.model.joints.dof_type,
-                self._source_d6_dims,
                 self.model.joints.d6_axes,
                 self.data.joints.B_r_Bj,
                 self.data.joints.F_r_Fj,

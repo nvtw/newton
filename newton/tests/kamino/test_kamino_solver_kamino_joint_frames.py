@@ -13,8 +13,7 @@ the fix establishes are:
    (``body_com``, ``body_inertia``, ``shape_transform``, ``joint_X_p``,
    ``joint_X_c``) — they are needed unchanged by ``eval_fk`` and the
    visualizer downstream.
-2. For aligned joints the conversion still produces ``X_Bj == X_Fj``,
-   keeping behaviour bit-identical for all existing models.
+2. For aligned joints the conversion produces equal anchor rotations ``X_Bj == X_Fj``.
 3. The Kamino solver runs cleanly to completion on a model with non-aligned
    joint frames (no constraint projection failure, no NaN propagation).
 """
@@ -107,13 +106,7 @@ class TestKaminoNonAlignedJointFrames(NewtonTestCase):
             np.testing.assert_array_equal(after, before, err_msg=f"ModelKamino.from_newton mutated model.{name}")
 
     def test_aligned_joint_frames_are_bit_identical(self):
-        """For aligned joint frames, ``X_Bj`` and ``X_Fj`` must be equal.
-
-        This pins the invariant that aligned-joint behaviour is unchanged after
-        the refactor. Every joint built with ``parent_xform.rotation == child_xform.rotation``
-        produces a :class:`JointsModel` with ``X_Bj == X_Fj``, so existing
-        models and solver behaviour remain bit-identical.
-        """
+        """Aligned Newton joint frames produce equal Kamino anchor rotations."""
         rot = wp.quat_from_axis_angle(wp.vec3f(0.0, 0.0, 1.0), 0.7)
         builder = newton.ModelBuilder()
         SolverKamino.register_custom_attributes(builder)
@@ -166,37 +159,18 @@ class TestKaminoNonAlignedJointFrames(NewtonTestCase):
         )
 
     def test_kamino_joint_X_Bj_matches_newton_joint_frame(self):
-        """``X_Bj`` must equal ``R(q_pj) @ R_axis`` from Newton's ``joint_X_p``.
-
-        With the two-frame formulation, the parent-side joint frame in Kamino
-        is no longer mutated by absorption of the child-side rotation. It must
-        equal the natural product of the Newton-side parent rotation and the
-        DoF axis basis matrix — for a revolute joint about Y this is
-        ``R(q_pj) @ identity == R(q_pj)``.
-        """
-        # Use a parent rotation about Z and a Y-axis revolute joint so the axis
-        # basis is a known permutation matrix.
+        """Store the authored parent frame and hinge axis in separate fields."""
         angle_pj = 0.4
         model = _build_revolute_with_offset(angle_pj=angle_pj, angle_cj=-0.3)
         kamino = ModelKamino.from_newton(model)
 
-        # The revolute Y joint stores its axis as the FIRST column of the joint
-        # frame (Kamino canonicalises DoF axes to (X, Y, Z)). For a revolute about
-        # the world Y axis with the parent-side rotation R(q_pj) applied, the
-        # first column of X_Bj is therefore R(q_pj) * (0, 1, 0).
-        X_Bj = kamino.joints.X_Bj.numpy()
-        ax_col = X_Bj[0, :, 0]
-
+        X_Bj = kamino.joints.X_Bj.numpy()[0]
+        hinge_axis = kamino.joints.d6_axes.numpy()["angular"][0].reshape(3, 3)[:, 0]
         q_pj = wp.quat_from_axis_angle(wp.vec3f(0.0, 0.0, 1.0), angle_pj)
         R_q_pj = np.array(wp.quat_to_matrix(q_pj)).reshape(3, 3)
-        expected = R_q_pj @ np.array([0.0, 1.0, 0.0], dtype=np.float32)
 
-        np.testing.assert_allclose(
-            ax_col,
-            expected,
-            atol=1e-6,
-            err_msg="X_Bj first column must equal R(q_pj) * (0, 1, 0) for a Y-revolute",
-        )
+        np.testing.assert_allclose(X_Bj, R_q_pj, atol=1e-6)
+        np.testing.assert_allclose(hinge_axis, (0.0, 1.0, 0.0), atol=1e-6)
 
     def test_step_runs_without_nan_on_non_aligned_joint(self):
         """A full ``solver.step`` on a non-aligned-joint model must produce finite poses.

@@ -15,7 +15,7 @@ import warp as wp
 from newton import BodyFlags, Model
 from newton._src.solvers.kamino._src.core.bodies import convert_body_com_to_origin
 from newton._src.solvers.kamino._src.core.control import ControlKamino
-from newton._src.solvers.kamino._src.core.joints import JointActuationType
+from newton._src.solvers.kamino._src.core.joints import JointActuationType, JointDoFType
 from newton._src.solvers.kamino._src.core.model import ModelKamino
 from newton._src.solvers.kamino._src.core.state import StateKamino
 
@@ -337,17 +337,14 @@ def _assert_model_joints_conversion_consistency(
                 err_msg="JointsModel.F_r_Fj does not recover Model.joint_X_c's translation.",
             )
 
-    # Inverse transformation: `X_Bj`/`X_Fj` re-express the joint's DoF axes
-    # (defined in the joint's own local frame) in the parent/child body frame,
-    # by rotating them with the parent/child joint transform's rotation
-    # (`Model.joint_X_p`/`joint_X_c`).
-    # Columns beyond a joint's DoF count complete an orthonormal basis chosen
-    # internally by the conversion and have no Newton counterpart, so they are
-    # never compared.
+    # Compare authored DoF axes in each body's frame. Scalar joints store the
+    # anchor rotations and their DoF bases separately.
     if "X_Bj" not in excluded or "X_Fj" not in excluded:
         joint_axis = model_newton.joint_axis.numpy()
         joint_qd_start = model_newton.joint_qd_start.numpy()
         num_dofs = joints.num_dofs.numpy()
+        dof_types = joints.dof_type.numpy()
+        d6_axes = joints.d6_axes.numpy()
         joint_X_p = model_newton.joint_X_p.numpy()
         joint_X_c = model_newton.joint_X_c.numpy()
         X_Bj = joints.X_Bj.numpy()
@@ -356,15 +353,33 @@ def _assert_model_joints_conversion_consistency(
             dof_start = int(joint_qd_start[j])
             q_p = wp.quatf(*joint_X_p[j, 3:7])
             q_c = wp.quatf(*joint_X_c[j, 3:7])
-            # X_Bj/X_Fj are always 3x3: a FREE joint has 6 DoFs (3 translational +
-            # 3 rotational) but only the first 3 (translational) axes feed the
-            # matrix -- Newton requires them to equal the rotational axes for a
-            # free joint, so comparing against the first 3 is valid either way.
-            for k in range(min(int(num_dofs[j]), 3)):
+            if dof_types[j] == JointDoFType.D6:
+                layout = d6_axes[j]
+                linear_count = int(layout["linear_count"])
+                angular_count = int(layout["angular_count"])
+                linear = layout["linear"].reshape(3, 3)[:, :linear_count]
+                angular_basis = layout["angular"].reshape(3, 3)
+                if layout["swing_limit"] > 0.0:
+                    angular = angular_basis[:, 1:]
+                elif angular_count == 2:
+                    angular = angular_basis[:, (0, 2)]
+                else:
+                    angular = angular_basis[:, :angular_count].copy()
+                    if angular_count == 3:
+                        angular[:, 2] *= layout["third_axis_sign"]
+                local_axes = np.concatenate((linear, angular), axis=1)
+                parent_axes = X_Bj[j] @ local_axes
+                child_axes = X_Fj[j] @ local_axes
+            else:
+                # The translational and angular axes of a free joint coincide.
+                count = min(int(num_dofs[j]), 3)
+                parent_axes = X_Bj[j][:, :count]
+                child_axes = X_Fj[j][:, :count]
+            for k in range(parent_axes.shape[1]):
                 axis = wp.vec3f(*joint_axis[dof_start + k])
                 if "X_Bj" not in excluded:
                     np.testing.assert_allclose(
-                        X_Bj[j][:, k],
+                        parent_axes[:, k],
                         np.array(wp.quat_rotate(q_p, axis)),
                         rtol=rtol.get("X_Bj", 1e-5),
                         atol=atol.get("X_Bj", 1e-6),
@@ -372,7 +387,7 @@ def _assert_model_joints_conversion_consistency(
                     )
                 if "X_Fj" not in excluded:
                     np.testing.assert_allclose(
-                        X_Fj[j][:, k],
+                        child_axes[:, k],
                         np.array(wp.quat_rotate(q_c, axis)),
                         rtol=rtol.get("X_Fj", 1e-5),
                         atol=atol.get("X_Fj", 1e-6),

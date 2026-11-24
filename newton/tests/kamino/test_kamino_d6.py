@@ -11,7 +11,7 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton._src.solvers.kamino._src.core.joints import D6JointAxes, JointCorrectionMode
+from newton._src.solvers.kamino._src.core.joints import D6JointAxes, JointCorrectionMode, JointDoFType
 from newton._src.solvers.kamino._src.core.model import ModelKamino
 from newton._src.solvers.kamino._src.kinematics.joints import (
     d6_angular_coordinates,
@@ -256,14 +256,17 @@ class TestKaminoD6(unittest.TestCase):
         np.testing.assert_allclose(analytic.numpy()[:2], finite_difference.numpy()[:2], atol=8.0e-5, rtol=0.0)
 
     def test_layouts_project_body_wrench(self):
-        """Project independent linear and angular axes in all 16 layouts on every backend."""
+        """Project wrenches through every D6 layout and the dedicated builders on all backends."""
         builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
-        layouts = list(itertools.product(range(4), repeat=2))
+        layouts = [(None, linear, angular) for linear, angular in itertools.product(range(4), repeat=2)]
+        layouts.extend(
+            ((newton.JointType.FIXED, 0, 0), (newton.JointType.PRISMATIC, 1, 0), (newton.JointType.REVOLUTE, 0, 1))
+        )
         wrench = np.array((1.0, 2.0, 3.0, -2.0, 1.0, 3.0), dtype=np.float32)
         dt = 0.01
         expected_twists = []
         expected_rates = []
-        for linear_count, angular_count in layouts:
+        for joint_type, linear_count, angular_count in layouts:
             builder.begin_world()
             body = builder.add_link(mass=1.0, inertia=_INERTIA, lock_inertia=True)
             linear = _LINEAR[:linear_count]
@@ -271,12 +274,19 @@ class TestKaminoD6(unittest.TestCase):
             if (linear_count, angular_count) == (1, 1):
                 # A shared orthogonal frame cannot represent this slider and hinge.
                 angular = np.array(((0.6, 0.0, 0.8),), dtype=np.float32)
-            joint = builder.add_joint_d6(
-                -1,
-                body,
-                linear_axes=[builder.JointDofConfig(axis=axis, armature=0.0) for axis in linear],
-                angular_axes=[builder.JointDofConfig(axis=axis, armature=0.0) for axis in angular],
-            )
+            if joint_type == newton.JointType.FIXED:
+                joint = builder.add_joint_fixed(-1, body)
+            elif joint_type == newton.JointType.PRISMATIC:
+                joint = builder.add_joint_prismatic(-1, body, axis=linear[0], armature=0.0)
+            elif joint_type == newton.JointType.REVOLUTE:
+                joint = builder.add_joint_revolute(-1, body, axis=angular[0], armature=0.0)
+            else:
+                joint = builder.add_joint_d6(
+                    -1,
+                    body,
+                    linear_axes=[builder.JointDofConfig(axis=axis, armature=0.0) for axis in linear],
+                    angular_axes=[builder.JointDofConfig(axis=axis, armature=0.0) for axis in angular],
+                )
             builder.add_articulation([joint])
             builder.end_world()
             linear_rates = linear @ wrench[:3] * dt
@@ -289,6 +299,7 @@ class TestKaminoD6(unittest.TestCase):
         for backend in ("scc", "lox", "padmm"):
             with self.subTest(backend=backend):
                 solver = SolverKamino(model, SolverKamino.Config(dynamics_solver=backend, use_collision_detector=False))
+                np.testing.assert_array_equal(solver._model_kamino.joints.dof_type.numpy(), JointDoFType.D6)
                 state, result = model.state(), model.state()
                 state.body_f.assign(np.tile(wrench, (len(layouts), 1)))
                 solver.step(state, result, control, contacts=None, dt=dt)

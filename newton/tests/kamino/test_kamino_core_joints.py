@@ -48,7 +48,7 @@ class TestCoreJoints(NewtonTestCase):
         setup_test_output(self, verbose=self.verbose)
 
     def test_joint_dof_type_enum(self):
-        doftype = JointDoFType.REVOLUTE
+        doftype = JointDoFType.SPHERICAL
 
         # Optional verbose output
         logger.debug("doftype: %s", doftype)
@@ -60,12 +60,12 @@ class TestCoreJoints(NewtonTestCase):
         logger.debug("doftype.dofs_axes: %s", doftype.dofs_axes)
 
         # Check the enum values
-        self.assertEqual(doftype.value, JointDoFType.REVOLUTE)
-        self.assertEqual(doftype.name, "REVOLUTE")
-        self.assertEqual(doftype.num_cts, 5)
-        self.assertEqual(doftype.num_dofs, 1)
-        self.assertEqual(doftype.cts_axes, (0, 1, 2, 4, 5))
-        self.assertEqual(doftype.dofs_axes, (3,))
+        self.assertEqual(doftype.value, JointDoFType.SPHERICAL)
+        self.assertEqual(doftype.name, "SPHERICAL")
+        self.assertEqual(doftype.num_cts, 3)
+        self.assertEqual(doftype.num_dofs, 3)
+        self.assertEqual(doftype.cts_axes, (0, 1, 2))
+        self.assertEqual(doftype.dofs_axes, (3, 4, 5))
 
     def test_dofs_axis_wp_matches_dofs_axes(self):
         """Verify dofs_axis_wp agrees with the dofs_axes property for all joint types."""

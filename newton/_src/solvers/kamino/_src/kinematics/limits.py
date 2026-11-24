@@ -17,7 +17,6 @@ from ..core.math import quat_log
 from ..core.model import ModelKamino
 from ..core.types import (
     to_warp_int32_array,
-    vec1f,
     vec6f,
     vec7f,
 )
@@ -206,46 +205,10 @@ def map_joint_coords_to_dofs_free(q_j: vec7f) -> wp.spatial_vectorf:
 
 
 @wp.func
-def map_joint_coords_to_dofs_revolute(q_j: vec1f) -> vec1f:
-    """No mapping needed for revolute joints."""
-    return q_j
-
-
-@wp.func
-def map_joint_coords_to_dofs_prismatic(q_j: vec1f) -> vec1f:
-    """No mapping needed for prismatic joints."""
-    return q_j
-
-
-@wp.func
-def map_joint_coords_to_dofs_cylindrical(q_j: wp.vec2f) -> wp.vec2f:
-    """No mapping needed for cylindrical joints."""
-    return q_j
-
-
-@wp.func
-def map_joint_coords_to_dofs_universal(q_j: wp.vec2f) -> wp.vec2f:
-    """No mapping needed for universal joints."""
-    return q_j
-
-
-@wp.func
-def map_joint_coords_to_dofs_gimbal(q_j: wp.vec3f) -> wp.vec3f:
-    """Use intrinsic Euler coordinates directly for scalar gimbal limits."""
-    return q_j
-
-
-@wp.func
 def map_joint_coords_to_dofs_spherical(q_j: wp.vec4f) -> wp.vec3f:
     """Maps quaternion coordinates of a spherical
     joint to a local axes-aligned rotation vector."""
     return quat_log(wp.quatf(*q_j))
-
-
-@wp.func
-def map_joint_coords_to_dofs_cartesian(q_j: wp.vec3f) -> wp.vec3f:
-    """No mapping needed for cartesian joints."""
-    return q_j
 
 
 def get_joint_coords_to_dofs_mapping_function(dof_type: JointDoFType):
@@ -255,24 +218,8 @@ def get_joint_coords_to_dofs_mapping_function(dof_type: JointDoFType):
     """
     if dof_type == JointDoFType.FREE:
         return map_joint_coords_to_dofs_free
-    elif dof_type == JointDoFType.REVOLUTE:
-        return map_joint_coords_to_dofs_revolute
-    elif dof_type == JointDoFType.PRISMATIC:
-        return map_joint_coords_to_dofs_prismatic
-    elif dof_type == JointDoFType.CYLINDRICAL:
-        return map_joint_coords_to_dofs_cylindrical
-    elif dof_type == JointDoFType.UNIVERSAL:
-        return map_joint_coords_to_dofs_universal
-    elif dof_type == JointDoFType.GIMBAL:
-        return map_joint_coords_to_dofs_gimbal
-    elif dof_type == JointDoFType.GIMBAL_LEFT_HANDED:
-        return map_joint_coords_to_dofs_gimbal
     elif dof_type == JointDoFType.SPHERICAL:
         return map_joint_coords_to_dofs_spherical
-    elif dof_type == JointDoFType.CARTESIAN:
-        return map_joint_coords_to_dofs_cartesian
-    elif dof_type == JointDoFType.FIXED:
-        return None
     else:
         raise ValueError(f"Unknown joint DoF type: {dof_type}")
 
@@ -350,73 +297,8 @@ def read_joint_coords_map_and_limits(
             q_j_min[i] = model_joint_q_j_min[dofs_offset + i]
             q_j_max[i] = model_joint_q_j_max[dofs_offset + i]
             q_j_map[i] = state_joints_q_j[coords_offset + i]
-    elif dof_type == JointDoFType.REVOLUTE:
-        d_j, q_j_min, q_j_max, q_j_map = wp.static(make_read_joint_coords_map_and_limits(JointDoFType.REVOLUTE))(
-            dofs_offset,
-            coords_offset,
-            model_joint_q_j_min,
-            model_joint_q_j_max,
-            state_joints_q_j,
-        )
-
-    elif dof_type == JointDoFType.PRISMATIC:
-        d_j, q_j_min, q_j_max, q_j_map = wp.static(make_read_joint_coords_map_and_limits(JointDoFType.PRISMATIC))(
-            dofs_offset,
-            coords_offset,
-            model_joint_q_j_min,
-            model_joint_q_j_max,
-            state_joints_q_j,
-        )
-
-    elif dof_type == JointDoFType.CYLINDRICAL:
-        d_j, q_j_min, q_j_max, q_j_map = wp.static(make_read_joint_coords_map_and_limits(JointDoFType.CYLINDRICAL))(
-            dofs_offset,
-            coords_offset,
-            model_joint_q_j_min,
-            model_joint_q_j_max,
-            state_joints_q_j,
-        )
-
-    elif dof_type == JointDoFType.UNIVERSAL:
-        d_j, q_j_min, q_j_max, q_j_map = wp.static(make_read_joint_coords_map_and_limits(JointDoFType.UNIVERSAL))(
-            dofs_offset,
-            coords_offset,
-            model_joint_q_j_min,
-            model_joint_q_j_max,
-            state_joints_q_j,
-        )
-
-    elif dof_type == JointDoFType.GIMBAL:
-        d_j, q_j_min, q_j_max, q_j_map = wp.static(make_read_joint_coords_map_and_limits(JointDoFType.GIMBAL))(
-            dofs_offset,
-            coords_offset,
-            model_joint_q_j_min,
-            model_joint_q_j_max,
-            state_joints_q_j,
-        )
-
-    elif dof_type == JointDoFType.GIMBAL_LEFT_HANDED:
-        d_j, q_j_min, q_j_max, q_j_map = wp.static(
-            make_read_joint_coords_map_and_limits(JointDoFType.GIMBAL_LEFT_HANDED)
-        )(
-            dofs_offset,
-            coords_offset,
-            model_joint_q_j_min,
-            model_joint_q_j_max,
-            state_joints_q_j,
-        )
-
     elif dof_type == JointDoFType.SPHERICAL:
         d_j, q_j_min, q_j_max, q_j_map = wp.static(make_read_joint_coords_map_and_limits(JointDoFType.SPHERICAL))(
-            dofs_offset,
-            coords_offset,
-            model_joint_q_j_min,
-            model_joint_q_j_max,
-            state_joints_q_j,
-        )
-
-    elif dof_type == JointDoFType.CARTESIAN:
-        d_j, q_j_min, q_j_max, q_j_map = wp.static(make_read_joint_coords_map_and_limits(JointDoFType.CARTESIAN))(
             dofs_offset,
             coords_offset,
             model_joint_q_j_min,
@@ -549,12 +431,7 @@ def _detect_active_joint_configuration_limits(
     #   a structurally-singular row; mirrors joint-bilateral and contact culling).
     #   ``bid_B < 0`` (joint against world) is treated as immovable, matching the
     #   joint-conversion culling predicate.
-    if (
-        dof_type_j == JointDoFType.FIXED
-        or dof_type_j == JointDoFType.ROD
-        or world_max_limits == 0
-        or model_max_limits == 0
-    ):
+    if dof_type_j == JointDoFType.ROD or world_max_limits == 0 or model_max_limits == 0:
         return
     parent_immovable = bid_B_j < 0 or model_body_is_immovable[bid_B_j] != 0
     child_immovable = model_body_is_immovable[bid_F_j] != 0

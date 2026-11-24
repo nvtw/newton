@@ -13,6 +13,7 @@ import warp as wp
 import newton
 from newton import JointTargetMode, ModelBuilder
 from newton._src.solvers.kamino._src.core.data import DataKamino
+from newton._src.solvers.kamino._src.core.joints import D6JointAxes
 from newton._src.solvers.kamino._src.core.math import quat_exp
 from newton._src.solvers.kamino._src.core.model import ModelKamino
 from newton._src.solvers.kamino._src.kinematics.joints import JointActuationType, compute_joints_data
@@ -37,12 +38,7 @@ THETA_Y_J = 0.1
 THETA_Z_J = -0.2
 J_DR_J = wp.vec3f(0.01, 0.02, 0.03)
 J_DV_J = wp.vec3f(0.1, -0.2, 0.3)
-J_DOMEGA_J = wp.vec3f(-1.0, 0.04, -0.05)
-
-# Compute revolute joint rotational residual: sin(angle) * axis
-ROT_RES_VEC = np.array([0.0, THETA_Y_J, THETA_Z_J])
-ROT_RES_ANGLE = np.linalg.norm(ROT_RES_VEC)
-ROT_RES = (np.sin(ROT_RES_ANGLE) / ROT_RES_ANGLE) * ROT_RES_VEC
+J_ANGULAR_RATES = wp.vec3f(-1.0, 0.4 * THETA_Y_J, 0.4 * THETA_Z_J)
 
 ###
 # Kernels
@@ -56,6 +52,7 @@ def _set_joint_follower_body_state(
     model_joint_F_r_Fj: wp.array[wp.vec3f],
     model_joint_X_Bj: wp.array[wp.mat33f],
     model_joint_X_Fj: wp.array[wp.mat33f],
+    model_joint_d6_axes: wp.array[D6JointAxes],
     state_body_q_i: wp.array[wp.transformf],
     state_body_u_i: wp.array[wp.spatial_vectorf],
 ):
@@ -82,9 +79,11 @@ def _set_joint_follower_body_state(
     omega_B = wp.spatial_bottom(u_B)
 
     # Define the joint rotation offset
+    angular_basis = model_joint_d6_axes[jid].angular
     j_dR_yz_j = wp.vec3f(0.0, THETA_Y_J, THETA_Z_J)  # Joint residual as rotation vector
     j_dR_x_j = wp.vec3f(Q_X_J, 0.0, 0.0)  # Joint dof rotation as rotation vector
-    q_jq = quat_exp(j_dR_yz_j) * quat_exp(j_dR_x_j)  # Total joint offset
+    swing = quat_exp(angular_basis @ j_dR_yz_j)
+    q_jq = swing * quat_exp(angular_basis @ j_dR_x_j)
     R_jq = wp.quat_to_matrix(q_jq)  # Joint offset as rotation matrix
 
     # Define the joint translation offset
@@ -92,7 +91,10 @@ def _set_joint_follower_body_state(
 
     # Define the joint twist offset
     j_dv_j = J_DV_J
-    j_domega_j = J_DOMEGA_J
+    # The swing varies along a fixed axis. The twist rate is transported through the swing.
+    swing_rate = angular_basis @ wp.vec3f(0.0, J_ANGULAR_RATES[1], J_ANGULAR_RATES[2])
+    twist_rate = angular_basis @ wp.vec3f(J_ANGULAR_RATES[0], 0.0, 0.0)
+    j_domega_j = swing_rate + wp.quat_rotate(swing, twist_rate)
 
     # Follower body rotation via the Base and joint frames
     R_B_X_j = R_B @ X_Bj
@@ -129,6 +131,7 @@ def set_joint_follower_body_state(model: ModelKamino, data: DataKamino):
             model.joints.F_r_Fj,
             model.joints.X_Bj,
             model.joints.X_Fj,
+            model.joints.d6_axes,
             data.bodies.q_i,
             data.bodies.u_i,
         ],
@@ -178,10 +181,12 @@ class TestKinematicsJoints(NewtonTestCase):
         logger.debug("[measured]: dq_j: %s", dq_j_np)
 
         # Construct expected joint data
-        r_j_expected = np.array([J_DR_J[0], J_DR_J[1], J_DR_J[2], ROT_RES[1], ROT_RES[2]], dtype=np.float32)
-        dr_j_expected = np.array([J_DV_J[0], J_DV_J[1], J_DV_J[2], J_DOMEGA_J[1], J_DOMEGA_J[2]], dtype=np.float32)
+        r_j_expected = np.array([J_DR_J[0], J_DR_J[1], J_DR_J[2], THETA_Y_J, THETA_Z_J], dtype=np.float32)
+        dr_j_expected = np.array(
+            [J_DV_J[0], J_DV_J[1], J_DV_J[2], J_ANGULAR_RATES[1], J_ANGULAR_RATES[2]], dtype=np.float32
+        )
         q_j_expected = np.array([Q_X_J], dtype=np.float32)
-        dq_j_expected = np.array([J_DOMEGA_J[0]], dtype=np.float32)
+        dq_j_expected = np.array([J_ANGULAR_RATES[0]], dtype=np.float32)
         logger.debug("[expected]:  r_j: %s", r_j_expected)
         logger.debug("[expected]: dr_j: %s", dr_j_expected)
         logger.debug("[expected]:  q_j: %s", q_j_expected)
@@ -222,10 +227,12 @@ class TestKinematicsJoints(NewtonTestCase):
         logger.debug("[measured]: dq_j: %s", dq_j_np)
 
         # Construct expected joint data
-        r_j_expected = np.array([J_DR_J[0], J_DR_J[1], J_DR_J[2], ROT_RES[1], ROT_RES[2]], dtype=np.float32)
-        dr_j_expected = np.array([J_DV_J[0], J_DV_J[1], J_DV_J[2], J_DOMEGA_J[1], J_DOMEGA_J[2]], dtype=np.float32)
+        r_j_expected = np.array([J_DR_J[0], J_DR_J[1], J_DR_J[2], THETA_Y_J, THETA_Z_J], dtype=np.float32)
+        dr_j_expected = np.array(
+            [J_DV_J[0], J_DV_J[1], J_DV_J[2], J_ANGULAR_RATES[1], J_ANGULAR_RATES[2]], dtype=np.float32
+        )
         q_j_expected = np.array([Q_X_J], dtype=np.float32)
-        dq_j_expected = np.array([J_DOMEGA_J[0]], dtype=np.float32)
+        dq_j_expected = np.array([J_ANGULAR_RATES[0]], dtype=np.float32)
 
         # Tile expected values for all joints
         r_j_expected = np.tile(r_j_expected, builder.world_count)
@@ -354,10 +361,12 @@ class TestKinematicsJoints(NewtonTestCase):
             dq_b_j_exp_val = inv_m_j_exp_val * h_j_exp_val
 
             # Construct expected joint data
-            r_j_expected = np.array([J_DR_J[0], J_DR_J[1], J_DR_J[2], ROT_RES[1], ROT_RES[2]], dtype=np.float32)
-            dr_j_expected = np.array([J_DV_J[0], J_DV_J[1], J_DV_J[2], J_DOMEGA_J[1], J_DOMEGA_J[2]], dtype=np.float32)
+            r_j_expected = np.array([J_DR_J[0], J_DR_J[1], J_DR_J[2], THETA_Y_J, THETA_Z_J], dtype=np.float32)
+            dr_j_expected = np.array(
+                [J_DV_J[0], J_DV_J[1], J_DV_J[2], J_ANGULAR_RATES[1], J_ANGULAR_RATES[2]], dtype=np.float32
+            )
             q_j_expected = np.array([Q_X_J], dtype=np.float32)
-            dq_j_expected = np.array([J_DOMEGA_J[0]], dtype=np.float32)
+            dq_j_expected = np.array([J_ANGULAR_RATES[0]], dtype=np.float32)
             m_j_expected = np.array([m_j_exp_val], dtype=np.float32)
             tau_j_expected = np.array([tau_j_exp_val], dtype=np.float32)
             h_j_expected = np.array([h_j_exp_val], dtype=np.float32)
@@ -467,10 +476,12 @@ class TestKinematicsJoints(NewtonTestCase):
         dq_b_j_exp_val = inv_m_j_exp_val * h_j_exp_val
 
         # Construct expected joint data
-        r_j_expected = np.array([J_DR_J[0], J_DR_J[1], J_DR_J[2], ROT_RES[1], ROT_RES[2]], dtype=np.float32)
-        dr_j_expected = np.array([J_DV_J[0], J_DV_J[1], J_DV_J[2], J_DOMEGA_J[1], J_DOMEGA_J[2]], dtype=np.float32)
+        r_j_expected = np.array([J_DR_J[0], J_DR_J[1], J_DR_J[2], THETA_Y_J, THETA_Z_J], dtype=np.float32)
+        dr_j_expected = np.array(
+            [J_DV_J[0], J_DV_J[1], J_DV_J[2], J_ANGULAR_RATES[1], J_ANGULAR_RATES[2]], dtype=np.float32
+        )
         q_j_expected = np.array([Q_X_J], dtype=np.float32)
-        dq_j_expected = np.array([J_DOMEGA_J[0]], dtype=np.float32)
+        dq_j_expected = np.array([J_ANGULAR_RATES[0]], dtype=np.float32)
         m_j_expected = np.array([m_j_exp_val], dtype=np.float32)
         h_j_expected = np.array([h_j_exp_val], dtype=np.float32)
         inv_m_j_expected = np.array([inv_m_j_exp_val], dtype=np.float32)

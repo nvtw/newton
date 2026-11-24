@@ -547,6 +547,11 @@ the quaternion state of a ``JointType.BALL`` joint. A planar joint is one
 possible D6 layout: two translation axes spanning a plane and a rotation
 axis normal to that plane.
 
+Kamino uses a common D6 dynamics representation for fixed, prismatic,
+revolute, and authored D6 joints. The existing builder methods still select
+the same degrees of freedom. Constraint recovery can differ when bodies
+start away from the allowed joint poses.
+
 An experimental alternative is :attr:`newton.JointD6AngularMode.SWING_TWIST`.
 It locks twist about the parent anchor's X axis and represents swing by the
 Y and Z components of a single rotation vector. The length of that vector

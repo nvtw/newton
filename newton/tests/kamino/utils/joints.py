@@ -174,6 +174,7 @@ def actuator_coords_from_units(
     """Helper generating actuator coords for a model, given one value to use per type of physical unit."""
     coords = []
     joint_dof_type_np = model.joints.dof_type.numpy()
+    joint_d6_axes = model.joints.d6_axes.numpy()
     joint_act_type_np = model.joints.act_type.numpy()
     if use_fk_actuators and model.joints.fk_act_flag is not None:
         fk_act_flags = model.joints.fk_act_flag.numpy()
@@ -185,24 +186,14 @@ def actuator_coords_from_units(
         if joint_act_type_np[jid] == JointActuationType.PASSIVE:
             continue
         dof_type = joint_dof_type_np[jid]
-        if dof_type == JointDoFType.CARTESIAN:
-            coords.extend([pos_val, pos_val, pos_val])
-        elif dof_type == JointDoFType.CYLINDRICAL:
-            coords.extend([pos_val, angle_val])
-        elif dof_type == JointDoFType.FIXED:
-            pass
+        if dof_type == JointDoFType.D6:
+            axes = joint_d6_axes[jid]
+            coords.extend([pos_val] * axes["linear_count"])
+            coords.extend([angle_val] * axes["angular_count"])
         elif dof_type == JointDoFType.FREE:
             coords.extend([pos_val, pos_val, pos_val, quat_val, quat_val, quat_val, quat_val])
-        elif dof_type == JointDoFType.PRISMATIC:
-            coords.extend([pos_val])
-        elif dof_type == JointDoFType.REVOLUTE:
-            coords.extend([angle_val])
         elif dof_type == JointDoFType.SPHERICAL:
             coords.extend([quat_val, quat_val, quat_val, quat_val])
-        elif dof_type == JointDoFType.GIMBAL or dof_type == JointDoFType.GIMBAL_LEFT_HANDED:
-            coords.extend([angle_val, angle_val, angle_val])
-        elif dof_type == JointDoFType.UNIVERSAL:
-            coords.extend([angle_val, angle_val])
     return np.asarray(coords)
 
 
@@ -215,6 +206,7 @@ def actuator_dofs_from_units(
     """Helper generating actuator dofs for a model, given one value to use per type of physical unit."""
     dofs = []
     joint_dof_type_np = model.joints.dof_type.numpy()
+    joint_d6_axes = model.joints.d6_axes.numpy()
     joint_act_type_np = model.joints.act_type.numpy()
     if use_fk_actuators and model.joints.fk_act_flag is not None:
         fk_act_flags = model.joints.fk_act_flag.numpy()
@@ -226,22 +218,12 @@ def actuator_dofs_from_units(
         if joint_act_type_np[jid] == JointActuationType.PASSIVE:
             continue
         dof_type = joint_dof_type_np[jid]
-        if dof_type == JointDoFType.CARTESIAN:
-            dofs.extend([lin_vel_val, lin_vel_val, lin_vel_val])
-        elif dof_type == JointDoFType.CYLINDRICAL:
-            dofs.extend([lin_vel_val, ang_vel_val])
-        elif dof_type == JointDoFType.FIXED:
-            pass
+        if dof_type == JointDoFType.D6:
+            axes = joint_d6_axes[jid]
+            dofs.extend([lin_vel_val] * axes["linear_count"])
+            dofs.extend([ang_vel_val] * axes["angular_count"])
         elif dof_type == JointDoFType.FREE:
             dofs.extend([lin_vel_val, lin_vel_val, lin_vel_val, ang_vel_val, ang_vel_val, ang_vel_val])
-        elif dof_type == JointDoFType.PRISMATIC:
-            dofs.extend([lin_vel_val])
-        elif dof_type == JointDoFType.REVOLUTE:
-            dofs.extend([ang_vel_val])
         elif dof_type == JointDoFType.SPHERICAL:
             dofs.extend([ang_vel_val, ang_vel_val, ang_vel_val])
-        elif dof_type == JointDoFType.GIMBAL or dof_type == JointDoFType.GIMBAL_LEFT_HANDED:
-            dofs.extend([ang_vel_val, ang_vel_val, ang_vel_val])
-        elif dof_type == JointDoFType.UNIVERSAL:
-            dofs.extend([ang_vel_val, ang_vel_val])
     return np.asarray(dofs)

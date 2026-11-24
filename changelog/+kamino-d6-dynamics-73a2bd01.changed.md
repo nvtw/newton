@@ -1,0 +1,1 @@
+Use a common D6 dynamics implementation for fixed, prismatic, revolute, and D6 joints in Kamino. Keep using the existing joint builder methods and check recovery if a scene starts with misaligned joint anchors.

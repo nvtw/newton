@@ -318,20 +318,21 @@ class TestKaminoNotifyModelChanged(NewtonTestCase):
         R_child = np.array(wp.quat_to_matrix(child_rotation)).reshape(3, 3)
         X_Bj = joints.X_Bj.numpy()[0]
         X_Fj = joints.X_Fj.numpy()[0]
+        hinge_axis = joints.d6_axes.numpy()["angular"][0].reshape(3, 3)[:, 0]
 
         np.testing.assert_allclose(joints.B_r_Bj.numpy()[0], parent_position, atol=1e-6)
         np.testing.assert_allclose(joints.F_r_Fj.numpy()[0], child_position - body_com, atol=1e-6)
         np.testing.assert_allclose(
-            X_Bj[:, 0],
+            X_Bj @ hinge_axis,
             R_parent @ axis,
             atol=1e-6,
-            err_msg="X_Bj first column must equal R(q_pj) * joint axis",
+            err_msg="Parent-side hinge axis must equal R(q_pj) * joint axis",
         )
         np.testing.assert_allclose(
-            X_Fj[:, 0],
+            X_Fj @ hinge_axis,
             R_child @ axis,
             atol=1e-6,
-            err_msg="X_Fj first column must equal R(q_cj) * joint axis",
+            err_msg="Child-side hinge axis must equal R(q_cj) * joint axis",
         )
 
     def test_shape_transform_propagates(self):
@@ -879,11 +880,11 @@ class TestKaminoNotifyModelChanged(NewtonTestCase):
         axes[qd_start + 1] = [1.0, 0.0, 0.0]
         model.joint_axis.assign(axes)
 
-        with self.assertRaisesRegex(ValueError, "gimbal axes must be unit length and orthogonal"):
+        with self.assertRaisesRegex(ValueError, "D6 axes must be unit length and orthogonal"):
             solver.notify_model_changed(newton.ModelFlags.JOINT_DOF_PROPERTIES)
 
-    def test_gimbal_handedness_change_raises(self):
-        """Reject reflected gimbal axes that flip handedness while staying orthonormal."""
+    def test_gimbal_handedness_change_updates_basis(self):
+        """Refresh D6 basis metadata when an orthonormal angular basis flips handedness."""
         model, gimbal = _build_gimbal()
         solver = SolverKamino(model)
         qd_start = model.joint_qd_start.numpy()[gimbal]
@@ -891,8 +892,8 @@ class TestKaminoNotifyModelChanged(NewtonTestCase):
         axes[qd_start + 2] = -axes[qd_start + 2]
         model.joint_axis.assign(axes)
 
-        with self.assertRaisesRegex(ValueError, "gimbal axes must preserve the solver's original handedness"):
-            solver.notify_model_changed(newton.ModelFlags.JOINT_DOF_PROPERTIES)
+        solver.notify_model_changed(newton.ModelFlags.JOINT_DOF_PROPERTIES)
+        self.assertEqual(solver._model_kamino.joints.d6_axes.numpy()["third_axis_sign"][gimbal], -1.0)
 
     def test_actuation_mode_change_raises(self):
         """Actuation type changes between active and passive raise under either relevant model flag."""

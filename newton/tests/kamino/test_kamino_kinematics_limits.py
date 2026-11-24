@@ -14,6 +14,7 @@ import warp as wp
 import newton
 from newton import ModelBuilder
 from newton._src.solvers.kamino._src.core.data import DataKamino
+from newton._src.solvers.kamino._src.core.joints import D6JointAxes
 from newton._src.solvers.kamino._src.core.math import quat_exp
 from newton._src.solvers.kamino._src.core.model import ModelKamino
 from newton._src.solvers.kamino._src.kinematics.joints import compute_joints_data
@@ -53,6 +54,7 @@ def _set_joint_follower_body_state(
     model_joint_F_r_Fj: wp.array[wp.vec3f],
     model_joint_X_Bj: wp.array[wp.mat33f],
     model_joint_X_Fj: wp.array[wp.mat33f],
+    model_joint_d6_axes: wp.array[D6JointAxes],
     state_body_q_i: wp.array[wp.transformf],
     state_body_u_i: wp.array[wp.spatial_vectorf],
 ):
@@ -71,8 +73,11 @@ def _set_joint_follower_body_state(
     X_Fj = model_joint_X_Fj[jid]
 
     # Retrieve the current state of the Base body
-    p_B = state_body_q_i[bid_B]
-    u_B = state_body_u_i[bid_B]
+    p_B = wp.transform_identity()
+    u_B = wp.spatial_vectorf(0.0)
+    if bid_B >= 0:
+        p_B = state_body_q_i[bid_B]
+        u_B = state_body_u_i[bid_B]
 
     # Extract the position and orientation of the Base body
     r_B = wp.transform_get_translation(p_B)
@@ -84,10 +89,7 @@ def _set_joint_follower_body_state(
     omega_B = wp.spatial_bottom(u_B)
 
     # Define the joint rotation offset
-    q_x_j = Q_X_J
-    theta_y_j = 0.0
-    theta_z_j = 0.0
-    j_dR_j = wp.vec3f(q_x_j, theta_y_j, theta_z_j)  # Joint offset as rotation vector
+    j_dR_j = Q_X_J * wp.vec3f(model_joint_d6_axes[jid].angular[:, 0])
     q_jq = quat_exp(j_dR_j)  # Joint offset as rotation quaternion
     R_jq = wp.quat_to_matrix(q_jq)  # Joint offset as rotation matrix
 
@@ -134,6 +136,7 @@ def set_joint_follower_body_state(model: ModelKamino, data: DataKamino):
             model.joints.F_r_Fj,
             model.joints.X_Bj,
             model.joints.X_Fj,
+            model.joints.d6_axes,
             data.bodies.q_i,
             data.bodies.u_i,
         ],

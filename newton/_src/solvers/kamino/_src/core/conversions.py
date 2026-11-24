@@ -81,12 +81,9 @@ class StructuralUpdateViolation(IntEnum):
     ACTUATION_PARTITION = 2
     INVALID_TARGET_MODE = 3
     NONORTHONORMAL_AXES = 4
-    GIMBAL_HANDEDNESS = 5
-    IMMOVABILITY_FLIP = 6
-    FRICTION_CTS = 7
-    EFFORT_CTS = 8
-    CARTESIAN_HANDEDNESS = 9
-    CYLINDRICAL_AXES = 10
+    IMMOVABILITY_FLIP = 5
+    FRICTION_CTS = 6
+    EFFORT_CTS = 7
 
 
 ###
@@ -399,7 +396,7 @@ def validate_joint_axes_kernel(
     joint = wp.tid()
     dof_type = joint_dof_type[joint]
     dof_start = joint_qd_start[joint]
-    if dof_type == JointDoFType.D6 or dof_type == JointDoFType.CYLINDRICAL:
+    if dof_type == JointDoFType.D6:
         linear_count = joint_dof_dim[joint, 0]
         angular_count = joint_dof_dim[joint, 1]
         start = dof_start
@@ -415,53 +412,6 @@ def validate_joint_axes_kernel(
                         wp.atomic_min(violations, StructuralUpdateViolation.NONORTHONORMAL_AXES, joint)
                         return
             start += count
-        if dof_type == JointDoFType.CYLINDRICAL:
-            if wp.length_sq(joint_axis[dof_start] - joint_axis[dof_start + 1]) > 1.0e-12:
-                wp.atomic_min(violations, StructuralUpdateViolation.CYLINDRICAL_AXES, joint)
-        return
-
-    is_universal = dof_type == JointDoFType.UNIVERSAL
-    is_gimbal = dof_type == JointDoFType.GIMBAL or dof_type == JointDoFType.GIMBAL_LEFT_HANDED
-    is_cartesian = dof_type == JointDoFType.CARTESIAN
-    if not is_universal and not is_gimbal and not is_cartesian:
-        return
-
-    axis_0 = joint_axis[dof_start]
-    axis_1 = joint_axis[dof_start + 1]
-    valid = (
-        wp.isfinite(axis_0[0])
-        and wp.isfinite(axis_0[1])
-        and wp.isfinite(axis_0[2])
-        and wp.isfinite(axis_1[0])
-        and wp.isfinite(axis_1[1])
-        and wp.isfinite(axis_1[2])
-        and wp.abs(wp.dot(axis_0, axis_0) - 1.0) <= 1.0e-6
-        and wp.abs(wp.dot(axis_1, axis_1) - 1.0) <= 1.0e-6
-        and wp.abs(wp.dot(axis_0, axis_1)) <= 1.0e-6
-    )
-    if is_gimbal or is_cartesian:
-        axis_2 = joint_axis[dof_start + 2]
-        valid = (
-            valid
-            and wp.isfinite(axis_2[0])
-            and wp.isfinite(axis_2[1])
-            and wp.isfinite(axis_2[2])
-            and wp.abs(wp.dot(axis_2, axis_2) - 1.0) <= 1.0e-6
-            and wp.abs(wp.dot(axis_0, axis_2)) <= 1.0e-6
-            and wp.abs(wp.dot(axis_1, axis_2)) <= 1.0e-6
-        )
-        if valid:
-            left_handed = wp.dot(wp.cross(axis_0, axis_1), axis_2) < 0.0
-            if is_cartesian:
-                # The Cartesian joint frame is built from the three axes, so they must form a rotation.
-                if left_handed:
-                    wp.atomic_min(violations, StructuralUpdateViolation.CARTESIAN_HANDEDNESS, joint)
-                    return
-            elif left_handed != (dof_type == JointDoFType.GIMBAL_LEFT_HANDED):
-                wp.atomic_min(violations, StructuralUpdateViolation.GIMBAL_HANDEDNESS, joint)
-                return
-    if not valid:
-        wp.atomic_min(violations, StructuralUpdateViolation.NONORTHONORMAL_AXES, joint)
 
 
 @wp.kernel
@@ -562,11 +512,9 @@ def joint_conversion_kernel(
     model_joint_parent: wp.array[wp.int32],
     model_joint_child: wp.array[wp.int32],
     model_joint_type: wp.array[wp.int32],
-    model_joint_d6_swing_limit: wp.array[wp.float32],
     model_joint_dof_dim: wp.array2d[wp.int32],
     model_joint_q_start: wp.array[wp.int32],
     model_joint_qd_start: wp.array[wp.int32],
-    model_joint_axis: wp.array[wp.vec3f],
     model_joint_target_mode: wp.array[wp.int32],
     model_joint_target_ke: wp.array[wp.float32],
     model_joint_target_kd: wp.array[wp.float32],
@@ -598,12 +546,7 @@ def joint_conversion_kernel(
     q_count_j = model_joint_q_start[joint_id + 1] - model_joint_q_start[joint_id]
     dofs_start_j = model_joint_qd_start[joint_id]
     qd_count_j = model_joint_qd_start[joint_id + 1] - dofs_start_j
-    dof_axes_j = mat63f()
-    for i in range(wp.min(qd_count_j, 6)):
-        dof_axes_j[i] = model_joint_axis[dofs_start_j + i]
-    dof_type_j = JointDoFType.from_newton_wp(type_j, q_count_j, qd_count_j, dof_dim_j, dof_axes_j)
-    if model_joint_d6_swing_limit and model_joint_d6_swing_limit[joint_id] > 0.0:
-        dof_type_j = JointDoFType.D6
+    dof_type_j = JointDoFType.from_newton_wp(type_j, q_count_j, qd_count_j, dof_dim_j)
     joint_dof_type[joint_id] = dof_type_j
     if dof_type_j < 0:
         return
@@ -1187,12 +1130,9 @@ def validate_model_structural_updates(
     - :attr:`StructuralUpdateViolation.ACTUATION_PARTITION`: passive/actuated partition changed
     - :attr:`StructuralUpdateViolation.INVALID_TARGET_MODE`: unsupported target-mode combination
     - :attr:`StructuralUpdateViolation.NONORTHONORMAL_AXES`: nonorthonormal D6 axis bases
-    - :attr:`StructuralUpdateViolation.GIMBAL_HANDEDNESS`: gimbal axis handedness changed
     - :attr:`StructuralUpdateViolation.IMMOVABILITY_FLIP`: a body's Kamino immovability status changed
     - :attr:`StructuralUpdateViolation.FRICTION_CTS`: joint friction constraint topology changed
     - :attr:`StructuralUpdateViolation.EFFORT_CTS`: effort-row topology changed
-    - :attr:`StructuralUpdateViolation.CARTESIAN_HANDEDNESS`: Cartesian axes changed handedness
-    - :attr:`StructuralUpdateViolation.CYLINDRICAL_AXES`: cylindrical axes became distinct
 
     An entry equal to the maximum of the body, joint, and DoF counts indicates that no
     violation of that type was found.
@@ -1355,23 +1295,7 @@ def _validate_joint_axes(
         raise ValueError(
             f"Invalid joint configuration for SolverKamino:\n"
             f"  - joint {invalid_joint} ({model.joint_label[invalid_joint]!r}): "
-            "universal, Cartesian, and gimbal axes must be unit length and orthogonal. "
-            "D6 linear and angular bases must each be orthonormal."
-        )
-    invalid_joint = int(violations_np[StructuralUpdateViolation.GIMBAL_HANDEDNESS])
-    if invalid_joint < model.joint_count:
-        raise ValueError(
-            f"Invalid joint configuration for SolverKamino:\n"
-            f"  - joint {invalid_joint} ({model.joint_label[invalid_joint]!r}): "
-            "gimbal axes must preserve the solver's original handedness"
-        )
-    invalid_joint = int(violations_np[StructuralUpdateViolation.CARTESIAN_HANDEDNESS])
-    if invalid_joint < model.joint_count:
-        raise ValueError(
-            f"Invalid joint configuration for SolverKamino:\n"
-            f"  - joint {invalid_joint} ({model.joint_label[invalid_joint]!r}): "
-            "three translational axes must form a right-handed set, unlike those of a USD D6 joint "
-            "whose physics:body1 is the world"
+            "D6 axes must be unit length and orthogonal within each linear or angular basis."
         )
 
 
@@ -1743,11 +1667,9 @@ def convert_joints(
             model.joint_parent,
             model.joint_child,
             model.joint_type,
-            model.joint_d6_swing_limit,
             model.joint_dof_dim,
             model.joint_q_start,
             model.joint_qd_start,
-            model.joint_axis,
             model.joint_target_mode,
             model.joint_target_ke,
             model.joint_target_kd,

@@ -385,18 +385,15 @@ class TestModelConversions(NewtonTestCase):
         # Conversion must succeed (previously raised ValueError)
         model_kamino_converted: ModelKamino = ModelKamino.from_newton(model_newton)
 
-        # Verify that X_Bj's and X_Fj's first column is aligned with the expected axis direction
-        X_Bj = model_kamino_converted.joints.X_Bj.numpy()
-        X_Fj = model_kamino_converted.joints.X_Fj.numpy()
-        # X_Bj has shape (num_joints, 3, 3); the revolute joint is the second one (index 1)
-        R_B = X_Bj[1]  # 3x3 rotation matrix
-        R_F = X_Fj[1]
-        ax_col_B = R_B[:, 0]  # first column = joint axis direction
-        ax_col_F = R_F[:, 0]  # first column = joint axis direction
+        # Recover the revolute axis (the second joint) in both body frames.
+        joints = model_kamino_converted.joints
+        axis = joints.d6_axes.numpy()["angular"][1].reshape(3, 3)[:, 0]
+        axis_B = joints.X_Bj.numpy()[1] @ axis
+        axis_F = joints.X_Fj.numpy()[1] @ axis
         expected_ax = np.array([1.0, 1.0, 0.0])
         expected_ax = expected_ax / np.linalg.norm(expected_ax)
-        np.testing.assert_allclose(ax_col_B, expected_ax, atol=1e-6)
-        np.testing.assert_allclose(ax_col_F, expected_ax, atol=1e-6)
+        np.testing.assert_allclose(axis_B, expected_ax, atol=1e-6)
+        np.testing.assert_allclose(axis_F, expected_ax, atol=1e-6)
 
     def test_12_model_conversions_q_i_0_com_frame(self):
         """
