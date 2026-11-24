@@ -277,6 +277,7 @@ def _get_island_iteration(axes):
         merged: int,
         fuse_columns: int,
         barrier: wp.array[wp.int32],
+        merged_pass: int,
     ):
         block, lane = wp.tid()
         # The merged large islands would leave one block walking them long
@@ -285,7 +286,7 @@ def _get_island_iteration(axes):
         # alone walks runs of narrow colors with block barriers, as the
         # one-launch sweep does, while the other blocks go on to the
         # independent small islands.
-        if ends[merged] > starts[merged]:
+        if merged_pass != 0 and ends[merged] > starts[merged]:
             i = starts[merged]
             # 0: nothing written, 1: block 0 wrote a narrow color, 2: the grid wrote a wide one.
             pending = int(0)
@@ -336,6 +337,8 @@ def _get_island_iteration(axes):
                     _sync_threads()
                     pending = 1
                 i = end
+        if merged_pass != 0:
+            return
         # Islands are sorted longest first; dealing them out in alternating
         # directions balances each block's serial chain of colors.
         total = count[0]
@@ -539,38 +542,46 @@ class IslandIterationSchedule:
         return blocks
 
     def iterate(self, world: PhoenXWorld, kernel, idt: float):
-        """Advance every island through all of its colors, in their original order."""
+        """Advance every island through all of its colors, in their original order.
+
+        The merged island needs a co-resident grid for its barrier. The small
+        islands share no body with it and need no barrier: their pass runs four
+        blocks per SM, which queue and balance as earlier blocks finish.
+        """
         island_kernel = _get_island_iteration(kernel.phoenx_axes)
-        blocks = self._grid_blocks(world, island_kernel)
-        wp.launch(
-            island_kernel,
-            (blocks, ONE_LAUNCH_BLOCK_DIM),
-            [
-                world.constraints,
-                world._contact_cols,
-                world.bodies,
-                world._particles_or_sentinel(),
-                idt,
-                world.sor_boost,
-                world._contact_container,
-                world._active_contact_views(),
-                world.num_joints,
-                world._joint_pgs_enabled,
-                world.num_bodies,
-                world._copy_state,
-                self.order,
-                self.count,
-                self.starts,
-                self.ends,
-                self.colors,
-                self.color_ends,
-                self.columns,
-                self.families,
-                blocks,
-                world.num_bodies,
-                int(world._fuse_threshold if self.fuse_columns is None else self.fuse_columns),
-                self.barrier,
-            ],
-            block_dim=ONE_LAUNCH_BLOCK_DIM,
-            device=world.device,
-        )
+        grid_blocks = self._grid_blocks(world, island_kernel)
+        island_blocks = 4 * max(1, int(world.device.sm_count))
+        for merged_pass, blocks in ((1, grid_blocks), (0, island_blocks)):
+            wp.launch(
+                island_kernel,
+                (blocks, ONE_LAUNCH_BLOCK_DIM),
+                [
+                    world.constraints,
+                    world._contact_cols,
+                    world.bodies,
+                    world._particles_or_sentinel(),
+                    idt,
+                    world.sor_boost,
+                    world._contact_container,
+                    world._active_contact_views(),
+                    world.num_joints,
+                    world._joint_pgs_enabled,
+                    world.num_bodies,
+                    world._copy_state,
+                    self.order,
+                    self.count,
+                    self.starts,
+                    self.ends,
+                    self.colors,
+                    self.color_ends,
+                    self.columns,
+                    self.families,
+                    blocks,
+                    world.num_bodies,
+                    int(world._fuse_threshold if self.fuse_columns is None else self.fuse_columns),
+                    self.barrier,
+                    merged_pass,
+                ],
+                block_dim=ONE_LAUNCH_BLOCK_DIM,
+                device=world.device,
+            )
