@@ -54,6 +54,19 @@ class TestPhoenXAutoPerformancePolicy(unittest.TestCase):
     def test_large_rigid_contact_world_selects_single_world(self):
         self.assertEqual(self._resolve(), "single_world")
 
+    def test_temporal_iterations_select_single_world(self):
+        """Temporal iterations run only on the single-world scheduler, so auto selects it."""
+        self.assertEqual(self._resolve(body_count=4, has_joints=True, temporal_iterations=True), "single_world")
+        self.assertEqual(self._resolve(step_layout="multi_world", temporal_iterations=True), "multi_world")
+        builder = newton.ModelBuilder()
+        builder.add_ground_plane()
+        body = builder.add_body(xform=wp.transform((0.0, 0.0, 0.1), wp.quat_identity()))
+        builder.add_shape_box(body, hx=0.1, hy=0.1, hz=0.1)
+        model = builder.finalize(device="cpu")
+        solver = newton.solvers.SolverPhoenX(model, solver_iterations=4, temporal_iterations=True)
+        self.assertEqual(solver.world.step_layout, "single_world")
+        self.assertTrue(solver.world.temporal_iterations)
+
     def test_noneligible_topologies_keep_multi_world(self):
         for overrides in (
             {"body_count": 2047},

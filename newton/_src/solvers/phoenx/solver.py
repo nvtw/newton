@@ -133,6 +133,7 @@ def _resolve_auto_step_layout(
     has_shapes: bool,
     contact_friction_model: str,
     joint_mode: str,
+    temporal_iterations: bool = False,
 ) -> str:
     """Resolve the model-facing PhoenX scheduler policy."""
     if step_layout not in ("auto", "multi_world", "single_world"):
@@ -148,7 +149,9 @@ def _resolve_auto_step_layout(
         and joint_mode == "maximal_direct"
     )
     if step_layout == "auto":
-        return "single_world" if joint_mode == "maximal_pgs" or large_rigid_contact_world else "multi_world"
+        # Maximal PGS joints and temporal iterations run only on the single-world scheduler.
+        single_world = joint_mode == "maximal_pgs" or temporal_iterations or large_rigid_contact_world
+        return "single_world" if single_world else "multi_world"
     return step_layout
 
 
@@ -464,8 +467,9 @@ class SolverPhoenX(SolverBase):
                 Joint factorization, row preparation, and direct contact
                 responses still run once per substep. Smaller contact steps can
                 reduce oscillation of heavy bodies on light movable supports;
-                the required schedule depends on the scene. Requires
-                ``step_layout="single_world"`` and rigid bodies. Mass splitting
+                the required schedule depends on the scene. Requires the
+                single-world layout, which ``step_layout="auto"`` then selects,
+                and rigid bodies. Mass splitting
                 is supported only with CUDA unrolled overflow-only dispatch and
                 uncolored contact headers.
             contact_hertz: Natural frequency [Hz] of the rigid contact springs
@@ -543,8 +547,8 @@ class SolverPhoenX(SolverBase):
                 Supported values are ``"average"``, ``"min"``, ``"multiply"``,
                 and ``"max"``. Defaults to ``"average"``.
             step_layout: ``"auto"`` keeps the multi-world scheduler except
-                for maximal PGS joints or one rigid contact-only world with at least 2,048 bodies,
-                where it selects ``"single_world"``. Explicit
+                for maximal PGS joints, temporal iterations, or one rigid contact-only
+                world with at least 2,048 bodies, where it selects ``"single_world"``. Explicit
                 ``"multi_world"`` and ``"single_world"`` override the policy.
                 The single-world layout colors all constraints together and can
                 also process multiple independent model worlds, including with
@@ -768,6 +772,7 @@ class SolverPhoenX(SolverBase):
             has_shapes=int(model.shape_count) > 0,
             contact_friction_model=contact_friction_model,
             joint_mode=joint_mode,
+            temporal_iterations=bool(temporal_iterations),
         )
         if parallel_contact_prepare is None and step_layout != "single_world" and scene_world_count > 1:
             # The multi-world schedulers spread many worlds over the device
