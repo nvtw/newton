@@ -138,22 +138,6 @@ class Example(PortedExample):
     # single block; the head-only path runs the same work in parallel
     # across many SMs.
     mass_splitting_unrolled = True
-    # Greedy MIS always hits the iter cap on this scene (chromatic
-    # number >> max_colored_partitions). Lowering to 1 commits one
-    # batch of independent maxes; everything else spills to the
-    # overflow bucket and mass splitting solves them Jacobi-style.
-    max_greedy_outer_iters = 1
-    # The default 32-block PGS grid floor over-provisions threads for
-    # chain's mostly-empty colored partitions; 16 blocks (4096 threads)
-    # is enough to saturate even the overflow partition's 4900/8 = 612
-    # batches, and the smaller launches reduce per-call dispatch
-    # overhead.
-    max_thread_blocks = 16
-    # Cross-frame warm-start of the greedy MIS coloring. Body pairs
-    # (ring-vs-ring contacts) are stable across frames, so most cids'
-    # previous colour is still legal. Validation pass catches the few
-    # cases where adjacency changed.
-    enable_warm_start_coloring = True
 
     def step(self) -> None:
         super().step()

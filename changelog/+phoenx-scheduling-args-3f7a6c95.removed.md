@@ -1,0 +1,1 @@
+Remove the `SolverPhoenX` scheduling arguments `max_thread_blocks`, `joint_coloring_priority`, `max_greedy_outer_iters` and `enable_warm_start_coloring`; the solver sizes its grid and colors constraints automatically.

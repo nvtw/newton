@@ -61,13 +61,13 @@ def make_scene():
         mass_splitting_batch_size=1,
         mass_splitting_unrolled=True,
         partitioner_algorithm="endpoint_owner",
-        # Keep the D6 out of the overflow so one color mixes joints and contacts.
-        joint_coloring_priority=True,
         colored_contact_headers=True,
         colored_contact_rows=True,
         joint_mode="maximal_pgs",
         sleeping_velocity_threshold=0.0,
     )
+    # Keep the D6 out of the overflow so one color mixes joints and contacts.
+    solver.world.joint_coloring_priority = True
     state = model.state()
     state.body_q.assign(model.body_q)
     control = model.control()

@@ -216,27 +216,6 @@ class PortedExample:
     #: the trade-off (no conditional graph nodes vs slightly higher
     #: launch count) is workload-dependent.
     mass_splitting_unrolled: bool = False
-    #: Override the greedy MIS outer-iteration cap (default 16). On
-    #: dense scenes with low :attr:`max_colored_partitions` greedy
-    #: hits the cap every step; lowering saves coloring time at the
-    #: cost of pushing more elements into the overflow bucket. Mass
-    #: splitting handles the overflow, so quality stays the same.
-    #: Only safe with :attr:`mass_splitting` enabled.
-    max_greedy_outer_iters: int | None = None
-    #: Hard cap on the single-world PGS persistent-grid block count
-    #: (each block is 256 threads). ``None`` uses the auto-size
-    #: heuristic (32 block floor, 4*SM ceiling). Lowering helps
-    #: small-partition scenes where the default 32-block floor
-    #: over-provisions threads; raising helps very large partitions.
-    max_thread_blocks: int | None = None
-    #: Enable cross-frame warm-start of the greedy MIS colouring.
-    #: When ``True`` the partitioner persists each step's coloring
-    #: into a body-pair-indexed cache, then on the next step seeds
-    #: ``color_tags`` from the cache and validates against the
-    #: current adjacency -- constraints whose previous colour is
-    #: still legal skip the MIS loop. See
-    #: :mod:`graph_coloring.warm_start` for the design.
-    enable_warm_start_coloring: bool = False
     #: Keyword arguments forwarded to :meth:`ModelBuilder.finalize`.
     #: Closed-loop maximal-coordinate examples can set
     #: ``{"skip_validation_joints": True}`` while keeping the shared
@@ -339,13 +318,10 @@ class PortedExample:
             velocity_iterations=self.velocity_iterations,
             default_friction=self.default_friction,
             step_layout=self.step_layout,
-            max_thread_blocks=self.max_thread_blocks,
             mass_splitting=self.mass_splitting,
             mass_splitting_color_group_size=self.mass_splitting_color_group_size,
             max_colored_partitions=self.max_colored_partitions,
             mass_splitting_unrolled=self.mass_splitting_unrolled,
-            max_greedy_outer_iters=self.max_greedy_outer_iters,
-            enable_warm_start_coloring=self.enable_warm_start_coloring,
             enable_column_timers=self.enable_column_timers,
             joint_mode="maximal_direct",
         )

@@ -29,9 +29,7 @@ def main():
     parser.add_argument("--record-checkpoints", action="store_true")
     parser.add_argument("--quality-every", type=int, default=0)
     parser.add_argument("--snapshot", action="store_true")
-    parser.add_argument("--blocks-per-sm", type=int)
     parser.add_argument("--singleton-lanes", action=argparse.BooleanOptionalAction, default=None)
-    parser.add_argument("--joint-priority", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if not 0 <= args.measure_after < args.frames:
@@ -44,16 +42,11 @@ def main():
     if utilization >= 10:
         raise SystemExit(f"GPU idle gate failed: {utilization}%")
     print(f"GPU idle gate: {utilization}%. Rendering at 1920x1080.", flush=True)
-    if args.blocks_per_sm is not None or args.singleton_lanes is not None or args.joint_priority is not None:
+    if args.singleton_lanes is not None:
         original_solver = scene.newton.solvers.SolverPhoenX
 
         def configured_solver(model, **kwargs):
-            if args.blocks_per_sm is not None:
-                kwargs["max_thread_blocks"] = args.blocks_per_sm * model.device.sm_count
-            if args.singleton_lanes is not None:
-                kwargs["colored_singleton_contact_lanes"] = args.singleton_lanes
-            if args.joint_priority is not None:
-                kwargs["joint_coloring_priority"] = args.joint_priority
+            kwargs["colored_singleton_contact_lanes"] = args.singleton_lanes
             return original_solver(model, **kwargs)
 
         scene.newton.solvers.SolverPhoenX = configured_solver

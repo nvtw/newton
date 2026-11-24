@@ -382,7 +382,6 @@ class SolverPhoenX(SolverBase):
         step_layout: str = "auto",
         threads_per_world: int | str = "auto",
         multi_world_scheduler: str = "auto",
-        max_thread_blocks: int | None = None,
         velocity_readout: str = "substep_end",
         mass_splitting: bool = False,
         max_colored_partitions: int = 12,
@@ -393,9 +392,6 @@ class SolverPhoenX(SolverBase):
         mass_splitting_unrolled: bool = False,
         mass_splitting_overflow_only: bool = False,
         partitioner_algorithm: str = "greedy",
-        joint_coloring_priority: bool = False,
-        max_greedy_outer_iters: int | None = None,
-        enable_warm_start_coloring: bool = True,
         colored_contact_headers: bool = False,
         colored_contact_rows: bool = False,
         colored_singleton_contact_lanes: bool | None = None,
@@ -555,7 +551,6 @@ class SolverPhoenX(SolverBase):
                 before graph capture; ``"fast_tail"`` and
                 ``"block_world[_32|_64|_128]"`` force a path for
                 benchmarking.
-            max_thread_blocks: Optional cap on the single-world PGS grid.
             velocity_readout: ``"substep_end"`` (default, bit-faithful),
                 ``"finite_difference"``, or ``"substep_average"``.
                 Sleeping bodies report a zero twist in the substep readouts.
@@ -571,16 +566,6 @@ class SolverPhoenX(SolverBase):
                 joints when joints are present.
             partitioner_algorithm: ``"greedy"`` (default) or
                 ``"endpoint_owner"`` (single-world mass splitting only).
-            joint_coloring_priority: Prioritize joints over contacts in
-                priority-based coloring. Defaults to ``False`` because
-                changing the solve order can reduce convergence of joint
-                loops. Enabling it can keep joints out of overflow. Does
-                not change sequential per-world greedy ordering.
-            max_greedy_outer_iters: Optional cap on greedy partitioner
-                iterations. Remaining constraints enter the overflow
-                partition.
-            enable_warm_start_coloring: Reuse previous-frame colour
-                assignments. No-op on multi-world.
             colored_contact_headers: Store rigid-contact column metadata in
                 solver color order. Requires mass splitting and point-friction
                 rigid contacts. Supports single- and multi-world layouts.
@@ -1244,7 +1229,6 @@ class SolverPhoenX(SolverBase):
             step_layout=step_layout,
             threads_per_world=threads_per_world,
             multi_world_scheduler=multi_world_scheduler,
-            max_thread_blocks=max_thread_blocks,
             enable_body_pair_grouping=use_body_pair_grouping,
             mass_splitting=mass_splitting,
             max_colored_partitions=max_colored_partitions,
@@ -1259,9 +1243,6 @@ class SolverPhoenX(SolverBase):
             mass_splitting_unrolled=mass_splitting_unrolled,
             mass_splitting_overflow_only=mass_splitting_overflow_only,
             partitioner_algorithm=partitioner_algorithm,
-            joint_coloring_priority=joint_coloring_priority,
-            max_greedy_outer_iters=max_greedy_outer_iters,
-            enable_warm_start_coloring=enable_warm_start_coloring,
             colored_contact_headers=colored_contact_headers,
             colored_contact_rows=colored_contact_rows,
             colored_singleton_contact_lanes=colored_singleton_contact_lanes,
