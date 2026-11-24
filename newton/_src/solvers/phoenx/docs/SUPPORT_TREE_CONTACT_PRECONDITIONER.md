@@ -102,11 +102,8 @@ The isolated planar and spatial prototypes show:
   10.24 microsecond median replay on an RTX PRO 6000 Blackwell; 8,012/8,192
   randomized trees pass the conservative gate.
 
-Run the GPU solve/acceptance benchmark with:
-
-```bash
-uv run --extra dev -m newton._src.solvers.phoenx.benchmarks.experimental.bench_support_tree_patch
-```
+The probe, `bench_support_tree_patch.py`, was removed with the other rejected experiment
+benchmarks; recover it with `git log --diff-filter=D -- newton/_src/solvers/phoenx/benchmarks/experimental/bench_support_tree_patch.py`.
 
 The benchmark excludes dynamic forest construction and PhoenX state updates,
 so it is a feasibility/cost measurement rather than an end-to-end speed claim.

@@ -108,11 +108,8 @@ constraint diagnostics gather the final wrench.
   and `685 us` hybrid. Joint-only tiny trees still favor reduced ownership.
   These are diagnostic, not end-to-end training numbers.
 
-Run the retained benchmark with:
-
-```bash
-uv run --extra dev -m newton._src.solvers.phoenx.benchmarks.experimental.bench_maximal_joint_tree_projector --worlds 8192 --bodies 29 --replays 100
-```
+The probe, `bench_maximal_joint_tree_projector.py`, was removed with the other rejected experiment
+benchmarks; recover it with `git log --diff-filter=D -- newton/_src/solvers/phoenx/benchmarks/experimental/bench_maximal_joint_tree_projector.py`.
 
 ## Position-level projection (2026-07-10, retained)
 

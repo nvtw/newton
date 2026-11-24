@@ -101,11 +101,8 @@ that the colorer considered independent. Under-relaxation would mask rather
 than remove that error. Articulation-aware coloring restores the GS
 independence invariant and remains effective across six mass decades.
 
-Run the probe with:
-
-```bash
-uv run --extra dev -m newton._src.solvers.phoenx.benchmarks.experimental.bench_articulated_color_gs
-```
+The probe, `bench_articulated_color_gs.py`, was removed with the other rejected experiment
+benchmarks; recover it with `git log --diff-filter=D -- newton/_src/solvers/phoenx/benchmarks/experimental/bench_articulated_color_gs.py`.
 
 ## Integration constraints
 

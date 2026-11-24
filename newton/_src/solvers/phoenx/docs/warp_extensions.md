@@ -15,9 +15,10 @@ Keep new native snippets tiny, GPU-scoped, and documented here.
 
 ## Warp Vote and Shuffle Intrinsics
 
-- `benchmarks/experimental/bench_lock_scheduled_pgs._warp_shfl_i32`,
-  `_warp_shfl_u32`, `_warp_ballot`, and `_warp_popc`: experimental wrappers
-  used by the one-warp-per-world no-coloring PGS feasibility benchmark. They
+- `_warp_shfl_i32`, `_warp_shfl_u32`, `_warp_ballot`, and `_warp_popc` in the
+  removed `benchmarks/experimental/bench_lock_scheduled_pgs.py` (see git history):
+  experimental wrappers used by the one-warp-per-world no-coloring PGS feasibility
+  benchmark. They
   let lanes propose constraint rows and greedily accept a body-disjoint
   micro-wave without global atomics.
 - `articulations.reduced_contact_block._broadcast_contact_scalar` uses a
