@@ -46,6 +46,7 @@ import warp as wp
 
 from newton._src.geometry.flags import MeshProperties
 from newton._src.solvers.phoenx.body import (
+    MOTION_ARTICULATED,
     MOTION_DYNAMIC,
     MOTION_KINEMATIC,
     MOTION_STATIC,
@@ -272,6 +273,108 @@ def _phoenx_detect_active_islands_kernel(
             wp.atomic_max(island_active, root, wp.int32(1))
 
 
+@wp.func
+def _reduced_column_body(columns: ContactColumnContainer, column: wp.int32, side: wp.int32) -> wp.int32:
+    if side == 0:
+        return contact_get_body1(columns, column)
+    return contact_get_body2(columns, column)
+
+
+@wp.kernel(enable_backward=False)
+def _phoenx_detect_active_islands_reduced_kernel(
+    bodies: BodyContainer,
+    columns: ContactColumnContainer,
+    num_columns: wp.array[wp.int32],
+    num_active_constraints: wp.array[wp.int32],
+    contact_offset: wp.int32,
+    num_bodies: wp.int32,
+    island_active: wp.array[wp.int32],
+):
+    """:func:`_phoenx_detect_active_islands_kernel` for the contact columns a reduced
+    articulation solves, which are ordered after the regular constraints."""
+    column = wp.tid() + num_active_constraints[0] - contact_offset
+    if column >= num_columns[0]:
+        return
+    has_awake = wp.int32(0)
+    has_sleeping = wp.int32(0)
+    for side in range(2):
+        b = _reduced_column_body(columns, column, side)
+        if b < 0 or b >= num_bodies:
+            continue
+        mt = bodies.motion_type[b]
+        if mt == MOTION_STATIC:
+            continue
+        if mt != MOTION_DYNAMIC or bodies.island_root[b] < wp.int32(0):
+            has_awake = wp.int32(1)
+        else:
+            has_sleeping = wp.int32(1)
+    if has_awake == wp.int32(0) or has_sleeping == wp.int32(0):
+        return
+    for side in range(2):
+        b = _reduced_column_body(columns, column, side)
+        if b < 0 or b >= num_bodies or bodies.motion_type[b] != MOTION_DYNAMIC:
+            continue
+        root = bodies.island_root[b]
+        if root >= wp.int32(0):
+            wp.atomic_max(island_active, root, wp.int32(1))
+
+
+@wp.kernel(enable_backward=False)
+def _phoenx_inject_reduced_contact_edges_kernel(
+    bodies: BodyContainer,
+    columns: ContactColumnContainer,
+    num_columns: wp.array[wp.int32],
+    num_active_constraints: wp.array[wp.int32],
+    contact_offset: wp.int32,
+    num_bodies: wp.int32,
+    island_active: wp.array[wp.int32],
+    interaction_capacity: wp.int32,
+    # inout
+    interaction_bodies: wp.array2d[wp.int32],
+    uf_num_interactions: wp.array[wp.int32],
+):
+    """Append the reduced-articulation contact columns to the union-find input.
+
+    These columns are solved by the reduced articulation, after the regular
+    constraints, so they are not elements; with the endpoint rules of
+    :func:`_phoenx_copy_elements_to_int2d_kernel` a moving link joins the
+    island of the free body it pushes, which then wakes.
+    """
+    column = wp.tid() + num_active_constraints[0] - contact_offset
+    if column >= num_columns[0]:
+        return
+    row = wp.vec2i(-1, -1)
+    count = wp.int32(0)
+    for side in range(2):
+        b = _reduced_column_body(columns, column, side)
+        if b < 0 or b >= num_bodies:
+            continue
+        mt = bodies.motion_type[b]
+        if mt != MOTION_DYNAMIC and mt != MOTION_KINEMATIC and mt != MOTION_ARTICULATED:
+            continue
+        if (
+            mt != MOTION_DYNAMIC
+            and wp.length_sq(bodies.velocity[b]) == 0.0
+            and wp.length_sq(bodies.angular_velocity[b]) == 0.0
+        ):
+            continue
+        if mt == MOTION_DYNAMIC:
+            root = bodies.island_root[b]
+            if root >= wp.int32(0) and island_active[root] == wp.int32(0):
+                continue
+        row[count] = b
+        count += wp.int32(1)
+    if count < wp.int32(2):
+        return
+    slot = wp.atomic_add(uf_num_interactions, 0, wp.int32(1))
+    if slot >= interaction_capacity:
+        return
+    interaction_bodies[slot, 0] = row[0]
+    interaction_bodies[slot, 1] = row[1]
+    for j in range(2, MAX_BODIES_PER_INTERACTION):
+        interaction_bodies[slot, j] = wp.int32(-1)
+
+
 @wp.kernel(enable_backward=False)
 def _phoenx_seed_uf_num_interactions_kernel(
     num_active_constraints: wp.array[wp.int32],
@@ -339,7 +442,11 @@ def _phoenx_copy_elements_to_int2d_kernel(
     island_active: wp.array[wp.int32],
     interaction_bodies: wp.array2d[wp.int32],
 ):
-    """Pack dynamic bodies and moving kinematics into each active interaction row.
+    """Pack dynamic bodies and moving kinematic or articulated bodies into each active interaction row.
+
+    Reduced articulations move their links like prescribed movers, so a moving
+    link joins the islands it touches and a stationary one does not, like a
+    kinematic body.
 
     Sleeping (dynamic) bodies whose root is **not** active stay filtered
     (cost nothing in the live UF). Sleeping bodies in **active** islands
@@ -362,10 +469,10 @@ def _phoenx_copy_elements_to_int2d_kernel(
         if b < 0 or b >= num_bodies:
             continue
         mt = bodies.motion_type[b]
-        if mt != MOTION_DYNAMIC and mt != MOTION_KINEMATIC:
+        if mt != MOTION_DYNAMIC and mt != MOTION_KINEMATIC and mt != MOTION_ARTICULATED:
             continue
         if (
-            mt == MOTION_KINEMATIC
+            mt != MOTION_DYNAMIC
             and wp.length_sq(bodies.velocity[b]) == 0.0
             and wp.length_sq(bodies.angular_velocity[b]) == 0.0
         ):
@@ -405,7 +512,7 @@ def _phoenx_island_max_velocity_kernel(
     dynamic bodies are skipped -- their integration is paused so they
     always score 0; self-wake handles fresh force injection on them.
 
-    KINEMATIC bodies contribute their inferred velocity (set by
+    KINEMATIC and ARTICULATED bodies contribute their velocity; kinematic ones their inferred velocity (set by
     :func:`_kinematic_prepare_step_kernel` from pose-target delta or
     user-set body_qd). They have inv_mass==0 so force/torque can't
     accelerate them, but a moving kinematic mover (camera collider,
@@ -414,7 +521,7 @@ def _phoenx_island_max_velocity_kernel(
     """
     b = wp.tid()
     mt = bodies.motion_type[b]
-    if mt != MOTION_DYNAMIC and mt != MOTION_KINEMATIC:
+    if mt != MOTION_DYNAMIC and mt != MOTION_KINEMATIC and mt != MOTION_ARTICULATED:
         return
     if bodies.island_root[b] >= wp.int32(0):
         return
@@ -618,7 +725,7 @@ def _phoenx_kinematic_contact_wake_kernel(
             or supported >= bodies.motion_type.shape[0]
         ):
             continue
-        if bodies.motion_type[mover] != MOTION_KINEMATIC:
+        if bodies.motion_type[mover] != MOTION_KINEMATIC and bodies.motion_type[mover] != MOTION_ARTICULATED:
             continue
         root = bodies.island_root[supported]
         if root < 0:

@@ -263,9 +263,11 @@ from newton._src.solvers.phoenx.sleeping_kernels import (
     _phoenx_compute_island_root_per_compact_kernel,
     _phoenx_copy_elements_to_int2d_kernel,
     _phoenx_detect_active_islands_kernel,
+    _phoenx_detect_active_islands_reduced_kernel,
     _phoenx_finalize_body_aabb_diagonal_kernel,
     _phoenx_init_body_aabb_kernel,
     _phoenx_inject_chain_edges_kernel,
+    _phoenx_inject_reduced_contact_edges_kernel,
     _phoenx_island_max_velocity_kernel,
     _phoenx_kinematic_contact_wake_kernel,
     _phoenx_mark_sleeping_islands_kernel,
@@ -4129,6 +4131,15 @@ class PhoenXWorld:
             device=self.device,
         )
 
+    def _reduced_contact_islands(self) -> bool:
+        """Whether reduced-articulation contact columns must join the sleeping islands."""
+        return (
+            self._sleeping_enabled
+            and self._reduced_articulation is not None
+            and self.max_contact_columns > 0
+            and self._ingest_scratch is not None
+        )
+
     def _build_contact_islands(self) -> None:
         """Build connectivity and distribute independent islands across solver blocks."""
         # --- Copy elements into the 2D UF input. ---
@@ -4160,8 +4171,25 @@ class PhoenXWorld:
                 outputs=[self._island_interaction_bodies, self._uf_num_interactions],
                 device=self.device,
             )
+            if self._reduced_contact_islands():
+                wp.launch(
+                    _phoenx_inject_reduced_contact_edges_kernel,
+                    dim=self.max_contact_columns,
+                    inputs=[
+                        self.bodies,
+                        self._contact_cols,
+                        self._ingest_scratch.num_contact_columns,
+                        self._num_active_constraints,
+                        wp.int32(self._contact_offset),
+                        wp.int32(self.num_bodies),
+                        self._island_active,
+                        wp.int32(self._island_interaction_bodies.shape[0]),
+                    ],
+                    outputs=[self._island_interaction_bodies, self._uf_num_interactions],
+                    device=self.device,
+                )
 
-        # --- Build islands. Single UF pass over (elements + chain edges). ---
+        # --- Build islands. Single UF pass over (elements, chain and reduced-contact edges). ---
         self._island_builder.build_islands(
             self._island_interaction_bodies,
             self._uf_num_interactions if self._sleeping_enabled else self._num_active_constraints,
@@ -4305,6 +4333,21 @@ class PhoenXWorld:
             outputs=[self._island_active],
             device=self.device,
         )
+        if self._reduced_contact_islands():
+            wp.launch(
+                _phoenx_detect_active_islands_reduced_kernel,
+                dim=self.max_contact_columns,
+                inputs=[
+                    self.bodies,
+                    self._contact_cols,
+                    self._ingest_scratch.num_contact_columns,
+                    self._num_active_constraints,
+                    wp.int32(self._contact_offset),
+                    wp.int32(self.num_bodies),
+                ],
+                outputs=[self._island_active],
+                device=self.device,
+            )
 
         # Seed the UF counter from the regular-element count so chain
         # edges atomically claim slots past it.

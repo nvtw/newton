@@ -5,7 +5,7 @@
 
 import warp as wp
 
-from newton._src.solvers.phoenx.body import MOTION_DYNAMIC, MOTION_KINEMATIC, BodyContainer
+from newton._src.solvers.phoenx.body import MOTION_ARTICULATED, MOTION_DYNAMIC, MOTION_KINEMATIC, BodyContainer
 
 
 @wp.struct
@@ -62,7 +62,8 @@ def score_island_motion(
 
     motion = bodies.motion_type[body]
     radius = 0.5 * body_aabb_diagonal[body]
-    if motion == MOTION_KINEMATIC:
+    if motion == MOTION_KINEMATIC or motion == MOTION_ARTICULATED:
+        # Prescribed movers: the reduced articulation moves articulated links.
         speed = wp.length(bodies.velocity[body]) + radius * wp.length(bodies.angular_velocity[body])
         if speed >= velocity_threshold:
             wp.atomic_max(island_score, island, speed)
