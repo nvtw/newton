@@ -187,6 +187,75 @@ def _supply_cases(
 def _nearest_pickup_lane(distance: float, index: int) -> int: ...
 
 
+# KR10 states of the source sequencer. LOADED and LOADED_HOVER carry the group
+# out of the nest; the inlet reads them as gripped.
+_ROBOT_TO_HOVER = wp.constant(0)
+_ROBOT_HOVER = wp.constant(1)
+_ROBOT_NEST_DOWN = wp.constant(2)
+_ROBOT_GRIP = wp.constant(3)
+_ROBOT_LOADED = wp.constant(4)
+_ROBOT_RELEASE = wp.constant(5)
+_ROBOT_EMPTY_HOVER = wp.constant(6)
+_ROBOT_LOADED_HOVER = wp.constant(7)
+_ROBOT_WAIT_STATION = wp.constant(8)
+_ROBOT_BOX_IN = wp.constant(9)
+_ROBOT_EMPTY = wp.constant(10)
+# Each row's moves follow init_to_hover and nest_down in the motion table.
+_ROW_MOVES = ("loaded", "loaded_hover", "box_in", "empty", "empty_hover")
+_LOADED, _LOADED_HOVER, _BOX_IN, _EMPTY, _EMPTY_HOVER = (wp.constant(i) for i in range(5))
+_GRIP_DWELL = wp.constant(0.1)  # s, the source's grip and release dwells
+
+
+@wp.func
+def _robot_move(row: int, move: int) -> int:
+    return 2 + row * 5 + move
+
+
+@wp.func
+def robot_sequence(
+    state: int,
+    finished: bool,
+    age: float,
+    gripped: bool,
+    group_ready: bool,
+    case_ready: bool,
+    inlet_state: int,
+) -> int:
+    """Return the KR10's next state, as the source sequencer (``robots_l02.py``) steps it.
+
+    ``finished`` reports the end of the current move and ``age`` the time in
+    the state [s]; ``gripped`` reports the group attached in GRIP.
+    """
+    if state == _ROBOT_TO_HOVER and finished:
+        return _ROBOT_HOVER
+    if state == _ROBOT_HOVER and group_ready:
+        return _ROBOT_NEST_DOWN
+    if state == _ROBOT_NEST_DOWN and finished:
+        return _ROBOT_GRIP
+    if state == _ROBOT_GRIP and gripped and age >= _GRIP_DWELL:
+        # Straight into a locked case, else loaded above it until it locks.
+        if case_ready:
+            return _ROBOT_LOADED
+        return _ROBOT_LOADED_HOVER
+    if (state == _ROBOT_LOADED or state == _ROBOT_BOX_IN) and finished:
+        return _ROBOT_RELEASE
+    if state == _ROBOT_LOADED_HOVER and finished:
+        return _ROBOT_WAIT_STATION
+    if state == _ROBOT_WAIT_STATION and case_ready:
+        return _ROBOT_BOX_IN
+    if state == _ROBOT_RELEASE and age >= _GRIP_DWELL:
+        # Straight back down only onto a group the inlet is about to present:
+        # GATE_CLOSING, SETTLE_GROUP, NESTING or READY.
+        if inlet_state >= 4 and inlet_state <= 7:
+            return _ROBOT_EMPTY
+        return _ROBOT_EMPTY_HOVER
+    if state == _ROBOT_EMPTY and finished:
+        return _ROBOT_GRIP
+    if state == _ROBOT_EMPTY_HOVER and finished:
+        return _ROBOT_HOVER
+    return state
+
+
 @wp.kernel
 def _robots(
     dyn: phoenx.DynamicsData,
@@ -205,7 +274,10 @@ def _robots(
     motion_qd: wp.array2d[float],
     offsets: wp.array[int],
     lengths: wp.array[int],
-    ready: wp.array[int],
+    descent: wp.array[int],
+    group_ready: wp.array[int],
+    case_ready: wp.array[int],
+    inlet_state: wp.array[int],
     mode: wp.array[int],
     age: wp.array[float],
     rows: wp.array[int],
@@ -218,7 +290,7 @@ def _robots(
     cell = wp.tid() // lanes
     lane = wp.tid() % lanes
     state = mode[cell]
-    picking = state == 3 and ready[cell] != 0
+    picking = state == _ROBOT_GRIP and held[cell, 0] < 0 and group_ready[cell] != 0
     selected = wp.vec4i(-1, -1, -1, -1)
     complete = bool(True)
     if picking:
@@ -248,68 +320,82 @@ def _robots(
                 complete = False
     if lane != 0:
         return
-    timer = age[cell]
+    # The source KR10 sequencer (robots_l02.py). It grips a nested group
+    # without waiting for the case, carries it straight in when the case is
+    # locked and otherwise waits loaded above it, and drops straight back
+    # onto the next group when the inlet is about to present one.
     row = rows[cell] % 3
+    placed_row = (rows[cell] + 2) % 3
     motion = int(0)
-    if state == 1:
-        motion = 0
-        timer = float(lengths[0] - 1) / 60.0
-        if ready[cell] != 0:
-            mode[cell] = 2
-            age[cell] = 0.0
-    elif state == 2 or state == 3:
+    hold = bool(True)
+    if state == _ROBOT_TO_HOVER:
+        hold = False
+    elif state == _ROBOT_NEST_DOWN or state == _ROBOT_GRIP:
         motion = 1
-        if state == 3:
-            timer = float(lengths[1] - 1) / 60.0
-    elif state == 4 or state == 5:
-        motion = 2 + row * 2
-        if state == 5:
-            timer = float(lengths[motion] - 1) / 60.0
-    elif state == 6:
-        motion = 3 + row * 2
-    index = wp.min(int(timer * 60.0 + 0.0001), lengths[motion] - 1)
+        hold = state == _ROBOT_GRIP
+    elif state == _ROBOT_LOADED or state == _ROBOT_RELEASE:
+        motion = _robot_move(row, _LOADED)
+        hold = state == _ROBOT_RELEASE
+        if state == _ROBOT_RELEASE:
+            motion = _robot_move(placed_row, _LOADED)
+    elif state == _ROBOT_LOADED_HOVER or state == _ROBOT_WAIT_STATION:
+        motion = _robot_move(row, _LOADED_HOVER)
+        hold = state == _ROBOT_WAIT_STATION
+    elif state == _ROBOT_BOX_IN:
+        motion = _robot_move(row, _BOX_IN)
+        hold = False
+    elif state == _ROBOT_EMPTY:
+        motion = _robot_move(placed_row, _EMPTY)
+        hold = False
+    elif state == _ROBOT_EMPTY_HOVER:
+        motion = _robot_move(placed_row, _EMPTY_HOVER)
+        hold = False
+    last = lengths[motion] - 1
+    index = last
+    if not hold:
+        index = wp.min(int(age[cell] * 60.0 + 0.0001), last)
+    if state == _ROBOT_EMPTY and group_ready[cell] == 0 and index >= descent[placed_row]:
+        # The gripper drops below the hover height over the nest only onto a ready group.
+        index = descent[placed_row]
+        age[cell] = float(index - 1) / 60.0
     for j in range(6):
         targets[arm_coordinate[cell, j]] = motion_q[offsets[motion] + index, j]
         target_velocity[arm_dof[cell, j]] = motion_qd[offsets[motion] + index, j]
 
-    if picking:
-        if complete:
-            for head in range(4):
-                bottle = selected[head]
-                parent = gripper[cell]
-                frame = wp.transform_multiply(wp.transform_inverse(body_q[parent]), body_q[bottle])
-                desc = phoenx.joint_desc(parent, bottle, frame, wp.transform_identity())
-                desc.collide_parent = False
-                attachments[cell, head] = phoenx.add_joint(dyn, desc)
-                held[cell, head] = bottle
-                claimed[bottle] = parent + 1
-            mode[cell] = 4
-            age[cell] = 0.0
-    elif state == 5 and timer >= float(lengths[motion] - 1) / 60.0 and age[cell] >= 0.1:
-        mode[cell] = 6
+    finished = not hold and index == last
+    if state == _ROBOT_GRIP and picking and complete:
+        for head in range(4):
+            bottle = selected[head]
+            parent = gripper[cell]
+            frame = wp.transform_multiply(wp.transform_inverse(body_q[parent]), body_q[bottle])
+            desc = phoenx.joint_desc(parent, bottle, frame, wp.transform_identity())
+            desc.collide_parent = False
+            attachments[cell, head] = phoenx.add_joint(dyn, desc)
+            held[cell, head] = bottle
+            claimed[bottle] = parent + 1
         age[cell] = 0.0
-    elif state != 1 and state != 3 and state != 5 and index == lengths[motion] - 1:
-        if state == 0:
-            mode[cell] = 1
-            age[cell] = 0.0
-        elif state == 2:
-            mode[cell] = 3
-            age[cell] = 0.0
-        elif state == 4:
-            for head in range(4):
-                joint = attachments[cell, head]
-                if joint >= 0:
-                    phoenx.remove_joint(dyn, joint)
-                claimed[held[cell, head]] = 0
-                attachments[cell, head] = -1
-                held[cell, head] = -1
-            placed[cell] += 4
-            mode[cell] = 5
-            age[cell] = 0.0
-        elif state == 6:
-            rows[cell] += 1
-            mode[cell] = 1
-            age[cell] = 0.0
+    next_state = robot_sequence(
+        state,
+        finished,
+        age[cell],
+        held[cell, 0] >= 0,
+        group_ready[cell] != 0,
+        case_ready[cell] != 0,
+        inlet_state[cell],
+    )
+    if next_state == _ROBOT_RELEASE and state != _ROBOT_RELEASE:
+        for head in range(4):
+            joint = attachments[cell, head]
+            if joint >= 0:
+                phoenx.remove_joint(dyn, joint)
+            claimed[held[cell, head]] = 0
+            attachments[cell, head] = -1
+            held[cell, head] = -1
+        placed[cell] += 4
+        rows[cell] += 1
+    if next_state != state:
+        mode[cell] = next_state
+        age[cell] = 0.0
     age[cell] += 1.0 / 60.0
 
 
@@ -407,7 +493,6 @@ def _debounce(inlet: _Inlet, cell: int, k: int, raw: bool) -> bool:
 def _inlet_plcs(
     inlet: _Inlet,
     observation: wp.array2d[float],
-    line_ready: wp.array[int],
     targets: wp.array2d[float],
     ready: wp.array[int],
     multipliers: wp.array[float],
@@ -546,7 +631,7 @@ def _inlet_plcs(
         inlet.inb_drive[cell] = wp.float64(0.0)
     multipliers[1 + cell * 2] = float(ina / wp.float64(0.2))
     multipliers[2 + cell * 2] = float(inb / wp.float64(0.4))
-    ready[cell] = int(next_state == 7 and line_ready[cell] != 0)
+    ready[cell] = int(next_state == 7)
     inlet.status[cell, 0] = next_state
     inlet.status[cell, 1] = inlet.fault[cell]
     inlet.status[cell, 2] = inlet.picked[cell]
@@ -705,7 +790,7 @@ class PlantController:
         library = json.loads((vendor / "packer_l02/motions_l02.json").read_text())
         motions = ["init_to_hover", "nest_down"]
         for row in ("far", "mid", "near"):
-            motions.extend(("loaded_" + row, "empty_hover_" + row))
+            motions.extend(f"{move}_{row}" for move in _ROW_MOVES)
         q, qd, offsets, lengths = [], [], [], []
         for name in motions:
             move = library["motions"][name]
@@ -724,6 +809,12 @@ class PlantController:
         self.motion_qd = wp.array(qd, dtype=float)
         self.offsets = wp.array(offsets, dtype=int)
         self.lengths = wp.array(lengths, dtype=int)
+        # Frames into each row's straight return at which the gripper drops over the nest.
+        moves = library["meta"]["moves"]
+        self.descent = wp.array(
+            [round(moves[f"empty_{row}"]["events"]["commit_descent_s"] * 60) for row in ("far", "mid", "near")],
+            dtype=int,
+        )
         self._setup_cases(vendor, starts)
         self.transport = TransportController(self, vendor)
         self.infeed = InfeedController(self, vendor, 17 + len(self.transport.zone_channels), supply)
@@ -1127,7 +1218,7 @@ class PlantController:
         wp.launch(
             _inlet_plcs,
             dim=8,
-            inputs=[self.inlet, self.observation, self.line_ready],
+            inputs=[self.inlet, self.observation],
             outputs=[self.valve_targets, self.ready, self.multipliers],
         )
         wp.launch(
@@ -1219,7 +1310,10 @@ class PlantController:
                 self.motion_qd,
                 self.offsets,
                 self.lengths,
+                self.descent,
                 self.ready,
+                self.line_ready,
+                self.inlet.state,
                 self.mode,
                 self.age,
                 self.rows,

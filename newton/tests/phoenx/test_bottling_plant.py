@@ -13,7 +13,13 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton.examples.phoenx._bottling_control import _Belt, _belt_speeds, _seal_cases, _target_coordinates
+from newton.examples.phoenx._bottling_control import (
+    _Belt,
+    _belt_speeds,
+    _seal_cases,
+    _target_coordinates,
+    robot_sequence,
+)
 from newton.examples.phoenx._bottling_fleet import FleetController, _Transfer
 from newton.examples.phoenx._bottling_infeed import BottleSupply, InfeedController, StandingQueue
 from newton.examples.phoenx._bottling_io import (
@@ -48,6 +54,20 @@ from newton.viewer import ViewerNull
 
 
 @requires("pxr.Usd")
+@wp.kernel
+def _robot_steps(cases: wp.array2d[int], after: wp.array[int]):
+    i = wp.tid()
+    after[i] = robot_sequence(
+        cases[i, 0],
+        cases[i, 1] != 0,
+        float(cases[i, 2]) * 0.05,
+        cases[i, 3] != 0,
+        cases[i, 4] != 0,
+        cases[i, 5] != 0,
+        cases[i, 6],
+    )
+
+
 class TestBottlingPlant(unittest.TestCase):
     @staticmethod
     def _bottle_line(path, layout=None, shapes=None):
@@ -91,6 +111,37 @@ class TestBottlingPlant(unittest.TestCase):
             solver.collide(state, contacts, dt=1.0 / 120.0)
             solver.step(state, state, None, contacts, 1.0 / 120.0)
         return scene, state, np.asarray(scene.bottle_bodies[1:]), capture.graph
+
+    @unittest.skipUnless(wp.is_cuda_available(), "CUDA device required")
+    def test_packer_robot_overlaps_the_case_exchange(self):
+        """Grip and wait loaded during the case exchange, and drop straight onto a nesting group, as the source KR10."""
+        hover, nest_down, grip, loaded, release, empty_hover, loaded_hover, wait, box_in, empty = range(1, 11)
+        waiting_queue, nesting = 1, 6
+        # state, move finished, age [0.05 s], gripped, group ready, case locked, inlet state -> next state
+        steps = [
+            ((hover, 0, 0, 0, 1, 0, 7), nest_down),  # a nested group, the case still exchanging
+            ((hover, 0, 0, 0, 0, 1, 1), hover),  # no group yet
+            ((nest_down, 1, 0, 0, 1, 0, 7), grip),
+            ((grip, 0, 1, 1, 1, 0, 8), grip),  # the grip dwell
+            ((grip, 0, 2, 1, 1, 0, 8), loaded_hover),  # loaded above the exchanging case
+            ((grip, 0, 2, 1, 1, 1, 8), loaded),  # straight into a locked case
+            ((loaded_hover, 1, 0, 1, 0, 0, 9), wait),
+            ((wait, 0, 9, 1, 0, 0, 1), wait),
+            ((wait, 0, 9, 1, 0, 1, 1), box_in),  # the case locks
+            ((box_in, 1, 0, 1, 0, 1, 1), release),
+            ((loaded, 1, 0, 1, 0, 1, 1), release),
+            ((release, 0, 2, 0, 0, 1, nesting), empty),  # straight back down onto the next group
+            ((release, 0, 2, 0, 0, 1, waiting_queue), empty_hover),
+            ((empty, 1, 0, 0, 1, 1, 7), grip),
+            ((empty_hover, 1, 0, 0, 0, 1, 1), hover),
+        ]
+        with wp.ScopedDevice("cuda:0"):
+            cases = wp.array([case for case, _ in steps], dtype=int)
+            after = wp.zeros(len(steps), dtype=int)
+            with wp.ScopedCapture() as capture:
+                wp.launch(_robot_steps, dim=len(steps), inputs=[cases, after])
+            wp.capture_launch(capture.graph)
+            np.testing.assert_array_equal(after.numpy(), [state for _, state in steps])
 
     def test_accumulation_table_feeds_the_ifm_with_its_drive(self):
         """Run the IFM's feed with its infeed drive and stop it for a standing mass at PE-A1."""

@@ -101,8 +101,10 @@ def _actuator_observations(
     for i in range(4):
         position = wp.transform_point(cell_inverse[cell], wp.transform_get_translation(body_q[actuator_body[cell, i]]))
         observation[cell, 7 + i] = wp.dot(position, axes[i]) - actuator_zero[cell, i]
-    observation[cell, 11] = float(mode[cell] == 4)
-    observation[cell, 12] = float(mode[cell] != 4 or age[cell] >= 0.27)
+    # The KR10's loaded moves (LOADED, LOADED_HOVER) lift the group out of the nest.
+    lifting = mode[cell] == 4 or mode[cell] == 7
+    observation[cell, 11] = float(lifting)
+    observation[cell, 12] = float(not lifting or age[cell] >= 0.27)
 
 
 @wp.kernel
