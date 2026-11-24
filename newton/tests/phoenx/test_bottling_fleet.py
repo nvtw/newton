@@ -15,6 +15,7 @@ from newton.examples.phoenx._bottling_control import PlantController
 from newton.examples.phoenx._bottling_fleet import (
     FleetController,
     _observe_port,
+    _occupied_drop_offs,
     _placement_valid,
     _Transfer,
     put_away,
@@ -44,6 +45,7 @@ class TestBottlingFleet(unittest.TestCase):
             fleet.roles = {"c_U": {("C", "U")}, "ab_U": {("A", "U")}}
             fleet.missions = {}
             fleet.wrapper_ready = {}
+            fleet.putaways = []
             self.assertEqual(list(fleet._transfer_requests("c_U")), [])
             fleet.notify_wrapper_ready("U", pallet)
             fleet.notify_wrapper_ready("U", pallet)
@@ -185,6 +187,14 @@ class TestBottlingFleet(unittest.TestCase):
         self.assertEqual((fleet.shelved, fleet.putaways), (1, []))
         delta = written[id(fleet.putaway_delta)][0]
         np.testing.assert_allclose(np.array((90.0, 44.0, 0.0)) + delta, shelf_slot(0), atol=1e-5)
+        # A wrapped load standing on a drop-off at the start leaves by the same leg.
+        ports = {
+            "dropoff_U_drop": SimpleNamespace(xy=(90.0, 44.0), z=0.0),
+            "dropoff_D_drop": SimpleNamespace(xy=(90.0, 32.0), z=0.0),
+            "WL_U_pick": SimpleNamespace(xy=(80.0, 44.0), z=0.5),
+        }
+        poses = np.array([[90.1, 44.0, 0.0], [80.0, 44.0, 0.6], [90.0, 32.0, 0.0]])
+        self.assertEqual(_occupied_drop_offs(ports, poses, np.array([True, True, False])), ["dropoff_U_drop"])
         # Neighbouring shelf slots leave room for a 1.2 m pallet with its load.
         self.assertGreaterEqual(
             min(np.linalg.norm(shelf_slot(i + 1)[:2] - shelf_slot(i)[:2]) for i in range(30)), 1.6 - 1e-6
@@ -200,12 +210,12 @@ class TestBottlingFleet(unittest.TestCase):
             state = model.state()
             state.body_qd.fill_(wp.spatial_vector(0.1, 0.0, 0.0, 0.0, 0.0, 0.2))
             active = wp.array([1], dtype=int)
+            # The fixed part and a truck's fork link are never carried away.
+            movable = wp.array([1, 1, 1, 1, 0], dtype=int)
             drop = wp.array([(90.0, 44.0, 0.0)], dtype=wp.vec3)
             shift = wp.array([delta], dtype=wp.vec3)
             with wp.ScopedCapture() as capture:
-                wp.launch(
-                    put_away, model.body_count, [active, drop, shift, model.body_inv_mass, state.body_q, state.body_qd]
-                )
+                wp.launch(put_away, model.body_count, [active, drop, shift, movable, state.body_q, state.body_qd])
             wp.capture_launch(capture.graph)
             active.zero_()
             wp.capture_launch(capture.graph)

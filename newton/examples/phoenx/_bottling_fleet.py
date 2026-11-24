@@ -48,18 +48,31 @@ def shelf_slot(index):
     return np.array((_SHELF_XY[0] + column * _SHELF_PITCH, _SHELF_XY[1] - row * _SHELF_PITCH, _SHELF_Z))
 
 
+def _occupied_drop_offs(ports, poses, movable):
+    """Return the drop-off ports with a movable body in their load box."""
+    occupied = []
+    for name, port in ports.items():
+        if name.startswith("dropoff_") and name.endswith("_drop"):
+            offset = poses[movable, :3] - np.array((*port.xy, port.z))
+            inside = np.all(np.abs(offset[:, :2]) <= float(_LOAD_HALF), axis=1)
+            inside &= (offset[:, 2] > -0.05) & (offset[:, 2] <= float(_LOAD_HEIGHT))
+            if np.any(inside):
+                occupied.append(name)
+    return occupied
+
+
 @wp.kernel
 def put_away(
     active: wp.array[int],
     drop: wp.array[wp.vec3],
     delta: wp.array[wp.vec3],
-    inv_mass: wp.array[float],
+    movable: wp.array[int],
     body_q: wp.array[wp.transform],
     body_qd: wp.array[wp.spatial_vector],
 ):
-    """Carry every free body of the wrapped load on a drop-off, at rest, by ``delta``."""
+    """Carry every movable body of the wrapped load on a drop-off, at rest, by ``delta``."""
     b = wp.tid()
-    if active[0] == 0 or inv_mass[b] == 0.0:
+    if active[0] == 0 or movable[b] == 0:
         return
     pose = body_q[b]
     offset = wp.transform_get_translation(pose) - drop[0]
@@ -214,6 +227,11 @@ class FleetController:
         self.putaway_active = wp.zeros(1, dtype=int, device=model.device)
         self.putaway_drop = wp.zeros(1, dtype=wp.vec3, device=model.device)
         self.putaway_delta = wp.zeros(1, dtype=wp.vec3, device=model.device)
+        # The put-away carries free product and pallets, never the plant's own trucks.
+        movable = (model.body_inv_mass.numpy() > 0.0) & ~np.array(
+            [label.startswith(prefix) for label in model.body_label]
+        )
+        self.putaway_movable = wp.array(movable.astype(np.int32), dtype=int, device=model.device)
         if transport is not None:
             data = json.loads((root.parent / "palletflow_model.json").read_text())
             self.navigation = source_model.from_json(
@@ -225,6 +243,10 @@ class FleetController:
             self.traffic = traffic.Traffic()
             for truck in self.driver.trucks:
                 truck.node = self.homes[truck.name]
+            # The plant starts in production: a wrapped load may already stand on a
+            # drop-off, waiting for the same reach truck.
+            for name in _occupied_drop_offs(self.navigation.ports, model.body_q.numpy(), movable):
+                self.putaways.append((_PUTAWAY_S, name))
 
     def station_busy(self, name):
         """Keep palletizing inhibited until the exchange truck has withdrawn."""
@@ -322,6 +344,7 @@ class FleetController:
             or (pallet is not None and src.pallet != pallet)
             or (empty and not src.empty)
             or not dst.clear
+            or any(destination == port for _, port in self.putaways)
         ):
             return None
         for mission in self.missions.values():
@@ -494,7 +517,7 @@ class FleetController:
                     self.putaway_active,
                     self.putaway_drop,
                     self.putaway_delta,
-                    self.model.body_inv_mass,
+                    self.putaway_movable,
                     self.state.body_q,
                     self.state.body_qd,
                 ],
