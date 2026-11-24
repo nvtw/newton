@@ -567,9 +567,8 @@ class SolverPhoenX(SolverBase):
                 and split only overflow constraints. Requires a single CUDA
                 world, unrolled dispatch, batch size one, and maximal PGS
                 joints when joints are present.
-            partitioner_algorithm: ``"greedy"`` (default),
-                ``"endpoint_owner"`` (single-world mass splitting only), or
-                ``"luby_fixed"`` (single-world only).
+            partitioner_algorithm: ``"greedy"`` (default) or
+                ``"endpoint_owner"`` (single-world mass splitting only).
             joint_coloring_priority: Prioritize joints over contacts in
                 priority-based coloring. Defaults to ``False`` because
                 changing the solve order can reduce convergence of joint

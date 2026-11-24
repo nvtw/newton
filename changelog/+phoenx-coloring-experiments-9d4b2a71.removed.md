@@ -1,0 +1,1 @@
+Remove the broken `"luby_fixed"` PhoenX partitioner and the experimental `PhoenXWorld` coloring arguments `symmetric_color_sweep`, `warm_start_invalidate_period`, `warm_start_rotate_skip_color`, `warm_start_rotate_skip_width`, `capture_while_greedy_coloring` and `speculative_coloring`; their defaults are now fixed.

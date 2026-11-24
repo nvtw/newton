@@ -19,7 +19,6 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     _priority_is_greater,
 )
 from newton._src.solvers.phoenx.graph_coloring.graph_coloring_incremental import IncrementalContactPartitioner
-from newton._src.solvers.phoenx.graph_coloring.luby_fixed import FixedIterationLubyPartitioner
 from newton._src.solvers.phoenx.simulation_kernels import _cost_biased_priority
 from newton._src.solvers.phoenx.tests.test_graph_coloring_speculative import _make_elements
 from newton._src.solvers.phoenx.tests.test_joint_row_capacity import _make_model
@@ -51,8 +50,8 @@ class TestJointColoringPriority(unittest.TestCase):
         """Preserve convergent default ordering and make joint priority explicit."""
         if not wp.is_cuda_available():
             self.skipTest("CUDA required")
-        for options, expected in (({}, 0), ({"joint_coloring_priority": True}, 255)):
-            with self.subTest(options=options):
+        for priority, expected in ((False, 0), (True, 255)):
+            with self.subTest(priority=priority):
                 model = _make_model(["hinge", "drive"])
                 solver = newton.solvers.SolverPhoenX(
                     model,
@@ -67,8 +66,8 @@ class TestJointColoringPriority(unittest.TestCase):
                     mass_splitting_batch_size=1,
                     max_colored_partitions=9,
                     partitioner_algorithm="endpoint_owner",
-                    **options,
                 )
+                solver.world.joint_coloring_priority = priority
                 state = model.state()
                 solver.step(state, state, model.control(), None, 1.0e-6)
                 cids = solver._joint_constraints.joint_idx_to_cid.numpy()
@@ -112,30 +111,24 @@ class TestJointColoringPriority(unittest.TestCase):
         columns = contact_column_container_zeros(contacts, device=device)
         contact_counts = wp.array([1, 128, 254, 255, 300] * 4, dtype=wp.int32, device=device)
         wp.launch(_set_counts, dim=contacts, inputs=[columns, contact_counts], device=device)
-        for algorithm in ("jp", "greedy", "speculative", "endpoint_owner", "luby_fixed"):
+        for algorithm in ("jp", "greedy", "speculative", "endpoint_owner"):
             with self.subTest(algorithm=algorithm):
-                if algorithm == "luby_fixed":
-                    partitioner = FixedIterationLubyPartitioner(
-                        size, size + 1, device=device, max_colored_partitions=joints
-                    )
-                else:
-                    partitioner = IncrementalContactPartitioner(
-                        size,
-                        size + 1,
-                        device=device,
-                        enable_warm_start=False,
-                        max_colored_partitions=joints,
-                        endpoint_owner_coloring=algorithm == "endpoint_owner",
-                    )
+                partitioner = IncrementalContactPartitioner(
+                    size,
+                    size + 1,
+                    device=device,
+                    enable_warm_start=False,
+                    max_colored_partitions=joints,
+                    endpoint_owner_coloring=algorithm == "endpoint_owner",
+                )
                 partitioner.set_costs_from_contacts(
                     joints, wp.array([contacts], dtype=wp.int32, device=device), columns
                 )
-                if algorithm != "luby_fixed":
-                    partitioner.set_speculative_coloring(algorithm == "speculative")
+                partitioner.set_speculative_coloring(algorithm == "speculative")
                 previous = None
                 for _ in range(3):
                     partitioner.reset(elements, count)
-                    if algorithm in ("jp", "luby_fixed"):
+                    if algorithm == "jp":
                         partitioner.build_csr()
                     elif algorithm == "endpoint_owner":
                         partitioner.build_csr_endpoint_owner()

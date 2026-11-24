@@ -450,37 +450,6 @@ class Example:
         shape_body_phoenx = np.where(shape_body_np < 0, 0, shape_body_np + 1)
         self._shape_body = wp.array(shape_body_phoenx, dtype=wp.int32, device=self.device)
 
-        # Drift-test env knobs (all opt-in):
-        #   PHOENX_DRIFT_NO_WARM_START=1  -> disable cross-frame
-        #     warm-start coloring entirely (full cold-start).
-        #   PHOENX_DRIFT_SYMMETRIC=1      -> enable cyclic-shift colour
-        #     sweep (experimental; on its own it doesn't fix drift).
-        #   PHOENX_DRIFT_INVALIDATE_EVERY=<N> -> rebuild the warm-start
-        #     coloring from scratch every N frames. ``0`` (default)
-        #     disables. ``2`` fixes Kapla drift at ~5% perf cost; higher
-        #     values are cheaper but leak drift back in.
-        #   PHOENX_DRIFT_ROTATE_SKIP=1    -> rotate-skip one cached
-        #     colour each step (~1/num_colors of cold-start cost).
-        #     Default ON. Cheap drift-mitigation alternative to full
-        #     periodic invalidate.
-        #   PHOENX_DRIFT_SOR              -> override ``sor_boost``.
-        enable_warm_start_coloring_env = os.environ.get("PHOENX_DRIFT_NO_WARM_START", "0")
-        enable_warm_start = enable_warm_start_coloring_env == "0"
-        symmetric_sweep = os.environ.get("PHOENX_DRIFT_SYMMETRIC", "0") == "1"
-        # Defaults (period=4 + rotate_skip=True) match the lowest-cost
-        # config we found that holds drift below cold-start levels at
-        # full warm-start FPS on this scene.
-        invalidate_every = int(os.environ.get("PHOENX_DRIFT_INVALIDATE_EVERY", "4"))
-        rotate_skip = os.environ.get("PHOENX_DRIFT_ROTATE_SKIP", "1") == "1"
-        sor_boost_env = os.environ.get("PHOENX_DRIFT_SOR")
-        sor_boost = float(sor_boost_env) if sor_boost_env else 1.0
-        print(
-            f"[PhoenX KaplaTower] drift_knobs: warm_start={enable_warm_start} "
-            f"symmetric_sweep={symmetric_sweep} invalidate_every={invalidate_every} "
-            f"rotate_skip={rotate_skip} sor_boost={sor_boost}",
-            flush=True,
-        )
-
         self.world = PhoenXWorld(
             bodies=self.bodies,
             constraints=self.constraints,
@@ -495,19 +464,6 @@ class Example:
             max_colored_partitions=MASS_SPLITTING_MAX_COLORED_PARTITIONS,
             mass_splitting_unrolled=True,
             mass_splitting_batch_size=8,
-            enable_warm_start_coloring=enable_warm_start,
-            symmetric_color_sweep=symmetric_sweep,
-            warm_start_invalidate_period=invalidate_every,
-            warm_start_rotate_skip_color=rotate_skip,
-            warm_start_rotate_skip_width=int(os.environ.get("PHOENX_DRIFT_ROTATE_WIDTH", "1")),
-            capture_while_greedy_coloring=(os.environ.get("PHOENX_DRIFT_CAPTURE_WHILE", "1") == "1"),
-            speculative_coloring=(os.environ.get("PHOENX_DRIFT_SPECULATIVE", "1") == "1"),
-            max_greedy_outer_iters=(
-                int(os.environ.get("PHOENX_DRIFT_MAX_GREEDY_ITERS"))
-                if os.environ.get("PHOENX_DRIFT_MAX_GREEDY_ITERS")
-                else None
-            ),
-            sor_boost=sor_boost,
             sleeping_velocity_threshold=SLEEPING_VELOCITY_THRESHOLD if ENABLE_SLEEPING else 0.0,
             sleeping_frames_required=SLEEPING_FRAMES_REQUIRED,
             device=self.device,

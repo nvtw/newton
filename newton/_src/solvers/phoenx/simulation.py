@@ -177,9 +177,6 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_incremental import
     MAX_COLORS,
     IncrementalContactPartitioner,
 )
-from newton._src.solvers.phoenx.graph_coloring.luby_fixed import (
-    FixedIterationLubyPartitioner,
-)
 from newton._src.solvers.phoenx.islands.island_builder import (
     MAX_BODIES_PER_INTERACTION,
     UnionFindIslandBuilder,
@@ -432,17 +429,6 @@ class PhoenXWorld:
         joint_coloring_priority: bool = False,
         max_greedy_outer_iters: int | None = None,
         enable_warm_start_coloring: bool = True,
-        symmetric_color_sweep: bool = False,
-        # Defaults tuned for contact-heavy rigid scenes (Kapla, stacks).
-        # cache-stir knobs break the warm-start colouring lock-in;
-        # capture_while + speculative are perf wins with no quality
-        # regression. See the matching ``set_*`` docstrings on the
-        # partitioner.
-        warm_start_invalidate_period: int | None = None,
-        warm_start_rotate_skip_color: bool | None = None,
-        warm_start_rotate_skip_width: int = 1,
-        capture_while_greedy_coloring: bool = True,
-        speculative_coloring: bool = True,
         sor_boost: float = 1.0,
         enable_column_timers: bool = False,
         sleeping_velocity_threshold: float = 0.0,
@@ -517,7 +503,7 @@ class PhoenXWorld:
                 mass-copy partition for small CUDA rigid mechanisms. Zero keeps
                 the existing regular/overflow schedule. Requires one world,
                 ordinary point contacts, block joints, and no packed contacts,
-                sleeping, symmetric sweeps, deformables, or unrolled dispatch.
+                sleeping, deformables, or unrolled dispatch.
             mass_splitting_overflow_only: Experimental single-world rigid path
                 that updates regular colors directly and splits only overflow
                 contacts and PGS joints. Requires the unrolled dispatcher, one
@@ -528,10 +514,8 @@ class PhoenXWorld:
                 across the PGS contact iterations, or ``None`` for the dispatcher
                 default. Set by SolverPhoenX.
             partitioner_algorithm: ``"greedy"`` (default) constructs the
-                interaction graph, ``"endpoint_owner"`` uses adjacency-free
-                endpoint elections for single-world mass splitting, and
-                ``"luby_fixed"`` uses fixed launches with overflow on
-                saturation.
+                interaction graph; ``"endpoint_owner"`` uses adjacency-free
+                endpoint elections for single-world mass splitting.
             joint_coloring_priority: Prefer joints in priority-based graph
                 coloring. Defaults to ``False`` to preserve the established
                 solve order; priority can worsen convergence of joint loops.
@@ -896,13 +880,12 @@ class PhoenXWorld:
             or contact_friction_model != "point"
             or sleeping_velocity_threshold > 0.0
             or mass_splitting_unrolled
-            or symmetric_color_sweep
             or sor_boost != 1.0
         ):
             raise ValueError(
                 "mass_splitting_color_group_size requires CUDA single-world rigid "
                 "mass splitting without packed contacts, deformables, sleeping, "
-                "symmetric sweeps, or unrolled mass splitting; sor_boost must be 1.0"
+                "or unrolled mass splitting; sor_boost must be 1.0"
             )
         # Both schedules are pure performance choices: ``None`` enables them
         # wherever they apply, ``True`` insists and reports why one cannot.
@@ -920,7 +903,7 @@ class PhoenXWorld:
             )
             and contact_friction_model == "point"
         )
-        island_eligible = rigid_single_world and not mass_splitting and not symmetric_color_sweep
+        island_eligible = rigid_single_world and not mass_splitting
         prepare_eligible = rigid_single_world and not mass_splitting_unrolled
         if island_parallel_iterations is None:
             island_parallel_iterations = island_eligible
@@ -1147,10 +1130,6 @@ class PhoenXWorld:
         self._colored_singleton_contact_lanes = (
             singleton_eligible if colored_singleton_contact_lanes is None else bool(colored_singleton_contact_lanes)
         )
-        if warm_start_invalidate_period is None:
-            warm_start_invalidate_period = 4 if _has_dynamic_rigid_rows else 0
-        if warm_start_rotate_skip_color is None:
-            warm_start_rotate_skip_color = _has_dynamic_rigid_rows
 
         # Warm-start coloring only feeds the single-world greedy build;
         # the per-world multi-world path uses a different kernel that
@@ -1172,35 +1151,15 @@ class PhoenXWorld:
                 device=self.device,
             )
             self._partitioner.set_locality_family(self._element_family)
-            self._partitioner.set_symmetric_sweep(bool(symmetric_color_sweep))
-            self._partitioner.set_warm_start_invalidate_period(int(warm_start_invalidate_period))
-            self._partitioner.set_warm_start_rotate_skip(
-                bool(warm_start_rotate_skip_color),
-                width=int(warm_start_rotate_skip_width),
-            )
-            self._partitioner.set_capture_while_greedy(bool(capture_while_greedy_coloring))
-            self._partitioner.set_speculative_coloring(bool(speculative_coloring))
-        elif self.partitioner_algorithm == "luby_fixed":
-            if step_layout != "single_world":
-                # Multi-world path reads ``_adjacency_section_end_indices``
-                # etc. straight from the partitioner because
-                # :class:`IncrementalContactPartitioner.reset` populates
-                # them eagerly. The Luby variant builds adjacency lazily
-                # in :meth:`build_csr` and doesn't expose a per-world
-                # coloring kernel yet.
-                raise NotImplementedError(
-                    "partitioner_algorithm='luby_fixed' currently requires step_layout='single_world'."
-                )
-            self._partitioner = FixedIterationLubyPartitioner(
-                max_num_interactions=self._constraint_capacity,
-                max_num_nodes=max(1, self.num_bodies + self.num_particles),
-                max_colored_partitions=self.max_colored_partitions,
-                device=self.device,
-            )
+            # Periodic and rotating warm-start invalidation break the coloring
+            # lock-in that biases stacks of moving rigid rows.
+            self._partitioner.set_warm_start_invalidate_period(4 if _has_dynamic_rigid_rows else 0)
+            self._partitioner.set_warm_start_rotate_skip(_has_dynamic_rigid_rows)
+            self._partitioner.set_capture_while_greedy(True)
+            self._partitioner.set_speculative_coloring(True)
         else:
             raise ValueError(
-                f"Unknown partitioner_algorithm '{self.partitioner_algorithm}'. "
-                "Expected one of: 'greedy', 'endpoint_owner', 'luby_fixed'."
+                f"Unknown partitioner_algorithm '{self.partitioner_algorithm}'. Expected 'greedy' or 'endpoint_owner'."
             )
 
         # Mass-splitting data plane. Always allocated (sentinel-sized
@@ -2936,12 +2895,9 @@ class PhoenXWorld:
 
         The local drive snapshot and the impulse refresh read no velocity the
         fused kernel writes, so they run first. The sweep's own
-        ``begin_sweep`` resets the colour cursor; another one here is needed
-        only to advance a symmetric sweep direction.
+        ``begin_sweep`` resets the colour cursor.
         """
         entries = self._temporal_contact_body_entries
-        if self._partitioner._symmetric_sweep:
-            self._partitioner.begin_sweep()
         entries.refresh_cached_warm_start(
             self._contact_cols,
             self._contact_container,
@@ -3009,8 +2965,6 @@ class PhoenXWorld:
         }
         head = get_singleworld_kernel(phase="joint_project", fused=False, **options)
         tail = get_singleworld_kernel(phase="joint_project", fused=True, **options)
-        # This projection belongs to the current sweep; do not advance its
-        # configured symmetric direction a second time.
         island_schedule = None
         if self._regular_pgs_active_this_step:
             island_schedule = getattr(self._dispatcher, "_island_schedule", None)
