@@ -75,7 +75,8 @@ class TestFrictionSliding(unittest.TestCase):
                 solver.step(state, state, control, contacts, dt, observables=observables)
                 pose, velocity = state.body_q.numpy().copy(), state.body_qd.numpy().copy()
                 count = int(contacts.rigid_contact_count.numpy()[0])
-                force = observables.contact_f.numpy()[:count, :3]
+                wrench = observables.contact_f.numpy()[:count]
+                force = wrench[:, :3]
                 normal = contacts.rigid_contact_normal.numpy()[:count]
                 body0 = shape_body[contacts.rigid_contact_shape0.numpy()[:count]]
                 body1 = shape_body[contacts.rigid_contact_shape1.numpy()[:count]]
@@ -97,11 +98,20 @@ class TestFrictionSliding(unittest.TestCase):
                 local = np.concatenate(
                     (contacts.rigid_contact_point0.numpy()[:count], contacts.rigid_contact_point1.numpy()[:count])
                 )[active]
-                quat = pose[owners, 3:]
-                lever = local + 2 * np.cross(quat[:, :3], np.cross(quat[:, :3], local) + quat[:, 3:] * local)
+
+                def world_lever(points, bodies):
+                    # Body origins are the COMs; static points are already in world space.
+                    quat = np.where(bodies[:, None] >= 0, pose[bodies, 3:], [0.0, 0.0, 0.0, 1.0])
+                    return points + 2 * np.cross(quat[:, :3], np.cross(quat[:, :3], points) + quat[:, 3:] * points)
+
+                lever = world_lever(local, owners)
+                # The reported torque about body0 adds the column's torsional and
+                # rolling friction moment to the point force's lever moment.
+                lever0 = world_lever(contacts.rigid_contact_point0.numpy()[:count], body0)
+                free = wrench[:, 3:] - np.cross(lever0, force)
                 total, torque = np.zeros((4, 3)), np.zeros((4, 3))
                 np.add.at(total, owners, forces_on_body)
-                np.add.at(torque, owners, np.cross(lever, forces_on_body))
+                np.add.at(torque, owners, np.cross(lever, forces_on_body) + np.concatenate((free, -free))[active])
                 return pose, velocity, total, torque
 
             for _ in range(round(0.5 / dt)):

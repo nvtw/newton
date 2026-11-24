@@ -19,6 +19,10 @@ from newton._src.solvers.phoenx.body import (
     BodyContainer,
     sym6_from_mat33,
 )
+from newton._src.solvers.phoenx.constraints.constraint_contact import (
+    ContactColumnContainer,
+    contact_get_contact_count,
+)
 from newton._src.solvers.phoenx.constraints.constraint_container import (
     ConstraintContainer,
     write_float,
@@ -28,6 +32,8 @@ from newton._src.solvers.phoenx.constraints.contact_container import (
     ContactContainer,
     cc_get_normal,
     cc_get_normal_lambda,
+    cc_get_r0,
+    cc_get_r1,
     cc_get_tangent1,
     cc_get_tangent1_lambda,
     cc_get_tangent2_lambda,
@@ -36,6 +42,7 @@ from newton._src.solvers.phoenx.helpers.math_helpers import rotate_inertia
 
 __all__ = [
     "_accumulate_contact_impulse_kernel",
+    "_accumulate_contact_moment_kernel",
     "_accumulate_temporal_contact_impulse_kernel",
     "_apply_joint_drive_control_kernel",
     "_apply_joint_forces_kernel",
@@ -590,6 +597,35 @@ def _accumulate_contact_impulse_kernel(
     impulse_sum[k] = impulse_sum[k] + _contact_impulse(cc, k)
 
 
+@wp.func
+def _contact_free_moment(cols: ContactColumnContainer, column: wp.int32) -> wp.vec3f:
+    """Contact ``column``'s torsional and rolling friction moment impulse on its body2, per contact row.
+
+    The column solves one free moment for all its rows; each row reports an equal share.
+    """
+    if column < wp.int32(0) or column >= cols.angular_impulse.shape[0]:
+        return wp.vec3f(0.0, 0.0, 0.0)
+    count = contact_get_contact_count(cols, column)
+    if count <= wp.int32(0):
+        return wp.vec3f(0.0, 0.0, 0.0)
+    return cols.angular_impulse[column] / wp.float32(count)
+
+
+@wp.kernel(enable_backward=False)
+def _accumulate_contact_moment_kernel(
+    rigid_contact_count: wp.array[wp.int32],
+    cid_of_contact: wp.array[wp.int32],
+    contact_offset: wp.int32,
+    cols: ContactColumnContainer,
+    moment_sum: wp.array[wp.vec3f],
+):
+    """Add each contact's share of its column's substep friction moment to its step total."""
+    k = wp.tid()
+    if k >= _active_contact_count(rigid_contact_count, moment_sum.shape[0]) or cid_of_contact[k] < wp.int32(0):
+        return
+    moment_sum[k] = moment_sum[k] + _contact_free_moment(cols, cid_of_contact[k] - contact_offset)
+
+
 @wp.kernel(enable_backward=False)
 def _accumulate_temporal_contact_impulse_kernel(
     rigid_contact_count: wp.array[wp.int32],
@@ -615,6 +651,9 @@ def _contact_impulse_to_force_wrapper_kernel(
     cid_of_contact: wp.array[wp.int32],
     cc: ContactContainer,
     impulse_sum: wp.array[wp.vec3f],
+    moment_sum: wp.array[wp.vec3f],
+    contact_offset: wp.int32,
+    cols: ContactColumnContainer,
     idt: wp.float32,
     sort_perm: wp.array[wp.int32],
     has_perm: wp.int32,
@@ -623,16 +662,18 @@ def _contact_impulse_to_force_wrapper_kernel(
     # out
     force_out: wp.array[wp.spatial_vector],
 ):
-    """Pack contact impulses into ``Contacts.force``.
+    """Pack contact wrenches into ``Contacts.force``.
 
-    ``impulse_sum`` holds each contact's impulse summed over the step's
-    substeps when the step recorded it, and ``idt`` is then the inverse
-    step ``dt``; otherwise it is empty and the last substep's lambdas are
-    divided by its ``dt``. Re-permutes from sorted_k (compound-body
-    grouping) to newton narrow-phase order via ``sort_perm``. Sign:
-    container lambdas are impulse on shape1; Newton stores force on
-    shape0, so we negate before writing and restore the narrow-phase
-    endpoint orientation when compound grouping reversed it.
+    ``impulse_sum`` and ``moment_sum`` hold each contact's impulse and
+    friction-moment share summed over the step's substeps when the step
+    recorded them, and ``idt`` is then the inverse step ``dt``; otherwise
+    they are empty and the last substep's impulses are divided by its
+    ``dt``. The torque is about the body's COM at the last substep and
+    includes the column's torsional and rolling friction moment. Re-permutes
+    from sorted_k (compound-body grouping) to newton narrow-phase order via
+    ``sort_perm``. Sign: container impulses act on shape1; Newton stores the
+    wrench on shape0, so we negate before writing and restore the
+    narrow-phase endpoint orientation when compound grouping reversed it.
     """
     k = wp.tid()
     # ``sort_perm`` may be a size-1 placeholder when ``has_perm == 0``, so
@@ -641,12 +682,16 @@ def _contact_impulse_to_force_wrapper_kernel(
         return
     if impulse_sum.shape[0] > 0:
         f = -impulse_sum[k] * idt
+        moment = -moment_sum[k] * idt
     else:
         f = -_contact_impulse(cc, k) * idt
+        moment = -_contact_free_moment(cols, cid_of_contact[k] - contact_offset) * idt
+    lever = cc_get_r0(cc, k)
+    out_k = k
     if has_perm != 0:
         out_k = sort_perm[k]
         if sorted_shape0[k] != shape0[out_k]:
             f = -f
-    else:
-        out_k = k
-    force_out[out_k] = wp.spatial_vector(f, wp.vec3f(0.0, 0.0, 0.0))
+            moment = -moment
+            lever = cc_get_r1(cc, k)
+    force_out[out_k] = wp.spatial_vector(f, wp.cross(lever, f) + moment)

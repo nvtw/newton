@@ -2425,8 +2425,10 @@ class SolverPhoenX(SolverBase):
         while the per-point friction distribution is a reporting convention.
         Request forces before stepping to enable this optional accounting.
 
-        The legacy soft scheme reports point forces with zero torque. Both
-        schemes restore the original collision-pipeline contact ordering.
+        The soft scheme reports each point force with its torque about the
+        body's COM at the last substep; each row also carries an equal share
+        of its column's torsional and rolling friction moment. Both schemes
+        restore the original collision-pipeline contact ordering.
         """
         if contacts.force is None:
             raise ValueError(
@@ -2477,10 +2479,11 @@ class SolverPhoenX(SolverBase):
             sorted_shape0 = contacts.rigid_contact_shape0
             has_perm = wp.int32(0)
         impulse_sum = self.world._contact_impulse_sum
+        moment_sum = self.world._contact_moment_sum
         if self.world._record_contact_impulses:
             idt = 1.0 / self._last_dt
         else:
-            impulse_sum = self._empty_impulse_sum
+            impulse_sum = moment_sum = self._empty_impulse_sum
             idt = float(self.world.substeps) / self._last_dt
         force.zero_()
         wp.launch(
@@ -2491,6 +2494,9 @@ class SolverPhoenX(SolverBase):
                 self.world._cid_of_contact_cur,
                 cc,
                 impulse_sum,
+                moment_sum,
+                wp.int32(self.world._contact_offset),
+                self.world._contact_cols,
                 wp.float32(idt),
                 sort_perm,
                 has_perm,

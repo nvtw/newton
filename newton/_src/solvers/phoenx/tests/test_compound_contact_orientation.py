@@ -118,11 +118,10 @@ class TestCompoundContactOrientation(unittest.TestCase):
                 solver.step(state, state, model.control(), contacts, 0.001)
                 solver.update_contacts(contacts)
                 forces = contacts.force.numpy()[:count].copy()
-                if scheme == "tgs":
-                    # Compare moments about a common origin before reversing endpoints.
-                    bodies = model.shape_body.numpy()[contacts.rigid_contact_shape0.numpy()[:count]]
-                    centers = state.body_q.numpy()[bodies, :3]
-                    forces[:, 3:] += np.cross(centers, forces[:, :3])
+                # Compare moments about a common origin before reversing endpoints.
+                bodies = model.shape_body.numpy()[contacts.rigid_contact_shape0.numpy()[:count]]
+                centers = state.body_q.numpy()[bodies, :3]
+                forces[:, 3:] += np.cross(centers, forces[:, :3])
                 if reverse:
                     forces[1::2] *= -1
                 samples.append((state.body_q.numpy(), state.body_qd.numpy(), forces))

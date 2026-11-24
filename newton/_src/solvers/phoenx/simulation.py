@@ -17,6 +17,7 @@ from newton._src.sim.enums import JointType
 from newton._src.solvers.phoenx import diagnostics
 from newton._src.solvers.phoenx.adapter_kernels import (
     _accumulate_contact_impulse_kernel,
+    _accumulate_contact_moment_kernel,
     _accumulate_substep_velocity_kernel,
     _accumulate_temporal_contact_impulse_kernel,
 )
@@ -716,6 +717,7 @@ class PhoenXWorld:
         #: Sum each contact's impulse over the step's substeps, for reported contact forces.
         self._record_contact_impulses = False
         self._contact_impulse_sum = None
+        self._contact_moment_sum = None
         self.solver_iterations = int(solver_iterations)
         if self.solver_iterations < 1:
             raise ValueError(f"solver_iterations must be >= 1 (got {self.solver_iterations})")
@@ -3502,6 +3504,7 @@ class PhoenXWorld:
         )
         if record_impulses:
             self._contact_impulse_sum.zero_()
+            self._contact_moment_sum.zero_()
         for k in range(self.substeps):
             self._current_substep_index = k
             if picking is not None:
@@ -4565,6 +4568,7 @@ class PhoenXWorld:
         self._record_contact_impulses = bool(enabled) and self.rigid_contact_max > 0
         if self._record_contact_impulses and self._contact_impulse_sum is None:
             self._contact_impulse_sum = wp.zeros(self.rigid_contact_max, dtype=wp.vec3f, device=self.device)
+            self._contact_moment_sum = wp.zeros(self.rigid_contact_max, dtype=wp.vec3f, device=self.device)
 
     def _accumulate_contact_impulses(self, contacts, *, temporal_only: bool = False) -> None:
         """Add the substep's rigid contact impulses to their step totals."""
@@ -4592,6 +4596,19 @@ class PhoenXWorld:
             outputs=[self._contact_impulse_sum],
             device=self.device,
         )
+        if self.max_contact_columns > 0 and self._contact_cols.angular_impulse.shape[0] > 0:
+            wp.launch(
+                _accumulate_contact_moment_kernel,
+                dim=self.rigid_contact_max,
+                inputs=[
+                    contacts.rigid_contact_count,
+                    self._cid_of_contact_cur,
+                    self._contact_offset,
+                    self._contact_cols,
+                ],
+                outputs=[self._contact_moment_sum],
+                device=self.device,
+            )
 
     def _enable_side_witnesses(self, shape_transform: wp.array, shape_scale: wp.array) -> None:
         """Keep the witnesses of contacts on cylinder sides on their axes, see :func:`contact_side_witness`."""

@@ -53,6 +53,7 @@ import newton
 from newton._src.solvers.phoenx.adapter_kernels import (
     _contact_impulse_to_force_wrapper_kernel,
 )
+from newton._src.solvers.phoenx.constraints.constraint_contact import contact_column_container_zeros
 from newton._src.solvers.phoenx.constraints.contact_container import (
     contact_container_zeros,
     contact_tile_rows_numpy,
@@ -204,6 +205,9 @@ class TestContactImpulseToForceKernel(unittest.TestCase):
                 cid_of_contact,
                 cc,
                 wp.empty(0, dtype=wp.vec3f, device=device),
+                wp.empty(0, dtype=wp.vec3f, device=device),
+                wp.int32(0),
+                contact_column_container_zeros(1, device=device),
                 wp.float32(idt),
                 sort_perm_wp,
                 wp.int32(has_perm),
@@ -313,6 +317,9 @@ class TestContactImpulseToForceKernel(unittest.TestCase):
                 wp.zeros(n, dtype=wp.int32, device=device),
                 cc,
                 wp.empty(0, dtype=wp.vec3f, device=device),
+                wp.empty(0, dtype=wp.vec3f, device=device),
+                wp.int32(0),
+                contact_column_container_zeros(1, device=device),
                 wp.float32(idt),
                 sort_perm,
                 wp.int32(0),
