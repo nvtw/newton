@@ -215,6 +215,49 @@ class TestTemporalLayouts(unittest.TestCase):
                     np.testing.assert_allclose(support, weight, rtol=2.0e-3)
 
 
+    def test_contact_substeps_sweep_in_forward_order(self):
+        """Each temporal contact substep runs its single sweep in forward color order.
+
+        Alternating the order across contact substeps, as sweeps within one substep do,
+        threw the masonry arcade apart on the multi-world schedulers.
+        """
+        with wp.ScopedDevice("cuda:0"):
+            builder = newton.ModelBuilder()
+            for _ in range(2):
+                builder.begin_world()
+                box = builder.add_body(xform=wp.transform((0, 0, 0.1), wp.quat_identity()))
+                builder.add_shape_box(box, hx=0.1, hy=0.1, hz=0.1)
+                builder.end_world()
+            builder.add_ground_plane()
+            model = builder.finalize()
+            for scheduler in ("fast_tail", "block_world"):
+                with self.subTest(scheduler=scheduler):
+                    solver = SolverPhoenX(
+                        model,
+                        step_layout="multi_world",
+                        multi_world_scheduler=scheduler,
+                        solver_iterations=4,
+                        temporal_iterations=True,
+                        sleeping_velocity_threshold=0,
+                    )
+                    world = solver.world
+                    orders = []
+                    name = "_iterate_main_block_world" if scheduler == "block_world" else "_iterate_main"
+                    original = getattr(world, name)
+
+                    def record(iteration, *args, original=original, orders=orders):
+                        orders.append(iteration)
+                        return original(iteration, *args)
+
+                    state, control = model.state(), model.control()
+                    contacts = model._collision_pipeline.contacts()
+                    with patch.object(world, name, record):
+                        solver.collide(state, contacts, dt=1 / 60)
+                        solver.step(state, state, control, contacts, 1 / 60)
+                    self.assertEqual(len(orders), 4 * world.substeps)
+                    self.assertEqual(set(orders), {0})
+
+
 @unittest.skipUnless(wp.is_cuda_available(), "CUDA device required")
 class TestTemporalStiffMaterial(unittest.TestCase):
     def test_stiff_box_rests_when_substeps_reuse_rows(self):

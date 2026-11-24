@@ -2854,6 +2854,16 @@ class PhoenXWorld:
         if self._temporal_owned_contacts():
             self._reapply_owned_contact_impulses()
 
+    def _sweep_order(self, iteration: int) -> int:
+        """Color-order index of biased sweep ``iteration``; odd indices sweep the colors in reverse.
+
+        Sweeps alternate their order within a substep. A temporal sweep is a
+        contact substep with a single sweep, which runs in forward order like
+        every substep's first sweep; alternating across contact substeps throws
+        stiff masonry arches apart.
+        """
+        return 0 if self.temporal_iterations else iteration
+
     def _temporal_close_sweep(self, iteration: int) -> None:
         """Close biased sweep ``iteration``; see :meth:`_temporal_enter_sweep`.
 

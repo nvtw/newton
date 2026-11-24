@@ -137,12 +137,14 @@ class MultiWorldMassSplittingDispatcher:
             # Regular colors and the overflow average update physical body storage.
             for iteration in range(w.solver_iterations):
                 w._temporal_enter_sweep(iteration, idt)
-                w._multiworld_mass_splitting_direct_regular("iterate", idt, reverse_colors=bool(iteration % 2))
+                w._multiworld_mass_splitting_direct_regular(
+                    "iterate", idt, reverse_colors=bool(w._sweep_order(iteration) % 2)
+                )
                 w._temporal_close_sweep(iteration)
         else:
             for iteration in range(w.solver_iterations):
                 w._temporal_enter_split_sweep(iteration, idt)
-                w._multiworld_mass_splitting_sweep("iterate", idt, reverse_colors=bool(iteration % 2))
+                w._multiworld_mass_splitting_sweep("iterate", idt, reverse_colors=bool(w._sweep_order(iteration) % 2))
                 w._mass_splitting_average_and_broadcast(inv_dt)
                 # Divide contact sweeps into temporal blocks when requested. A
                 # complete PCR pass transfers intermediate contact impulses through

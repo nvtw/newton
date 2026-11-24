@@ -130,7 +130,7 @@ class SingleWorldMassSplittingDispatcher:
                 iterate_fused,
                 idt,
                 contact_container=w._contact_container_solve,
-                reverse_colors=bool(iteration % 2),
+                reverse_colors=bool(w._sweep_order(iteration) % 2),
             )
             w._mass_splitting_average_and_broadcast(inv_dt)
             # Divide contact sweeps into temporal blocks when requested. A

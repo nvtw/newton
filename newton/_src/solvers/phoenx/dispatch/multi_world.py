@@ -73,9 +73,9 @@ class MultiWorldDispatcher:
                 for iteration in range(w.solver_iterations):
                     w._temporal_enter_sweep(iteration, idt)
                     if block_world:
-                        w._iterate_main_block_world(iteration)
+                        w._iterate_main_block_world(w._sweep_order(iteration))
                     else:
-                        w._iterate_main(iteration)
+                        w._iterate_main(w._sweep_order(iteration))
                     if direct_enabled:
                         w._project_direct_after_sweep(direct, iteration, idt)
                     w._temporal_close_sweep(iteration)

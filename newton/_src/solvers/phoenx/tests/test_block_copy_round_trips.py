@@ -46,6 +46,7 @@ def make_world(requires_projection=False, solver_iterations=1, direct_joint_proj
         _refresh_prepare_this_substep=Mock(return_value=True),
         _active_velocity_iterations=2,
         temporal_iterations=False,
+        _sweep_order=lambda iteration: iteration,
     )
     for name in (
         "_temporal_enter_split_sweep",

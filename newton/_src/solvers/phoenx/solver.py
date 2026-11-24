@@ -149,8 +149,8 @@ def _resolve_auto_step_layout(
         and joint_mode == "maximal_direct"
     )
     if step_layout == "auto":
-        # Maximal PGS joints run only on the single-world scheduler; temporal sweeps
-        # are validated there (multi-world temporal sweeps open masonry joints).
+        # Maximal PGS joints run only on the single-world scheduler. Temporal sweeps
+        # run on both; a single scene's sweeps are faster on the single-world one.
         single_world = joint_mode == "maximal_pgs" or temporal_iterations or large_rigid_contact_world
         return "single_world" if single_world else "multi_world"
     return step_layout
