@@ -261,8 +261,10 @@ class PersistentProductFactorSchedule:
         column_work = column_remaining_initial.copy()
         max_ready_count = 0
         completed_count = 0
+        level_count = 0
         while ready:
             max_ready_count = max(max_ready_count, len(ready))
+            level_count += 1
             next_ready: list[int] = []
             for task in ready:
                 completed_count += 1
@@ -288,6 +290,8 @@ class PersistentProductFactorSchedule:
         if completed_count != task_count:
             raise RuntimeError("product factor task graph must be acyclic")
         self.max_ready_count = max_ready_count
+        #: Tasks per dependency level: the parallelism a task queue can use.
+        self.mean_ready_count = completed_count / max(1, level_count)
         self.product_count = product_count
 
         def task_array(values: list[int]) -> wp.array[wp.int32]:
@@ -469,8 +473,10 @@ class PersistentPushSolveSchedule:
         remaining_work = remaining_initial.copy()
         max_ready_count = 0
         completed_count = 0
+        level_count = 0
         while ready:
             max_ready_count = max(max_ready_count, len(ready))
+            level_count += 1
             next_ready: list[int] = []
             for task in ready:
                 completed_count += 1
@@ -486,6 +492,8 @@ class PersistentPushSolveSchedule:
         if completed_count != len(task_kind):
             raise RuntimeError("push triangular solve task graph must be acyclic")
         self.max_ready_count = max_ready_count
+        #: Tasks per dependency level: the parallelism a task queue can use.
+        self.mean_ready_count = completed_count / max(1, level_count)
 
         def task_array(values: list[int]) -> wp.array[wp.int32]:
             return wp.array(values, dtype=wp.int32, device=device)

@@ -914,11 +914,13 @@ class TestDirectJointTypes(unittest.TestCase):
             device=wp.get_preferred_device(),
         )
         np.testing.assert_array_equal(panel.large_mechanism.numpy(), [2, 3])
+        # Dense blocks offer no independent panels for a task queue: every mechanism
+        # solves on its own block.
         np.testing.assert_array_equal(
-            np.sort(np.concatenate((panel.cooperative_mechanism.numpy(), panel.subgroup_mechanism.numpy()))), [0, 1]
+            np.sort(np.concatenate((panel.cooperative_mechanism.numpy(), panel.subgroup_mechanism.numpy()))),
+            [0, 1, 2, 3],
         )
-        self.assertTrue(panel._use_push_solve)
-        self.assertEqual(panel.cooperative_factor_mechanism.size, 0)
+        self.assertFalse(panel._use_push_solve)
 
         rng = np.random.default_rng(1234)
         matrices = []
@@ -1221,11 +1223,15 @@ class TestDirectJointTypes(unittest.TestCase):
 
     def test_branching_panel_solve_uses_global_ready_queue(self) -> None:
         """Solve a branching panel graph deterministically through the global queue."""
-        dimension = 64
+        # Eight independent panels feeding a shared one are wide enough for the queue.
+        branches = 8
+        dimension = 16 * (branches + 1)
         starts = np.asarray((0, dimension), dtype=np.int32)
         permutation = np.arange(dimension, dtype=np.int32)
         row_bodies = tuple(
-            frozenset((tile,)) if tile < 3 else frozenset((0, 1, 2)) for tile in range(4) for _ in range(16)
+            frozenset((tile,)) if tile < branches else frozenset(range(branches))
+            for tile in range(branches + 1)
+            for _ in range(16)
         )
         panel = FixedPatternPanelLLT(
             (dimension,),
@@ -1235,8 +1241,8 @@ class TestDirectJointTypes(unittest.TestCase):
             device=wp.get_preferred_device(),
         )
         self.assertTrue(panel._use_push_solve)
-        self.assertEqual(panel._push_forward_schedule.max_ready_count, 3)
-        self.assertEqual(panel._push_backward_schedule.max_ready_count, 3)
+        self.assertEqual(panel._push_forward_schedule.max_ready_count, branches)
+        self.assertEqual(panel._push_backward_schedule.max_ready_count, branches)
 
         matrix = np.eye(dimension, dtype=np.float32) * 2.0
         storage = np.zeros(panel.matrix.size, dtype=np.float32)

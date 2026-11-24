@@ -1045,11 +1045,22 @@ def _find_block_tridiagonal_mechanisms(panel_tables: list[np.ndarray], block_siz
 # per-mechanism block grid idle. With many mechanisms the grid is already busy:
 # a forest of 50 G1 trees runs 24% faster without queues.
 _QUEUE_MAX_MECHANISMS_PER_SM = 1.0 / 8.0
+# A queued task costs about twice a panel step of one block per mechanism, so the
+# queue needs at least two ready tasks per mechanism on average to win: an Allegro
+# hand (1.4 to 1.7 per level) solves twice as fast on one block, a Hoberman sphere
+# (4.4 to 16) faster on the queue.
+_QUEUE_MIN_MEAN_READY_PER_MECHANISM = 2.0
 
 
-def _use_task_queue(ready_width: int, mechanism_count: int, device: wp.Device) -> bool:
-    """Whether dependency-ready panel queues beat one block per mechanism."""
-    return ready_width > mechanism_count and mechanism_count < _QUEUE_MAX_MECHANISMS_PER_SM * device.sm_count
+def _use_task_queue(mean_ready_count: float, mechanism_count: int, device: wp.Device) -> bool:
+    """Whether dependency-ready panel queues beat one block per mechanism.
+
+    ``mean_ready_count`` is the schedule's tasks per dependency level.
+    """
+    return (
+        mean_ready_count >= _QUEUE_MIN_MEAN_READY_PER_MECHANISM * mechanism_count
+        and mechanism_count < _QUEUE_MAX_MECHANISMS_PER_SM * device.sm_count
+    )
 
 
 #: Bit pattern of a signalling NaN, which no arithmetic produces: an unfactored
@@ -1258,7 +1269,7 @@ class FixedPatternPanelLLT:
                 self.device,
             )
             self._use_product_factor = product_schedule.product_count > 0 and _use_task_queue(
-                product_schedule.max_ready_count, len(dimensions), self.device
+                product_schedule.mean_ready_count, len(dimensions), self.device
             )
             if self._use_product_factor:
                 self._product_factor_schedule = product_schedule
@@ -1314,11 +1325,8 @@ class FixedPatternPanelLLT:
                 self.device,
                 forward=False,
             )
-            push_ready_width = min(
-                push_forward_schedule.max_ready_count,
-                push_backward_schedule.max_ready_count,
-            )
-            self._use_push_solve = _use_task_queue(push_ready_width, mechanism_count, self.device)
+            push_ready = min(push_forward_schedule.mean_ready_count, push_backward_schedule.mean_ready_count)
+            self._use_push_solve = _use_task_queue(push_ready, mechanism_count, self.device)
             if self._use_push_solve:
                 self._push_forward_schedule = push_forward_schedule
                 self._push_backward_schedule = push_backward_schedule
