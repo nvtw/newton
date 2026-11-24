@@ -23,6 +23,7 @@ import newton
 import newton.usd
 from newton._src.solvers.phoenx.materials import CombineMode
 from newton.examples.phoenx._bottling_dispenser import disable_owned_proxies, prepare_dispensers
+from newton.examples.phoenx._bottling_fleet import add_rack_shelf
 from newton.examples.phoenx._bottling_process import (
     IFM_RECEIVING_BELT,
     PROCESS_BOTTLES,
@@ -1302,6 +1303,8 @@ def load_plant(
             builder.body_inv_inertia[body] = wp.mat33(
                 np.linalg.inv(np.asarray(builder.body_inertia[body]).reshape(3, 3))
             )
+    if fleet.is_file():
+        add_rack_shelf(builder)
     print(
         f"Berlin plant: {len(scene.bodies)} bodies, {len(scene.bottle_bodies)} live bottles, "
         f"{len(scene.joints)} joints, {builder.shape_count} shapes, {len(meshes)} shared meshes "

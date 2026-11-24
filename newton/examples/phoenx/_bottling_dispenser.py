@@ -1,12 +1,29 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""Restore the palletizer area's empty-pallet stores, magazines and separator contacts."""
+"""Restore the palletizer area's empty-pallet stores and magazines, and run their dispensers."""
+
+import json
 
 import numpy as np
+import warp as wp
 
 import newton.usd
 from newton.examples.phoenx._bottling_wrap import mesh_components
+
+_RETRACT = 0.15  # m, clears the separator fingers' 0.12 m reach into the pallet pockets
+_PLATE_GAP = 0.01  # m, between the push-out plate and the column's rear face
+
+
+@wp.kernel
+def kinematic_strokes(
+    bodies: wp.array[int], rest: wp.array[wp.transform], strokes: wp.array[wp.vec3], body_q: wp.array[wp.transform]
+):
+    """Set each kinematic carriage's target pose: its rest pose moved by its stroke in the plant frame."""
+    i = wp.tid()
+    body_q[bodies[i]] = wp.transform(
+        wp.transform_get_translation(rest[i]) + strokes[i], wp.transform_get_rotation(rest[i])
+    )
 
 
 def disable_owned_proxies(stage, covered_roots, *, scope="/Plant/Physics/NavProxies/Replaceable"):
@@ -45,11 +62,12 @@ def prepare_dispensers(stage):
     finger triangles, including any nonconvex detail. Remove a coarse navigation
     proxy only when all its owners have been replaced by physical stock.
 
-    Fingers remain stationary in their source pose, so stock initially settles
-    onto them. This supplies initial stock/support physics, not a dispenser
-    controller: lowering, separation, presentation and refill remain missing.
+    The source's four separator fingers become two kinematic carriages, one
+    per side, and its push-out plate a kinematic plate, all in their source
+    poses; :class:`DispenserController` strokes them. Stock initially settles
+    onto the fingers.
     """
-    from pxr import Usd, UsdGeom, UsdPhysics, UsdShade  # noqa: PLC0415 - OpenUSD is optional.
+    from pxr import Sdf, Usd, UsdGeom, UsdPhysics, UsdShade  # noqa: PLC0415 - OpenUSD is optional.
 
     stores = stage.GetPrimAtPath("/Plant/WrapLine/Stores")
     if stores:
@@ -100,20 +118,158 @@ def prepare_dispensers(stage):
             material = None
         fingers.append((str(dispenser.GetPath()), selected, material))
 
+    def carriage(path):
+        # A kinematic machine part, authored at the identity so its pose is its stroke.
+        body = UsdGeom.Xform.Define(stage, path).GetPrim()
+        UsdPhysics.RigidBodyAPI.Apply(body).CreateKinematicEnabledAttr(True)
+        return path
+
+    def collider(prim, material):
+        prim.CreateAttribute("visibility", Sdf.ValueTypeNames.Token).Set("invisible")
+        prim.CreateAttribute("purpose", Sdf.ValueTypeNames.Token).Set("guide")
+        UsdPhysics.CollisionAPI.Apply(prim)
+        if material:
+            UsdShade.MaterialBindingAPI.Apply(prim).Bind(material, materialPurpose="physics")
+
     with Usd.EditContext(stage, stage.GetSessionLayer()):
         for pallet_path in pallets:
             _restore_pallet(stage.GetPrimAtPath(pallet_path))
         for dispenser_path, components, material in fingers:
-            for i, (vertices, indices) in enumerate(components):
-                finger = UsdGeom.Mesh.Define(stage, f"{dispenser_path}/Physics/SeparatorFinger{i}")
-                finger.CreatePointsAttr(vertices.tolist())
-                finger.CreateFaceVertexIndicesAttr(indices.tolist())
-                finger.CreateFaceVertexCountsAttr([3] * (len(indices) // 3))
-                finger.CreateVisibilityAttr("invisible")
-                finger.CreatePurposeAttr("guide")
-                UsdPhysics.CollisionAPI.Apply(finger.GetPrim())
-                if material:
-                    UsdShade.MaterialBindingAPI.Apply(finger.GetPrim()).Bind(material, materialPurpose="physics")
+            # The separator's two finger pairs enter the column's side pockets
+            # from either side; the push-out plate behind the column moves a
+            # lowered pallet forward into the pick opening.
+            ordered = sorted(components, key=lambda component: component[0][:, 0].mean())
+            for side, pair in (("L", ordered[:2]), ("R", ordered[2:])):
+                root = carriage(f"{dispenser_path}/Physics/Separator{side}")
+                for i, (vertices, indices) in enumerate(pair):
+                    finger = UsdGeom.Mesh.Define(stage, f"{root}/Finger{i}")
+                    finger.CreatePointsAttr(vertices.tolist())
+                    finger.CreateFaceVertexIndicesAttr(indices.tolist())
+                    finger.CreateFaceVertexCountsAttr([3] * (len(indices) // 3))
+                    collider(finger.GetPrim(), material)
+            plate = stage.GetPrimAtPath(f"{dispenser_path}/Physics/Static/push_out")
+            if not plate:
+                raise ValueError(f"{dispenser_path}: push-out plate is missing")
+            matrix = (
+                cache.GetLocalToWorldTransform(plate)
+                * cache.GetLocalToWorldTransform(stage.GetPrimAtPath(f"{dispenser_path}/Physics")).GetInverse()
+            )
+            root = carriage(f"{dispenser_path}/Physics/PushOut")
+            cube = UsdGeom.Cube.Define(stage, f"{root}/plate")
+            cube.CreateSizeAttr(plate.GetAttribute("size").Get() or 2.0)
+            cube.MakeMatrixXform().Set(matrix)
+            collider(cube.GetPrim(), material)
+            plate.SetActive(False)
     bodies = [path + "/Geometry/sm_pallet_block_a08_obj_00" for path in pallets]
     disable_owned_proxies(stage, bodies)
     return bodies
+
+
+def dispenser_unit(spec):
+    """Return a dispenser's strokes and dispense sequence from its source specification (``EP_*.json``)."""
+    pick, load = (np.asarray(spec["ports"][port]["xy"]) for port in ("pick", "load"))
+    heights = spec["magazine"]["pallet_z"]
+    forward = (pick - load) / np.linalg.norm(pick - load)
+    drop, pitch = heights[1] - heights[0], heights[2] - heights[1]
+    return {
+        "pick": pick,
+        "started": None,
+        "duration": spec["timers_s"]["dispense_s"],
+        # The finger carriages retract across the fork axis, the left one (lower x) to -x.
+        "side": np.abs((forward[1], forward[0])) * _RETRACT,
+        "push": forward * (spec["magazine"]["column_behind_pick_m"] + _PLATE_GAP),
+        # (duration share, column height [m], fingers retracted, push-out stroke)
+        "phases": (
+            (4.0, -drop, 0.0, 0.0),  # lower until the column's bottom pallet stands on the floor
+            (1.5, -drop, 1.0, 0.0),  # release it
+            (2.0, pitch - drop, 1.0, 0.0),  # rise to the next pallet's pockets
+            (1.5, pitch - drop, 0.0, 0.0),  # clamp the next pallet
+            (3.0, 0.0, 0.0, 0.0),  # lift the column clear of the released pallet
+            (1.5, 0.0, 0.0, 1.0),  # push the released pallet forward into the pick opening
+            (1.5, 0.0, 0.0, 0.0),  # return the push-out
+        ),
+    }
+
+
+def dispense_strokes(unit, age):
+    """Return the left and right finger carriages' and the push-out's strokes ``age`` seconds into a dispense."""
+    height, retract, push = np.zeros(3)
+    if age is not None:
+        scale = unit["duration"] / sum(phase[0] for phase in unit["phases"])
+        start, previous = 0.0, np.zeros(3)
+        for share, *target in unit["phases"]:
+            end = start + share * scale
+            if age < end:
+                t = max(0.0, age - start) / (end - start)
+                previous = previous + (np.asarray(target) - previous) * (t * t * (3.0 - 2.0 * t))
+                break
+            start, previous = end, np.asarray(target)
+        height, retract, push = previous
+    side = unit["side"] * retract
+    return [(-side[0], -side[1], height), (side[0], side[1], height), (*(unit["push"] * push), 0.0)]
+
+
+class DispenserController:
+    """Run the source's empty-pallet dispensers (``plant/lines_1x8/wrapline/EP_*.json``).
+
+    A magazine presents one pallet at its pick opening and holds the column
+    behind it on the separator fingers. Once a vehicle has lifted the
+    presented pallet and withdrawn (``amr_pick_done``), the dispenser lowers
+    the column until its bottom pallet stands on the floor, releases it,
+    clamps the next pallet, lifts the column clear and pushes the released
+    pallet forward into the pick opening, all within the source's
+    ``dispense_s``.
+
+    The source refills an empty magazine with a store stack of 11 at its load
+    port (role R). A magazine of 15 serves its palletizer for more than an hour
+    of production; that refill is not run here, so an empty magazine stops.
+    """
+
+    def __init__(self, scene, state, asset_root, fleet, link):
+        self.state, self.fleet, self.link = state, fleet, link
+        root = "/Plant/WrapLine/Dispensers/"
+        names = sorted(
+            label[len(root) :].split("/", 1)[0]
+            for label in scene.bodies
+            if label.startswith(root) and label.endswith("/Physics/PushOut")
+        )
+        self.units, bodies = [], []
+        for name in names:
+            unit = dispenser_unit(json.loads((asset_root / f"plant/lines_1x8/wrapline/{name}.json").read_text()))
+            unit["port"] = f"{name}_pick"
+            # The pallets in the column above the one presented at pick.
+            unit["column"] = sum(label.startswith(f"{root}{name}/Magazine/") for label in scene.bodies) - 1
+            self.units.append(unit)
+            bodies.extend(
+                scene.bodies[f"{root}{name}/Physics/{part}"] for part in ("SeparatorL", "SeparatorR", "PushOut")
+            )
+        self.bodies = wp.array(bodies, dtype=int, device=state.body_q.device)
+        self.rest = wp.array(state.body_q.numpy()[bodies], dtype=wp.transform, device=state.body_q.device)
+        self.strokes = wp.zeros(len(bodies), dtype=wp.vec3, device=state.body_q.device)
+
+    def before_step(self, time, data):
+        """Start a dispense once the presented pallet has left with its vehicle; queue the carriage strokes."""
+        pallets = data["body_q"][self.fleet.pallet_bodies]
+        strokes = []
+        for unit in self.units:
+            if unit["started"] is not None and time - unit["started"] >= unit["duration"]:
+                unit["started"] = None
+            if unit["started"] is None and unit["column"] > 0:
+                offset = pallets[:, :3] - np.array([*unit["pick"], 0.0])
+                present = np.any((np.linalg.norm(offset[:, :2], axis=1) < 0.6) & (offset[:, 2] < 0.2))
+                picking = any(
+                    mission.source == unit["port"] and mission.phase in ("to_pick", "pick")
+                    for mission in self.fleet.missions.values()
+                )
+                if not present and not picking:
+                    unit["started"] = time
+                    unit["column"] -= 1
+            age = None if unit["started"] is None else time - unit["started"]
+            strokes += dispense_strokes(unit, age)
+        self.link.write(self.strokes, np.asarray(strokes, dtype=np.float32))
+
+    def simulate(self):
+        """Apply the queued carriage strokes; graph-capturable."""
+        wp.launch(
+            kinematic_strokes, dim=len(self.bodies), inputs=[self.bodies, self.rest, self.strokes, self.state.body_q]
+        )

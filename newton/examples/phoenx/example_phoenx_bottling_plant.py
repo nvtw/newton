@@ -14,6 +14,12 @@ a packed field waits on the accumulation table before the IFM.
 The source assets remain outside the repository and require NVIDIA Storage
 access; see ``newton/examples/assets/bottling_plant/README.md``.
 
+Each palletizer's empty-pallet dispenser holds 15 pallets, more than an hour
+of production; the source's refill of an empty magazine is not simulated. As in
+the source, wrapped pallets leave their drop-offs 120 s after they land: the
+unsimulated reach truck puts them into the rack, the source's hidden shelf
+below the floor.
+
 Success criteria:
 - Body poses and velocities remain finite.
 - Bottles stay off the factory floor, and sealed cases retain all 12 bottles.
@@ -547,6 +553,8 @@ class Example:
         if self.supply is not None:
             bodies = self.controller.bottles.numpy()
             bodies = bodies[bodies >= 0]
+        # Wrapped loads put away into the source's rack shelf below the floor have left the plant.
+        bodies = bodies[poses[bodies, 2] > -2.0]
         bottles = poses[bodies]
         # Even floor-level pallets support the case contents above 0.1 m.
         lowest = int(np.argmin(bottles[:, 2]))

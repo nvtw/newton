@@ -12,6 +12,67 @@ import warp as wp
 
 from newton.examples.phoenx._bottling_io import _case_drives, _load_controller
 
+# The source does not simulate its warehouse leg: a reach truck takes a wrapped
+# pallet off a drop-off 120 s after it lands and puts it into the rack, which
+# the source keeps as a hidden shelf below the floor (palletflow dispatcher.py
+# ``putaway_s``; isaac_exec.py ``PalletPool``: shelf at (0, -60), z -5, 1.6 m
+# pitch, 20 columns). The plant runs that leg at the source's timing.
+_PUTAWAY_S = 120.0
+_SHELF_XY, _SHELF_Z, _SHELF_PITCH, _SHELF_COLUMNS, _SHELF_ROWS = (0.0, -60.0), -5.0, 1.6, 20, 4
+# m, the box above a drop-off that holds a wrapped load
+_LOAD_HALF, _LOAD_HEIGHT = wp.constant(0.8), wp.constant(2.6)
+
+
+def add_rack_shelf(builder):
+    """Add the source's hidden rack shelf, on which put-away loads rest out of the plant."""
+    span = _SHELF_PITCH * np.array((_SHELF_COLUMNS, _SHELF_ROWS))
+    center = (
+        _SHELF_XY[0] + 0.5 * (span[0] - _SHELF_PITCH),
+        _SHELF_XY[1] - 0.5 * (span[1] - _SHELF_PITCH),
+        _SHELF_Z - 0.05,
+    )
+    builder.add_shape_box(
+        -1,
+        xform=wp.transform(center, wp.quat_identity()),
+        hx=0.5 * span[0],
+        hy=0.5 * span[1],
+        hz=0.05,
+        cfg=builder.ShapeConfig(mu=0.5, is_visible=False),
+        label="/Plant/Logistics/RackShelf/collision",
+    )
+
+
+def shelf_slot(index):
+    """Return the plant position of the source shelf's ``index``-th pallet slot."""
+    row, column = divmod(index, _SHELF_COLUMNS)
+    return np.array((_SHELF_XY[0] + column * _SHELF_PITCH, _SHELF_XY[1] - row * _SHELF_PITCH, _SHELF_Z))
+
+
+@wp.kernel
+def put_away(
+    active: wp.array[int],
+    drop: wp.array[wp.vec3],
+    delta: wp.array[wp.vec3],
+    inv_mass: wp.array[float],
+    body_q: wp.array[wp.transform],
+    body_qd: wp.array[wp.spatial_vector],
+):
+    """Carry every free body of the wrapped load on a drop-off, at rest, by ``delta``."""
+    b = wp.tid()
+    if active[0] == 0 or inv_mass[b] == 0.0:
+        return
+    pose = body_q[b]
+    offset = wp.transform_get_translation(pose) - drop[0]
+    if (
+        wp.abs(offset[0]) > _LOAD_HALF
+        or wp.abs(offset[1]) > _LOAD_HALF
+        or offset[2] < -0.05
+        or offset[2] > _LOAD_HEIGHT
+    ):
+        return
+    body_q[b] = wp.transform(wp.transform_get_translation(pose) + delta[0], wp.transform_get_rotation(pose))
+    body_qd[b] = wp.spatial_vector()
+
 
 @wp.kernel
 def _hold_wheels(
@@ -148,6 +209,11 @@ class FleetController:
         self.completed = []
         self.waiting = {}
         self.wrapper_ready = {}
+        # Wrapped pallets waiting on a drop-off for the source's timed put-away.
+        self.putaways, self.shelved = [], 0
+        self.putaway_active = wp.zeros(1, dtype=int, device=model.device)
+        self.putaway_drop = wp.zeros(1, dtype=wp.vec3, device=model.device)
+        self.putaway_delta = wp.zeros(1, dtype=wp.vec3, device=model.device)
         if transport is not None:
             data = json.loads((root.parent / "palletflow_model.json").read_text())
             self.navigation = source_model.from_json(
@@ -344,6 +410,8 @@ class FleetController:
                 self.completed.append(
                     {"truck": truck.name, "source": mission.source, "destination": mission.destination, "error": error}
                 )
+                if mission.destination.startswith("dropoff_"):
+                    self.putaways.append((self.driver.t + _PUTAWAY_S, mission.destination))
                 mission.phase = "home"
                 self._queue_route(truck, self.homes[truck.name], False)
             elif mission.phase == "home":
@@ -351,10 +419,24 @@ class FleetController:
                 del self.missions[truck.name]
                 self.waiting.pop(truck.name, None)
 
+    def _put_away(self, time):
+        """Queue the source's put-away of the next due wrapped pallet from its drop-off into the rack shelf."""
+        active, drop, delta = 0, np.zeros(3), np.zeros(3)
+        if self.putaways and time >= self.putaways[0][0]:
+            port = self.navigation.ports[self.putaways.pop(0)[1]]
+            drop = np.array((*port.xy, port.z))
+            delta = shelf_slot(self.shelved) - drop
+            self.shelved += 1
+            active = 1
+        self.link.write(self.putaway_active, [active])
+        self.link.write(self.putaway_drop, drop[None].astype(np.float32))
+        self.link.write(self.putaway_delta, delta[None].astype(np.float32))
+
     def report(self):
         """Report physical transfers and unresolved stock/station interlocks."""
         return {
             "completed": len(self.completed),
+            "put_away": self.shelved,
             "active": {name: mission.phase for name, mission in self.missions.items()},
             "waiting": dict(self.waiting),
         }
@@ -382,6 +464,7 @@ class FleetController:
         if self.transport is not None:
             self._advance_missions(poses, senses)
             self._dispatch(senses, poses)
+            self._put_away(time)
         counts = [len(truck.log) for truck in self.driver.trucks]
         # Only reuse the operation sequencer: source Fleet.tick() also corrects
         # pallet poses, which would bypass the physical fork contacts.
@@ -403,6 +486,20 @@ class FleetController:
 
     def simulate(self):
         """Apply the current commands using the existing graph-capturable drive I/O."""
+        if self.transport is not None:
+            wp.launch(
+                put_away,
+                dim=self.model.body_count,
+                inputs=[
+                    self.putaway_active,
+                    self.putaway_drop,
+                    self.putaway_delta,
+                    self.model.body_inv_mass,
+                    self.state.body_q,
+                    self.state.body_qd,
+                ],
+                device=self.model.device,
+            )
         if self.dofs.size:
             wp.launch(
                 _case_drives,

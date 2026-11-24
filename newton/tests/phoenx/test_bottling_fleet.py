@@ -12,7 +12,14 @@ import warp as wp
 
 import newton
 from newton.examples.phoenx._bottling_control import PlantController
-from newton.examples.phoenx._bottling_fleet import FleetController, _observe_port, _placement_valid, _Transfer
+from newton.examples.phoenx._bottling_fleet import (
+    FleetController,
+    _observe_port,
+    _placement_valid,
+    _Transfer,
+    put_away,
+    shelf_slot,
+)
 from newton.examples.phoenx._bottling_transport import TransportController
 
 
@@ -157,6 +164,57 @@ class TestBottlingFleet(unittest.TestCase):
         for field, value in (("xy_m", 0.031), ("yaw_deg", -3.1), ("z_m", 0.04), ("tilt_deg", 3.1)):
             with self.subTest(field=field):
                 self.assertFalse(_placement_valid({**error, field: value}))
+
+    @unittest.skipUnless(wp.is_cuda_available(), "CUDA device required")
+    def test_drop_off_is_put_away_after_the_source_delay(self):
+        """Clear a drop-off 120 s after a wrapped pallet lands, carrying its whole load to the rack shelf at rest."""
+        written = {}
+        fleet = SimpleNamespace(
+            putaways=[(130.0, "dropoff_U_drop")],
+            shelved=0,
+            navigation=SimpleNamespace(ports={"dropoff_U_drop": SimpleNamespace(xy=(90.0, 44.0), z=0.0)}),
+            link=SimpleNamespace(write=lambda array, values: written.__setitem__(id(array), np.asarray(values))),
+            putaway_active=wp.zeros(1, dtype=int, device="cpu"),
+            putaway_drop=wp.zeros(1, dtype=wp.vec3, device="cpu"),
+            putaway_delta=wp.zeros(1, dtype=wp.vec3, device="cpu"),
+        )
+        FleetController._put_away(fleet, 129.9)
+        self.assertEqual(written[id(fleet.putaway_active)][0], 0)
+        FleetController._put_away(fleet, 130.0)
+        self.assertEqual(written[id(fleet.putaway_active)][0], 1)
+        self.assertEqual((fleet.shelved, fleet.putaways), (1, []))
+        delta = written[id(fleet.putaway_delta)][0]
+        np.testing.assert_allclose(np.array((90.0, 44.0, 0.0)) + delta, shelf_slot(0), atol=1e-5)
+        # Neighbouring shelf slots leave room for a 1.2 m pallet with its load.
+        self.assertGreaterEqual(
+            min(np.linalg.norm(shelf_slot(i + 1)[:2] - shelf_slot(i)[:2]) for i in range(30)), 1.6 - 1e-6
+        )
+
+        with wp.ScopedDevice("cuda:0"):
+            builder = newton.ModelBuilder()
+            # The pallet, a case and a bottle on the drop-off; a truck beside it; a fixed part over it.
+            positions = [(90.0, 44.0, 0.08), (90.2, 44.3, 0.5), (90.25, 44.3, 0.6), (92.0, 44.0, 0.5)]
+            bodies = [builder.add_body(xform=wp.transform(p, wp.quat_identity()), mass=1.0) for p in positions]
+            fixed = builder.add_body(xform=wp.transform((90.0, 44.0, 1.0), wp.quat_identity()), mass=0.0)
+            model = builder.finalize()
+            state = model.state()
+            state.body_qd.fill_(wp.spatial_vector(0.1, 0.0, 0.0, 0.0, 0.0, 0.2))
+            active = wp.array([1], dtype=int)
+            drop = wp.array([(90.0, 44.0, 0.0)], dtype=wp.vec3)
+            shift = wp.array([delta], dtype=wp.vec3)
+            with wp.ScopedCapture() as capture:
+                wp.launch(
+                    put_away, model.body_count, [active, drop, shift, model.body_inv_mass, state.body_q, state.body_qd]
+                )
+            wp.capture_launch(capture.graph)
+            active.zero_()
+            wp.capture_launch(capture.graph)
+            q, qd = state.body_q.numpy(), state.body_qd.numpy()
+
+        np.testing.assert_allclose(q[bodies[:3], :3], np.asarray(positions[:3]) + delta, atol=1e-4)
+        np.testing.assert_array_equal(qd[bodies[:3]], 0.0)
+        np.testing.assert_allclose(q[[bodies[3], fixed], :3], [positions[3], (90.0, 44.0, 1.0)], atol=1e-6)
+        np.testing.assert_allclose(qd[bodies[3]], (0.1, 0.0, 0.0, 0.0, 0.0, 0.2), atol=1e-6)
 
 
 if __name__ == "__main__":

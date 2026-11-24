@@ -1,0 +1,1 @@
+Run the bottling plant's empty-pallet dispensers through their source sequence, and put wrapped pallets away from the drop-offs at the source's timing, so palletizing continues past the first pallet change.

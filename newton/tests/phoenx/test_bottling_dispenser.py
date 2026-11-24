@@ -6,9 +6,15 @@
 import unittest
 
 import numpy as np
+import warp as wp
 
 import newton
-from newton.examples.phoenx._bottling_dispenser import prepare_dispensers
+from newton.examples.phoenx._bottling_dispenser import (
+    dispense_strokes,
+    dispenser_unit,
+    kinematic_strokes,
+    prepare_dispensers,
+)
 from newton.tests.unittest_utils import requires
 
 
@@ -66,6 +72,9 @@ class TestBottlingDispenser(unittest.TestCase):
         material = UsdShade.Material.Define(stage, "/Materials/Static")
         UsdPhysics.MaterialAPI.Apply(material.GetPrim()).CreateDynamicFrictionAttr(0.45)
         tower = stage.DefinePrim(root + "/Physics/Static/tower_l")
+        plate = UsdGeom.Cube.Define(stage, root + "/Physics/Static/push_out")
+        plate.AddTranslateOp().Set((0.0, 0.9, 0.07))
+        UsdPhysics.CollisionAPI.Apply(plate.GetPrim())
         UsdShade.MaterialBindingAPI.Apply(tower).Bind(material, materialPurpose="physics")
         owners = {
             "covered": root + "/Magazine/P00/Geometry/sm_pallet_block_a08_obj_00/Visual",
@@ -98,8 +107,11 @@ class TestBottlingDispenser(unittest.TestCase):
             np.testing.assert_allclose(
                 UsdGeom.XformCache().GetLocalToWorldTransform(body).ExtractTranslation(), positions[i]
             )
+        # The left and right finger pairs ride two kinematic carriages; the push-out plate a third.
         for i in range(4):
-            finger = stage.GetPrimAtPath(root + f"/Physics/SeparatorFinger{i}")
+            carriage = stage.GetPrimAtPath(root + f"/Physics/Separator{'LR'[i // 2]}")
+            self.assertTrue(UsdPhysics.RigidBodyAPI(carriage).GetKinematicEnabledAttr().Get())
+            finger = carriage.GetChild(f"Finger{i % 2}")
             self.assertTrue(finger.HasAPI(UsdPhysics.CollisionAPI))
             self.assertEqual(finger.GetAttribute("visibility").Get(), "invisible")
             points = np.array(finger.GetAttribute("points").Get())
@@ -108,9 +120,90 @@ class TestBottlingDispenser(unittest.TestCase):
             self.assertEqual(
                 UsdShade.MaterialBindingAPI(finger).ComputeBoundMaterial("physics")[0].GetPath(), material.GetPath()
             )
+        pusher = stage.GetPrimAtPath(root + "/Physics/PushOut")
+        self.assertTrue(UsdPhysics.RigidBodyAPI(pusher).GetKinematicEnabledAttr().Get())
+        self.assertTrue(pusher.GetChild("plate").HasAPI(UsdPhysics.CollisionAPI))
+        self.assertFalse(plate.GetPrim().IsActive())
+        plate_center = UsdGeom.XformCache().GetLocalToWorldTransform(pusher.GetChild("plate")).ExtractTranslation()
+        np.testing.assert_allclose(plate_center, (0.0, 0.9, 0.17), atol=1.0e-7)
         prepare_dispensers(stage)
         self.assertEqual(len(stage.GetPrimAtPath(root + "/Magazine").GetChildren()), 2)
-        self.assertEqual(len(stage.GetPrimAtPath(root + "/Physics").GetChildren()), 5)
+        self.assertEqual(len(stage.GetPrimAtPath(root + "/Physics").GetChildren()), 4)
+
+
+def _block_pallet(builder, xy, z, cfg):
+    """Add a 1.0 x 1.2 x 0.1625 m block pallet whose side pockets are open along x, as the source A08."""
+    body = builder.add_body(xform=wp.transform((*xy, z), wp.quat_identity()))
+    for height, half in ((0.01, 0.01), (0.1525, 0.01)):  # bottom boards and top deck
+        builder.add_shape_box(
+            body, xform=wp.transform((0, 0, height), wp.quat_identity()), hx=0.5, hy=0.6, hz=half, cfg=cfg
+        )
+    for y in (-0.55, 0.0, 0.55):  # block rows between the pockets
+        builder.add_shape_box(
+            body, xform=wp.transform((0, y, 0.08125), wp.quat_identity()), hx=0.5, hy=0.05, hz=0.06125, cfg=cfg
+        )
+    return body
+
+
+class TestDispenserSequence(unittest.TestCase):
+    @unittest.skipUnless(wp.is_cuda_available(), "CUDA device required")
+    def test_dispense_presents_the_next_pallet_at_pick(self):
+        """Lower, release, re-clamp and lift the column, then push its bottom pallet into the pick opening."""
+        # The source EP_PZ1 dispenser, with its pick opening at the origin.
+        spec = {
+            "ports": {"pick": {"xy": [0.0, 0.0]}, "load": {"xy": [0.0, 0.15]}},
+            "magazine": {"pallet_z": [0.0, 0.2625, 0.425], "column_behind_pick_m": 0.15},
+            "timers_s": {"dispense_s": 15.0},
+        }
+        unit = dispenser_unit(spec)
+        with wp.ScopedDevice("cuda:0"):
+            builder = newton.ModelBuilder()
+            builder.add_ground_plane(cfg=builder.ShapeConfig(mu=0.5))
+            wood = builder.ShapeConfig(density=250.0, mu=0.5)
+            steel = builder.ShapeConfig(density=0.0, mu=0.3)
+            # The separator's finger pairs and the push-out plate, in their source poses.
+            carriages = []
+            for side in (-1.0, 1.0):
+                carriage = builder.add_body(is_kinematic=True)
+                for y in (-0.28, 0.28):
+                    pose = wp.transform((side * 0.505, 0.15 + y, 0.3375), wp.quat_identity())
+                    builder.add_shape_box(carriage, xform=pose, hx=0.125, hy=0.06, hz=0.025, cfg=steel)
+                carriages.append(carriage)
+            pusher = builder.add_body(is_kinematic=True)
+            pose = wp.transform((0.0, 0.905, 0.07), wp.quat_identity())
+            builder.add_shape_box(pusher, xform=pose, hx=0.3, hy=0.145, hz=0.07, cfg=steel)
+            carriages.append(pusher)
+            column = [_block_pallet(builder, (0.0, 0.15), z, wood) for z in (0.2625, 0.425, 0.5875)]
+            model = builder.finalize()
+            solver = newton.solvers.SolverPhoenX(model, substeps=4, solver_iterations=8, step_layout="single_world")
+            state, control = model.state(), model.control()
+            contacts = model._collision_pipeline.contacts()
+            bodies = wp.array(carriages, dtype=int)
+            rest = wp.array(state.body_q.numpy()[carriages], dtype=wp.transform)
+            strokes = wp.zeros(3, dtype=wp.vec3)
+            dt = 1.0 / 60.0
+            with wp.ScopedCapture() as capture:
+                wp.launch(kinematic_strokes, dim=3, inputs=[bodies, rest, strokes, state.body_q])
+                solver.collide(state, contacts, dt=dt)
+                solver.step(state, state, control, contacts, dt)
+            # Let the column settle on the fingers, dispense, then let it settle again.
+            for _frame in range(60):
+                wp.capture_launch(capture.graph)
+            hanging = state.body_q.numpy()[column[0], 2]
+            for frame in range(60 * 17):
+                strokes.assign(np.asarray(dispense_strokes(unit, frame * dt), dtype=np.float32))
+                wp.capture_launch(capture.graph)
+            poses = state.body_q.numpy()[column]
+
+        # The column's bottom pallet stands seated and square in the pick opening.
+        np.testing.assert_allclose(poses[0, :3], (0.0, 0.0, 0.0), atol=0.03)
+        tilt = np.degrees(2.0 * np.arcsin(np.linalg.norm(poses[:, 3:5], axis=1)))
+        self.assertTrue(np.all(tilt < 2.0))
+        # The fingers hold the next pallet at the column's height again, with the rest stacked on it.
+        self.assertGreater(hanging, 0.15)
+        self.assertAlmostEqual(float(poses[1, 2]), float(hanging), delta=0.01)
+        np.testing.assert_allclose(poses[1:, 1], 0.15, atol=0.03)
+        self.assertAlmostEqual(float(poses[2, 2] - poses[1, 2]), 0.1625, delta=0.01)
 
 
 if __name__ == "__main__":

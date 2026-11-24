@@ -20,6 +20,7 @@ from newton.examples.phoenx._bottling_case_plc import (
     case_line_plcs,
     make_case_lines,
 )
+from newton.examples.phoenx._bottling_dispenser import DispenserController
 from newton.examples.phoenx._bottling_fleet import FleetController
 from newton.examples.phoenx._bottling_infeed import InfeedController
 from newton.examples.phoenx._bottling_io import (
@@ -819,6 +820,7 @@ class PlantController:
         self.transport = TransportController(self, vendor)
         self.infeed = InfeedController(self, vendor, 17 + len(self.transport.zone_channels), supply)
         self.fleet = FleetController(model, state, control, asset_root, transport=self.transport, link=self.link)
+        self.dispensers = DispenserController(scene, state, asset_root, self.fleet, self.link)
         self.wrapper_channels = {
             label: self.infeed.channel_end + i for i, label in enumerate(scene.metadata.get("wrapper_belt_zones", {}))
         }
@@ -1169,6 +1171,7 @@ class PlantController:
         self.transport.before_step(self.case_clock, speed, data)
         self.infeed.before_step(self.case_clock, commands, speed, data)
         self.fleet.before_step(self.case_clock, data)
+        self.dispensers.before_step(self.case_clock, data)
         self.wrapper.before_step(self.case_clock, speed, data)
         for name, channel in self.zone_channels.items():
             speed[channel] = self.infeed.zone_speed[name]
@@ -1253,6 +1256,7 @@ class PlantController:
         self.transport.simulate()
         self.infeed.simulate()
         self.fleet.simulate()
+        self.dispensers.simulate()
         self.wrapper.simulate()
         wp.launch(
             _supply_cases,
