@@ -8,7 +8,7 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton._src.solvers.phoenx.islands.iteration_schedule import _index_colors
+from newton._src.solvers.phoenx.islands.iteration_schedule import _index_colors, _key_island_order
 from newton._src.solvers.phoenx.tests.test_parallel_prepare_sleeping import _build_model
 
 
@@ -24,15 +24,37 @@ class TestIslandIterationSchedule(unittest.TestCase):
         families = wp.empty(0, dtype=int, device=device)
         colors = wp.full(6, -1, dtype=int, device=device)
         ends = wp.full_like(colors, -1)
-        count = wp.array([2, 0], dtype=int, device=device)
         wp.launch(
             _index_colors,
             dim=len(keys),
-            inputs=[keys, slots, island_ends, 2, starts, num_colors, families, False, colors, ends, families, count],
+            inputs=[keys, slots, island_ends, 2, starts, num_colors, families, False, colors, ends, families],
             device=device,
         )
         np.testing.assert_array_equal(colors.numpy(), [0, 0, 2, 2, 3, -1])
         np.testing.assert_array_equal(ends.numpy(), [2, -1, 4, -1, 5, -1])
+
+    def test_islands_are_ordered_longest_first(self):
+        """Order every island once by its color span, longest first, ties in index order.
+
+        Blocks deal the ordered islands out in alternating directions, so the
+        longest serial color chains are spread over different blocks.
+        """
+        device = "cpu"
+        roots = wp.array([3, 1, 0, 4, -1, -1], dtype=int, device=device)
+        count = wp.array([4], dtype=int, device=device)
+        first_color = wp.array([0, 2, 0, 5, 1], dtype=int, device=device)
+        last_color = wp.array([1, 9, 0, 6, 9], dtype=int, device=device)
+        keys = wp.empty(2 * len(roots), dtype=int, device=device)
+        order = wp.empty(2 * len(roots), dtype=int, device=device)
+        wp.launch(
+            _key_island_order,
+            dim=len(roots),
+            inputs=[roots, count, first_color, last_color, keys, order],
+            device=device,
+        )
+        wp.utils.radix_sort_pairs(keys, order, len(roots), end_bit=17)
+        # Spans: island 4 -> 9, 1 -> 8, 3 -> 2, 0 -> 2 (ties keep their index order).
+        np.testing.assert_array_equal(order.numpy()[:4], [4, 1, 3, 0])
 
     @unittest.skipUnless(wp.is_cuda_available(), "Island iteration scheduling requires CUDA")
     def test_mixed_islands_in_captured_sweeps(self):

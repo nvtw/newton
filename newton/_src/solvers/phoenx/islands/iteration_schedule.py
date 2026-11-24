@@ -151,9 +151,6 @@ def _merge_wide_islands(
     if key < num_bodies and sizes[key] > merge_width * (last_color[key] - first_color[key] + 1):
         keys[slot] = num_bodies
 
-# A dozen columns can already span a long sequence of dependent contact colors.
-_LARGE_ISLAND_COLUMNS = wp.constant(12)
-
 
 @wp.kernel(enable_backward=False)
 def _index_islands(
@@ -174,12 +171,7 @@ def _index_islands(
     ordered[i] = columns[slots[i]]
     if i == 0 or keys[i - 1] != root:
         starts[root] = i
-        # Start long islands early so their final colors overlap shorter islands.
-        last = i + _LARGE_ISLAND_COLUMNS - 1
-        if last < ordered.shape[0] and keys[last] == root:
-            roots[wp.atomic_add(count, 0, 1)] = root
-        else:
-            roots[roots.shape[0] - 1 - wp.atomic_add(count, 1, 1)] = root
+        roots[wp.atomic_add(count, 0, 1)] = root
     if i + 1 == ordered.shape[0] or keys[i + 1] != root:
         ends[root] = i + 1
 
@@ -206,11 +198,8 @@ def _index_colors(
     colors: wp.array[int],
     ends: wp.array[int],
     families: wp.array[int],
-    count: wp.array[int],
 ):
     i = wp.tid()
-    if i == 0:
-        count[0] += count[1]
     root = keys[i]
     if root == sentinel:
         return
@@ -225,6 +214,30 @@ def _index_colors(
         family = wp.static(_PER_WORLD_FAST_FAMILIES)
         families[i * family] = i
         families[i * family + 1] = _first_slot_at_least(slots, i, end, family_starts[color * family + 1])
+
+
+#: Island color spans are below this bound; it orders the descending sort.
+_MAX_ISLAND_COLORS = wp.constant(1 << 16)
+
+
+@wp.kernel(enable_backward=False)
+def _key_island_order(
+    roots: wp.array[int],
+    count: wp.array[int],
+    first_color: wp.array[int],
+    last_color: wp.array[int],
+    keys: wp.array[int],
+    order: wp.array[int],
+):
+    """Key every island by its color span, longest first; unused slots sort last."""
+    i = wp.tid()
+    if i >= count[0]:
+        keys[i] = _MAX_ISLAND_COLORS
+        order[i] = -1
+        return
+    root = roots[i]
+    keys[i] = _MAX_ISLAND_COLORS - 1 - wp.min(last_color[root] - first_color[root] + 1, _MAX_ISLAND_COLORS - 1)
+    order[i] = root
 
 
 @functools.cache
@@ -323,13 +336,16 @@ def _get_island_iteration(axes):
                     _sync_threads()
                     pending = 1
                 i = end
+        # Islands are sorted longest first; dealing them out in alternating
+        # directions balances each block's serial chain of colors.
         total = count[0]
-        large = total - count[1]
-        for index in range(block, total, num_blocks):
-            slot = index
-            if index >= large:
-                slot = roots.shape[0] - 1 - (index - large)
-            root = roots[slot]
+        for round_index in range((total + num_blocks - 1) / num_blocks):
+            index = round_index * num_blocks + block
+            if round_index % 2 == 1:
+                index = round_index * num_blocks + num_blocks - 1 - block
+            if index >= total:
+                continue
+            root = roots[index]
             i = starts[root]
             end_of_island = ends[root]
             if root == merged:
@@ -388,9 +404,12 @@ class IslandIterationSchedule:
         self.mixed = world.num_joints > 0 and world.max_contact_columns > 0
         self.families = wp.empty(capacity * _PER_WORLD_FAST_FAMILIES if self.mixed else 1, dtype=int, device=device)
         self.roots = wp.empty(num_bodies + 1, dtype=int, device=device)
+        # Warp's stable radix sort needs a second buffer in each array.
+        self.order_keys = wp.empty(2 * (num_bodies + 1), dtype=int, device=device)
+        self.order = wp.empty(2 * (num_bodies + 1), dtype=int, device=device)
         self.starts = wp.empty_like(self.roots)
         self.ends = wp.empty_like(self.roots)
-        self.count = wp.empty(2, dtype=int, device=device)
+        self.count = wp.empty(1, dtype=int, device=device)
         self.sizes = wp.empty(num_bodies + 1, dtype=int, device=device)
         self.first_color = wp.empty_like(self.sizes)
         self.last_color = wp.empty_like(self.sizes)
@@ -488,10 +507,16 @@ class IslandIterationSchedule:
                 self.colors,
                 self.color_ends,
                 self.families,
-                self.count,
             ],
             device=world.device,
         )
+        wp.launch(
+            _key_island_order,
+            num_bodies + 1,
+            [self.roots, self.count, self.first_color, self.last_color, self.order_keys, self.order],
+            device=world.device,
+        )
+        wp.utils.radix_sort_pairs(self.order_keys, self.order, num_bodies + 1, end_bit=17)
 
     def _grid_blocks(self, world: PhoenXWorld, kernel) -> int:
         """Blocks of the island sweep, all co-resident for its grid barrier.
@@ -533,7 +558,7 @@ class IslandIterationSchedule:
                 world._joint_pgs_enabled,
                 world.num_bodies,
                 world._copy_state,
-                self.roots,
+                self.order,
                 self.count,
                 self.starts,
                 self.ends,
