@@ -2608,6 +2608,9 @@ class DirectEqualitySystem:
         self.velocity_reference = wp.zeros(row_count, dtype=wp.float32, device=device)
         self.drive_active_set_flag = wp.zeros(1, dtype=wp.int32, device=device)
         self._bound_scan_flags = self.drive_active_set_flag
+        #: Set when a bound change refactors within a substep; responses derived
+        #: from the factor (contact mobility, bias velocity) clear it on refresh.
+        self.factor_changed = wp.zeros(1, dtype=wp.int32, device=device)
         self.drive_saturated = wp.zeros(row_count, dtype=wp.bool, device=device)
         self.accumulated_impulse = wp.zeros(row_count, dtype=wp.float32, device=device)
         joint_q = np.asarray(model.joint_q.numpy(), dtype=np.float32)
@@ -3119,6 +3122,7 @@ class DirectEqualitySystem:
 
         def correct() -> None:
             activate_and_correct(3)
+            self.factor_changed.fill_(1)
             if after_change is not None:
                 after_change()
 
