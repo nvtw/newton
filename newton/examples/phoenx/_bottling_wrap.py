@@ -71,6 +71,11 @@ def _process_drives(
         target_qd[dofs[i]] = velocity[i]
 
 
+def _angle_error(angle, reference):
+    """Signed angle error in [-pi, pi); measured rotor angles are wrapped, targets accumulate turns."""
+    return (angle - reference + np.pi) % (2 * np.pi) - np.pi
+
+
 def _rotation_profile(time, distance, speed, acceleration):
     """A rest-to-rest trapezoid with continuous angle and bounded acceleration."""
     speed = min(speed, np.sqrt(distance * acceleration))
@@ -367,9 +372,9 @@ class WrapperController:
             reference = line["reference"] or (targets[line["rotor_target"]], targets[line["lift_target"]])
             line["reference"] = (targets[line["rotor_target"]], targets[line["lift_target"]])
             measured = float(coordinates[line["rotor_q"]])
-            line["turns"] += (measured - line["angle"] + np.pi) % (2 * np.pi) - np.pi
+            line["turns"] += _angle_error(measured, line["angle"])
             line["angle"] = measured
-            error = (measured - reference[0] + np.pi) % (2 * np.pi) - np.pi
+            error = _angle_error(measured, reference[0])
             if abs(error) > np.radians(3) or abs(coordinates[line["lift_q"]] - reference[1]) > 0.01:
                 line.update(state="FAULT", fault="Wrapper motor left its tracking envelope")
             elif (
@@ -549,7 +554,8 @@ class WrapperController:
             spec = line["spec"]
             port = name + "_drop"
             reserved = any(port in (mission.source, mission.destination) for mission in self.fleet.missions.values())
-            rotor_home = abs(coordinates[line["rotor_q"]] - targets[line["rotor_q"]]) < np.radians(2.0)
+            # Each wrap advances the target by whole turns; compare wrapped angles.
+            rotor_home = abs(_angle_error(coordinates[line["rotor_q"]], targets[line["rotor_q"]])) < np.radians(2.0)
             rotor_home = rotor_home and abs(joint_velocity[line["rotor_qd"]]) < 0.02
             if line["state"] == "WAIT_DROP":
                 if reserved or not rotor_home:

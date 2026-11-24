@@ -1061,13 +1061,15 @@ class TestBottlingPlant(unittest.TestCase):
                 step_layout="single_world",
             )
             contacts = solver._collision_pipeline.contacts()
-            for frame in range(600):
+            for frame in range(720):
                 if frame == 60:
                     fleet.missions.clear()
                 if frame == 62:
                     control.joint_target_q.fill_(0.5)
                 if frame == 90:
-                    control.joint_target_q.zero_()
+                    # A finished wrap leaves the target whole turns ahead of
+                    # the reported (wrapped) rotor angle; home must still pass.
+                    control.joint_target_q.fill_(4.0 * np.pi)
                 speed = np.ones(len(channels), dtype=np.float32)
                 wrapper.before_step(frame / 120, speed, wrapper.observe())
                 if frame < 60:
