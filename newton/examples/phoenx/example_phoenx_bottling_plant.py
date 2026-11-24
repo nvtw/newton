@@ -14,9 +14,10 @@ a packed field waits on the accumulation table before the IFM.
 The source assets remain outside the repository and require NVIDIA Storage
 access; see ``newton/examples/assets/bottling_plant/README.md``.
 
-The bottle supply is sized for ``--num-frames`` and at least 330 simulated
-seconds; an interactive run that goes on past it warns once when the supply is
-exhausted, and the line then runs dry. Pass ``--num-frames`` for longer runs.
+The bottle and carton supplies are sized for ``--num-frames`` and at least
+330 simulated seconds; an interactive run that goes on past them warns once
+when the bottle supply is exhausted, and the line then runs dry. Pass
+``--num-frames`` for longer runs.
 Each palletizer's empty-pallet dispenser holds 15 pallets, more than an hour
 of production; the source's refill of an empty magazine is not simulated. As in
 the source, wrapped pallets leave their drop-offs 120 s after they land: the
@@ -67,6 +68,12 @@ from newton.geometry import BroadPhaseImplicitTree
 from newton.solvers import SolverPhoenX
 
 _PRODUCTION_SECONDS = 330.0  # s, the bottling benchmark's default run length
+_CASE_CYCLE_S = 14.9  # s, the source L02 packer's demonstrated case cycle
+
+
+def production_cartons(duration):
+    """Return the cartons per packer for ``duration`` seconds of production: one per source case cycle, at least 50."""
+    return max(50, math.ceil(duration / _CASE_CYCLE_S) + 1)
 
 
 # OptiX allocates an instance for every shape, hidden colliders included.
@@ -201,7 +208,7 @@ class Example:
             raise ValueError("--substeps must be positive")
         if args.solver_substeps < 1:
             raise ValueError("--solver-substeps must be positive")
-        if args.cartons_per_packer < 1:
+        if args.cartons_per_packer is not None and args.cartons_per_packer < 1:
             raise ValueError("--cartons-per-packer must be positive")
         if args.extra_bottles is not None and args.extra_bottles < 0:
             raise ValueError("--extra-bottles must be nonnegative")
@@ -215,12 +222,15 @@ class Example:
             raise ValueError("Physical runtime grasp joints require --joint-mode maximal_pgs")
         self.frame_dt = 1.0 / 60.0
         self.sim_time = 0.0
+        # The supplies last the run, and at least the benchmark's production run.
+        duration = max(_PRODUCTION_SECONDS, args.num_frames * self.frame_dt)
+        cartons = args.cartons_per_packer or production_cartons(duration)
         self.scene = load_plant(
             Path(args.asset_root).expanduser(),
             cutaway=args.cutaway,
             visuals=args.visuals if args.visuals is not None else args.viewer != "null",
             motor_off=args.motor_off,
-            cartons_per_packer=args.cartons_per_packer,
+            cartons_per_packer=cartons,
             filling_room_physics=args.filling_room_physics,
         )
         self.supply = None
@@ -230,7 +240,6 @@ class Example:
             joints = max(320, 5 * carton_count + 36)
             # The filler runs at its rated output for the whole run, and at least
             # long enough to fill every carton.
-            duration = max(_PRODUCTION_SECONDS, args.num_frames * self.frame_dt)
             demand = max(
                 12 * carton_count - len(self.scene.bottle_bodies), math.ceil(BOTTLES_PER_MINUTE / 60.0 * duration)
             )
@@ -732,8 +741,9 @@ class Example:
         parser.add_argument(
             "--cartons-per-packer",
             type=int,
-            default=50,
-            help="Total cartons per packer, including the initial carton at the filling station.",
+            default=None,
+            help="Total cartons per packer, including the initial carton at the filling station. Defaults to "
+            "the packer's source case cycle over the run (--num-frames, at least 330 s), and at least 50.",
         )
         parser.add_argument(
             "--mass-splitting",

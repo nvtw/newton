@@ -53,6 +53,7 @@ from newton.examples.phoenx.example_phoenx_bottling_plant import (
     Example,
     _fleet_direct_contact_mask,
     _local_fixture_drives,
+    production_cartons,
 )
 from newton.tests.unittest_utils import requires
 from newton.viewer import ViewerNull
@@ -1482,6 +1483,13 @@ def Xform "Plant" {
                 )
             stopped_scene = load_plant(root, visuals=False, motor_off=True)
             np.testing.assert_array_equal(stopped_scene.belts[0][1], 0.0)
+
+    def test_carton_stock_lasts_the_run(self):
+        """Stock each packer with a carton per source case cycle over the run, and the initial 50 at least."""
+        self.assertEqual(production_cartons(330.0), 50)
+        # A 1500 s run fills a case every 14.9 s at each packer.
+        self.assertEqual(production_cartons(1500.0), 102)
+        self.assertIsNone(Example.create_parser().parse_args([]).cartons_per_packer)
 
     def test_optix_capacity_covers_the_plant(self):
         """Size OptiX instances for the plant's shapes in both modes and refuse a capacity that is too small."""
