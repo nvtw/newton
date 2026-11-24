@@ -380,6 +380,12 @@ _ISLAND_ROW_GROUPS = 64
 #: :func:`temporal_sweep_relaxation_kernel`.
 _TEMPORAL_SWEEP_COUPLING_BUDGET = 6.0
 
+#: Ordered passes over owned contacts per temporal contact substep. The exact
+#: mechanism response couples every manifold of a component; a single warm-started
+#: pass leaves a steady period-two rocking of a resting hinged pair (8.4 mm/s),
+#: two passes settle it (0.5 mm/s). The passes share one launch.
+_TEMPORAL_OWNED_CONTACT_PASSES = 2
+
 
 class PhoenXWorld:
     """PhoenX solver driver.
@@ -724,11 +730,23 @@ class PhoenXWorld:
         #: Each biased sweep of a substep advances the contacts by ``1/solver_iterations``
         #: of the substep, see :mod:`~newton._src.solvers.phoenx.temporal_contacts`.
         self.temporal_iterations = bool(temporal_iterations) and int(solver_iterations) > 1
-        if self.temporal_iterations and (
-            str(step_layout) != "single_world" or (bool(mass_splitting) and not mass_splitting_overflow_only)
+        if self.temporal_iterations and (colored_contact_headers or colored_contact_rows):
+            raise ValueError("temporal_iterations requires uncolored contact headers and rows")
+        # Between sweeps, contact impulses are replayed per body (see
+        # :class:`ContactBodyEntries`). Only the single world without copy state
+        # or with unrolled overflow-only copies also has a colored-sweep fallback.
+        colored_replay = str(step_layout) == "single_world" and (
+            not mass_splitting or (mass_splitting_overflow_only and mass_splitting_unrolled)
+        )
+        if (
+            self.temporal_iterations
+            and not colored_replay
+            and self.max_contact_columns > 0
+            and not self._temporal_gathered_replay_supported()
         ):
             raise ValueError(
-                "temporal_iterations requires step_layout='single_world' with no mass splitting or overflow-only splitting"
+                "temporal_iterations with step_layout='multi_world' or mass splitting requires CUDA, "
+                "rigid bodies, and point contacts"
             )
         self._temporal_local_joints = None
         self._temporal_outer_joint_placeholder = wp.empty(0, dtype=wp.bool, device=self.device)
@@ -1282,9 +1300,9 @@ class PhoenXWorld:
                 if self._colored_contact_rows
                 else self._contact_container
             )
-            if self.temporal_iterations and self._singleworld_overflow_only_mass_splitting:
-                # Temporal contacts require canonical rows. Keep this scratch
-                # separate from packed geometry and previous-step history.
+            if self.temporal_iterations and self.mass_splitting_enabled:
+                # Split copies keep the physical contact compliance. Temporal contacts
+                # use canonical rows; this scratch stays apart from previous-step history.
                 assert self._contact_container_solve is self._contact_container
                 self._contact_container.normal_compliance_scale = wp.empty(
                     self.rigid_contact_max, dtype=wp.float32, device=self.device
@@ -1331,6 +1349,8 @@ class PhoenXWorld:
                 and not self.mass_splitting_unrolled
                 and self._mass_splitting_velocity_only_average
                 and self.device.is_cuda
+                # Temporal sweeps replay colored contact impulses only.
+                and not self.temporal_iterations
             )
         else:
             self._contact_container = contact_container_zeros(1, device=self.device)
@@ -1523,20 +1543,23 @@ class PhoenXWorld:
         # Temporal warm starts only replay impulses; they need no color-order
         # dependency. Keep other layouts on their existing specialized paths.
         self._temporal_contact_body_entries = None
-        if (
-            self.temporal_iterations
-            and self.device.is_cuda
-            and self.max_contact_columns > 0
-            and not self._colored_contact_headers
-            and not self._colored_contact_rows
-            and (not self.mass_splitting_enabled or self._singleworld_overflow_only_mass_splitting)
-            and not self._contact_patch_enabled
-            and self.num_particles == 0
-            and self._reduced_articulation is None
-        ):
+        if self.temporal_iterations and self.max_contact_columns > 0 and self._temporal_gathered_replay_supported():
             self._temporal_contact_body_entries = ContactBodyEntries(
                 self._constraint_capacity, self.rigid_contact_max, self.bodies.velocity.shape[0], self.device
             )
+
+    def _temporal_gathered_replay_supported(self) -> bool:
+        """Whether temporal sweeps can replay contact impulses per body, see :class:`ContactBodyEntries`."""
+        return bool(self.device.is_cuda and not self._contact_patch_enabled and self.num_particles == 0)
+
+    @property
+    def _element_ids_by_color(self) -> wp.array:
+        """Active constraint ids in color order: ``[0, num_active_constraints)`` of the layout's coloring."""
+        return (
+            self._world_element_ids_by_color
+            if self.step_layout == "multi_world"
+            else self._partitioner.element_ids_by_color
+        )
 
     def _fast_tail_fixed_tpw(self) -> int:
         """Static kernel axis for fixed-tpw launches; 0 keeps dynamic lookup."""
@@ -2815,12 +2838,85 @@ class PhoenXWorld:
             device=self.device,
         )
 
-    def _temporal_begin_sweeps(self) -> None:
-        """Start the substep's contact substeps after preparation and warm start."""
-        if self._temporal_contacts_active():
-            self._temporal_contact_rows(0.0)
-            self._temporal_sweep_relaxation()
-            self._apply_contact_coefficients(self._temporal_contact_coefficients[1])
+    def _temporal_enter_sweep(self, iteration: int, idt: wp.float32) -> None:
+        """Enter biased sweep ``iteration`` of the substep as a contact substep.
+
+        Every dispatcher calls this before each biased sweep and
+        :meth:`_temporal_close_sweep` after it, on physical body velocities.
+        The first sweep starts after preparation and warm start.
+        """
+        if not self.temporal_iterations:
+            return
+        if iteration == 0:
+            if self._temporal_contacts_active():
+                self._temporal_contact_rows(0.0)
+                self._temporal_sweep_relaxation()
+                self._apply_contact_coefficients(self._temporal_contact_coefficients[1])
+            return
+        self._temporal_next_sweep(idt)
+        if self._temporal_owned_contacts():
+            self._reapply_owned_contact_impulses()
+
+    def _temporal_close_sweep(self, iteration: int) -> None:
+        """Close biased sweep ``iteration``; see :meth:`_temporal_enter_sweep`.
+
+        Owned contacts take :data:`_TEMPORAL_OWNED_CONTACT_PASSES` ordered passes
+        at the contact substep's step.
+        """
+        if not self.temporal_iterations:
+            return
+        if self._temporal_owned_contacts():
+            self._solve_direct_contacts(
+                use_bias=True,
+                refresh_mobility=iteration == 0,
+                iterations=_TEMPORAL_OWNED_CONTACT_PASSES,
+                inverse_dt=self.solver_iterations / float(self.substep_dt),
+            )
+        self._temporal_end_sweep(iteration == self.solver_iterations - 1)
+
+    def _temporal_enter_split_sweep(self, iteration: int, idt: wp.float32) -> None:
+        """:meth:`_temporal_enter_sweep` for a sweep on mass-splitting copies.
+
+        Requires every copy to hold its body's velocity. The entered contact
+        substep's forces and impulses land on the bodies, so copies refresh.
+        """
+        if not self.temporal_iterations:
+            return
+        if iteration == 0:
+            self._mass_splitting_writeback(already_averaged=True)
+        self._temporal_enter_sweep(iteration, idt)
+        if iteration > 0:
+            self._mass_splitting_broadcast()
+
+    def _temporal_close_split_sweep(self, iteration: int) -> None:
+        """:meth:`_temporal_close_sweep` after a sweep on copies and their average."""
+        if not self.temporal_iterations:
+            return
+        if iteration < self.solver_iterations - 1:
+            # The closing contact substep tracks the averaged motion.
+            self._mass_splitting_writeback(already_averaged=True)
+        self._temporal_close_sweep(iteration)
+
+    def _temporal_skip_sweeps(self) -> None:
+        """Apply the substep's remaining forces when no contact substeps run."""
+        if self.temporal_iterations:
+            self._temporal_apply_forces(self.solver_iterations - 1)
+
+    def _project_direct_after_sweep(self, direct, iteration: int, idt: wp.float32) -> None:
+        """Project exact mechanisms after biased sweep ``iteration`` of a single- or multi-world substep.
+
+        Every temporal sweep is a contact substep whose motion enters the integrated
+        positions, so each one carries the joint recovery bias. Limits and contacts
+        react to capped motors during iteration.
+        """
+        use_bias = self.temporal_iterations or iteration == self.solver_iterations - 1
+        direct.solve(use_bias=use_bias)
+        direct.resolve_bounded_drives(idt, use_bias=use_bias)
+
+    def _solve_owned_contacts_after_sweeps(self) -> None:
+        """Solve owned contacts once per substep unless the temporal sweeps solved them."""
+        if not (self._regular_pgs_active_this_step and self._temporal_owned_contacts()):
+            self._solve_direct_contacts(use_bias=True, refresh_mobility=True)
 
     def _temporal_fused_sweep_entry(self) -> bool:
         """Whether one per-body launch can close a contact substep and enter the next.
@@ -2847,17 +2943,17 @@ class PhoenXWorld:
             return
         self._temporal_apply_forces()
         if self._temporal_contacts_active():
-            self._partitioner.begin_sweep()
             if self._temporal_contact_body_entries is not None:
                 self._temporal_contact_body_entries.apply_cached_warm_start(
                     self._contact_cols,
                     self.bodies,
                     self._contact_container,
-                    self._partitioner.element_ids_by_color,
+                    self._element_ids_by_color,
                     self._num_active_constraints,
                     self._contact_offset,
                 )
             else:
+                self._partitioner.begin_sweep()
                 head, fused = self._singleworld_contact_warm_start_kernels()
                 self._singleworld_head_plus_tail_sweep(head, fused, idt)
 
@@ -2875,7 +2971,7 @@ class PhoenXWorld:
         entries.refresh_cached_warm_start(
             self._contact_cols,
             self._contact_container,
-            self._partitioner.element_ids_by_color,
+            self._element_ids_by_color,
             self._num_active_constraints,
             self._contact_offset,
         )
@@ -3428,7 +3524,7 @@ class PhoenXWorld:
         if self._temporal_contact_body_entries is not None:
             self._temporal_contact_body_entries.build(
                 self._contact_cols,
-                self._partitioner.element_ids_by_color,
+                self._element_ids_by_color,
                 self._num_active_constraints,
                 self._contact_offset,
                 self._contact_cols.articulation_owner,
@@ -3930,11 +4026,7 @@ class PhoenXWorld:
 
         self._dispatcher.begin_step()
         if self._colored_contact_headers:
-            colored_element_ids = (
-                self._world_element_ids_by_color
-                if self.step_layout == "multi_world"
-                else self._partitioner.element_ids_by_color
-            )
+            colored_element_ids = self._element_ids_by_color
             contact_pack_colored_headers(
                 self._contact_cols,
                 self._contact_cols_packed,
@@ -4555,6 +4647,7 @@ class PhoenXWorld:
                     self._contact_container,
                     self._contact_offset,
                     self._contact_cols.articulation_owner,
+                    self._temporal_owned_contacts(),
                 ],
                 outputs=[self._contact_impulse_sum],
                 device=self.device,
@@ -5188,11 +5281,14 @@ class PhoenXWorld:
         Each temporal sweep is a contact substep: its rows and impulses describe
         ``dt / solver_iterations``. Owned contacts then take one sweep each, at that
         step, instead of all their sweeps over the whole substep after the others.
+        Sweeps on split copies leave body velocities stale, so their owned contacts
+        keep the substep schedule.
         """
         return (
             self._temporal_contacts_active()
             and self._direct_contact_response is not None
             and self._direct_contact_schedule is not None
+            and (not self.mass_splitting_enabled or self._singleworld_overflow_only_mass_splitting)
         )
 
     def _reapply_owned_contact_impulses(self) -> None:
@@ -6239,6 +6335,7 @@ class PhoenXWorld:
         *,
         num_iterations: int,
         direct_regular_colors: bool,
+        reverse_colors: bool = False,
     ) -> None:
         """Run complete rigid sweeps inside one world-owning block."""
         flags = self._dispatch_specialization_flags()
@@ -6280,7 +6377,7 @@ class PhoenXWorld:
                 wp.int32(self.num_bodies),
                 self._copy_state,
                 wp.int32(int(self.max_colored_partitions)),
-                wp.int32(0),
+                wp.int32(int(reverse_colors)),
                 wp.int32(0),
                 self._world_body_ids,
                 self._world_body_offsets,
@@ -6305,6 +6402,7 @@ class PhoenXWorld:
         idt: wp.float32,
         *,
         num_iterations: int = 1,
+        reverse_colors: bool = False,
     ) -> None:
         """Solve regular colors directly and mass split only overflow rows."""
         self._multiworld_mass_splitting_persistent(
@@ -6312,6 +6410,7 @@ class PhoenXWorld:
             idt,
             num_iterations=num_iterations,
             direct_regular_colors=True,
+            reverse_colors=reverse_colors,
         )
 
     def _multiworld_mass_splitting_sweep(

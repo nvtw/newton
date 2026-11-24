@@ -583,14 +583,15 @@ def _accumulate_temporal_contact_impulse_kernel(
     cc: ContactContainer,
     contact_offset: wp.int32,
     articulation_owner: wp.array[wp.int32],
+    owned_per_sweep: wp.bool,
     impulse_sum: wp.array[wp.vec3f],
 ):
-    """Record intermediate temporal impulses, excluding contacts solved after the loop."""
+    """Record intermediate temporal impulses, excluding owned contacts solved after the loop."""
     k = wp.tid()
     if k >= _active_contact_count(rigid_contact_count, impulse_sum.shape[0]):
         return
     column = cid_of_contact[k] - contact_offset
-    if column < wp.int32(0) or articulation_owner[column] >= wp.int32(0):
+    if column < wp.int32(0) or (articulation_owner[column] >= wp.int32(0) and not owned_per_sweep):
         return
     impulse_sum[k] = impulse_sum[k] + _contact_impulse(cc, k)
 

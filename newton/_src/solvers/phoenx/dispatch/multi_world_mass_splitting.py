@@ -43,6 +43,7 @@ class MultiWorldMassSplittingDispatcher:
             # Fully split worlds still need slot[0] -> body writeback.
             if not w._overflow_only_mass_splitting:
                 w._mass_splitting_writeback()
+            w._temporal_skip_sweeps()
             return
         direct = getattr(w, "_direct_equality_system", None)
         overlap_factor = bool(
@@ -78,6 +79,7 @@ class MultiWorldMassSplittingDispatcher:
 
         if not w._regular_pgs_active_this_step:
             w._mass_splitting_writeback()
+            w._temporal_skip_sweeps()
             if direct is not None and direct.enabled:
                 w._warm_start_owned_contacts()
                 direct.solve(use_bias=True)
@@ -115,13 +117,15 @@ class MultiWorldMassSplittingDispatcher:
             w._warm_start_owned_contacts()
             direct.solve(use_bias=False)
             w._mass_splitting_broadcast()
+        # Temporal sweeps enter and close one contact substep each.
         fuse_iterations = bool(
             w._fused_multiworld_mass_splitting
             and (direct is None or not direct.enabled)
             and not w._reduced_constraints_active_this_step
             and w.joint_refinement_iterations == 0
+            and not w.temporal_iterations
         )
-        if direct_regular_colors:
+        if direct_regular_colors and not w.temporal_iterations:
             w._multiworld_mass_splitting_direct_regular(
                 "iterate",
                 idt,
@@ -129,23 +133,33 @@ class MultiWorldMassSplittingDispatcher:
             )
         elif fuse_iterations:
             w._multiworld_mass_splitting_iterate_fused(idt)
+        elif direct_regular_colors:
+            # Regular colors and the overflow average update physical body storage.
+            for iteration in range(w.solver_iterations):
+                w._temporal_enter_sweep(iteration, idt)
+                w._multiworld_mass_splitting_direct_regular("iterate", idt, reverse_colors=bool(iteration % 2))
+                w._temporal_close_sweep(iteration)
         else:
             for iteration in range(w.solver_iterations):
+                w._temporal_enter_split_sweep(iteration, idt)
                 w._multiworld_mass_splitting_sweep("iterate", idt, reverse_colors=bool(iteration % 2))
                 w._mass_splitting_average_and_broadcast(inv_dt)
                 # Divide contact sweeps into temporal blocks when requested. A
                 # complete PCR pass transfers intermediate contact impulses through
                 # the joint graph. Final position recovery and the velocity pass
-                # retain residual refinement.
-                direct_projection = iteration in w._direct_joint_projection_iterations
+                # retain residual refinement. Every temporal sweep is a contact
+                # substep whose motion is integrated, so each one projects with bias.
+                final_projection = iteration == w.solver_iterations - 1
+                direct_projection = w.temporal_iterations or iteration in w._direct_joint_projection_iterations
                 if direct is not None and direct.enabled and (direct_projection or direct.has_bounded_drives):
                     w._mass_splitting_writeback(already_averaged=True)
-                    final_projection = iteration == w.solver_iterations - 1
+                    biased = final_projection or w.temporal_iterations
                     if direct_projection:
-                        direct.solve(use_bias=final_projection, refine=final_projection)
-                    direct.resolve_bounded_drives(idt, use_bias=final_projection)
+                        direct.solve(use_bias=biased, refine=final_projection)
+                    direct.resolve_bounded_drives(idt, use_bias=biased)
                     if iteration + 1 < w.solver_iterations:
                         w._mass_splitting_broadcast()
+                w._temporal_close_split_sweep(iteration)
 
         # Keep each joint's original copy ownership and reconcile its paired
         # impulse before the next refinement or body writeback.

@@ -79,10 +79,9 @@ class SingleWorldMassSplittingUnrolledDispatcher:
         if not w._singleworld_overflow_only_mass_splitting:
             w._mass_splitting_broadcast()
         if w._constraint_capacity == 0:
-            if temporal:
-                w._temporal_apply_forces(w.solver_iterations - 1)
             if not w._singleworld_overflow_only_mass_splitting:
                 w._mass_splitting_writeback()
+            w._temporal_skip_sweeps()
             return
         direct = getattr(w, "_direct_equality_system", None)
         # Overflow-only sweeps finish in physical body storage. Copy slots
@@ -95,10 +94,9 @@ class SingleWorldMassSplittingUnrolledDispatcher:
                 direct.prepare_and_factor(idt)
 
         if not w._regular_pgs_active_this_step:
-            if temporal:
-                w._temporal_apply_forces(w.solver_iterations - 1)
             if not w._singleworld_overflow_only_mass_splitting:
                 w._mass_splitting_writeback()
+            w._temporal_skip_sweeps()
             if direct is not None and direct.enabled:
                 w._warm_start_owned_contacts()
                 direct.solve(use_bias=True)
@@ -147,11 +145,12 @@ class SingleWorldMassSplittingUnrolledDispatcher:
                 w._mass_splitting_broadcast()
         # Without explicit projection passes, project after every iteration.
         every_iteration = temporal or w.direct_joint_projection_passes is None
-        if temporal:
-            w._temporal_begin_sweeps()
+        # Overflow-only sweeps leave averaged velocities in physical body storage.
+        split = not w._singleworld_overflow_only_mass_splitting
+        enter_sweep = w._temporal_enter_split_sweep if split else w._temporal_enter_sweep
+        close_sweep = w._temporal_close_split_sweep if split else w._temporal_close_sweep
         for iteration in range(w.solver_iterations):
-            if temporal and iteration > 0:
-                w._temporal_next_sweep(idt)
+            enter_sweep(iteration, idt)
             project = (
                 direct is not None
                 and direct.enabled
@@ -174,10 +173,7 @@ class SingleWorldMassSplittingUnrolledDispatcher:
                 direct.resolve_bounded_drives(idt, use_bias=final or temporal)
                 if sync_direct_copies and iteration + 1 < w.solver_iterations:
                     w._mass_splitting_broadcast()
-            if temporal:
-                # Overflow has been averaged into physical body storage, also
-                # when the exact projection performs that average itself.
-                w._temporal_end_sweep(final)
+            close_sweep(iteration)
 
         if (direct is None or not direct.enabled) and not w._singleworld_overflow_only_mass_splitting:
             w._mass_splitting_writeback(already_averaged=True)

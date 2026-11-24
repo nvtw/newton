@@ -48,6 +48,7 @@ class SingleWorldMassSplittingDispatcher:
             # Still need to writeback to keep slot[0] -> body in sync
             # for the next substep.
             w._mass_splitting_writeback()
+            w._temporal_skip_sweeps()
             return
         direct = getattr(w, "_direct_equality_system", None)
         overlap_factor = bool(
@@ -83,6 +84,7 @@ class SingleWorldMassSplittingDispatcher:
 
         if not w._regular_pgs_active_this_step:
             w._mass_splitting_writeback()
+            w._temporal_skip_sweeps()
             if direct is not None and direct.enabled:
                 w._warm_start_owned_contacts()
                 direct.solve(use_bias=True)
@@ -120,6 +122,7 @@ class SingleWorldMassSplittingDispatcher:
             direct.solve(use_bias=False)
             w._mass_splitting_broadcast()
         for iteration in range(w.solver_iterations):
+            w._temporal_enter_split_sweep(iteration, idt)
             if w._color_group_data is None:
                 w._partitioner.begin_sweep()
             w._singleworld_head_plus_tail_sweep(
@@ -133,18 +136,21 @@ class SingleWorldMassSplittingDispatcher:
             # Divide contact sweeps into temporal blocks when requested. A
             # complete PCR pass transfers intermediate contact impulses through
             # the joint graph. Final position recovery and the velocity pass
-            # retain residual refinement.
-            direct_projection = iteration in w._direct_joint_projection_iterations
+            # retain residual refinement. Every temporal sweep is a contact
+            # substep whose motion is integrated, so each one projects with bias.
+            final_projection = iteration == w.solver_iterations - 1
+            direct_projection = w.temporal_iterations or iteration in w._direct_joint_projection_iterations
             if direct is not None and direct.enabled and (direct_projection or direct.has_bounded_drives):
                 w._mass_splitting_writeback(already_averaged=True)
-                final_projection = iteration == w.solver_iterations - 1
+                biased = final_projection or w.temporal_iterations
                 if direct_projection:
-                    direct.solve(use_bias=final_projection, refine=final_projection)
+                    direct.solve(use_bias=biased, refine=final_projection)
                 # Even between full projections, limits need the current
                 # finite motor bound rather than an uncapped drive reaction.
-                direct.resolve_bounded_drives(idt, use_bias=final_projection)
+                direct.resolve_bounded_drives(idt, use_bias=biased)
                 if iteration + 1 < w.solver_iterations:
                     w._mass_splitting_broadcast()
+            w._temporal_close_split_sweep(iteration)
 
         # Keep each joint's original copy ownership and reconcile its paired
         # impulse before the next refinement or body writeback.

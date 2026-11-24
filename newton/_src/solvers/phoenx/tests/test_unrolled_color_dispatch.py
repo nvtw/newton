@@ -28,6 +28,8 @@ class TestUnrolledColorDispatch(unittest.TestCase):
             substep_dt=0.01,
             solver_iterations=1,
             temporal_iterations=False,
+            _temporal_enter_sweep=Mock(),
+            _temporal_close_sweep=Mock(),
             _active_velocity_iterations=1,
             _colored_contact_rows=False,
             _contact_container_solve=None,

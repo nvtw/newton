@@ -54,9 +54,16 @@ class TestPhoenXAutoPerformancePolicy(unittest.TestCase):
     def test_large_rigid_contact_world_selects_single_world(self):
         self.assertEqual(self._resolve(), "single_world")
 
-    def test_temporal_iterations_select_single_world(self):
-        """Temporal iterations run only on the single-world scheduler, so auto selects it."""
-        self.assertEqual(self._resolve(body_count=4, has_joints=True, temporal_iterations=True), "single_world")
+    def test_temporal_iterations_select_single_world_without_cuda_point_contacts(self):
+        """Multi-world temporal sweeps need CUDA point contacts; auto selects single world otherwise."""
+        self.assertEqual(self._resolve(body_count=4, has_joints=True, temporal_iterations=True), "multi_world")
+        self.assertEqual(
+            self._resolve(body_count=4, has_joints=True, temporal_iterations=True, cuda=False), "single_world"
+        )
+        self.assertEqual(
+            self._resolve(body_count=4, has_joints=True, temporal_iterations=True, contact_friction_model="patch"),
+            "single_world",
+        )
         self.assertEqual(self._resolve(step_layout="multi_world", temporal_iterations=True), "multi_world")
         builder = newton.ModelBuilder()
         builder.add_ground_plane()
@@ -214,7 +221,8 @@ class TestPhoenXAutoPerformancePolicy(unittest.TestCase):
             _block_world_supported=lambda: True,
             _solve_main_block_world=lambda **_kwargs: events.append("prepare"),
             solver_iterations=0,
-            _solve_direct_contacts=lambda **_kwargs: None,
+            temporal_iterations=False,
+            _solve_owned_contacts_after_sweeps=lambda: None,
             _warm_start_owned_contacts=lambda: events.append("warm"),
             _maximal_tree_projector=None,
             _reduced_constraints_active_this_step=False,

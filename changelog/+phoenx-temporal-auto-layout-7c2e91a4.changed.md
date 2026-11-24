@@ -1,1 +1,1 @@
-Select the single-world layout for ``SolverPhoenX(temporal_iterations=True)`` when ``step_layout="auto"`` instead of raising, since temporal iterations run only on that layout.
+Select the single-world layout for ``SolverPhoenX(temporal_iterations=True)`` when ``step_layout="auto"`` and the multi-world layout cannot run temporal sweeps (CPU or patch friction), instead of raising.

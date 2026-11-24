@@ -36,12 +36,11 @@ class SingleWorldDispatcher:
     def solve(self, idt: wp.float32) -> None:
         w = self._world
         if w._constraint_capacity == 0:
-            if w.temporal_iterations:
-                w._temporal_apply_forces(w.solver_iterations - 1)
+            w._temporal_skip_sweeps()
             return
-        if w.temporal_iterations and not w._regular_pgs_active_this_step:
-            # No contact substeps run: apply the substep's remaining forces before any projection.
-            w._temporal_apply_forces(w.solver_iterations - 1)
+        if not w._regular_pgs_active_this_step:
+            # Apply the substep's remaining forces before any projection.
+            w._temporal_skip_sweeps()
         direct = getattr(w, "_direct_equality_system", None)
         if direct is not None and direct.enabled:
             direct.prepare_and_factor(idt)
@@ -71,43 +70,21 @@ class SingleWorldDispatcher:
                 direct.solve(use_bias=False)
                 # Test drive bounds only once contact warm starts load the mechanisms.
                 direct.resolve_bounded_drives(idt, use_bias=False)
-            temporal = w.temporal_iterations
-            owned_sweeps = temporal and w._temporal_owned_contacts()
-            if temporal:
-                w._temporal_begin_sweeps()
             for iteration in range(w.solver_iterations):
-                last = iteration == w.solver_iterations - 1
-                if temporal and iteration > 0:
-                    w._temporal_next_sweep(idt)
-                    if owned_sweeps:
-                        w._reapply_owned_contact_impulses()
+                w._temporal_enter_sweep(iteration, idt)
                 if self._island_schedule is None:
                     w._partitioner.begin_sweep()
                 w._singleworld_head_plus_tail_sweep(
                     iterate_head, iterate_fused, idt, island_schedule=self._island_schedule
                 )
                 if direct is not None and direct.enabled:
-                    # Every temporal sweep is a contact substep whose motion enters the
-                    # integrated positions, so each one carries the joint recovery bias.
-                    direct.solve(use_bias=last or temporal)
-                    # Limits and contacts must react to the capped motor during
-                    # iteration, not retain an uncapped reaction at integration.
-                    direct.resolve_bounded_drives(idt, use_bias=last or temporal)
-                    if owned_sweeps:
-                        w._solve_direct_contacts(
-                            use_bias=True,
-                            refresh_mobility=iteration == 0,
-                            iterations=1,
-                            inverse_dt=float(idt) * w.solver_iterations,
-                        )
-                if temporal:
-                    w._temporal_end_sweep(last)
+                    w._project_direct_after_sweep(direct, iteration, idt)
+                w._temporal_close_sweep(iteration)
         elif direct is not None and direct.enabled:
             w._warm_start_owned_contacts()
             direct.solve(use_bias=True)
             direct.resolve_bounded_drives(idt, use_bias=True)
-        if not (w._regular_pgs_active_this_step and w.temporal_iterations and w._temporal_owned_contacts()):
-            w._solve_direct_contacts(use_bias=True, refresh_mobility=True)
+        w._solve_owned_contacts_after_sweeps()
         if w._maximal_tree_projector is not None:
             if w._direct_tree_contacts:
                 w._maximal_tree_projector.factor_contact_response()

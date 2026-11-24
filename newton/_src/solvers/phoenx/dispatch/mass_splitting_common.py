@@ -16,7 +16,10 @@ if TYPE_CHECKING:
 def solve_auxiliary_constraints(world: PhoenXWorld, idt: wp.float32, *, relax: bool) -> None:
     """Finish a mass-splitting phase after its copy-state reconciliation."""
     use_bias = not relax
-    world._solve_direct_contacts(use_bias=use_bias, refresh_mobility=use_bias)
+    if relax:
+        world._solve_direct_contacts(use_bias=False, refresh_mobility=False)
+    else:
+        world._solve_owned_contacts_after_sweeps()
     if world._maximal_tree_projector is not None:
         world._maximal_tree_projector.project(use_bias=use_bias, idt=idt)
         world._solve_maximal_articulated_contacts(use_bias=use_bias, refresh_mobility=use_bias)

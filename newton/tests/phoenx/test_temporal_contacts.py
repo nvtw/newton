@@ -136,6 +136,77 @@ class TestTemporalIterationPhysics(unittest.TestCase):
         self.assertLessEqual(float(temporal[-1] - temporal[0]), 1.0e-6 * initial)
 
 
+@unittest.skipUnless(wp.is_cuda_available(), "CUDA device required")
+class TestTemporalLayouts(unittest.TestCase):
+    """Every dispatcher runs the substep's contact substeps."""
+
+    LAYOUTS = {
+        "multi_world_fast_tail": {"step_layout": "multi_world", "multi_world_scheduler": "fast_tail"},
+        "multi_world_block_world": {"step_layout": "multi_world", "multi_world_scheduler": "block_world"},
+        "multi_world_mass_splitting": {"step_layout": "multi_world", "mass_splitting": True},
+        "single_world_mass_splitting": {"step_layout": "single_world", "mass_splitting": True},
+        "single_world_mass_splitting_unrolled": {
+            "step_layout": "single_world",
+            "mass_splitting": True,
+            "mass_splitting_unrolled": True,
+        },
+    }
+
+    def test_forces_and_contacts_in_every_layout(self):
+        """A free sphere receives all of gravity and a resting box's reported support balances its weight."""
+        with wp.ScopedDevice("cuda:0"):
+            builder = newton.ModelBuilder()
+            cfg = builder.ShapeConfig(density=1000)
+            for _ in range(2):
+                builder.begin_world()
+                box = builder.add_body(xform=wp.transform((0, 0, 0.1), wp.quat_identity()))
+                builder.add_shape_box(box, hx=0.1, hy=0.1, hz=0.1, cfg=cfg)
+                sphere = builder.add_body(xform=wp.transform((2, 0, 10.0), wp.quat_identity()))
+                builder.add_shape_sphere(sphere, radius=0.1, cfg=cfg)
+                builder.end_world()
+            builder.add_ground_plane()
+            model = builder.finalize()
+            boxes, spheres = [0, 2], [1, 3]
+            weight = float(model.body_mass.numpy()[0]) * 9.81
+            dt, frames = 1 / 120, 60
+            for name, layout in self.LAYOUTS.items():
+                with self.subTest(layout=name):
+                    pipeline = newton.CollisionPipeline(model, contact_matching="sticky", rigid_contact_max=64)
+                    contacts = pipeline.contacts()
+                    solver = SolverPhoenX(
+                        model,
+                        collision_pipeline=pipeline,
+                        substeps=2,
+                        solver_iterations=8,
+                        contact_hertz=60,
+                        sleeping_velocity_threshold=0,
+                        temporal_iterations=True,
+                        **layout,
+                    )
+                    self.assertEqual(solver.world.step_layout, layout["step_layout"])
+                    state, control = model.state(), model.control()
+                    observables = solver.observables({SolverBase.ObservableKind.CONTACT_F}, contacts=contacts)
+
+                    def step(state=state, control=control, contacts=contacts, pipeline=pipeline, solver=solver):
+                        pipeline.collide(state, contacts, dt=dt)
+                        solver.step(state, state, control, contacts, dt, observables=observables)
+
+                    step()
+                    with wp.ScopedCapture() as capture:
+                        step()
+                    for _ in range(frames - 1):
+                        wp.capture_launch(capture.graph)
+                    np.testing.assert_allclose(state.body_qd.numpy()[spheres, 2], -9.81 * frames * dt, atol=1.0e-3)
+                    np.testing.assert_allclose(state.body_q.numpy()[boxes, 2], 0.1, atol=1.0e-3)
+                    count = int(contacts.rigid_contact_count.numpy()[0])
+                    shape_body = model.shape_body.numpy()
+                    body0 = shape_body[contacts.rigid_contact_shape0.numpy()[:count]]
+                    body1 = shape_body[contacts.rigid_contact_shape1.numpy()[:count]]
+                    force_z = observables.contact_f.numpy()[:count, 2]
+                    support = [abs(float(force_z[body0 == b].sum() - force_z[body1 == b].sum())) for b in boxes]
+                    np.testing.assert_allclose(support, weight, rtol=2.0e-3)
+
+
 class _FirstSweepRecorded(Exception):
     """Stop after observing the real solver's first temporal sweep."""
 
@@ -423,8 +494,8 @@ class TestTemporalContactObservables(unittest.TestCase):
             np.testing.assert_allclose(state.body_q.numpy()[:, 2], 0.1, atol=0.001)
             self.assertLess(float(np.abs(state.body_qd.numpy()[:, 2]).max()), 0.005)
 
-    def test_owned_contacts_accumulate_only_after_their_solve(self):
-        """Count articulation impulses only when their contacts are solved."""
+    def test_owned_contacts_accumulate_in_every_sweep(self):
+        """Count owned impulses in every temporal sweep, which solves them as a contact substep."""
         builder = newton.ModelBuilder(gravity=(0.0, 0.0, -9.81), up_axis=newton.Axis.Z)
         cfg = newton.ModelBuilder.ShapeConfig(density=500.0, mu=0.7, gap=0.002)
         links = []
@@ -476,7 +547,7 @@ class TestTemporalContactObservables(unittest.TestCase):
             delta = world._contact_impulse_sum.numpy()[:count] - before[:count]
             calls.append((float(np.linalg.norm(delta[owned])), float(np.linalg.norm(delta[valid & ~owned]))))
 
-        saw_owned_final = False
+        saw_owned_intermediate = False
         saw_ordinary_intermediate = False
         shape_body = model.shape_body.numpy()
         box_mass = float(model.body_mass.numpy()[box])
@@ -491,9 +562,8 @@ class TestTemporalContactObservables(unittest.TestCase):
                 self.assertTrue(world._regular_pgs_active_this_step)
                 self.assertEqual(len(calls), 4)
                 for owned, ordinary in calls[:-1]:
-                    self.assertEqual(owned, 0.0, "Owned impulses must not be recorded before their solve")
+                    saw_owned_intermediate |= owned > 0.0
                     saw_ordinary_intermediate |= ordinary > 0.0
-                saw_owned_final |= calls[-1][0] > 0.0
                 count = int(contacts.rigid_contact_count.numpy()[0])
                 body0 = shape_body[contacts.rigid_contact_shape0.numpy()[:count]]
                 body1 = shape_body[contacts.rigid_contact_shape1.numpy()[:count]]
@@ -502,7 +572,7 @@ class TestTemporalContactObservables(unittest.TestCase):
                 velocity = float(state.body_qd.numpy()[box, 2])
                 expected_force = box_mass * (9.81 + (velocity - previous_velocity) / dt)
                 self.assertAlmostEqual(reported_force, expected_force, delta=1.0e-4)
-        self.assertTrue(saw_owned_final, "The final accumulation must include owned contacts")
+        self.assertTrue(saw_owned_intermediate, "Owned contact substeps must accumulate their impulses")
         self.assertTrue(saw_ordinary_intermediate, "Ordinary temporal contact impulses must still accumulate")
 
 

@@ -45,8 +45,13 @@ def make_world(requires_projection=False, solver_iterations=1, direct_joint_proj
         _singleworld_kernels=Mock(return_value=(None,) * 6),
         _refresh_prepare_this_substep=Mock(return_value=True),
         _active_velocity_iterations=2,
+        temporal_iterations=False,
     )
     for name in (
+        "_temporal_enter_split_sweep",
+        "_temporal_close_split_sweep",
+        "_temporal_skip_sweeps",
+        "_solve_owned_contacts_after_sweeps",
         "_mass_splitting_broadcast",
         "_mass_splitting_writeback",
         "_mass_splitting_average_and_broadcast",
