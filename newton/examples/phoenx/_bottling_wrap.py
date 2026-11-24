@@ -346,11 +346,14 @@ class WrapperController:
                 line["load_quiet_since"] = time
             if time - line["load_quiet_since"] < 0.5:
                 return
+            # The drive tracks accumulated turns, so the wrap continues from the
+            # current target rather than from the wrapped measured angle.
+            target = float(targets[line["rotor_target"]])
             line.update(
                 state="WRAPPING",
                 since=time,
                 cartons=selected,
-                home=float(coordinates[line["rotor_q"]]),
+                home=target + _angle_error(coordinates[line["rotor_q"]], target),
                 angle=float(coordinates[line["rotor_q"]]),
                 turns=0.0,
                 reference=None,

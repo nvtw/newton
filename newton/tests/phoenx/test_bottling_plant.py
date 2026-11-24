@@ -348,6 +348,36 @@ class TestBottlingPlant(unittest.TestCase):
         on_line = (poses[:, 0] < 9.4) & (poses[:, 2] > 0.9)
         self.assertTrue(np.all(np.linalg.norm(poses[on_line, 3:5], axis=1) < np.sin(np.radians(7.5))))
 
+    def test_wrapper_wrap_continues_from_accumulated_target(self):
+        """A second wrap starts from the drive's accumulated target, not the wrapped angle."""
+        line = {
+            "state": "WAIT_WRAP_PROCESS",
+            "spec": {"item": "WL_U"},
+            "load_quiet_since": 0.0,
+            "rotor_q": 0,
+            "rotor_qd": 0,
+            "rotor_target": 0,
+            "lift_q": 1,
+            "lift_qd": 1,
+            "lift_target": 1,
+            "acceleration": 1.0,
+            "lift_upper": 0.0,
+            "lift_speed": 0.1,
+        }
+        controller = SimpleNamespace(
+            plant=object(),
+            fleet=SimpleNamespace(missions={}),
+            _load=lambda *_: np.array([0]),
+            process_speeds=np.zeros(2),
+            driven_lines=set(),
+        )
+        # The first wrap left the target nine turns ahead; the joint reports the wrapped angle.
+        targets = np.array([0.3 + 18.0 * np.pi, 0.0])
+        coordinates = np.array([0.3, 0.0])
+        WrapperController._process(controller, 0, line, 1.0, None, None, coordinates, None, None, np.zeros(2), targets)
+        self.assertEqual(line["state"], "WRAPPING")
+        self.assertAlmostEqual(targets[0], 0.3 + 18.0 * np.pi, places=5)
+
     def test_wrapper_checks_actual_carton_corner_speed(self):
         """Admit a seated carton only when every corner meets the motion limit."""
         signs = np.array([(x, y, z) for x in (-1, 1) for y in (-1, 1) for z in (-1, 1)])
