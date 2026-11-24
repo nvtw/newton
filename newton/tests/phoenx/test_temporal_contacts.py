@@ -522,10 +522,13 @@ class TestTemporalContactObservables(unittest.TestCase):
             weight = float(masses.sum()) * 9.81
             forces = []
             expected_forces = []
+            settled_heights = None
             for frame in range(120):
                 previous_momentum = float(masses @ state.body_qd.numpy()[:, 2]) if frame >= 90 else 0.0
                 solver.collide(state, contacts, dt=1 / 120)
                 solver.step(state, state, control, contacts, 1 / 120, observables=observables)
+                if frame == 90:
+                    settled_heights = state.body_q.numpy()[:, 2].copy()
                 if frame >= 90:
                     count = int(contacts.rigid_contact_count.numpy()[0])
                     shape0 = contacts.rigid_contact_shape0.numpy()[:count]
@@ -545,8 +548,14 @@ class TestTemporalContactObservables(unittest.TestCase):
                 self.assertGreater(solver.step_report().overflow_size, 0)
             if device == "cpu":
                 self.assertAlmostEqual(np.mean(forces), weight, delta=0.01)
-            np.testing.assert_allclose(state.body_q.numpy()[:, 2], 0.1, atol=0.001)
-            self.assertLess(float(np.abs(state.body_qd.numpy()[:, 2]).max()), 0.005)
+            heights = state.body_q.numpy()[:, 2]
+            np.testing.assert_allclose(heights, 0.1, atol=0.001)
+            # No drift over the last quarter second. The jointed pair receives the whole
+            # substep's gravity at its start while its owned contacts answer in every
+            # temporal sweep, so the last sweep's velocity reads a few mm/s that the next
+            # substep's gravity takes back; positions integrate the sweeps' average.
+            np.testing.assert_allclose(heights, settled_heights, atol=1.0e-4)
+            self.assertLess(float(np.abs(state.body_qd.numpy()[:, 2]).max()), 0.02)
 
     def test_owned_contacts_accumulate_in_every_sweep(self):
         """Count owned impulses in every temporal sweep, which solves them as a contact substep."""
