@@ -157,7 +157,8 @@ class SingleWorldMassSplittingDispatcher:
         # velocity.
         if direct is None or not direct.enabled:
             w._mass_splitting_writeback(already_averaged=True)
-        if direct is not None and direct.enabled:
+        if direct is not None and direct.enabled and w.joint_refinement_iterations > 0:
+            # The last iteration resolved the bounds; refinement sweeps changed the motion since.
             direct.resolve_bounded_drives(idt, use_bias=True)
         solve_auxiliary_constraints(w, idt, relax=False)
 
