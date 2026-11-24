@@ -183,6 +183,121 @@ class TestPhoenXHydroelasticStack(unittest.TestCase):
             )
 
 
+def _small_hydroelastic_cube_config(gap: float = 0.0) -> newton.ModelBuilder.ShapeConfig:
+    """Hydroelastic 10 cm cube material; ``gap=0`` keeps contacts to overlapping geometry."""
+    return newton.ModelBuilder.ShapeConfig(
+        mu=0.5,
+        sdf_max_resolution=32,
+        is_hydroelastic=True,
+        sdf_narrow_band_range=(-0.01, 0.01),
+        gap=gap,
+        density=1000.0,
+    )
+
+
+def _capture_frame(pipeline, solver, state_0, state_1, contacts, frame_dt: float):
+    """Capture one collide + step frame that leaves its result in ``state_0``."""
+
+    def frame():
+        pipeline.collide(state_0, contacts)
+        solver.step(state_0, state_1, None, contacts, frame_dt)
+        state_0.assign(state_1)
+
+    frame()  # compile and allocate outside the capture
+    with wp.ScopedCapture() as capture:
+        frame()
+    return capture.graph
+
+
+@unittest.skipUnless(wp.is_cuda_available(), "Hydroelastic requires CUDA")
+class TestPhoenXHydroelasticImpact(unittest.TestCase):
+    """Hydroelastic contacts publish a stiffness without damping."""
+
+    HALF = 0.05
+    DROP = 0.01
+
+    def test_contact_does_not_return_penetration_as_bounce(self) -> None:
+        """A cube placed on a cube rests and a dropped cube rebounds below its drop height.
+
+        Contacts are found once per frame of four substeps, so an impact first
+        penetrates. An undamped stiff row returns that penetration as
+        separation speed: the dropped cube rebounded 71 mm from 10 mm and the
+        placed cube bounced 14 mm.
+        """
+        half = self.HALF
+        builder = newton.ModelBuilder()
+        builder.default_shape_cfg = _small_hydroelastic_cube_config()
+        cubes = []
+        for x, drop in ((0.0, 0.0), (0.5, self.DROP)):
+            builder.add_shape_box(
+                body=-1, xform=wp.transform((x, 0.0, half), wp.quat_identity()), hx=half, hy=half, hz=half
+            )
+            body = builder.add_body(xform=wp.transform((x, 0.0, 3.0 * half + drop), wp.quat_identity()))
+            builder.add_shape_box(body=body, hx=half, hy=half, hz=half)
+            cubes.append(body)
+        model = builder.finalize()
+        pipeline = newton.CollisionPipeline(
+            model,
+            rigid_contact_max=512,
+            broad_phase="explicit",
+            contact_matching=PHOENX_CONTACT_MATCHING,
+            sdf_hydroelastic_config=HydroelasticSDF.Config(reduce_contacts=True, anchor_contact=True),
+        )
+        contacts = pipeline.contacts()
+        solver = SolverPhoenX(model, collision_pipeline=pipeline, substeps=4, solver_iterations=8)
+        state_0, state_1 = model.state(), model.state()
+        graph = _capture_frame(pipeline, solver, state_0, state_1, contacts, 1.0 / 120.0)
+
+        heights = []
+        for _ in range(120):
+            wp.capture_launch(graph)
+            heights.append(state_0.body_q.numpy()[cubes, 2] - 3.0 * half)
+        heights = np.array(heights)
+        self.assertTrue(np.isfinite(heights).all())
+
+        placed_bounce = float(heights[:, 0].max())
+        self.assertLess(placed_bounce, 1.0e-3, msg=f"placed cube bounced {placed_bounce * 1e3:.2f} mm")
+        dropped = heights[:, 1]
+        impact = int(np.argmin(dropped))
+        rebound = float(dropped[impact:].max())
+        self.assertLess(
+            rebound, self.DROP, msg=f"cube dropped {self.DROP * 1e3:.0f} mm rebounded {rebound * 1e3:.2f} mm"
+        )
+        self.assertLess(abs(float(dropped[-1])), 1.0e-3, msg="dropped cube did not come to rest on the cube")
+
+
+@unittest.skipUnless(wp.is_cuda_available(), "Hydroelastic requires CUDA")
+class TestPhoenXHydroelasticCapacity(unittest.TestCase):
+    """The collision pipeline PhoenX creates holds every hydroelastic contact."""
+
+    def test_own_pipeline_holds_hydroelastic_contacts(self) -> None:
+        """Before, a hydroelastic pair was budgeted like a convex pair (10 contacts),
+        so 32 worlds of two stacked cubes overflowed 1504 contacts into 1000 slots."""
+        half = 0.05
+        world = newton.ModelBuilder()
+        world.default_shape_cfg = _small_hydroelastic_cube_config(gap=0.002)
+        for level in range(2):
+            body = world.add_body(
+                xform=wp.transform((0.0, 0.0, half + level * (2.0 * half - 5.0e-4)), wp.quat_identity())
+            )
+            world.add_shape_box(body=body, hx=half, hy=half, hz=half)
+        scene = newton.ModelBuilder()
+        scene.add_ground_plane()
+        scene.replicate(world, 32)
+        model = scene.finalize()
+
+        solver = SolverPhoenX(model, substeps=2, solver_iterations=4)
+        pipeline = model._collision_pipeline
+        contacts = pipeline.contacts()
+        state_0, state_1 = model.state(), model.state()
+        graph = _capture_frame(pipeline, solver, state_0, state_1, contacts, 1.0 / 120.0)
+        wp.capture_launch(graph)
+
+        count = int(contacts.rigid_contact_count.numpy()[0])
+        self.assertLessEqual(count, int(contacts.rigid_contact_max), msg="rigid contact buffer overflowed")
+        self.assertTrue(np.isfinite(state_0.body_q.numpy()).all())
+
+
 if __name__ == "__main__":
     wp.init()
     unittest.main()

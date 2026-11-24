@@ -800,6 +800,7 @@ def contact_pd_coefficients(
 ):
     """Resolve an explicit contact override or the authored arithmetic-mean shape spring.
 
+    An explicit stiffness without damping is damped at the default damping ratio.
     An authored spring the sweep schedule cannot keep stable on a resting stack
     (:func:`contact_spring_stable`) is replaced by the stiffest stable spring at
     the default damping ratio, never stiffer than authored.
@@ -810,6 +811,12 @@ def contact_pd_coefficients(
     if row < views.rigid_contact_damping.shape[0]:
         d = views.rigid_contact_damping[row]
     if k > 0.0 or d > 0.0:
+        if d <= 0.0 and inverse_mass > 0.0:
+            # Zero damping means none was set (hydroelastic contacts carry only a stiffness).
+            # An undamped row returns its whole penetration as separation speed, so damp the
+            # spring the row applies (Nyquist-limited like pd_coefficients) at the default ratio.
+            k_applied = wp.min(k, PHOENX_BOOST_CONTACT_NORMAL / (inverse_mass * dt * dt))
+            d = wp.float32(2.0) * DEFAULT_DAMPING_RATIO * wp.sqrt(k_applied / inverse_mass)
         return pd_coefficients(k, d, depth, inverse_mass, dt, PHOENX_BOOST_CONTACT_NORMAL)
 
     count = views.shape_compliance.shape[0]
