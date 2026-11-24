@@ -568,7 +568,7 @@ class FleetController:
         for i, truck in enumerate(self.driver.trucks):
             for result in truck.log[counts[i] :]:
                 if result.get("reached") is False:
-                    truck.failed = f"{result['label']}: route target was not reached"
+                    truck.failed = f"{result['label']}: route target was not reached ({result})"
                 if result.get("op") == "lift" and abs(result["final_m"] - result["target_m"]) > 0.004:
                     truck.failed = f"{result['label']}: lift target was not reached"
             if truck.failed:
