@@ -121,7 +121,16 @@ class TestRestitution(unittest.TestCase):
                     dt, fraction, speed, coefficient = 1.0 / 240.0, 0.65, 4.0, 0.8
                     radius, offset, inertia = 0.08, 0.2, 0.125
                     builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
-                    material = builder.ShapeConfig(density=0.0, mu=0.0, restitution=coefficient, gap=0.05, margin=0.0)
+                    # The analytic bounce is frictionless: no sliding, torsional, or rolling friction.
+                    material = builder.ShapeConfig(
+                        density=0.0,
+                        mu=0.0,
+                        mu_torsional=0.0,
+                        mu_rolling=0.0,
+                        restitution=coefficient,
+                        gap=0.05,
+                        margin=0.0,
+                    )
                     builder.add_ground_plane(cfg=material)
                     body = builder.add_body(
                         mass=1.0,
