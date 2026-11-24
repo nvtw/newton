@@ -562,6 +562,7 @@ def joint_conversion_kernel(
     model_joint_parent: wp.array[wp.int32],
     model_joint_child: wp.array[wp.int32],
     model_joint_type: wp.array[wp.int32],
+    model_joint_d6_swing_limit: wp.array[wp.float32],
     model_joint_dof_dim: wp.array2d[wp.int32],
     model_joint_q_start: wp.array[wp.int32],
     model_joint_qd_start: wp.array[wp.int32],
@@ -601,6 +602,8 @@ def joint_conversion_kernel(
     for i in range(wp.min(qd_count_j, 6)):
         dof_axes_j[i] = model_joint_axis[dofs_start_j + i]
     dof_type_j = JointDoFType.from_newton_wp(type_j, q_count_j, qd_count_j, dof_dim_j, dof_axes_j)
+    if model_joint_d6_swing_limit and model_joint_d6_swing_limit[joint_id] > 0.0:
+        dof_type_j = JointDoFType.D6
     joint_dof_type[joint_id] = dof_type_j
     if dof_type_j < 0:
         return
@@ -689,6 +692,7 @@ def joint_frame_conversion_kernel(
     model_joint_child: wp.array[wp.int32],
     model_joint_qd_start: wp.array[wp.int32],
     model_joint_dof_dim: wp.array2d[wp.int32],
+    model_joint_d6_swing_limit: wp.array[wp.float32],
     model_joint_axis: wp.array[wp.vec3f],
     model_body_com: wp.array[wp.vec3f],
     model_joint_X_p: wp.array[wp.transformf],
@@ -736,7 +740,11 @@ def joint_frame_conversion_kernel(
         axes.angular_count = model_joint_dof_dim[joint_id, 1]
         axes.linear = complete_joint_axis_basis(dof_axes_j, 0, axes.linear_count)
         axes.third_axis_sign = 1.0
-        if axes.angular_count == 2:
+        if model_joint_d6_swing_limit:
+            axes.swing_limit = model_joint_d6_swing_limit[joint_id]
+        if axes.swing_limit > 0.0:
+            axes.angular = wp.identity(3, dtype=wp.float32)
+        elif axes.angular_count == 2:
             # Complete the intrinsic XYZ chart with the locked angle in the middle.
             first = dof_axes_j[axes.linear_count]
             last = dof_axes_j[axes.linear_count + 1]
@@ -1391,6 +1399,7 @@ def convert_model_joint_transforms(model: Model, joints: JointsModel) -> None:
             model.joint_child,
             model.joint_qd_start,
             model.joint_dof_dim,
+            model.joint_d6_swing_limit,
             model.joint_axis,
             model.body_com,
             model.joint_X_p,
@@ -1734,6 +1743,7 @@ def convert_joints(
             model.joint_parent,
             model.joint_child,
             model.joint_type,
+            model.joint_d6_swing_limit,
             model.joint_dof_dim,
             model.joint_q_start,
             model.joint_qd_start,
@@ -1784,6 +1794,7 @@ def convert_joints(
             model.joint_child,
             model.joint_qd_start,
             model.joint_dof_dim,
+            model.joint_d6_swing_limit,
             model.joint_axis,
             model.body_com,
             model.joint_X_p,

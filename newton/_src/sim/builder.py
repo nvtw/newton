@@ -98,7 +98,9 @@ from .body_variants import (
     _VariantShapeRows,
 )
 from .enums import (
+    _D6_SWING_LIMIT_MAX,
     BodyFlags,
+    JointD6AngularMode,
     JointTargetMode,
     JointType,
 )
@@ -2530,6 +2532,8 @@ class ModelBuilder:
 
         self.joint_type: list[int] = []
         """Joint type ids accumulated for :attr:`Model.joint_type`."""
+        self.joint_d6_swing_limit: list[float] = []
+        """Swing half-angles [rad] accumulated for :attr:`Model.joint_d6_swing_limit`."""
         self.joint_label: list[str] = []
         """Joint labels accumulated for :attr:`Model.joint_label`."""
         self.joint_armature: list[float] = []
@@ -7207,6 +7211,7 @@ class ModelBuilder:
                 )
 
         self.joint_type.append(joint_type)
+        self.joint_d6_swing_limit.append(0.0)
         joint_idx = self.joint_count - 1
         self.joint_parent.append(parent)
         if child not in self.joint_parents:
@@ -7857,6 +7862,8 @@ class ModelBuilder:
         *,
         linear_axes: Sequence[JointDofConfig] | None = None,
         angular_axes: Sequence[JointDofConfig] | None = None,
+        angular_mode: JointD6AngularMode = JointD6AngularMode.EULER,
+        swing_limit: float | None = None,
         label: str | None = None,
         parent_xform: Transform | None = None,
         child_xform: Transform | None = None,
@@ -7877,11 +7884,20 @@ class ModelBuilder:
         motion composes intrinsic rotations in the authored order, so each
         later axis moves with the previous rotations. See :ref:`d6-joint-conventions`.
 
+        In experimental swing-twist mode, the two angular entries are the Y/Z
+        components of a single swing rotation vector and their time derivatives.
+        Kamino supports this mode with zero twist and passive angular motion.
+
         Args:
             parent: The index of the parent body.
             child: The index of the child body.
             linear_axes: Configurations for the enabled translation axes, in coordinate order.
             angular_axes: Configurations for the enabled rotation axes, in composition order.
+                In swing-twist mode these are the anchor Y/Z axes. If omitted, both are enabled.
+            angular_mode: Angular coordinate convention. Swing-twist is experimental and
+                supports passive angular motion with locked twist and a circular swing limit.
+            swing_limit: Circular swing half-angle [rad], greater than zero and at most pi minus 0.001.
+                Required for swing-twist.
             label: The label of the joint.
             parent_xform: The transform from the parent body frame to the joint parent anchor frame.
             child_xform: The transform from the child body frame to the joint child anchor frame.
@@ -7896,10 +7912,33 @@ class ModelBuilder:
         """
         if linear_axes is None:
             linear_axes = []
+        angular_mode = JointD6AngularMode(angular_mode)
+        if angular_mode == JointD6AngularMode.SWING_TWIST:
+            if swing_limit is None or not 0.0 < swing_limit <= _D6_SWING_LIMIT_MAX or np.float32(swing_limit) == 0.0:
+                raise ValueError("D6 swing-twist requires 0 < swing_limit <= pi - 0.001 radians.")
+            swing_axes = (wp.vec3(0.0, 1.0, 0.0), wp.vec3(0.0, 0.0, 1.0))
+            if angular_axes is None:
+                angular_axes = [self.JointDofConfig(axis=axis) for axis in swing_axes]
+            if len(angular_axes) != 2 or any(
+                not wp.length_sq(cfg.axis - axis) <= 1.0e-12 for cfg, axis in zip(angular_axes, swing_axes, strict=True)
+            ):
+                raise ValueError("D6 swing-twist requires the anchor Y and Z swing axes in that order.")
+            for cfg in angular_axes:
+                if (
+                    cfg.actuator_mode not in (None, JointTargetMode.NONE)
+                    or cfg.target_ke
+                    or cfg.target_kd
+                    or cfg.stiffness
+                    or not cfg.limit_lower <= -MAXVAL
+                    or not cfg.limit_upper >= MAXVAL
+                ):
+                    raise ValueError("D6 swing-twist angular axes support passive motion and the circular limit only.")
+        elif swing_limit is not None:
+            raise ValueError("D6 swing_limit requires the swing-twist angular mode.")
         if angular_axes is None:
             angular_axes = []
 
-        return self.add_joint(
+        joint = self.add_joint(
             JointType.D6,
             parent,
             child,
@@ -7913,6 +7952,9 @@ class ModelBuilder:
             custom_attributes=custom_attributes,
             **kwargs,
         )
+        if swing_limit is not None:
+            self.joint_d6_swing_limit[joint] = swing_limit
+        return joint
 
     def add_joint_rod(
         self,
@@ -8819,6 +8861,7 @@ class ModelBuilder:
 
             data = {
                 "type": self.joint_type[i],
+                "d6_swing_limit": self.joint_d6_swing_limit[i],
                 "q": self.joint_q[q_start : q_start + q_dim],
                 "target_q": self.joint_target_q[q_start : q_start + q_dim],
                 "rest_q": self.joint_rest_q[q_start : q_start + q_dim],
@@ -9382,6 +9425,7 @@ class ModelBuilder:
 
         self.joint_label.clear()
         self.joint_type.clear()
+        self.joint_d6_swing_limit.clear()
         self.joint_parent.clear()
         self.joint_child.clear()
         self.joint_q.clear()
@@ -9418,6 +9462,7 @@ class ModelBuilder:
         for joint in retained_joints:
             self.joint_label.append(joint["label"])
             self.joint_type.append(joint["type"])
+            self.joint_d6_swing_limit.append(joint["d6_swing_limit"])
             self.joint_parent.append(body_remap[joint["parent"]])
             self.joint_child.append(body_remap[joint["child"]])
             self.joint_q_start.append(len(self.joint_q))
@@ -17233,6 +17278,9 @@ class ModelBuilder:
             joint_articulation_np = np.asarray(self.joint_articulation, dtype=np.int32)
 
             m.joint_type = wp.array(self.joint_type, dtype=wp.int32)
+            m.joint_d6_swing_limit = (
+                wp.array(self.joint_d6_swing_limit, dtype=wp.float32) if any(self.joint_d6_swing_limit) else None
+            )
             m.joint_parent = wp.array(joint_parent_np, dtype=wp.int32)
             m.joint_child = wp.array(joint_child_np, dtype=wp.int32)
             m.joint_X_p = warp_array_from_values(self.joint_X_p, dtype=wp.transform, requires_grad=requires_grad)

@@ -312,6 +312,36 @@ def d6_locked_axis(linear_count: int, angular_count: int, row: int) -> int:
 
 
 @wp.func
+def swing_twist_x_coordinates(q: wp.quatf, twist_at_singularity: float) -> tuple[wp.vec3f, wp.mat33f]:
+    """Measure X twist and the Y/Z swing rotation vector with their angular covectors."""
+    q = quat_positive(q)
+    twist_norm_sq = q.x * q.x + q.w * q.w
+    twist_axis = wp.vec3f(1.0, 0.0, 0.0)
+    angle = twist_at_singularity
+    twist_gradient = wp.vec3f(0.0)
+    inverse_twist = wp.quat_identity(dtype=wp.float32)
+    if twist_norm_sq > 1.0e-8:
+        inv_norm = 1.0 / wp.sqrt(twist_norm_sq)
+        inverse_twist = wp.quatf(-q.x * inv_norm, 0.0, 0.0, q.w * inv_norm)
+        angle = 2.0 * wp.atan2(q.x, q.w)
+        twist_gradient = wp.vec3f(
+            1.0,
+            (q.w * q.z + q.x * q.y) / twist_norm_sq,
+            (q.x * q.z - q.w * q.y) / twist_norm_sq,
+        )
+    elif angle != 0.0:
+        inverse_twist = wp.quat_from_axis_angle(twist_axis, -angle)
+    swing = q * inverse_twist
+    # For R = R_swing R_twist, remove the transported twist rate before
+    # differentiating the swing logarithm.
+    swing_velocity = wp.identity(3, dtype=wp.float32) - wp.outer(wp.quat_rotate(swing, twist_axis), twist_gradient)
+    swing_gradient = quat_left_jacobian_inverse(swing) @ swing_velocity
+    swing_log = quat_log(swing)
+    covectors = wp.matrix_from_cols(twist_gradient, wp.vec3f(swing_gradient[1]), wp.vec3f(swing_gradient[2]))
+    return wp.vec3f(angle, swing_log[1], swing_log[2]), covectors
+
+
+@wp.func
 def d6_angular_coordinates(
     axes: D6JointAxes, relative_q: wp.quatf, reference: wp.vec3f, use_reference: bool
 ) -> tuple[wp.vec3f, wp.mat33f]:
@@ -321,44 +351,23 @@ def d6_angular_coordinates(
     covectors are expressed in the authored parent anchor frame.
     """
     count = axes.angular_count
+    if axes.swing_limit > 0.0:
+        values, swing_covectors = swing_twist_x_coordinates(relative_q, 0.0)
+        return wp.vec3f(values[1], values[2], values[0]), wp.matrix_from_cols(
+            wp.vec3f(swing_covectors[:, 1]), wp.vec3f(swing_covectors[:, 2]), wp.vec3f(swing_covectors[:, 0])
+        )
     if count == 0:
         return quat_log(relative_q), wp.transpose(quat_left_jacobian_inverse(relative_q))
 
     basis_q = wp.quat_from_matrix(axes.angular)
     q = wp.quat_inverse(basis_q) * relative_q * basis_q
     if count == 1:
-        q = quat_positive(q)
-        twist_norm_sq = q.x * q.x + q.w * q.w
-        twist_axis = wp.vec3f(1.0, 0.0, 0.0)
-        inverse_twist = wp.quat_identity(dtype=wp.float32)
-        angle = float(0.0)
-        twist_gradient = wp.vec3f(0.0)
-        if twist_norm_sq > 1.0e-8:
-            inv_norm = 1.0 / wp.sqrt(twist_norm_sq)
-            inverse_twist = wp.quatf(-q.x * inv_norm, 0.0, 0.0, q.w * inv_norm)
-            angle = 2.0 * wp.atan2(q.x, q.w)
-            # Differentiate 2 atan2(q.x, q.w) under a left perturbation of q.
-            twist_gradient = wp.vec3f(
-                1.0,
-                (q.w * q.z + q.x * q.y) / twist_norm_sq,
-                (q.x * q.z - q.w * q.y) / twist_norm_sq,
-            )
-        elif use_reference:
-            # The twist is indeterminate when the hinge axes are antiparallel.
-            # Freeze it at the reference angle and let the swing rows restore alignment.
-            angle = reference[0]
-            inverse_twist = wp.quat_from_axis_angle(twist_axis, -angle)
+        # At antiparallel hinge axes, preserve the reference twist while
+        # the swing rows restore alignment.
+        angles, covectors = swing_twist_x_coordinates(q, reference[0] if use_reference else 0.0)
         if use_reference:
-            angle = correct_rotational_coord(angle, reference[0])
-        swing = q * inverse_twist
-        # With R = R_swing R_twist, subtract the transported twist rate
-        # before differentiating the swing log. The log keeps a usable
-        # gradient as the swing angle approaches pi.
-        swing_velocity = wp.identity(3, dtype=wp.float32) - wp.outer(wp.quat_rotate(swing, twist_axis), twist_gradient)
-        swing_gradient = quat_left_jacobian_inverse(swing) @ swing_velocity
-        residual = quat_log(swing)
-        covectors = wp.matrix_from_cols(twist_gradient, wp.vec3f(swing_gradient[1]), wp.vec3f(swing_gradient[2]))
-        return wp.vec3f(angle, residual[1], residual[2]), axes.angular @ covectors
+            angles[0] = correct_rotational_coord(angles[0], reference[0])
+        return angles, axes.angular @ covectors
 
     coords = wp.quat_to_euler(q, 2, 1, 0)
     if count == 2:
@@ -413,7 +422,7 @@ def write_d6_joint_motion(
     for i in range(count):
         axis = d6_dof_axis(axes.linear_count, i)
         value = values[axis]
-        if i >= axes.linear_count and correction == JointCorrectionMode.TWOPI:
+        if axes.swing_limit == 0.0 and i >= axes.linear_count and correction == JointCorrectionMode.TWOPI:
             value = wp.mod(value, wp.tau)
         joint_q[coords_offset + i] = value
         joint_qd[dofs_offset + i] = rates[axis]

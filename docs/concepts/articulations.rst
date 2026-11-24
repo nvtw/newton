@@ -547,6 +547,20 @@ the quaternion state of a ``JointType.BALL`` joint. A planar joint is one
 possible D6 layout: two translation axes spanning a plane and a rotation
 axis normal to that plane.
 
+An experimental alternative is :attr:`newton.JointD6AngularMode.SWING_TWIST`.
+It locks twist about the parent anchor's X axis and represents swing by the
+Y and Z components of a single rotation vector. The length of that vector
+is the swing angle. Pass a circular ``swing_limit`` in radians to
+:meth:`~newton.ModelBuilder.add_joint_d6`. The half-angle must be positive
+and at most :math:`\pi - 0.001`. This margin keeps the cone away from
+the singularity where the two X axes become antiparallel.
+
+Kamino supports this mode with passive angular motion. The optional Kamino
+FK solver enforces zero twist and reports failure if the solved pose lies
+outside the cone. It solves equality constraints, so it does not search for
+a different pose within the cone. General Newton FK and IK and other
+Newton dynamics solvers reject this experimental mode.
+
 Definition of ``joint_q``
 ^^^^^^^^^^^^^^^^^^^^^^^^^
 

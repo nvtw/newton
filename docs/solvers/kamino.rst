@@ -454,7 +454,14 @@ Set ``use_fk_solver=True`` to initialize a model with Kamino's optional
 forward kinematics solver, including D6 joints in closed loops. A joint
 participates as either passive or actuated. For an actuated D6 joint, supply
 all its enabled coordinates and, when solving velocities, their rates.
-Newton's :func:`newton.eval_fk` can also initialize articulated D6 body states.
+Newton's :func:`newton.eval_fk` can also initialize articulated Euler D6
+body states.
+
+The experimental :attr:`newton.JointD6AngularMode.SWING_TWIST` option
+locks X twist and limits passive swing to a circular cone. SCC, LOX, and
+PADMM enforce the limit through the same unilateral constraint machinery
+as other joint limits. The optional FK solver enforces zero twist and
+checks cone feasibility after solving the pose.
 
 .. _kamino-rod-joints:
 

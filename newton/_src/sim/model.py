@@ -714,6 +714,7 @@ class Model:
         "tet_materials": AttributeSpec(AttributeFrequency.TETRAHEDRON),
         # joints
         "joint_type": AttributeSpec(AttributeFrequency.JOINT),
+        "joint_d6_swing_limit": AttributeSpec(AttributeFrequency.JOINT),
         "joint_parent": AttributeSpec(AttributeFrequency.JOINT, references=AttributeFrequency.BODY),
         "joint_child": AttributeSpec(AttributeFrequency.JOINT, references=AttributeFrequency.BODY),
         "joint_ancestor": AttributeSpec(
@@ -1571,6 +1572,11 @@ class Model:
         """Per-DOF feedforward actuation input for control initialization, shape [joint_dof_count], float."""
         self.joint_type: wp.array[wp.int32] | None = None
         """Joint type, shape [joint_count], int."""
+        self.joint_d6_swing_limit: wp.array[wp.float32] | None = None
+        """Experimental D6 swing half-angle [rad], or zero for other joints. Shape [joint_count].
+
+        This is structural joint data. Rebuild the model and solver to change the mode or limit.
+        """
         self._has_rod_joints: bool = False
         self.joint_articulation: wp.array[wp.int32] | None = None
         """Joint articulation index (-1 if not in any articulation), shape [joint_count], int."""

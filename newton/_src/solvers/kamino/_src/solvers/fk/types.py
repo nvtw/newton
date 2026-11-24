@@ -52,24 +52,13 @@ wp.set_module_options({"enable_backward": False})
 
 class FKJointDoFType(IntEnum):
     """
-    Joint dof types for the FK solver, which currently differs from Kamino's main joint types
-    by the addition of the axis joint, used to regularize tie rods between two spherical joints
-    (taking out the rotation dof about their own axis).
-
-    Importantly, the integer value is the same for all joints not specific to FK, allowing seamless
-    conversions.
+    FK uses D6 for scalar-coordinate joints, quaternion layouts for free
+    and spherical joints, and an internal axis row for tie rods. Shared
+    layouts keep their corresponding Kamino joint type values.
     """
 
     FREE = 0
-    REVOLUTE = 1
-    PRISMATIC = 2
-    CYLINDRICAL = 3
-    UNIVERSAL = 4
     SPHERICAL = 5
-    CARTESIAN = 6
-    FIXED = 7
-    GIMBAL = 8
-    GIMBAL_LEFT_HANDED = 9
     AXIS = 10
     D6 = 11
 
@@ -416,9 +405,6 @@ class FKJointsModel:
     Base joint id per world (-1 = none).
     Shape of ``(num_worlds,)``.
     """
-
-    has_universal_actuators: bool = False
-    """True iff the model has at least one actuated universal joint."""
 
     built_actuated: wp.array[wp.int32] | None = None
     """

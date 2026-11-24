@@ -1,7 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
+import math
 from enum import IntEnum
+
+# Keep the cone away from the float32 swing-twist rank loss at pi.
+_D6_SWING_LIMIT_MAX = math.pi - 1.0e-3
 
 
 class ModelFlags(IntEnum):
@@ -262,6 +266,20 @@ class JointType(IntEnum):
         elif self == JointType.FIXED:
             cts_count = 6
         return cts_count
+
+
+class JointD6AngularMode(IntEnum):
+    """Angular coordinate convention for a D6 joint.
+
+    The :attr:`SWING_TWIST` mode is experimental and initially supports
+    passive zero twist with a circular swing limit.
+    """
+
+    EULER = 0
+    """Ordered intrinsic rotations."""
+
+    SWING_TWIST = 1
+    """Swing about anchor Y/Z with anchor X twist locked."""
 
 
 class JointTargetMode(IntEnum):

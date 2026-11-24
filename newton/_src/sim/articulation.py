@@ -624,6 +624,8 @@ def eval_fk(
             shape, or device.
     """
     # Validate inputs
+    if getattr(model, "joint_d6_swing_limit", None) is not None:
+        raise ValueError("Use SolverKamino's FK solver for D6 swing-twist joints.")
     if mask is not None and indices is not None:
         raise ValueError("Cannot specify both mask and indices parameters")
     if joint_mask is not None:
@@ -1009,6 +1011,8 @@ def eval_ik(
     Note:
         The mask and indices parameters are mutually exclusive. If both are provided, a ValueError is raised.
     """
+    if getattr(model, "joint_d6_swing_limit", None) is not None:
+        raise ValueError("eval_ik does not support D6 swing-twist joints.")
     # Check for mutually exclusive parameters
     if mask is not None and indices is not None:
         raise ValueError("mask and indices parameters are mutually exclusive - please use only one")

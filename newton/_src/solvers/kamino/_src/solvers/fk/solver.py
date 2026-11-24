@@ -37,7 +37,6 @@ from .kernels import (
     _compute_fk_axis_joint_frames,
     _compute_fk_joint_frames,
     _correct_actuator_coords,
-    _correct_universal_constraint_velocities,
     _eval_actuator_coords,
     _eval_body_velocities,
     _eval_fk_actuated_dofs_or_coords,
@@ -58,6 +57,7 @@ from .kernels import (
     _reset_state_base_q,
     _resolve_fk_actuation_types,
     _update_cg_tolerance_kernel,
+    _validate_fk_swing_cones,
     make_1d_tile_based_kernels,
     make_2d_tile_based_kernels,
     make_eval_joint_constraints_jacobian_kernel,
@@ -275,10 +275,39 @@ class ForwardKinematicsSolver:
         # We resolve discrete joint data (e.g. types and indices) first, then
         # copy or compute continuous joint data (e.g. frames).
         joint_dof_type_prev = self.model.joints.dof_type.numpy().copy()
+        self._has_swing_cones = False
+        if d6_layouts is not None:
+            cones = (joint_dof_type_prev == JointDoFType.D6) & (d6_layouts["swing_limit"] > 0.0)
+            self._has_swing_cones = bool(cones.any())
+            if np.any(cones & (joint_act_type_prev != JointActuationType.PASSIVE)):
+                raise ValueError("Kamino FK requires passive D6 swing-twist joints.")
         joint_bid_B_prev = self.model.joints.bid_B.numpy().copy()
         joint_bid_F_prev = self.model.joints.bid_F.numpy().copy()
         joints_num_coords_prev = self.model.joints.num_coords.numpy().copy()
         joints_num_dofs_prev = self.model.joints.num_dofs.numpy().copy()
+        # These scalar-coordinate joints use D6 in FK. The source frames
+        # already contain the authored basis for the specialized layouts.
+        layouts = {
+            JointDoFType.FIXED: (0, 0),
+            JointDoFType.PRISMATIC: (1, 0),
+            JointDoFType.REVOLUTE: (0, 1),
+            JointDoFType.CYLINDRICAL: (1, 1),
+            JointDoFType.UNIVERSAL: (0, 2),
+            JointDoFType.CARTESIAN: (3, 0),
+            JointDoFType.GIMBAL: (0, 3),
+            JointDoFType.GIMBAL_LEFT_HANDED: (0, 3),
+        }
+        canonical_d6 = np.isin(joint_dof_type_prev, tuple(layouts))
+        linear_counts = np.zeros_like(joints_num_dofs_prev)
+        angular_counts = np.zeros_like(linear_counts)
+        for source_type, (linear, angular) in layouts.items():
+            mask = joint_dof_type_prev == source_type
+            linear_counts[mask] = linear
+            angular_counts[mask] = angular
+        if d6_layouts is not None:
+            general = joint_dof_type_prev == JointDoFType.D6
+            linear_counts[general] = d6_layouts["linear_count"][general]
+            angular_counts[general] = d6_layouts["angular_count"][general]
         joint_dof_type = []
         joint_act_type = []
         joint_bid_B = []
@@ -312,7 +341,9 @@ class ForwardKinematicsSolver:
             for jt_id_prev in world_joint_ids:
                 # Note: we use the fact that integer values of the FK vs Kamino dof type enums
                 # are matched for all joints that are not FK-specific
-                joint_dof_type.append(joint_dof_type_prev[jt_id_prev])
+                joint_dof_type.append(
+                    FKJointDoFType.D6 if canonical_d6[jt_id_prev] else joint_dof_type_prev[jt_id_prev]
+                )
                 joint_act_type.append(joint_act_type_prev[jt_id_prev])
                 joint_bid_B.append(joint_bid_B_prev[jt_id_prev])
                 joint_bid_F.append(joint_bid_F_prev[jt_id_prev])
@@ -433,7 +464,6 @@ class ForwardKinematicsSolver:
         # Retrieve / compute dimensions - Constraints
         num_constraints = num_bodies.copy()  # Number of kinematic constraints per world (unit quat. + joints)
         has_universal_joints = False  # Whether the model has at least one passive universal joint
-        self.data.joints.has_universal_actuators = False  # Whether the model has at least one actuated universal joint
         constraint_full_to_red_map = np.full(6 * self.data.dimensions.num_joints_tot, -1, dtype=np.int32)
         for eq_class in classes:
             # Count constraints for first world in equivalence class
@@ -444,21 +474,17 @@ class ForwardKinematicsSolver:
                 dof_type = joint_dof_type[jt_id]
                 if act_type != JointActuationType.PASSIVE:  # Actuator: select all six constraints
                     rows = range(6)
-                    if dof_type == FKJointDoFType.UNIVERSAL:
-                        self.data.joints.has_universal_actuators = True
                 elif dof_type == FKJointDoFType.AXIS:
                     rows = (3,)
                 elif dof_type == FKJointDoFType.D6:
-                    layout = d6_layouts[joints_source_id[jt_id]]
-                    linear_count = int(layout["linear_count"])
-                    angular_count = int(layout["angular_count"])
+                    source_id = joints_source_id[jt_id]
+                    linear_count = int(linear_counts[source_id])
+                    angular_count = int(angular_counts[source_id])
                     rows = (*range(linear_count, 3), *range(3 + angular_count, 6))
                     has_universal_joints |= angular_count == 2
                 else:
                     # FK and dynamics use the same row order for specialized joints.
                     rows = JointDoFType(dof_type).cts_axes
-                    if dof_type == FKJointDoFType.UNIVERSAL:
-                        has_universal_joints = True
                 for i in rows:
                     constraint_full_to_red_map[6 * jt_id + i] = ct_count
                     ct_count += 1
@@ -496,7 +522,7 @@ class ForwardKinematicsSolver:
                         for i in range(4):
                             delta_q_max[coord_id + i] = max_step_quat
                     elif dof_type == FKJointDoFType.D6:
-                        count = int(d6_layouts[joints_source_id[jt_id]]["linear_count"])
+                        count = int(linear_counts[joints_source_id[jt_id]])
                         stop = coord_id + joints_num_actuated_coords[jt_id]
                         delta_q_max[coord_id : coord_id + count] = max_step_linear
                         delta_q_max[coord_id + count : stop] = max_step_angular
@@ -570,8 +596,9 @@ class ForwardKinematicsSolver:
             self.data.joints.X_Bj = wp.empty(self.data.dimensions.num_joints_tot, dtype=wp.mat33f)
             self.data.joints.X_Fj = wp.empty(self.data.dimensions.num_joints_tot, dtype=wp.mat33f)
             self.data.joints.d6_axes = wp.empty(
-                self.data.dimensions.num_joints_tot if d6_layouts is not None else 0, dtype=D6JointAxes
+                self.data.dimensions.num_joints_tot if FKJointDoFType.D6 in joint_dof_type else 0, dtype=D6JointAxes
             )
+            self._source_d6_dims = wp.array(np.column_stack((linear_counts, angular_counts)), dtype=wp.vec2i)
             self.data.joints.source_id = to_warp_int32_array(joints_source_id)
             self.data.joints.world_id = to_warp_int32_array(joint_world_id)
             self.data.joints.axis_joint_id = to_warp_int32_array(axis_joint_d)
@@ -1053,6 +1080,8 @@ class ForwardKinematicsSolver:
                 self.model.joints.X_Bj,
                 self.model.joints.X_Fj,
                 self.data.joints.dof_type,
+                self.model.joints.dof_type,
+                self._source_d6_dims,
                 self.model.joints.d6_axes,
                 self.data.joints.B_r_Bj,
                 self.data.joints.F_r_Fj,
@@ -2007,26 +2036,6 @@ class ForwardKinematicsSolver:
             ],
             device=self.device,
         )
-        if self.data.joints.has_universal_actuators:
-            wp.launch(
-                _correct_universal_constraint_velocities,
-                dim=(batch_size, self.model.size.num_worlds, self.data.dimensions.num_joints_max),
-                inputs=[
-                    self.data.dimensions.num_joints,
-                    self.data.dimensions.joints_offset,
-                    self.data.joints.dof_type,
-                    self.data.joints.act_type,
-                    self.data.joints.bid_B,
-                    self.data.joints.bid_F,
-                    self.data.joints.X_Bj,
-                    self.data.joints.X_Fj,
-                    self.data.dimensions.constraint_full_to_red_map,
-                    body_q,
-                    world_mask,
-                    target_cts_u,
-                ],
-                device=self.device,
-            )
 
         # Update constraints Jacobian
         self._update_jacobian(body_q, target_rel_transforms, world_mask)
@@ -2463,6 +2472,25 @@ class ForwardKinematicsSolver:
 
         # Main loop
         wp.capture_while(self.data.gauss_newton.loop_condition, lambda: self._run_newton_iteration(body_q))
+
+        if self._has_swing_cones:
+            wp.launch(
+                _validate_fk_swing_cones,
+                dim=self.model.size.num_worlds,
+                inputs=[
+                    self.data.joints.dof_type,
+                    self.data.joints.d6_axes,
+                    self.data.dimensions.joints_offset,
+                    self.data.joints.bid_B,
+                    self.data.joints.bid_F,
+                    self.data.joints.X_Bj,
+                    self.data.joints.X_Fj,
+                    body_q,
+                    self.config.tolerance,
+                    self.data.gauss_newton.success,
+                ],
+                device=self.device,
+            )
 
         # Velocity solve, for worlds where FK ran and was successful
         if body_u is not None:

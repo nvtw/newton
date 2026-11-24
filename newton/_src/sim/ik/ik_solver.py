@@ -269,6 +269,8 @@ class IKSolver:
         wolfe_c1: float = 1e-4,
         wolfe_c2: float = 0.9,
     ) -> None:
+        if model.joint_d6_swing_limit is not None:
+            raise ValueError("IKSolver does not support D6 swing-twist joints.")
         if isinstance(optimizer, str):
             optimizer = IKOptimizer(optimizer)
         if isinstance(jacobian_mode, str):

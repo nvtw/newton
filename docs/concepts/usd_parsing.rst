@@ -878,6 +878,19 @@ The parser resolves ``self_collision_enabled`` from either ``newton:selfCollisio
 
 **Newton Joint Attribute Remapping:**
 
+An experimental passive swing–twist D6 can be authored on a generic
+``PhysicsJoint`` prim with the custom token ``newton:d6AngularMode = "swingTwist"``
+and float ``newton:d6SwingLimit`` in degrees. The angle must be positive
+and stay at least 0.001 radians below 180 degrees. The mode locks anchor X twist and enables Y/Z
+swing together. Omit separate angular limits and drives. Author the intended
+parent as ``physics:body0`` and the child as ``physics:body1``.
+See :ref:`d6-joint-conventions` for solver support and the coordinate layout.
+Existing USD D6 joints keep their Euler interpretation. The
+`Omni Physics D6 joint documentation
+<https://docs.omniverse.nvidia.com/kit/docs/omni_physics/107.3/dev_guide/rigid_bodies_articulations/joints.html#d6-joint>`__
+describes ordinary D6 angular limits as a pyramid, distinct from a circular
+swing cone.
+
 On joint prims (``RevoluteJoint``, ``PrismaticJoint``, ``D6Joint``), the following ``NewtonJointAPI`` attributes are resolved uniformly across all DOFs of the joint:
 
 .. list-table:: Newton Joint Attribute Remapping

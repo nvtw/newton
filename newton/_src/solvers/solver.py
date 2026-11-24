@@ -588,6 +588,7 @@ class SolverBase:
         """Solver-specific default."""
 
     supports_collision_pipeline: bool = False
+    _supports_d6_swing_twist: bool = False
     """Whether this solver can own a :class:`~newton.CollisionPipeline` and drive detection itself.
 
     Currently only :class:`~newton.solvers.SolverVBD` opts in; passing
@@ -626,6 +627,8 @@ class SolverBase:
             collision_frequency_type: Per-slot detection points. Unspecified
                 slots retain their defaults.
         """
+        if getattr(model, "joint_d6_swing_limit", None) is not None and not self._supports_d6_swing_twist:
+            raise ValueError(f"{type(self).__name__} does not support D6 swing-twist joints.")
         self.model = model
         self._module_options: dict[Any, dict[str, Any]] = {}
         self._applied_module_options_revision = -1

@@ -37,6 +37,7 @@ newton
    Gaussian
    GeoType
    Heightfield
+   JointD6AngularMode
    JointTargetMode
    JointType
    Mesh

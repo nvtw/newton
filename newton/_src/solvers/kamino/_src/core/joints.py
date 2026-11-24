@@ -1268,6 +1268,7 @@ class D6JointAxes:
     linear: wp.mat33f
     angular: wp.mat33f
     third_axis_sign: wp.float32
+    swing_limit: wp.float32
 
 
 @dataclass

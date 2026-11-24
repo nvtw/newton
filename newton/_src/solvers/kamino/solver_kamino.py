@@ -38,6 +38,7 @@ from ...sim.collide import (
     _RIGID_CONTACTS_PER_PRIMITIVE_PAIR,
     _estimate_rigid_contact_max,
 )
+from ...sim.enums import _D6_SWING_LIMIT_MAX
 from ...utils.deprecation import warn_deprecation
 from ..coupled.interface import CouplingInterface
 from ..solver import SolverBase
@@ -198,6 +199,8 @@ class SolverKamino(SolverBase, CouplingInterface):
                 solver.step(state_in, state_out, control, contacts, dt)
                 state_in, state_out = state_out, state_in
     """
+
+    _supports_d6_swing_twist = True
 
     SUPPORTED_OBSERVABLES = frozenset(
         {
@@ -866,6 +869,7 @@ class SolverKamino(SolverBase, CouplingInterface):
 
         # Validate solver-specific model compatibility after resolving the selected backend.
         self._validate_model_compatibility(model, self._config)
+        self._swing_limits_built = self._validate_swing_twist_joints(model)
         self._rod_joints = (
             np.flatnonzero(model.joint_type.numpy() == JointType.ROD) if model.joint_count > 0 else np.empty(0, int)
         )
@@ -1366,6 +1370,15 @@ class SolverKamino(SolverBase, CouplingInterface):
             flags: Bitmask of :class:`~newton.ModelFlags` or custom ``int`` bits indicating which properties changed.
         """
         self._validate_rod_joint_properties(flags)
+        if flags & (
+            ModelFlags.JOINT_PROPERTIES
+            | ModelFlags.JOINT_DOF_PROPERTIES
+            | ModelFlags.JOINT_DOF_FORCE_PROPERTIES
+            | ModelFlags.ACTUATOR_PROPERTIES
+        ) and (self._swing_limits_built is not None or self.model.joint_d6_swing_limit is not None):
+            swing_limits = self._validate_swing_twist_joints(self.model)
+            if not np.array_equal(swing_limits, self._swing_limits_built):
+                raise ValueError("Changing a D6 angular mode or swing limit requires rebuilding the model and solver.")
         self._validate_structural_invariants(flags)
         self._solver_kamino.validate_model_changed(flags)
 
@@ -1672,6 +1685,36 @@ class SolverKamino(SolverBase, CouplingInterface):
             for feature in unsupported_features:
                 error_msg += "\n  - " + feature
             raise ValueError(error_msg)
+
+    @staticmethod
+    def _validate_swing_twist_joints(model: Model) -> np.ndarray | None:
+        """Validate the authored swing axes before constructing or updating constraints."""
+        if model.joint_d6_swing_limit is None:
+            return None
+        limits = model.joint_d6_swing_limit.numpy()
+        if limits.shape != (model.joint_count,) or not np.all(
+            (limits >= 0.0) & (limits <= np.float32(_D6_SWING_LIMIT_MAX))
+        ):
+            raise ValueError("Expected one D6 swing limit in [0, pi - 0.001] per joint.")
+        swing_joints = np.flatnonzero(limits > 0.0)
+        dimensions = model.joint_dof_dim.numpy()[swing_joints]
+        if np.any(model.joint_type.numpy()[swing_joints] != JointType.D6) or np.any(dimensions[:, 1] != 2):
+            raise ValueError("A D6 swing-twist joint requires two angular axes.")
+        starts = model.joint_qd_start.numpy()[swing_joints] + dimensions[:, 0]
+        slots = starts[:, None] + np.arange(2)
+        axes = model.joint_axis.numpy()[slots]
+        if not np.allclose(axes, ((0.0, 1.0, 0.0), (0.0, 0.0, 1.0)), rtol=0.0, atol=1.0e-6):
+            raise ValueError("D6 swing-twist requires the anchor Y and Z swing axes in that order.")
+        if (
+            np.any(model.joint_target_mode.numpy()[slots] != JointTargetMode.NONE)
+            or np.any(model.joint_target_ke.numpy()[slots] != 0.0)
+            or np.any(model.joint_target_kd.numpy()[slots] != 0.0)
+            or np.any(model.joint_stiffness.numpy()[slots] != 0.0)
+            or not np.all(model.joint_limit_lower.numpy()[slots] <= -MAXVAL)
+            or not np.all(model.joint_limit_upper.numpy()[slots] >= MAXVAL)
+        ):
+            raise ValueError("D6 swing-twist angular axes support passive motion and the circular limit only.")
+        return limits.copy()
 
     def _validate_rod_joint_properties(self, flags: ModelFlags | int) -> None:
         """Raise if a runtime edit gives a rod joint DoF properties that Kamino does not model.

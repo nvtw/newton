@@ -12,7 +12,7 @@ import numpy as np
 import numpy.typing as npt
 import warp as wp
 
-from ..core.joints import JOINT_QMAX, JOINT_QMIN, JointDoFType
+from ..core.joints import JOINT_QMAX, JOINT_QMIN, D6JointAxes, JointDoFType
 from ..core.math import quat_log
 from ..core.model import ModelKamino
 from ..core.types import (
@@ -136,6 +136,9 @@ class LimitsKaminoData:
     `1.0` for active min limits, `-1.0` for active max limits.
     Shape of ``(model_max_limits_host,)``.
     """
+
+    weights: wp.array[wp.vec2f] | None = None
+    """Optional weights of the first and next DoF for coupled limits."""
 
     r_q: wp.array[wp.float32] | None = None
     """
@@ -453,6 +456,7 @@ def detect_active_dof_limit(
     q: wp.float32,
     qmin: wp.float32,
     qmax: wp.float32,
+    weights: wp.vec2f,
     # Outputs:
     limits_model_num: wp.array[wp.int32],
     limits_world_num: wp.array[wp.int32],
@@ -462,6 +466,7 @@ def detect_active_dof_limit(
     limits_bids: wp.array[wp.vec2i],
     limits_dof: wp.array[wp.int32],
     limits_side: wp.array[wp.float32],
+    limits_weights: wp.array[wp.vec2f],
     limits_r_q: wp.array[wp.float32],
     limits_key: wp.array[wp.uint64],
 ):
@@ -481,6 +486,8 @@ def detect_active_dof_limit(
             limits_bids[mlid] = wp.vec2i(bid_B, bid_F)
             limits_dof[mlid] = dofid
             limits_side[mlid] = 1.0 if exceeds_min else -1.0
+            if limits_weights:
+                limits_weights[mlid] = weights
             limits_r_q[mlid] = r_min if exceeds_min else r_max
             limits_key[mlid] = build_pair_key2(wp.uint32(jid), wp.uint32(dof))
 
@@ -494,6 +501,7 @@ def detect_active_dof_limit(
 def _detect_active_joint_configuration_limits(
     model_joint_wid: wp.array[wp.int32],
     model_joint_dof_type: wp.array[wp.int32],
+    model_joint_d6_axes: wp.array[D6JointAxes],
     model_joint_dofs_offset: wp.array[wp.int32],
     model_joint_coords_offset: wp.array[wp.int32],
     model_joint_bid_B: wp.array[wp.int32],
@@ -513,6 +521,7 @@ def _detect_active_joint_configuration_limits(
     limits_bids: wp.array[wp.vec2i],
     limits_dof: wp.array[wp.int32],
     limits_side: wp.array[wp.float32],
+    limits_weights: wp.array[wp.vec2f],
     limits_r_q: wp.array[wp.float32],
     limits_key: wp.array[wp.uint64],
 ):
@@ -584,6 +593,7 @@ def _detect_active_joint_configuration_limits(
             q_j_map[dof],
             q_j_min[dof],
             q_j_max[dof],
+            wp.vec2f(1.0, 0.0),
             # Outputs:
             limits_model_num,
             limits_world_num,
@@ -593,9 +603,43 @@ def _detect_active_joint_configuration_limits(
             limits_bids,
             limits_dof,
             limits_side,
+            limits_weights,
             limits_r_q,
             limits_key,
         )
+
+    if limits_weights and dof_type_j == JointDoFType.D6:
+        axes = model_joint_d6_axes[jid]
+        if axes.swing_limit > 0.0:
+            dof = axes.linear_count
+            swing = wp.vec2f(q_j_map[dof], q_j_map[dof + 1])
+            angle = wp.length(swing)
+            if angle > axes.swing_limit:
+                detect_active_dof_limit(
+                    model_max_limits,
+                    world_max_limits,
+                    wid,
+                    jid,
+                    dof,
+                    dofs_offset_j + dof,
+                    bid_B_j,
+                    bid_F_j,
+                    angle,
+                    JOINT_QMIN,
+                    axes.swing_limit,
+                    swing / angle,
+                    limits_model_num,
+                    limits_world_num,
+                    limits_wid,
+                    limits_lid,
+                    limits_jid,
+                    limits_bids,
+                    limits_dof,
+                    limits_side,
+                    limits_weights,
+                    limits_r_q,
+                    limits_key,
+                )
 
 
 ###
@@ -775,6 +819,12 @@ class LimitsKamino:
         return self._data.side
 
     @property
+    def weights(self) -> wp.array[wp.vec2f] | None:
+        """Return the optional DoF weights of coupled limits."""
+        self._assert_has_data()
+        return self._data.weights
+
+    @property
     def r_q(self) -> wp.array[wp.float32]:
         """
         Returns the amount of generalized coordinate violation per joint-limit.
@@ -849,6 +899,18 @@ class LimitsKamino:
             body_is_immovable,
             model.size.num_worlds,
         )
+        has_cone = False
+        if model.joints.d6_axes.size:
+            cones = (model.joints.dof_type.numpy() == JointDoFType.D6) & (
+                model.joints.d6_axes.numpy()["swing_limit"] > 0.0
+            )
+            has_cone = bool(cones.any())
+            for joint in np.flatnonzero(cones):
+                parent, child = joint_bid_B[joint], joint_bid_F[joint]
+                if body_is_immovable[child] and (parent < 0 or body_is_immovable[parent]):
+                    continue
+                model_max_limits += 1
+                world_max_limits[joint_wid[joint]] += 1
 
         # Skip allocation if there are no limits to allocate
         if model_max_limits == 0:
@@ -870,6 +932,7 @@ class LimitsKamino:
                 bids=wp.zeros(shape=model_max_limits, dtype=wp.vec2i),
                 dof=wp.zeros(shape=model_max_limits, dtype=wp.int32),
                 side=wp.zeros(shape=model_max_limits, dtype=wp.float32),
+                weights=wp.empty(model_max_limits, dtype=wp.vec2f) if has_cone else None,
                 r_q=wp.zeros(shape=model_max_limits, dtype=wp.float32),
                 key=wp.full(shape=model_max_limits, value=make_bitmask(63), dtype=wp.uint64),
                 reaction=wp.zeros(shape=model_max_limits, dtype=wp.float32),
@@ -920,6 +983,7 @@ class LimitsKamino:
                 # Inputs:
                 self._model.joints.wid,
                 self._model.joints.dof_type,
+                self._model.joints.d6_axes,
                 self._model.joints.dofs_offset,
                 self._model.joints.coords_offset,
                 self._model.joints.bid_B,
@@ -939,6 +1003,7 @@ class LimitsKamino:
                 self._data.bids,
                 self._data.dof,
                 self._data.side,
+                self._data.weights,
                 self._data.r_q,
                 self._data.key,
             ],

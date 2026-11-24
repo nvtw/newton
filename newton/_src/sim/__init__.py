@@ -10,6 +10,7 @@ from .contacts import Contacts
 from .control import Control
 from .enums import (
     BodyFlags,
+    JointD6AngularMode,
     JointTargetMode,
     JointType,
     ModelFlags,
@@ -28,6 +29,7 @@ __all__ = [
     "CollisionSubstepScheduler",
     "Contacts",
     "Control",
+    "JointD6AngularMode",
     "JointTargetMode",
     "JointType",
     "Model",

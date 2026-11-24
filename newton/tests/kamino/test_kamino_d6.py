@@ -4,6 +4,7 @@
 """Exercise D6 layouts and row assembly through the Kamino backends."""
 
 import itertools
+import math
 import unittest
 
 import numpy as np
@@ -12,7 +13,11 @@ import warp as wp
 import newton
 from newton._src.solvers.kamino._src.core.joints import D6JointAxes, JointCorrectionMode
 from newton._src.solvers.kamino._src.core.model import ModelKamino
-from newton._src.solvers.kamino._src.kinematics.joints import d6_angular_coordinates, write_d6_joint_motion
+from newton._src.solvers.kamino._src.kinematics.joints import (
+    d6_angular_coordinates,
+    swing_twist_x_coordinates,
+    write_d6_joint_motion,
+)
 from newton._src.solvers.kamino._src.solvers.fk import ForwardKinematicsSolver
 from newton.solvers import SolverKamino
 from newton.tests.kamino import setup_tests, test_context
@@ -45,6 +50,28 @@ def _measure_angular_derivatives(analytic: wp.array[wp.vec3f], finite_difference
 
 
 @wp.kernel
+def _measure_swing_twist(
+    values: wp.array[wp.vec3f], analytic: wp.array[wp.vec3f], finite_difference: wp.array[wp.vec3f]
+):
+    swing_vector = wp.vec3f(0.0, 0.45, -0.7)
+    swing = wp.quat_from_axis_angle(wp.normalize(swing_vector), wp.length(swing_vector))
+    twist_angle = 0.6 * float(wp.tid())
+    twist = wp.quat_from_axis_angle(wp.vec3f(1.0, 0.0, 0.0), twist_angle)
+    orientation = swing * twist
+    direction = wp.normalize(wp.vec3f(-3.0, 1.0, 2.0))
+    epsilon = 1.0e-3
+    minus = wp.quat_from_axis_angle(direction, -epsilon) * orientation
+    plus = wp.quat_from_axis_angle(direction, epsilon) * orientation
+    coords, covectors = swing_twist_x_coordinates(orientation, 0.0)
+    values_minus, _ = swing_twist_x_coordinates(minus, 0.0)
+    values_plus, _ = swing_twist_x_coordinates(plus, 0.0)
+    i = wp.tid()
+    values[i] = coords
+    analytic[i] = wp.transpose(covectors) @ direction
+    finite_difference[i] = (values_plus - values_minus) / (2.0 * epsilon)
+
+
+@wp.kernel
 def _measure_wrapped_angles(
     correction: int, reference: wp.array[float], result: wp.array[float], rates: wp.array[float]
 ):
@@ -72,6 +99,103 @@ class TestKaminoD6(unittest.TestCase):
         if not test_context.setup_done:
             setup_tests(clear_cache=False)
         self.device = wp.get_device(test_context.device)
+
+    def test_swing_twist_recovers_to_circular_cone(self):
+        """Recover oblique swing and twist violations on all three dynamics backends."""
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        body = builder.add_link(mass=1.0, inertia=_INERTIA, lock_inertia=True)
+        joint = builder.add_joint_d6(-1, body, angular_mode=newton.JointD6AngularMode.SWING_TWIST, swing_limit=0.6)
+        builder.add_articulation([joint])
+        model = builder.finalize(device=self.device)
+        with self.assertRaisesRegex(ValueError, "does not support D6 swing"):
+            newton.solvers.SolverXPBD(model)
+        swing = wp.quat_from_axis_angle(wp.normalize(wp.vec3(0, -1, 1)), 0.8)
+        twist = wp.quat_from_axis_angle(wp.vec3(1, 0, 0), 0.25)
+        pose = np.array([[0.0, 0.0, 0.0, *(swing * twist)]], dtype=np.float32)
+        for backend in ("scc", "lox", "padmm"):
+            with self.subTest(backend=backend):
+                solver = SolverKamino(model, SolverKamino.Config(dynamics_solver=backend, use_collision_detector=False))
+                state, result, control = model.state(), model.state(), model.control()
+                state.body_q.assign(pose)
+                for _ in range(120):
+                    solver.step(state, result, control, None, 0.01)
+                    state, result = result, state
+                actual = state.body_q.numpy()[0, 3:]
+                angle = 2.0 * math.atan2(math.hypot(actual[1], actual[2]), math.hypot(actual[0], actual[3]))
+                self.assertLessEqual(angle, 0.6005)
+                # Each backend uses its own finite recovery rate. Check
+                # that the twist violation decreases materially.
+                self.assertLess(abs(2.0 * math.atan2(actual[0], actual[3])), 0.15)
+        model.joint_d6_swing_limit.assign(np.array([0.7], dtype=np.float32))
+        with self.assertRaisesRegex(ValueError, "requires rebuilding"):
+            solver.notify_model_changed(newton.ModelFlags.JOINT_PROPERTIES)
+
+    def test_swing_twist_fk_checks_cone(self):
+        """Keep a pure swing in FK and reject an otherwise valid pose beyond the cone."""
+        builder = newton.ModelBuilder()
+        body = builder.add_link(mass=1.0, inertia=_INERTIA, lock_inertia=True)
+        joint = builder.add_joint_d6(-1, body, angular_mode=newton.JointD6AngularMode.SWING_TWIST, swing_limit=0.6)
+        builder.add_articulation([joint])
+        model = builder.finalize(device=self.device)
+        config = ForwardKinematicsSolver.Config(reset_state=False, use_regularization=True)
+        solver = ForwardKinematicsSolver(ModelKamino.from_newton(model), config)
+        state = model.state()
+        coordinates = wp.empty(0, dtype=wp.float32, device=self.device)
+        axis = wp.normalize(wp.vec3(0, -1, 1))
+        for angle, twist, expected in ((0.5, 0.0, True), (0.5, 0.2, True), (0.7, 0.0, False)):
+            with self.subTest(angle=angle, twist=twist):
+                swing = wp.quat_from_axis_angle(axis, angle)
+                rotation = swing * wp.quat_from_axis_angle(wp.vec3(1, 0, 0), twist)
+                state.body_q.assign(np.array([[0.0, 0.0, 0.0, *rotation]], dtype=np.float32))
+                solver.solve_fk(coordinates, state.body_q)
+                self.assertEqual(bool(solver.data.gauss_newton.success.numpy()[0]), expected)
+                if expected:
+                    actual = state.body_q.numpy()[0, 3:]
+                    self.assertLess(abs(2.0 * math.atan2(actual[0], actual[3])), 2.0e-4)
+                    if twist == 0.0:
+                        self.assertAlmostEqual(abs(float(np.dot(actual, np.array(rotation)))), 1.0, places=5)
+
+    @requires("pxr.Usd")
+    def test_usd_swing_twist_matches_builder(self):
+        """Resolve a degree-valued USD swing limit to the same Kamino motion as the builder."""
+        from pxr import Gf, Sdf, Usd, UsdGeom, UsdPhysics
+
+        stage = Usd.Stage.CreateInMemory()
+        UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
+        UsdGeom.SetStageMetersPerUnit(stage, 1.0)
+        UsdPhysics.SetStageKilogramsPerUnit(stage, 1.0)
+        body = UsdGeom.Xform.Define(stage, "/Body")
+        UsdPhysics.RigidBodyAPI.Apply(body.GetPrim())
+        mass = UsdPhysics.MassAPI.Apply(body.GetPrim())
+        mass.CreateMassAttr(1.0)
+        mass.CreateDiagonalInertiaAttr(Gf.Vec3f(1.0))
+        joint = UsdPhysics.Joint.Define(stage, "/Swing")
+        joint.CreateBody1Rel().SetTargets([body.GetPath()])
+        joint.GetPrim().CreateAttribute("newton:d6AngularMode", Sdf.ValueTypeNames.Token).Set("swingTwist")
+        joint.GetPrim().CreateAttribute("newton:d6SwingLimit", Sdf.ValueTypeNames.Float).Set(30.0)
+        usd_builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        usd_builder.add_usd(stage)
+
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        child = builder.add_link(mass=1.0, inertia=_INERTIA, lock_inertia=True)
+        j = builder.add_joint_d6(-1, child, angular_mode=newton.JointD6AngularMode.SWING_TWIST, swing_limit=math.pi / 6)
+        builder.add_articulation([j])
+
+        rotation = wp.quat_from_axis_angle(wp.normalize(wp.vec3(0, 1, -1)), 0.7)
+        rates = []
+        for source in (builder, usd_builder):
+            worlds = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+            worlds.add_world(source)
+            worlds.add_world(source)
+            model = worlds.finalize(device=self.device)
+            np.testing.assert_allclose(model.joint_d6_swing_limit.numpy(), (math.pi / 6,) * 2, atol=1.0e-6)
+            solver = SolverKamino(model)
+            state, result = model.state(), model.state()
+            state.body_q.assign(np.tile(np.array([0.0, 0.0, 0.0, *rotation], dtype=np.float32), (2, 1)))
+            solver.step(state, result, model.control(), None, 0.01)
+            rates.append(result.joint_qd.numpy())
+        np.testing.assert_allclose(rates[0], rates[1], atol=1.0e-5, rtol=0.0)
+        self.assertLess(float(rates[0][0]), -0.01)
 
     def test_fk_general_d6_pose_and_twist(self):
         """Match Newton FK for a driven joint with independent linear and angular axes."""
@@ -123,6 +247,13 @@ class TestKaminoD6(unittest.TestCase):
         finite_difference = wp.empty_like(analytic)
         wp.launch(_measure_angular_derivatives, dim=4, outputs=[analytic, finite_difference], device=self.device)
         np.testing.assert_allclose(analytic.numpy(), finite_difference.numpy(), atol=8.0e-5, rtol=0.0)
+
+        # An oblique pure swing has zero twist. Adding a twist on the right
+        # changes only the twist coordinate, even away from the identity.
+        coords = wp.empty(2, dtype=wp.vec3f, device=self.device)
+        wp.launch(_measure_swing_twist, dim=2, outputs=[coords, analytic, finite_difference], device=self.device)
+        np.testing.assert_allclose(coords.numpy(), ((0.0, 0.45, -0.7), (0.6, 0.45, -0.7)), atol=2.0e-6, rtol=0.0)
+        np.testing.assert_allclose(analytic.numpy()[:2], finite_difference.numpy()[:2], atol=8.0e-5, rtol=0.0)
 
     def test_layouts_project_body_wrench(self):
         """Project independent linear and angular axes in all 16 layouts on every backend."""

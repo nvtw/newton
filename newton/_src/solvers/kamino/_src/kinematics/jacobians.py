@@ -987,6 +987,7 @@ def _build_limit_jacobians_dense(
     limits_bids: wp.array[wp.vec2i],
     limits_dof: wp.array[wp.int32],
     limits_side: wp.array[wp.float32],
+    limits_weights: wp.array[wp.vec2f],
     jacobian_dofs_data_storage: wp.array2d[wp.float32],
     # Outputs:
     jacobian_cts_data_storage: wp.array2d[wp.float32],
@@ -1012,6 +1013,9 @@ def _build_limit_jacobians_dense(
     bids_l = limits_bids[lid]
     dof_l = limits_dof[lid]
     side_l = limits_side[lid]
+    weights = wp.vec2f(1.0, 0.0)
+    if limits_weights:
+        weights = limits_weights[lid]
 
     # Retrieve the relevant model info of the world
     bio = model_info_bodies_offset[wid_l]
@@ -1034,7 +1038,10 @@ def _build_limit_jacobians_dense(
     act_kj = ajmio + bio_F
     cts_kj = cjmio + bio_F
     for i in range(6):
-        jacobian_cts_data[cts_kj + i] = side_l * jacobian_dofs_data[act_kj + i]
+        value = weights[0] * jacobian_dofs_data[act_kj + i]
+        if weights[1] != 0.0:
+            value += weights[1] * jacobian_dofs_data[act_kj + i + nbd]
+        jacobian_cts_data[cts_kj + i] = side_l * value
 
     # If not the world body, set the constraint Jacobian block for the base body from the actuation Jacobian block
     if bid_B_l > -1:
@@ -1042,7 +1049,10 @@ def _build_limit_jacobians_dense(
         act_kj = ajmio + bio_B
         cts_kj = cjmio + bio_B
         for i in range(6):
-            jacobian_cts_data[cts_kj + i] = side_l * jacobian_dofs_data[act_kj + i]
+            value = weights[0] * jacobian_dofs_data[act_kj + i]
+            if weights[1] != 0.0:
+                value += weights[1] * jacobian_dofs_data[act_kj + i + nbd]
+            jacobian_cts_data[cts_kj + i] = side_l * value
 
 
 @wp.kernel
@@ -1060,6 +1070,7 @@ def _build_limit_jacobians_sparse(
     limits_bids: wp.array[wp.vec2i],
     limits_dof: wp.array[wp.int32],
     limits_side: wp.array[wp.float32],
+    limits_weights: wp.array[wp.vec2f],
     jacobian_dofs_joint_nzb_offsets: wp.array[wp.int32],
     jacobian_dofs_nzb_values: wp.array[vec6f],
     jacobian_cts_nzb_start: wp.array[wp.int32],
@@ -1090,6 +1101,9 @@ def _build_limit_jacobians_sparse(
     body_id_F_l = body_ids_l[1]
     dof_l = limits_dof[limit_id]
     side_l = limits_side[limit_id]
+    weights = wp.vec2f(1.0, 0.0)
+    if limits_weights:
+        weights = limits_weights[limit_id]
     joint_id = limits_jid[limit_id]
 
     # Resolve which NZB of the dofs Jacobian corresponds to the limit's dof (on the follower)
@@ -1107,14 +1121,20 @@ def _build_limit_jacobians_sparse(
     jacobian_cts_limit_nzb_offsets[limit_id] = jac_cts_nzb_idx
 
     # Set the constraint Jacobian block for the follower body from the actuation Jacobian block
-    jacobian_cts_nzb_values[jac_cts_nzb_idx] = side_l * jacobian_dofs_nzb_values[jac_dofs_nzb_idx]
+    value = weights[0] * jacobian_dofs_nzb_values[jac_dofs_nzb_idx]
+    if weights[1] != 0.0:
+        value += weights[1] * jacobian_dofs_nzb_values[jac_dofs_nzb_idx + 1]
+    jacobian_cts_nzb_values[jac_cts_nzb_idx] = side_l * value
     jacobian_cts_nzb_coords[jac_cts_nzb_idx, 0] = limit_cts_offset + limit_id_l
     jacobian_cts_nzb_coords[jac_cts_nzb_idx, 1] = 6 * (body_id_F_l - body_index_offset)
 
     # If not the world body, set the constraint Jacobian block for the base body from the actuation Jacobian block
     if body_id_B_l > -1:
         nzb_stride = model_joints_num_dofs[joint_id]
-        jacobian_cts_nzb_values[jac_cts_nzb_idx + 1] = side_l * jacobian_dofs_nzb_values[jac_dofs_nzb_idx + nzb_stride]
+        value = weights[0] * jacobian_dofs_nzb_values[jac_dofs_nzb_idx + nzb_stride]
+        if weights[1] != 0.0:
+            value += weights[1] * jacobian_dofs_nzb_values[jac_dofs_nzb_idx + nzb_stride + 1]
+        jacobian_cts_nzb_values[jac_cts_nzb_idx + 1] = side_l * value
         jacobian_cts_nzb_coords[jac_cts_nzb_idx + 1, 0] = limit_cts_offset + limit_id_l
         jacobian_cts_nzb_coords[jac_cts_nzb_idx + 1, 1] = 6 * (body_id_B_l - body_index_offset)
 
@@ -1764,6 +1784,7 @@ class DenseSystemJacobians:
                     limits.bids,
                     limits.dof,
                     limits.side,
+                    limits.weights,
                     self._data.J_dofs_data,
                     # Outputs:
                     self._data.J_cts_data,
@@ -1944,6 +1965,11 @@ class SparseSystemJacobians:
         dof_world_ids = joint_wid[dof_joint_ids]
         dof_block_counts = num_adjacent_bodies[dof_joint_ids]
         limited_dofs = (joint_q_j_min > float(FLOAT32_MIN)) | (joint_q_j_max < float(FLOAT32_MAX))
+        if model.joints.d6_axes.size:
+            axes = model.joints.d6_axes.numpy()
+            cones = (model.joints.dof_type.numpy() == JointDoFType.D6) & (axes["swing_limit"] > 0.0)
+            first_dofs = prefix_offsets(joint_num_dofs)[:-1]
+            limited_dofs[first_dofs[cones] + axes["linear_count"][cones]] = True
         limited_dofs &= max_num_limits[dof_world_ids] > 0
         np.add.at(
             J_cts_nnzb_max,
@@ -2208,6 +2234,7 @@ class SparseSystemJacobians:
                     limits.bids,
                     limits.dof,
                     limits.side,
+                    limits.weights,
                     self._J_dofs_joint_nzb_offsets,
                     jacobian_dofs.nzb_values,
                     jacobian_cts.nzb_start,

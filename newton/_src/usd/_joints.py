@@ -16,7 +16,7 @@ import warp as wp
 from ..core._warnings import _external_warning_stacklevel
 from ..exceptions import NewtonWarning
 from ..sim.builder import ModelBuilder
-from ..sim.enums import JointTargetMode
+from ..sim.enums import JointD6AngularMode, JointTargetMode
 from ..sim.model import Model
 from . import utils as usd
 from ._resolution_policy import (
@@ -327,6 +327,22 @@ def parse_joint(
         joint_params["damping"] = joint_damping
         joint_index = builder.add_joint_ball(**joint_params)
     elif key == UsdPhysics.ObjectType.D6Joint:
+        mode_attr = joint_prim.GetAttribute("newton:d6AngularMode")
+        limit_attr = joint_prim.GetAttribute("newton:d6SwingLimit")
+        angular_mode = mode_attr.Get() if mode_attr else None
+        limit_degrees = limit_attr.Get() if limit_attr else None
+        if angular_mode not in (None, "euler", "swingTwist"):
+            raise ValueError(f"Unknown D6 angular mode {angular_mode!r} on {joint_path}.")
+        swing_twist = angular_mode == "swingTwist"
+        if not swing_twist and limit_degrees is not None:
+            raise ValueError(f"newton:d6SwingLimit requires swingTwist on {joint_path}.")
+        if swing_twist:
+            if endpoints_swapped:
+                raise ValueError(f"Cannot swap the authored parent and child of swing-twist joint {joint_path}.")
+            angular_dofs = (UsdPhysics.JointDOF.RotX, UsdPhysics.JointDOF.RotY, UsdPhysics.JointDOF.RotZ)
+            if any(axis in angular_dofs and drive.enabled for axis, drive in joint_desc.jointDrives):
+                raise ValueError(f"D6 swing-twist joint {joint_path} supports passive angular motion only.")
+
         unsupported_ref_keys = ("mujoco:dof_ref", "mujoco:dof_springref")
         unsupported_ref_attrs = [key for key in unsupported_ref_keys if key in joint_custom_attrs]
         if unsupported_ref_attrs:
@@ -385,6 +401,12 @@ def parse_joint(
 
         for limit in joint_desc.jointLimits:
             dof = limit.first
+            if swing_twist and dof in angular_dofs:
+                if limit.second.enabled and (
+                    dof != UsdPhysics.JointDOF.RotX or limit.second.lower <= limit.second.upper
+                ):
+                    raise ValueError(f"D6 swing-twist joint {joint_path} uses the circular swing limit only.")
+                continue
             if limit.second.enabled:
                 limit_lower = limit.second.lower
                 limit_upper = limit.second.upper
@@ -592,7 +614,15 @@ def parse_joint(
             else:
                 _warn_irreversible_joint(f"joint {joint_path}")
 
-        joint_index = builder.add_joint_d6(**joint_params, linear_axes=linear_axes, angular_axes=angular_axes)
+        if swing_twist:
+            joint_index = builder.add_joint_d6(
+                **joint_params,
+                linear_axes=linear_axes,
+                angular_mode=JointD6AngularMode.SWING_TWIST,
+                swing_limit=None if limit_degrees is None else float(limit_degrees) * DegreesToRadian,
+            )
+        else:
+            joint_index = builder.add_joint_d6(**joint_params, linear_axes=linear_axes, angular_axes=angular_axes)
     elif key == UsdPhysics.ObjectType.DistanceJoint:
         joint_index = builder.add_joint_distance(
             **joint_params,
