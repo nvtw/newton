@@ -1352,6 +1352,9 @@ def test_sticky_position_threshold_uses_body_witnesses(test, device):
         # can retain the anchor, but separation beyond it cannot.
         test.assertEqual(match(sticky=True, body_z=0.002, margin=0.003), 0)
         test.assertEqual(match(sticky=True, body_z=0.002), MATCH_BROKEN)
+        # Separation within the 0.5 mm match tolerance keeps the anchor: a
+        # resting contact that jitters open by microns stays the same contact.
+        test.assertEqual(match(sticky=True, body_z=0.0001), 0)
 
         # A witness that jumps along the normal to another feature of its body,
         # such as the opposite face of a thin plate, expires the anchor.

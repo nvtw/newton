@@ -284,7 +284,9 @@ def _match_contacts_kernel(data: _MatchData):
 
     new_n = data.new_normal[source]
     fresh_gap = wp.dot(p1w - p0w, new_n) - (data.new_margin0[source] + data.new_margin1[source])
-    if data.sticky != 0 and fresh_gap > wp.float32(0.0):
+    # Separation within the match tolerance keeps the contact, like planar drift:
+    # a resting contact that jitters open by microns must keep its friction anchor.
+    if data.sticky != 0 and fresh_gap > wp.float32(0.0) and fresh_gap * fresh_gap > data.pos_threshold_sq:
         data.match_index[tid] = MATCH_BROKEN
         return
 

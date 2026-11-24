@@ -2159,8 +2159,9 @@ class CollisionPipeline:
                     The ``"sticky"`` mode may change without prior notice.
             contact_matching_pos_threshold: Distance threshold [m] between
                 previous and current world-space contact midpoints. ``"sticky"``
-                projects this drift onto the current contact plane so normal
-                validity remains governed by the fresh margin-aware gap. Other
+                projects this drift onto the current contact plane and also
+                breaks a match whose fresh margin-aware gap opens wider than
+                this threshold; compression does not break a match. Other
                 matching modes use the 3-D distance. In sticky mode, matched rows
                 keep fresh geometry when either saved witness moves farther than
                 this from its fresh contact point under the current body
