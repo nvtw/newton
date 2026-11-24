@@ -111,6 +111,7 @@ def _finalize_direct_contact_schedule_kernel(
     response: DirectContactResponseData,
     num_columns: wp.array[wp.int32],
     mechanism_component: wp.array[wp.int32],
+    body_bits: wp.int32,
     keys: wp.array[wp.int64],
     scheduled_column: wp.array[wp.int32],
     section_end: wp.array[wp.int32],
@@ -127,8 +128,13 @@ def _finalize_direct_contact_schedule_kernel(
         mechanism = mechanism1
     component = mechanism_component[mechanism]
     columns.articulation_owner[column] = component
-    # Radix sorting is stable, so equal components retain ascending column order.
-    keys[column] = wp.int64(component)
+    # Manifolds of one body pair are adjacent so a sweep relaxes them as one run.
+    # Radix sorting is stable, so equal pairs retain ascending column order.
+    key = wp.int64(component)
+    if body_bits > wp.int32(0):
+        key = (key << wp.int64(body_bits)) | wp.int64(response.column_body0[column])
+        key = (key << wp.int64(body_bits)) | wp.int64(response.column_body1[column])
+    keys[column] = key
     wp.atomic_add(section_end, component, wp.int32(1))
     first = contact_get_contact_first(columns, column)
     count = contact_get_contact_count(columns, column)
@@ -177,15 +183,46 @@ def _make_spatial_wrench(force: wp.vec3, torque: wp.vec3) -> wp.spatial_vector:
 
 
 @wp.func
-def _apply_raw_contact_wrench(bodies: BodyContainer, body: wp.int32, wrench: wp.spatial_vector):
+def _raw_contact_twist(bodies: BodyContainer, body: wp.int32, wrench: wp.spatial_vector) -> wp.spatial_vector:
+    """Twist change of a body outside every mechanism under a contact wrench."""
     if (
         body <= wp.int32(0)
         or bodies.inverse_mass[body] <= wp.float32(0.0)
         or bodies.motion_type[body] == MOTION_KINEMATIC
     ):
-        return
-    bodies.velocity[body] += bodies.inverse_mass[body] * wp.spatial_top(wrench)
-    bodies.angular_velocity[body] += mat33_from_sym6(bodies.inverse_inertia_world[body]) * wp.spatial_bottom(wrench)
+        return wp.spatial_vectorf(0.0)
+    linear = bodies.inverse_mass[body] * wp.spatial_top(wrench)
+    angular = mat33_from_sym6(bodies.inverse_inertia_world[body]) * wp.spatial_bottom(wrench)
+    return wp.spatial_vectorf(linear[0], linear[1], linear[2], angular[0], angular[1], angular[2])
+
+
+@wp.func
+def _apply_raw_contact_wrench(bodies: BodyContainer, body: wp.int32, wrench: wp.spatial_vector):
+    twist = _raw_contact_twist(bodies, body, wrench)
+    if body > wp.int32(0) and wp.length_sq(twist) > wp.float32(0.0):
+        bodies.velocity[body] += wp.spatial_top(twist)
+        bodies.angular_velocity[body] += wp.spatial_bottom(twist)
+
+
+@wp.func
+def _pair_twist_change(
+    response: DirectContactResponseData,
+    bodies: BodyContainer,
+    body: wp.int32,
+    slot: wp.int32,
+    local_body: wp.int32,
+    wrench: wp.spatial_vector,
+    other_slot: wp.int32,
+    other_wrench: wp.spatial_vector,
+    same_mechanism: wp.bool,
+) -> wp.spatial_vector:
+    """Twist change of one manifold endpoint under both endpoint wrenches."""
+    if slot < wp.int32(0):
+        return _raw_contact_twist(bodies, body, wrench)
+    twist = _push_response(response, slot, local_body, wrench)
+    if same_mechanism:
+        twist += _push_response(response, other_slot, local_body, other_wrench)
+    return twist
 
 
 @wp.func
@@ -333,7 +370,9 @@ _RECORD_BODY_BEGIN0 = 8
 _RECORD_BODY_COUNT0 = 9
 _RECORD_BODY_BEGIN1 = 10
 _RECORD_BODY_COUNT1 = 11
-_RECORD_WIDTH = 12
+# One past the last manifold of the record's body-pair run.
+_RECORD_RUN_END = 12
+_RECORD_WIDTH = 13
 _record_t = wp.types.vector(length=_RECORD_WIDTH, dtype=wp.int32)
 
 
@@ -358,28 +397,22 @@ def _warp_sum_spatial(value: wp.spatial_vector) -> wp.spatial_vector: ...
 @wp.func_native(
     """
 #if defined(__CUDA_ARCH__)
-    __shared__ float partial[6 * 32];
-    const int warps = blockDim.x >> 5;
-    if (warps <= 1) return value;
-    __syncthreads();
-    if ((threadIdx.x & 31) == 0) {
-        for (int component = 0; component < 6; ++component) partial[6 * (threadIdx.x >> 5) + component] = value[component];
+    __shared__ float shared_wrench[12];
+    float* entry = shared_wrench + 6 * index;
+    if (mode == 1) {
+        for (int component = 0; component < 6; ++component) entry[component] = value[component];
+        return value;
     }
-    __syncthreads();
     wp::spatial_vector result;
-    for (int component = 0; component < 6; ++component) {
-        float sum = 0.0f;
-        for (int warp = 0; warp < warps; ++warp) sum += partial[6 * warp + component];
-        result[component] = sum;
-    }
+    for (int component = 0; component < 6; ++component) result[component] = entry[component];
     return result;
 #else
     return value;
 #endif
 """
 )
-def _combine_warp_sums(value: wp.spatial_vector) -> wp.spatial_vector:
-    """Add each warp's sum across the block; every thread must call it."""
+def _shared_wrench(index: wp.int32, value: wp.spatial_vector, mode: wp.int32) -> wp.spatial_vector:
+    """Write (mode 1) or read one of a block's two run wrenches in shared memory."""
     ...
 
 
@@ -388,6 +421,18 @@ def _body_twist(bodies: BodyContainer, body: wp.int32) -> wp.spatial_vector:
     linear = bodies.velocity[body]
     angular = bodies.angular_velocity[body]
     return wp.spatial_vectorf(linear[0], linear[1], linear[2], angular[0], angular[1], angular[2])
+
+
+@wp.func
+def _same_run(
+    columns: ContactColumnContainer, response: DirectContactResponseData, column: wp.int32, other: wp.int32
+) -> wp.bool:
+    """Whether two scheduled manifolds share their component and ordered body pair."""
+    return (
+        columns.articulation_owner[other] == columns.articulation_owner[column]
+        and response.column_body0[other] == response.column_body0[column]
+        and response.column_body1[other] == response.column_body1[column]
+    )
 
 
 @wp.kernel(enable_backward=False)
@@ -400,10 +445,15 @@ def _build_direct_contact_records_kernel(
     record_friction: wp.array[wp.vec2],
 ):
     scheduled = wp.tid()
-    if scheduled >= section_end[section_end.shape[0] - 1]:
+    total = section_end[section_end.shape[0] - 1]
+    if scheduled >= total:
         return
     column = scheduled_column[scheduled]
     record = _record_t()
+    run_end = scheduled + wp.int32(1)
+    while run_end < total and _same_run(columns, response, column, scheduled_column[run_end]):
+        run_end += wp.int32(1)
+    record[_RECORD_RUN_END] = run_end
     record[_RECORD_FIRST] = contact_get_contact_first(columns, column)
     record[_RECORD_COUNT] = contact_get_contact_count(columns, column)
     record_friction[scheduled] = wp.vec2(
@@ -676,6 +726,7 @@ def make_solve_direct_contact_columns_kernel(body_capacity: int, max_mechanism_b
     # CPU native warp operations are scalar: visit every point and endpoint
     # serially, using body arrays instead of CUDA-only shared twist storage.
     lanes = _component_lanes(max_mechanism_bodies, is_cuda)
+    relax_lanes = min(lanes, 32)
     rounds = max(1, (int(max_mechanism_bodies) + lanes - 1) // lanes)
     shared = is_cuda and 24 * capacity <= _SHARED_TWIST_BYTES
     twist_state = _make_twist_state_access(capacity if shared else 1)
@@ -686,6 +737,17 @@ def make_solve_direct_contact_columns_kernel(body_capacity: int, max_mechanism_b
             if index >= wp.int32(0):
                 return twist_state(index, wp.spatial_vectorf(0.0), _TWIST_READ)
         return _body_twist(bodies, body)
+
+    @wp.func
+    def write_twist(
+        response: DirectContactResponseData, bodies: BodyContainer, index: wp.int32, twist: wp.spatial_vector
+    ):
+        if wp.static(shared):
+            twist_state(index, twist, _TWIST_WRITE)
+        else:
+            body = response.mechanism_body[index]
+            bodies.velocity[body] = wp.spatial_top(twist)
+            bodies.angular_velocity[body] = wp.spatial_bottom(twist)
 
     @wp.func
     def add_twist(
@@ -717,12 +779,17 @@ def make_solve_direct_contact_columns_kernel(body_capacity: int, max_mechanism_b
     ):
         """Sweep manifolds in order through the exact mechanism response.
 
-        One warp owns a contact-connected component. Manifolds are visited in
-        schedule order and each manifold's wrench is pushed through the exact
-        constrained body responses, so later manifolds see every earlier
-        update. The points of one manifold act on the same two bodies; each
-        relaxes against its share of the manifold's exact mobility, which
-        keeps the Gauss-Seidel fixed point.
+        One block owns a contact-connected component and visits its manifolds
+        in schedule order, so later manifolds see every earlier update. The
+        points of one manifold act on the same two bodies; each relaxes
+        against its share of the manifold's exact mobility, which keeps the
+        Gauss-Seidel fixed point.
+
+        Manifolds of one body pair form a run. The first warp relaxes a run's
+        manifolds in turn and updates the pair's twists through the pair's own
+        response blocks. Only then does the whole block push the run's
+        wrenches to the other mechanism bodies, which no manifold of the run
+        reads.
         """
         component, lane = wp.tid()
         if component >= num_components[0]:
@@ -746,82 +813,123 @@ def make_solve_direct_contact_columns_kernel(body_capacity: int, max_mechanism_b
         dt = wp.float32(1.0) / inverse_dt
         _, mass_coeff, impulse_coeff = soft_constraint_coefficients(DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, dt)
         for _iteration in range(iteration_count):
-            next_record = _record_t()
-            if section_begin < section_stop:
-                next_record = records[section_begin]
-            for scheduled in range(section_begin, section_stop):
-                # Load the following manifold's record while this one runs.
-                record = next_record
-                if scheduled + wp.int32(1) < section_stop:
-                    next_record = records[scheduled + wp.int32(1)]
+            run_begin = section_begin
+            while run_begin < section_stop:
+                record = records[run_begin]
+                run_end = record[_RECORD_RUN_END]
                 body0 = record[_RECORD_BODY0]
                 body1 = record[_RECORD_BODY1]
+                twist0 = record[_RECORD_TWIST0]
+                twist1 = record[_RECORD_TWIST1]
                 slot0 = record[_RECORD_SLOT0]
                 slot1 = record[_RECORD_SLOT1]
-                first = record[_RECORD_FIRST]
-                count = record[_RECORD_COUNT]
                 body_begin0 = record[_RECORD_BODY_BEGIN0]
                 body_count0 = record[_RECORD_BODY_COUNT0]
                 body_begin1 = record[_RECORD_BODY_BEGIN1]
                 body_count1 = record[_RECORD_BODY_COUNT1]
-                friction = record_friction[scheduled]
-                velocity_body0 = read_twist(bodies, body0, record[_RECORD_TWIST0])
-                velocity_body1 = read_twist(bodies, body1, record[_RECORD_TWIST1])
-                # Tonge mass splitting inside the manifold: every point sees the
-                # pair with ``count`` times its exact mobility.
-                split = wp.float32(wp.max(count, wp.int32(1)))
-                wrench0 = wp.spatial_vectorf(0.0)
-                wrench1 = wp.spatial_vectorf(0.0)
-                for offset in range(lane, count, wp.int32(lanes)):
-                    contact = first + offset
-                    impulse = _relax_direct_contact_point(
-                        response,
-                        contacts,
-                        contact,
-                        velocity_body0,
-                        velocity_body1,
-                        use_bias,
-                        mass_coeff,
-                        impulse_coeff,
-                        sor_boost,
-                        friction[0],
-                        friction[1],
-                        split,
-                    )
-                    r0 = cc_get_r0(contacts, contact)
-                    r1 = cc_get_r1(contacts, contact)
-                    wrench0 += _make_spatial_wrench(-impulse, -wp.cross(r0, impulse))
-                    wrench1 += _make_spatial_wrench(impulse, wp.cross(r1, impulse))
-                wrench0 = _combine_warp_sums(_warp_sum_spatial(wrench0))
-                wrench1 = _combine_warp_sums(_warp_sum_spatial(wrench1))
-                if lane == wp.int32(0):
-                    if slot0 >= wp.int32(0):
-                        basis_wrench[slot0] += wrench0
-                    else:
-                        _apply_raw_contact_wrench(bodies, body0, wrench0)
-                if lane == wp.int32(1) or wp.static(not is_cuda):
-                    if slot1 >= wp.int32(0):
-                        basis_wrench[slot1] += wrench1
-                    else:
-                        _apply_raw_contact_wrench(bodies, body1, wrench1)
-                # Push the manifold wrench through each touched mechanism. Every
+                same_mechanism = body_begin1 == body_begin0 and slot0 >= wp.int32(0) and slot1 >= wp.int32(0)
+                total0 = wp.spatial_vectorf(0.0)
+                total1 = wp.spatial_vectorf(0.0)
+                if lane < wp.int32(relax_lanes):
+                    velocity_body0 = read_twist(bodies, body0, twist0)
+                    velocity_body1 = read_twist(bodies, body1, twist1)
+                    next_record = record
+                    for scheduled in range(run_begin, run_end):
+                        # Load the following manifold's record while this one runs.
+                        manifold = next_record
+                        if scheduled + wp.int32(1) < run_end:
+                            next_record = records[scheduled + wp.int32(1)]
+                        first = manifold[_RECORD_FIRST]
+                        count = manifold[_RECORD_COUNT]
+                        friction = record_friction[scheduled]
+                        # Tonge mass splitting inside the manifold: every point sees the
+                        # pair with ``count`` times its exact mobility.
+                        split = wp.float32(wp.max(count, wp.int32(1)))
+                        wrench0 = wp.spatial_vectorf(0.0)
+                        wrench1 = wp.spatial_vectorf(0.0)
+                        for offset in range(lane, count, wp.int32(relax_lanes)):
+                            contact = first + offset
+                            impulse = _relax_direct_contact_point(
+                                response,
+                                contacts,
+                                contact,
+                                velocity_body0,
+                                velocity_body1,
+                                use_bias,
+                                mass_coeff,
+                                impulse_coeff,
+                                sor_boost,
+                                friction[0],
+                                friction[1],
+                                split,
+                            )
+                            r0 = cc_get_r0(contacts, contact)
+                            r1 = cc_get_r1(contacts, contact)
+                            wrench0 += _make_spatial_wrench(-impulse, -wp.cross(r0, impulse))
+                            wrench1 += _make_spatial_wrench(impulse, wp.cross(r1, impulse))
+                        wrench0 = _warp_sum_spatial(wrench0)
+                        wrench1 = _warp_sum_spatial(wrench1)
+                        total0 += wrench0
+                        total1 += wrench1
+                        velocity_body0 += _pair_twist_change(
+                            response,
+                            bodies,
+                            body0,
+                            slot0,
+                            twist0 - body_begin0,
+                            wrench0,
+                            slot1,
+                            wrench1,
+                            same_mechanism,
+                        )
+                        velocity_body1 += _pair_twist_change(
+                            response,
+                            bodies,
+                            body1,
+                            slot1,
+                            twist1 - body_begin1,
+                            wrench1,
+                            slot0,
+                            wrench0,
+                            same_mechanism,
+                        )
+                    if lane == wp.int32(0):
+                        _shared_wrench(0, total0, _TWIST_WRITE)
+                        if slot0 >= wp.int32(0):
+                            basis_wrench[slot0] += total0
+                            write_twist(response, bodies, twist0, velocity_body0)
+                        else:
+                            _apply_raw_contact_wrench(bodies, body0, total0)
+                    if lane == wp.int32(1) or wp.static(not is_cuda):
+                        _shared_wrench(1, total1, _TWIST_WRITE)
+                        if slot1 >= wp.int32(0):
+                            basis_wrench[slot1] += total1
+                            write_twist(response, bodies, twist1, velocity_body1)
+                        else:
+                            _apply_raw_contact_wrench(bodies, body1, total1)
+                _sync_block()
+                total0 = _shared_wrench(0, total0, _TWIST_READ)
+                total1 = _shared_wrench(1, total1, _TWIST_READ)
+                # Push the run's wrenches to the mechanisms' other bodies. Every
                 # lane owns distinct twists, so all rounds' response loads can
                 # be in flight before the twist updates.
-                same_mechanism = body_begin1 == body_begin0 and slot0 >= wp.int32(0) and slot1 >= wp.int32(0)
                 for round_index in range(wp.static(rounds)):
                     local_body = round_index * lanes + lane
+                    target0 = body_begin0 + local_body
+                    target1 = body_begin1 + local_body
                     value0 = wp.spatial_vectorf(0.0)
                     if slot0 >= wp.int32(0) and local_body < body_count0:
-                        value0 = _push_response(response, slot0, local_body, wrench0)
+                        value0 = _push_response(response, slot0, local_body, total0)
                     if slot1 >= wp.int32(0) and local_body < body_count1:
-                        value1 = _push_response(response, slot1, local_body, wrench1)
+                        value1 = _push_response(response, slot1, local_body, total1)
                         if same_mechanism:
                             value0 += value1
-                        else:
-                            add_twist(response, bodies, body_begin1 + local_body, value1)
-                    if slot0 >= wp.int32(0) and local_body < body_count0:
-                        add_twist(response, bodies, body_begin0 + local_body, value0)
+                        elif target1 != twist1:
+                            add_twist(response, bodies, target1, value1)
+                    if slot0 >= wp.int32(0) and local_body < body_count0 and target0 != twist0 and target0 != twist1:
+                        add_twist(response, bodies, target0, value0)
                 _sync_block()
+                run_begin = run_end
 
         if wp.static(shared):
             for item in range(mechanism_begin, mechanism_end):
@@ -861,6 +969,11 @@ class DirectContactRunSchedule:
             response.body_capacity, response.max_mechanism_bodies, is_cuda=device.is_cuda
         )
         self._lanes = _component_lanes(response.max_mechanism_bodies, device.is_cuda)
+        # Sort keys hold the component and, when they fit, the ordered body pair.
+        self._component_bits = self.section_end.size.bit_length()
+        self._body_bits = max(1, (response.direct.bodies.position.shape[0] - 1).bit_length())
+        if self._component_bits + 2 * self._body_bits > 63:
+            self._body_bits = 0
         # The schedule after the candidate pass runs on a private stream.
         self._stream = wp.Stream(device) if device.is_cuda else None
         self._fork_event = wp.Event(device) if device.is_cuda else None
@@ -1009,6 +1122,7 @@ class DirectContactRunSchedule:
                 self.response.data,
                 num_columns,
                 self.islands.set_nr,
+                wp.int32(self._body_bits),
                 self.keys,
                 self.columns,
                 self.section_end,
@@ -1019,7 +1133,7 @@ class DirectContactRunSchedule:
             self.keys,
             self.columns,
             num_columns,
-            end_bit=self.section_end.size.bit_length(),
+            end_bit=self._component_bits + 2 * self._body_bits,
             tail_masked=True,
         )
         wp.utils.array_scan(self.section_end, self.section_end, inclusive=True)

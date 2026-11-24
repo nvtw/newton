@@ -71,14 +71,22 @@ def _build_floating_tree_on_plane() -> newton.Model:
     return builder.finalize(device=wp.get_preferred_device())
 
 
-def _build_closed_chain_on_plane(links: int = 40) -> newton.Model:
-    """Build a closed loop of ``links`` boxes lying on a plane: one large exact mechanism."""
+def _build_closed_chain_on_plane(links: int = 40, plates: int = 1) -> newton.Model:
+    """Build a closed loop of ``links`` lying on a plane: one large exact mechanism.
+
+    Each link has ``plates`` side-by-side boxes, so each link touches the plane
+    through that many contact manifolds.
+    """
     builder = newton.ModelBuilder(gravity=(0.0, 0.0, -9.81))
     cfg = newton.ModelBuilder.ShapeConfig(density=500.0, mu=0.7)
     previous, joints = -1, []
     for i in range(links):
         body = builder.add_link(xform=wp.transform((0.1 * i, 0.0, 0.03), wp.quat_identity()))
-        builder.add_shape_box(body, hx=0.05, hy=0.03, hz=0.02, cfg=cfg)
+        for plate in range(plates):
+            offset = 0.06 * (plate - 0.5 * (plates - 1))
+            builder.add_shape_box(
+                body, xform=wp.transform((0.0, offset, 0.0), wp.quat_identity()), hx=0.05, hy=0.03, hz=0.02, cfg=cfg
+            )
         if previous < 0:
             joints.append(builder.add_joint_free(parent=-1, child=body))
         else:
@@ -377,6 +385,44 @@ class TestDirectContactCoupling(unittest.TestCase):
         # Lanes past a manifold's points add exact zeros: the sums keep their order.
         np.testing.assert_array_equal(several, run(32))
         self.assertGreater(float(several[:, 2].min()), 0.015)
+
+    def test_body_pair_manifolds_relax_as_one_run(self):
+        """Relax all manifolds of a body pair in one run and keep the chain at rest on the plane."""
+        if not wp.get_device().is_cuda:
+            self.skipTest("PhoenX requires CUDA")
+
+        model = _build_closed_chain_on_plane(links=40, plates=2)
+        pipeline = newton.CollisionPipeline(model, contact_matching="sticky")
+        solver = newton.solvers.SolverPhoenX(
+            model, collision_pipeline=pipeline, substeps=1, solver_iterations=8, joint_mode="maximal_direct"
+        )
+        state, control, contacts = model.state(), model.control(), pipeline.contacts()
+        newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+        with wp.ScopedCapture(model.device) as capture:
+            pipeline.collide(state, contacts)
+            solver.step(state, state, control, contacts, 1.0 / 240.0)
+        for _ in range(120):
+            wp.capture_launch(capture.graph)
+
+        body_q = state.body_q.numpy()
+        body_qd = state.body_qd.numpy()
+        self.assertTrue(np.isfinite(body_q).all())
+        self.assertGreater(float(body_q[:, 2].min()), 0.0195)
+        self.assertLess(float(np.abs(body_qd).max()), 0.005)
+
+        schedule = solver._direct_contact_schedule
+        total = int(schedule.section_end.numpy()[-1])
+        records = schedule.records.numpy()[:total]
+        pairs = [tuple(record[:2]) for record in records]
+        begin, runs = 0, 0
+        while begin < total:
+            end = int(records[begin][direct_contact_gs._RECORD_RUN_END])
+            self.assertGreater(end, begin)
+            self.assertEqual(set(pairs[begin:end]), {pairs[begin]})
+            begin, runs = end, runs + 1
+        # Both plates of a link are adjacent: one run per link and plane.
+        self.assertEqual(runs, len(set(pairs)))
+        self.assertLess(runs, total)
 
 
 if __name__ == "__main__":
