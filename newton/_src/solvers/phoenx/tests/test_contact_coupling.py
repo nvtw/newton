@@ -8,7 +8,6 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton._src.solvers.phoenx.articulations.reduced_forest import ReducedForestContactSystem
 from newton._src.solvers.phoenx.constraints.contact_container import ContactContainer, contact_container_zeros
 from newton._src.solvers.phoenx.constraints.contact_projection import (
     _fast_div,
@@ -375,10 +374,6 @@ class TestContactCoupling(unittest.TestCase):
                 total += 0.5 * (qd[index, :3] @ qd[index, :3] + omega @ np.asarray(inertia).reshape(3, 3) @ omega)
             return total
 
-        if getattr(self, "_use_forest", False):
-            solver._reduced_articulation.forest_contact_system = ReducedForestContactSystem(
-                solver._reduced_articulation, 8
-            )
         before = energy()
         momentum_before = _total_momentum(model, state)
         pipeline.collide(state, contacts)
@@ -387,7 +382,6 @@ class TestContactCoupling(unittest.TestCase):
         self.assertGreater(int(solver._reduced_articulation.contact_block_system.fallback_count.numpy()[0]), 0)
         self.assertLessEqual(energy(), before + 1.0e-7)
         np.testing.assert_allclose(_total_momentum(model, state), momentum_before, rtol=0.0, atol=2.0e-6)
-        self._last_velocity = state.body_qd.numpy()
 
     def test_metric_friction_with_vanishing_radius_stays_finite(self):
         """Sliding radii whose squares underflow (or flush to zero) must not produce NaN impulses."""
@@ -543,10 +537,6 @@ class TestContactCoupling(unittest.TestCase):
             solver_iterations=8,
             sor_boost=1.0,
         )
-        if getattr(self, "_use_forest", False):
-            solver._reduced_articulation.forest_contact_system = ReducedForestContactSystem(
-                solver._reduced_articulation, 32
-            )
         contacts = pipeline.contacts()
         before = _total_momentum(model, state)
         with wp.ScopedCapture(device=model.device) as capture:

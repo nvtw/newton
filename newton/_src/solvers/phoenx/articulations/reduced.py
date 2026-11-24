@@ -5896,12 +5896,6 @@ class ReducedPhoenXArticulation:
         )
         if world.max_contact_columns <= 0 or not world._reduced_contacts_active_this_step:
             return
-        forest = getattr(self, "forest_contact_system", None)
-        if forest is not None:
-            forest.solve(
-                world, idt, iterations, use_bias=not relax, prepare=relax or world._refresh_prepare_this_substep()
-            )
-            return
         contact_views = world._active_contact_views()
         common_inputs = [
             world._contact_cols,
