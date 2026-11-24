@@ -386,7 +386,6 @@ class IncrementalContactPartitioner:
         device: wp.DeviceLike = None,
         seed: int = 0,
         max_colored_partitions: int | None = None,
-        max_greedy_outer_iters: int | None = None,
         enable_warm_start: bool = False,
         endpoint_owner_coloring: bool = False,
     ) -> None:
@@ -399,7 +398,6 @@ class IncrementalContactPartitioner:
             seed: Seed for the deterministic priority permutation.
             max_colored_partitions: Soft regular-color cap. Any remainder
                 lands in one mass-splitting overflow bucket.
-            max_greedy_outer_iters: Optional greedy iteration limit.
             enable_warm_start: Reuse valid colors from the previous build.
             endpoint_owner_coloring: Use bounded per-endpoint elections instead
                 of constructing interaction adjacency. This requires a positive
@@ -429,15 +427,6 @@ class IncrementalContactPartitioner:
                 raise ValueError("endpoint-owner coloring requires max_colored_partitions >= 1")
             if enable_warm_start:
                 raise ValueError("endpoint-owner coloring replaces adjacency-based warm-start coloring")
-        # Per-instance override for the host-side greedy loop bound. ``None``
-        # uses the module-level :data:`MAX_GREEDY_OUTER_ITERS` (default 16).
-        # Mass-splitting scenes can safely lower this -- excess uncoloured
-        # elements just spill to the overflow bucket. Non-MS scenes
-        # (``max_colored_partitions is None``) need the full 16 to find a
-        # valid coloring with no fallback.
-        self._max_greedy_outer_iters_override: int | None = (
-            int(max_greedy_outer_iters) if max_greedy_outer_iters is not None else None
-        )
         self._max_colored_partitions_kernel_arg: int = (
             -1 if max_colored_partitions is None else int(max_colored_partitions)
         )
@@ -1123,22 +1112,12 @@ class IncrementalContactPartitioner:
                 if self._use_capture_while_greedy:
                     wp.capture_while(self._num_remaining, self._capture_speculative_step)
                 else:
-                    outer_iters = (
-                        self._max_greedy_outer_iters_override
-                        if self._max_greedy_outer_iters_override is not None
-                        else int(MAX_GREEDY_OUTER_ITERS)
-                    )
-                    for _ in range(outer_iters):
+                    for _ in range(int(MAX_GREEDY_OUTER_ITERS)):
                         self._capture_speculative_step()
             elif self._use_capture_while_greedy:
                 wp.capture_while(self._num_remaining, self._capture_build_csr_greedy_step)
             else:
-                outer_iters = (
-                    self._max_greedy_outer_iters_override
-                    if self._max_greedy_outer_iters_override is not None
-                    else int(MAX_GREEDY_OUTER_ITERS)
-                )
-                for _ in range(outer_iters):
+                for _ in range(int(MAX_GREEDY_OUTER_ITERS)):
                     self._capture_build_csr_greedy_step()
         # Force-spill anything still uncoloured into the overflow colour.
         # No-op when capture_while drained num_remaining naturally; only

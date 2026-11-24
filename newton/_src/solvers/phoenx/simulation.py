@@ -425,8 +425,6 @@ class PhoenXWorld:
         mass_splitting_unrolled: bool = False,
         partitioner_algorithm: str = "greedy",
         joint_coloring_priority: bool = False,
-        max_greedy_outer_iters: int | None = None,
-        enable_warm_start_coloring: bool = True,
         sor_boost: float = 1.0,
         enable_column_timers: bool = False,
         sleeping_velocity_threshold: float = 0.0,
@@ -1134,17 +1132,12 @@ class PhoenXWorld:
         # Warm-start coloring only feeds the single-world greedy build;
         # the per-world multi-world path uses a different kernel that
         # never reads the cache. Skip the allocation in that case.
-        _warm_start_active: bool = (
-            bool(enable_warm_start_coloring)
-            and step_layout == "single_world"
-            and self.partitioner_algorithm == "greedy"
-        )
+        _warm_start_active: bool = step_layout == "single_world" and self.partitioner_algorithm == "greedy"
         if self.partitioner_algorithm in ("greedy", "endpoint_owner"):
             self._partitioner = IncrementalContactPartitioner(
                 max_num_interactions=self._constraint_capacity,
                 max_num_nodes=max(1, self.num_bodies + self.num_particles),
                 max_colored_partitions=self.max_colored_partitions,
-                max_greedy_outer_iters=max_greedy_outer_iters,
                 enable_warm_start=_warm_start_active,
                 endpoint_owner_coloring=self.partitioner_algorithm == "endpoint_owner",
                 device=self.device,
