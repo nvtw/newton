@@ -832,11 +832,7 @@ def _contact_pack_columns_kernel(
     mu_static = resolve_friction_static_in_kernel(materials, mat_a, mat_b, default_friction) * friction_scale
     mu_dynamic = resolve_friction_in_kernel(materials, mat_a, mat_b, default_friction) * friction_scale
 
-    # Header is stored at offsets 0 / 1 / 2 (contract is
-    # ``constraint_type / body1 / body2``). Dispatcher no longer reads
-    # the type tag for contacts (cid-based dispatch) but the slot is
-    # written anyway to preserve the shared header invariant for any
-    # diagnostic / future caller that does.
+    # Shared column header: ``constraint_type / body1 / body2`` at offsets 0 / 1 / 2.
     _col_write_int(contact_cols, CONSTRAINT_TYPE_OFFSET, tid, CONSTRAINT_TYPE_CONTACT)
     _col_write_int(contact_cols, CONSTRAINT_BODY1_OFFSET, tid, b1)
     _col_write_int(contact_cols, CONSTRAINT_BODY2_OFFSET, tid, b2)
