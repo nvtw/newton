@@ -105,15 +105,12 @@ def _run_pair_detection(
         device=device,
     )
 
-    # The fused pair_counts+columns kernel needs a shape->body map and
-    # a (possibly empty) body-pair filter. For this correctness test
-    # each shape id maps to its own body and no pairs are filtered --
-    # the test is only probing the pair_count derivation, which is
-    # independent of the filter output.
+    # The fused pair_counts+columns kernel needs a shape->body map. Each
+    # shape id maps to its own body; the test only probes the pair_count
+    # derivation.
     max_shape = int(max(int(shape0_np.max()) if shape0_np.size else 0, int(shape1_np.max()) if shape1_np.size else 0))
     shape_body_np = np.arange(max_shape + 2, dtype=np.int32)
     shape_body_arr = wp.from_numpy(shape_body_np, dtype=wp.int32, device=device)
-    filter_keys_arr = wp.array([-1], dtype=wp.int64, device=device)
     wp.launch(
         _pair_counts_and_columns_kernel,
         dim=capacity,
@@ -125,9 +122,6 @@ def _run_pair_detection(
             pair_shape_a,
             pair_shape_b,
             shape_body_arr,
-            int(len(shape_body_np)),
-            filter_keys_arr,
-            0,
             wp.empty(0, dtype=wp.int32, device=device),
         ],
         outputs=[pair_count, pair_columns],
@@ -245,7 +239,6 @@ class TestContactIngestLargeShapeCount(unittest.TestCase):
         )
         shape_body_np = np.arange(int(shape0_pad.max()) + 2, dtype=np.int32)
         shape_body_arr = wp.from_numpy(shape_body_np, dtype=wp.int32, device=device)
-        filter_keys_arr = wp.array([-1], dtype=wp.int64, device=device)
         wp.launch(
             _pair_counts_and_columns_kernel,
             dim=capacity,
@@ -257,9 +250,6 @@ class TestContactIngestLargeShapeCount(unittest.TestCase):
                 pair_shape_a,
                 pair_shape_b,
                 shape_body_arr,
-                int(len(shape_body_np)),
-                filter_keys_arr,
-                0,
                 wp.empty(0, dtype=wp.int32, device=device),
             ],
             outputs=[pair_count, pair_columns],

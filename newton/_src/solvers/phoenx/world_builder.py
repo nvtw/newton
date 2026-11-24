@@ -288,7 +288,6 @@ class WorldBuilder:
             )
             for w in range(self._num_worlds)
         ]
-        self._collision_filter_pairs: set[tuple[int, int]] = set()
         self._shapes: list[ShapeDescriptor] = []
 
     # ------------------------------------------------------------------
@@ -538,14 +537,6 @@ class WorldBuilder:
             )
         )
 
-    def add_collision_filter_pair(self, body_a: int, body_b: int) -> None:
-        """Ignore contacts between ``body_a`` and ``body_b`` (canonical (min, max))."""
-        self._validate_body(body_a)
-        self._validate_body(body_b)
-        if body_a == body_b:
-            raise ValueError(f"add_collision_filter_pair: bodies must differ (got both = {body_a})")
-        self._collision_filter_pairs.add((min(int(body_a), int(body_b)), max(int(body_a), int(body_b))))
-
     # ------------------------------------------------------------------
     # Finalisation
     # ------------------------------------------------------------------
@@ -607,7 +598,6 @@ class WorldBuilder:
             gravity=gravity,
             rigid_contact_max=rigid_contact_max,
             num_joints=0,
-            collision_filter_pairs=self._collision_filter_pairs,
             default_friction=default_friction,
             num_worlds=self._num_worlds,
             step_layout=step_layout,
@@ -642,7 +632,6 @@ class WorldBuilder:
             )
             for w in range(self._num_worlds)
         ]
-        self._collision_filter_pairs = set()
         self._shapes = []
         return world
 

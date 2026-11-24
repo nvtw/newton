@@ -407,7 +407,6 @@ class PhoenXWorld:
         num_cloth_bending: int = 0,
         num_soft_tetrahedra: int = 0,
         num_soft_hexahedra: int = 0,
-        collision_filter_pairs: Iterable[tuple[int, int]] | None = None,
         default_friction: float = 0.5,
         num_worlds: int = 1,
         step_layout: str = "multi_world",
@@ -1371,10 +1370,6 @@ class PhoenXWorld:
         self._moving_surface_only: bool = False
         self._contact_views_placeholder: ContactViews = self._make_placeholder_contact_views()
 
-        # ----- Pairwise contact filter (packed int64 keys) -----
-        self._collision_filter_keys: wp.array[wp.int64]
-        self._set_collision_filter_pairs_impl(collision_filter_pairs or ())
-
         # ----- Optional material table -----
         self._shape_material: wp.array[wp.int32] | None = None
         self._restitution_targets = None
@@ -2064,40 +2059,6 @@ class PhoenXWorld:
         # reduced system's fallback would solve far slower.
         self._free_rigid_contacts_classic = bool(articulation.contact_block_system.free_rigid_pairs_possible)
         self._has_maximal_dynamic_bodies = bool(np.any(self.bodies.motion_type.numpy() == int(MOTION_DYNAMIC)))
-
-    def set_collision_filter_pairs(self, pairs: Iterable[tuple[int, int]]) -> None:
-        """Replace the body-pair contact filter (canonical (min, max), deduped)."""
-        self._set_collision_filter_pairs_impl(pairs)
-
-    def _set_collision_filter_pairs_impl(self, pairs: Iterable[tuple[int, int]]) -> None:
-        nb = int(self.num_bodies)
-        packed: list[int] = []
-        seen: set[tuple[int, int]] = set()
-        for a, b in pairs:
-            a_i = int(a)
-            b_i = int(b)
-            if a_i == b_i:
-                raise ValueError(f"collision filter pair must have two distinct bodies (got both = {a_i})")
-            if not (0 <= a_i < nb and 0 <= b_i < nb):
-                raise IndexError(
-                    f"collision filter pair ({a_i}, {b_i}) out of range [0, {nb}) for this World's body count"
-                )
-            lo = min(a_i, b_i)
-            hi = max(a_i, b_i)
-            key = (lo, hi)
-            if key in seen:
-                continue
-            seen.add(key)
-            packed.append(lo * nb + hi)
-
-        packed.sort()
-        if not packed:
-            arr = np.asarray([np.iinfo(np.int64).max], dtype=np.int64)
-        else:
-            arr = np.asarray(packed, dtype=np.int64)
-
-        self._collision_filter_keys = wp.array(arr, dtype=wp.int64, device=self.device)
-        self._collision_filter_count = int(len(packed))
 
     def _particles_or_sentinel(self) -> ParticleContainer:
         """Return the particle SoA, allocating a length-1 sentinel for
@@ -3775,8 +3736,6 @@ class PhoenXWorld:
             default_friction=self.default_friction,
             device=self.device,
             num_bodies=self.num_bodies,
-            filter_keys=self._collision_filter_keys,
-            filter_count=self._collision_filter_count,
             shape_material=self._shape_material,
             materials=self._materials,
             enable_body_pair_grouping=self._enable_body_pair_grouping,
