@@ -22,7 +22,7 @@ import warp as wp
 from newton._src.geometry.support_function import GeoTypeEx, _has_verified_hull
 from newton._src.math import orthonormal_basis
 
-from .contact_data import ContactData
+from .contact_data import ContactData, contact_separation
 from .mpr import create_support_map_function
 from .types import GeoType
 
@@ -978,6 +978,7 @@ def create_build_manifold(support_func: Any, writer_func: Any, post_process_cont
                 contact_data = post_process_contact(
                     contact_data, geom_a, position_a, quaternion_a, geom_b, position_b, quaternion_b
                 )
+                penetrating_mask |= int(contact_separation(contact_data) <= 0.0) << i
                 writer_func(contact_data, writer_data, -1)
 
             # Two penetrating endpoints are required to support the deepest point.
