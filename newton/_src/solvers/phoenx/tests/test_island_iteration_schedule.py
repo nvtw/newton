@@ -43,7 +43,7 @@ class TestIslandIterationSchedule(unittest.TestCase):
             model = _build_model()
             pipeline = newton.CollisionPipeline(model, contact_matching="sticky")
 
-            def run(independent, giant=False):
+            def run(independent, giant=False, temporal=False):
                 solver = newton.solvers.SolverPhoenX(
                     model,
                     collision_pipeline=pipeline,
@@ -54,6 +54,7 @@ class TestIslandIterationSchedule(unittest.TestCase):
                     parallel_contact_prepare=True,
                     solver_iterations=3,
                     island_parallel_iterations=independent,
+                    temporal_iterations=temporal,
                 )
                 world = solver.world
                 # Island blocks solve every color with the head kernel. Without a
@@ -86,11 +87,12 @@ class TestIslandIterationSchedule(unittest.TestCase):
                     self.assertGreater(int(world._partitioner.num_colors.numpy()[0]), 1)
                 return history
 
-            reference = run(False)
-            for actual in (run(True), run(True, giant=True)):
-                for expected_step, actual_step in zip(reference, actual, strict=True):
-                    for expected, result in zip(expected_step, actual_step, strict=True):
-                        np.testing.assert_array_equal(result.view(np.uint8), expected.view(np.uint8))
+            for temporal in (False, True):
+                reference = run(False, temporal=temporal)
+                for actual in (run(True, temporal=temporal), run(True, giant=True, temporal=temporal)):
+                    for expected_step, actual_step in zip(reference, actual, strict=True):
+                        for expected, result in zip(expected_step, actual_step, strict=True):
+                            np.testing.assert_array_equal(result.view(np.uint8), expected.view(np.uint8))
 
 
 if __name__ == "__main__":
