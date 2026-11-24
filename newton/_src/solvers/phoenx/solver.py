@@ -580,7 +580,7 @@ class SolverPhoenX(SolverBase):
             partitioner_algorithm: ``"greedy"`` or ``"endpoint_owner"``
                 (single-world mass splitting only). ``None`` (the default)
                 selects ``"endpoint_owner"`` with overflow-only mass splitting
-                and ``"greedy"`` otherwise.
+                and at least one colored partition, and ``"greedy"`` otherwise.
             colored_contact_headers: Store rigid-contact column metadata in
                 solver color order. Requires mass splitting and point-friction
                 rigid contacts. Supports single- and multi-world layouts.
@@ -710,7 +710,10 @@ class SolverPhoenX(SolverBase):
         if mass_splitting_unrolled is None:
             mass_splitting_unrolled = bool(mass_splitting_overflow_only)
         if partitioner_algorithm is None:
-            partitioner_algorithm = "endpoint_owner" if mass_splitting_overflow_only else "greedy"
+            # Endpoint-owner coloring needs at least one colour; with none, every
+            # constraint is overflow and the greedy partitioner handles it.
+            endpoint_owner = mass_splitting_overflow_only and max_colored_partitions >= 1
+            partitioner_algorithm = "endpoint_owner" if endpoint_owner else "greedy"
         self.joint_mode = joint_mode
         self._joint_solver = joint_solver
         self._articulation_mode = articulation_mode
