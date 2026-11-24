@@ -16,7 +16,7 @@ import warp as wp
 
 from ......sim import ModelFlags
 from ....config import ForwardKinematicsSolverConfig
-from ...core.joints import JointActuationType, JointDoFType
+from ...core.joints import D6JointAxes, JointActuationType, JointDoFType
 from ...core.model import ModelKamino
 from ...core.types import assign_to_warp_int32_array, to_warp_int32_array, vec7f
 from ...kinematics.resets import get_base_q_from_joint_q_and_body_q
@@ -265,7 +265,8 @@ class ForwardKinematicsSolver:
             actuated_dofs_offset_prev = np.concatenate(([0], num_act_dofs.cumsum()))
 
         # Determine which worlds are equivalent for FK (at least discrete data)
-        classes = compute_fk_equivalence_classes(self.model)
+        d6_layouts = self.model.joints.d6_axes.numpy() if self.model.joints.d6_axes.size else None
+        classes = compute_fk_equivalence_classes(self.model, d6_layouts)
         num_classes = len(classes)
 
         # Create a copy of the model's joints with added joints as needed:
@@ -493,6 +494,14 @@ class ForwardKinematicsSolver:
                         constraint_full_to_red_map[6 * jt_id + 5] = ct_count + 3
                         ct_count += 4
                         has_universal_joints = True
+                    elif dof_type == FKJointDoFType.D6:
+                        layout = d6_layouts[joints_source_id[jt_id]]
+                        linear_count = int(layout["linear_count"])
+                        angular_count = int(layout["angular_count"])
+                        for i in (*range(linear_count, 3), *range(3 + angular_count, 6)):
+                            constraint_full_to_red_map[6 * jt_id + i] = ct_count
+                            ct_count += 1
+                        has_universal_joints |= angular_count == 2
                     else:
                         raise RuntimeError("Unknown joint dof type")
             num_constraints[wd_id] = ct_count
@@ -546,6 +555,11 @@ class ForwardKinematicsSolver:
                     elif dof_type == FKJointDoFType.UNIVERSAL:
                         delta_q_max[coord_id] = max_step_angular
                         delta_q_max[coord_id + 1] = max_step_angular
+                    elif dof_type == FKJointDoFType.D6:
+                        count = int(d6_layouts[joints_source_id[jt_id]]["linear_count"])
+                        stop = coord_id + joints_num_actuated_coords[jt_id]
+                        delta_q_max[coord_id : coord_id + count] = max_step_linear
+                        delta_q_max[coord_id + count : stop] = max_step_angular
                     else:
                         raise RuntimeError("Invalid joint dof type for an actuator")
 
@@ -612,6 +626,9 @@ class ForwardKinematicsSolver:
             self.data.joints.F_r_Fj = wp.empty(self.data.dimensions.num_joints_tot, dtype=wp.vec3f)
             self.data.joints.X_Bj = wp.empty(self.data.dimensions.num_joints_tot, dtype=wp.mat33f)
             self.data.joints.X_Fj = wp.empty(self.data.dimensions.num_joints_tot, dtype=wp.mat33f)
+            self.data.joints.d6_axes = wp.empty(
+                self.data.dimensions.num_joints_tot if d6_layouts is not None else 0, dtype=D6JointAxes
+            )
             self.data.joints.source_id = to_warp_int32_array(joints_source_id)
             self.data.joints.world_id = to_warp_int32_array(joint_world_id)
             self.data.joints.axis_joint_id = to_warp_int32_array(axis_joint_d)
@@ -1092,10 +1109,13 @@ class ForwardKinematicsSolver:
                 self.model.joints.F_r_Fj,
                 self.model.joints.X_Bj,
                 self.model.joints.X_Fj,
+                self.data.joints.dof_type,
+                self.model.joints.d6_axes,
                 self.data.joints.B_r_Bj,
                 self.data.joints.F_r_Fj,
                 self.data.joints.X_Bj,
                 self.data.joints.X_Fj,
+                self.data.joints.d6_axes,
             ],
             device=self.device,
         )
@@ -1207,6 +1227,7 @@ class ForwardKinematicsSolver:
                 self.data.dimensions.num_joints,
                 self.data.dimensions.joints_offset,
                 self.data.joints.dof_type,
+                self.data.joints.d6_axes,
                 self.data.joints.bid_B,
                 self.data.joints.bid_F,
                 self.data.joints.X_Bj,
@@ -1215,12 +1236,13 @@ class ForwardKinematicsSolver:
                 self.data.joints.F_r_Fj,
                 body_q,
                 self.data.dimensions.actuated_coords_offset,
+                actuator_q_ref,
                 actuator_q,
             ],
             device=self.device,
         )
         # Correct w.r.t. reference coordinates
-        if actuator_q_ref is not None:
+        if actuator_q_ref is not None and actuator_q_ref is not actuator_q:
             wp.launch(
                 _correct_actuator_coords,
                 dim=(self.data.dimensions.num_joints_tot,),
@@ -1330,6 +1352,7 @@ class ForwardKinematicsSolver:
             dim=(self.data.dimensions.num_joints_tot,),
             inputs=[
                 self.data.joints.dof_type,
+                self.data.joints.d6_axes,
                 self.data.joints.act_type,
                 self.data.dimensions.actuated_coords_offset,
                 self.data.joints.X_Bj,
@@ -1369,6 +1392,7 @@ class ForwardKinematicsSolver:
                 self.data.dimensions.num_joints,
                 self.data.dimensions.joints_offset,
                 self.data.joints.dof_type,
+                self.data.joints.d6_axes,
                 self.data.joints.act_type,
                 self.data.joints.bid_B,
                 self.data.joints.bid_F,
@@ -1451,6 +1475,7 @@ class ForwardKinematicsSolver:
                 self.data.dimensions.joints_offset,
                 self.model.info.bodies_offset,
                 self.data.joints.dof_type,
+                self.data.joints.d6_axes,
                 self.data.joints.act_type,
                 self.data.joints.bid_B,
                 self.data.joints.bid_F,
@@ -1504,6 +1529,7 @@ class ForwardKinematicsSolver:
                 self.data.dimensions.joints_offset,
                 self.model.info.bodies_offset,
                 self.data.joints.dof_type,
+                self.data.joints.d6_axes,
                 self.data.joints.act_type,
                 self.data.joints.bid_B,
                 self.data.joints.bid_F,
@@ -1982,6 +2008,7 @@ class ForwardKinematicsSolver:
         body_q: wp.array[wp.transformf],
         body_u: wp.array2d[wp.spatial_vectorf],
         world_mask: wp.array[wp.bool],
+        actuator_q_ref: wp.array[wp.float32] | None = None,
     ):
         """
         Internal function solving for body velocities, so that constraint velocities are zero,
@@ -2016,7 +2043,7 @@ class ForwardKinematicsSolver:
         )
 
         # Compute target constraint velocities (prescribed for actuated dofs, zero for passive constraints)
-        self._eval_actuator_coords(body_q, self.data.problem.actuator_q_next)
+        self._eval_actuator_coords(body_q, self.data.problem.actuator_q_next, actuator_q_ref)
         target_cts_u.zero_()
         wp.launch(
             _eval_target_constraint_velocities,
@@ -2025,6 +2052,7 @@ class ForwardKinematicsSolver:
                 self.data.dimensions.num_joints,
                 self.data.dimensions.joints_offset,
                 self.data.joints.dof_type,
+                self.data.joints.d6_axes,
                 self.data.joints.act_type,
                 self.data.dimensions.actuated_coords_offset,
                 self.data.dimensions.actuated_dofs_offset,
@@ -2502,6 +2530,7 @@ class ForwardKinematicsSolver:
                 body_q,
                 body_u.reshape((1, body_u.shape[0])),
                 self.data.gauss_newton.success,
+                actuator_q_ref=self.data.problem.actuator_q_next if self.data.joints.d6_axes.size else None,
             )
 
     def solve_fk(
@@ -2601,7 +2630,7 @@ class ForwardKinematicsSolver:
 ###
 
 
-def compute_fk_equivalence_classes(model: ModelKamino) -> list[list[int]]:
+def compute_fk_equivalence_classes(model: ModelKamino, d6_layouts: np.ndarray | None = None) -> list[list[int]]:
     """Groups world that are equivalent for FK discrete information"""
     sig_num_bodies = DiscreteSignature(num_worlds=model.size.num_worlds, data=model.info.num_bodies)
     sig_joint_act_type = DiscreteSignature(
@@ -2652,6 +2681,22 @@ def compute_fk_equivalence_classes(model: ModelKamino) -> list[list[int]]:
         sig_base_body,
         sig_base_joint,
     ]
+
+    if d6_layouts is None and model.joints.d6_axes.size:
+        d6_layouts = model.joints.d6_axes.numpy()
+    if d6_layouts is not None:
+        # Unlike specialized joint types, D6 does not encode the row layout.
+        layouts = np.zeros(len(d6_layouts), dtype=np.int32)
+        is_d6 = model.joints.dof_type.numpy() == JointDoFType.D6
+        layouts[is_d6] = 4 * d6_layouts["linear_count"][is_d6] + d6_layouts["angular_count"][is_d6]
+        signatures.append(
+            DiscreteSignature(
+                num_worlds=model.size.num_worlds,
+                data=to_warp_int32_array(layouts, device=model.joints.dof_type.device),
+                world_offset=model.info.joints_offset,
+                world_size=model.info.num_joints,
+            )
+        )
 
     if model.joints.fk_act_flag is not None:
         sig_joint_fk_act_flag = DiscreteSignature(

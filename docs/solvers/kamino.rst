@@ -450,12 +450,11 @@ axes, individual Euler rates become indeterminate at gimbal lock. Kamino
 uses the minimum-norm rate split at float32 rank loss and the exact coordinate
 derivative at regular poses.
 
-Use ``use_fk_solver=False`` (the default) for general D6 layouts. The
-optional Kamino forward-kinematics solver supports D6 layouts that map to
-its specialized joints: fixed, prismatic, revolute, same-axis cylindrical,
-universal, right-handed Cartesian, and three-axis gimbal. Newton's
-:func:`newton.eval_fk` can initialize articulated D6 body states for any
-supported D6 layout.
+Set ``use_fk_solver=True`` to initialize a model with Kamino's optional
+forward kinematics solver, including D6 joints in closed loops. A joint
+participates as either passive or actuated. For an actuated D6 joint, supply
+all its enabled coordinates and, when solving velocities, their rates.
+Newton's :func:`newton.eval_fk` can also initialize articulated D6 body states.
 
 .. _kamino-rod-joints:
 

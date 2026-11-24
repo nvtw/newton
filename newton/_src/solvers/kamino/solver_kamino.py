@@ -883,8 +883,6 @@ class SolverKamino(SolverBase, CouplingInterface):
             include_shape_contact_pairs=include_shape_contact_pairs,
             kinematic_only_immovable=config.dynamics_solver == "lox",
         )
-        if config.use_fk_solver and self._model_kamino.joints.d6_axes.size:
-            raise ValueError("General D6 joints require use_fk_solver=False.")
 
         # Store for which joints the limits are finite. This is used to validate that finiteness of limits is not changed at runtime.
         q_min = self._model_kamino.joints.q_j_min.numpy()

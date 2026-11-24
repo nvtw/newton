@@ -11,7 +11,9 @@ import warp as wp
 
 import newton
 from newton._src.solvers.kamino._src.core.joints import D6JointAxes, JointCorrectionMode
+from newton._src.solvers.kamino._src.core.model import ModelKamino
 from newton._src.solvers.kamino._src.kinematics.joints import d6_angular_coordinates, write_d6_joint_motion
+from newton._src.solvers.kamino._src.solvers.fk import ForwardKinematicsSolver
 from newton.solvers import SolverKamino
 from newton.tests.kamino import setup_tests, test_context
 from newton.tests.kamino.utils.extract import extract_cts_jacobians, extract_dofs_jacobians
@@ -70,6 +72,50 @@ class TestKaminoD6(unittest.TestCase):
         if not test_context.setup_done:
             setup_tests(clear_cache=False)
         self.device = wp.get_device(test_context.device)
+
+    def test_fk_general_d6_pose_and_twist(self):
+        """Match Newton FK for a driven joint with independent linear and angular axes."""
+        builder = newton.ModelBuilder()
+        SolverKamino.register_custom_attributes(builder, fk_actuation_flags={0: 1, 1: 1})
+        cfg = builder.JointDofConfig
+        for angular_axes in (((1, 0, 0), (0, 1, 0)), ((1, 0, 0), (0, 0, 1), (0, 1, 0))):
+            builder.begin_world()
+            child = builder.add_link(mass=1.0, inertia=_INERTIA, lock_inertia=True)
+            joint = builder.add_joint_d6(
+                -1,
+                child,
+                linear_axes=[cfg(axis=(0.6, 0.0, 0.8))],
+                angular_axes=[cfg(axis=axis) for axis in angular_axes],
+                parent_xform=wp.transform(wp.vec3(0.1, -0.2, 0.3), wp.quat_from_axis_angle(wp.vec3(0, 0, 1), 0.3)),
+                child_xform=wp.transform(wp.vec3(-0.1, 0.0, 0.2), wp.quat_from_axis_angle(wp.vec3(0, 1, 0), -0.2)),
+            )
+            builder.add_articulation([joint])
+            builder.end_world()
+        model = builder.finalize(device=self.device)
+        # The second joint uses a left-handed chart outside its principal branch.
+        q = wp.array([0.13, 0.4, -0.3, -0.08, 0.2, 1.9, -0.4], dtype=wp.float32, device=self.device)
+        qd = wp.array([0.27, -0.43, 0.39, -0.2, 0.1, 0.6, -0.4], dtype=wp.float32, device=self.device)
+        expected = model.state()
+        newton.eval_fk(model, q, qd, expected)
+        for sparse in (False, True):
+            with self.subTest(sparse=sparse):
+                solver = SolverKamino(
+                    model,
+                    SolverKamino.Config(use_fk_solver=True, fk=ForwardKinematicsSolver.Config(use_sparsity=sparse)),
+                )
+                state = model.state()
+                success = wp.zeros(model.world_count, dtype=wp.bool, device=self.device)
+                reset = SolverKamino.ResetConfig(
+                    body_poses=SolverKamino.ResetConfig.FromActuatorQ(q),
+                    body_velocities=SolverKamino.ResetConfig.FromActuatorU(qd),
+                )
+                solver.reset(state, config=reset, success_mask=success)
+                self.assertTrue(success.numpy().all())
+                actual_q, expected_q = state.body_q.numpy(), expected.body_q.numpy()
+                np.testing.assert_allclose(actual_q[:, :3], expected_q[:, :3], atol=2.0e-5, rtol=0.0)
+                alignment = np.sum(actual_q[:, 3:] * expected_q[:, 3:], axis=1)
+                np.testing.assert_allclose(np.abs(alignment), 1.0, atol=2.0e-6, rtol=0.0)
+                np.testing.assert_allclose(state.body_qd.numpy(), expected.body_qd.numpy(), atol=2.0e-5, rtol=0.0)
 
     def test_angular_jacobians_differentiate_coordinates(self):
         """Match angular velocity covectors to finite differences away from the chart singularities."""
@@ -185,6 +231,7 @@ class TestKaminoD6(unittest.TestCase):
     def test_d6_closes_a_kinematic_loop(self):
         """Couple two world sliders through a D6 loop and constrain only the locked motion."""
         builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        SolverKamino.register_custom_attributes(builder, fk_actuation_flags={1: 1})
         parent = builder.add_link(mass=1.0, inertia=_INERTIA, lock_inertia=True)
         child = builder.add_link(mass=1.0, inertia=_INERTIA, lock_inertia=True)
         builder.add_articulation([builder.add_joint_prismatic(-1, parent, axis=(1, 0, 0))])
@@ -193,9 +240,19 @@ class TestKaminoD6(unittest.TestCase):
             parent,
             child,
             linear_axes=[builder.JointDofConfig(axis=axis) for axis in _LINEAR[1:]],
-            angular_axes=[builder.JointDofConfig(axis=axis) for axis in _ANGULAR],
+            angular_axes=[builder.JointDofConfig(axis=axis) for axis in _ANGULAR[:2]],
         )
         model = builder.finalize(device=self.device, skip_validation_joints=True)
+        # The driven slider fixes y while the passive D6 closes the loop in x.
+        fk = ForwardKinematicsSolver(ModelKamino.from_newton(model))
+        state = model.state()
+        position = wp.array([0.15], dtype=wp.float32, device=self.device)
+        rate = wp.array([-0.17], dtype=wp.float32, device=self.device)
+        fk.solve_fk(position, state.body_q, actuator_u=rate, body_u=state.body_qd)
+        np.testing.assert_allclose(state.body_q.numpy()[:, :3], ((0, 0, 0), (0, 0.15, 0)), atol=2.0e-5, rtol=0.0)
+        np.testing.assert_allclose(
+            state.body_qd.numpy(), ((0, 0, 0, 0, 0, 0), (0, -0.17, 0, 0, 0, 0)), atol=2.0e-5, rtol=0.0
+        )
         wrench = np.array(((3, 0, 0, 0, 0, 0), (0, 2, 0, 0, 0, 0)), dtype=np.float32)
         expected = ((0, 0, 0, 0, 0, 0), (0, 0.02, 0, 0, 0, 0))
         for backend in ("scc", "lox", "padmm"):

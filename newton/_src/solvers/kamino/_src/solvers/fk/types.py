@@ -17,6 +17,8 @@ if TYPE_CHECKING:
     from newton._src.solvers.kamino._src.linalg.sparse_matrix import BlockSparseMatrices
     from newton._src.solvers.kamino._src.linalg.sparse_operator import BlockSparseLinearOperators
 
+    from ...core.joints import D6JointAxes
+
 ###
 # Module interface
 ###
@@ -69,6 +71,7 @@ class FKJointDoFType(IntEnum):
     GIMBAL = 8
     GIMBAL_LEFT_HANDED = 9
     AXIS = 10
+    D6 = 11
 
 
 class ForwardKinematicsPreconditionerType(IntEnum):
@@ -360,6 +363,9 @@ class FKJointsModel:
     Joint local frame on follower body.
     Shape of ``(num_joints_tot,)``.
     """
+
+    d6_axes: wp.array[D6JointAxes] | None = None
+    """D6 bases indexed by FK joint when the model contains a general D6 joint."""
 
     source_id: wp.array[wp.int32] | None = None
     """

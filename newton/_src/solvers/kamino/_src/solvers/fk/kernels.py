@@ -9,7 +9,7 @@ from functools import cache
 
 import warp as wp
 
-from ...core.joints import JointActuationType, JointDoFType
+from ...core.joints import D6JointAxes, JointActuationType, JointDoFType
 from ...core.math import (
     G_of,
     quat_left_jacobian_inverse,
@@ -23,6 +23,7 @@ from ...core.math import (
 from ...core.types import mat34f
 from ...kinematics.joints import (
     correct_joint_coords_in_place,
+    d6_angular_coordinates,
     get_joint_coords_mapping_function,
     gimbal_transported_axes,
     universal_intermediary_axes,
@@ -194,15 +195,13 @@ def _eval_rotation_jacobian_blocks(
 
 @wp.func
 def _eval_passive_universal_jacobian_blocks(
-    X_B_T: wp.mat33f,
-    X_F_T: wp.mat33f,
+    a_x: wp.vec3f,
+    a_y: wp.vec3f,
     q_base: wp.quatf,
     q_follower: wp.quatf,
     has_base: wp.bool,
 ) -> tuple[wp.vec4f, wp.vec4f]:
     """Evaluate the base and follower blocks of a passive universal constraint Jacobian."""
-    a_x = X_B_T[0]  # x-axis on base
-    a_y = X_F_T[1]  # y-axis on follower
     jac_q_base = wp.vec4f(0.0)
     if has_base:
         a_y_follower = unit_quat_apply(q_follower, a_y)
@@ -210,6 +209,47 @@ def _eval_passive_universal_jacobian_blocks(
     a_x_base = unit_quat_apply(q_base, a_x)
     jac_q_follower = -a_x_base * unit_quat_apply_jacobian(q_follower, a_y)
     return jac_q_base, jac_q_follower
+
+
+@wp.func
+def _fk_translation_frame_transpose(X_B: wp.mat33f, dof_type: int, d6_axes: wp.array[D6JointAxes], joint: int):
+    if dof_type == FKJointDoFType.D6:
+        return wp.transpose(X_B @ d6_axes[joint].linear)
+    return wp.transpose(X_B)
+
+
+@wp.func
+def _fk_rotation_frame_transpose(
+    X_B: wp.mat33f, dof_type: int, act_type: int, d6_axes: wp.array[D6JointAxes], joint: int
+):
+    if dof_type == FKJointDoFType.D6 and act_type == JointActuationType.PASSIVE:
+        return wp.transpose(X_B @ d6_axes[joint].angular)
+    return wp.transpose(X_B)
+
+
+@wp.func
+def _fk_passive_universal_axes(
+    X_B: wp.mat33f, X_F: wp.mat33f, dof_type: int, act_type: int, d6_axes: wp.array[D6JointAxes], joint: int
+):
+    if act_type == JointActuationType.PASSIVE:
+        if dof_type == FKJointDoFType.UNIVERSAL:
+            return True, wp.vec3f(X_B[:, 0]), wp.vec3f(X_F[:, 1])
+        if dof_type == FKJointDoFType.D6:
+            axes = d6_axes[joint]
+            if axes.angular_count == 2:
+                return True, X_B @ wp.vec3f(axes.angular[:, 0]), X_F @ wp.vec3f(axes.angular[:, 2])
+    return False, wp.vec3f(0.0), wp.vec3f(0.0)
+
+
+@wp.func
+def _fk_d6_angular_axis(axes: D6JointAxes, index: int) -> wp.vec3f:
+    column = index
+    if axes.angular_count == 2 and index == 1:
+        column = 2
+    axis = wp.vec3f(axes.angular[:, column])
+    if axes.angular_count == 3 and index == 2:
+        axis *= axes.third_axis_sign
+    return axis
 
 
 ###
@@ -272,11 +312,14 @@ def _compute_fk_joint_frames(
     model_F_r_Fj: wp.array[wp.vec3f],
     model_X_Bj: wp.array[wp.mat33f],
     model_X_Fj: wp.array[wp.mat33f],
+    fk_dof_type: wp.array[wp.int32],
+    model_d6_axes: wp.array[D6JointAxes],
     # Outputs
     fk_B_r_Bj: wp.array[wp.vec3f],
     fk_F_r_Fj: wp.array[wp.vec3f],
     fk_X_Bj: wp.array[wp.mat33f],
     fk_X_Fj: wp.array[wp.mat33f],
+    fk_d6_axes: wp.array[D6JointAxes],
 ):
     """Compute FK joint frames from the current model data."""
     fk_joint = wp.tid()
@@ -287,6 +330,8 @@ def _compute_fk_joint_frames(
         fk_F_r_Fj[fk_joint] = model_F_r_Fj[model_joint]
         fk_X_Bj[fk_joint] = model_X_Bj[model_joint]
         fk_X_Fj[fk_joint] = model_X_Fj[model_joint]
+        if fk_dof_type[fk_joint] == FKJointDoFType.D6:
+            fk_d6_axes[fk_joint] = model_d6_axes[model_joint]
     else:
         # FK-added base and axis joints start at identity; axis orientations are
         # overwritten by _compute_fk_axis_joint_frames.
@@ -544,6 +589,7 @@ def _eval_actuator_coords(
     num_joints: wp.array[wp.int32],
     joints_offset: wp.array[wp.int32],
     joint_dof_type: wp.array[wp.int32],
+    joint_d6_axes: wp.array[D6JointAxes],
     joint_bid_B: wp.array[wp.int32],
     joint_bid_F: wp.array[wp.int32],
     joint_X_Bj: wp.array[wp.mat33f],
@@ -552,6 +598,7 @@ def _eval_actuator_coords(
     joint_F_r_F: wp.array[wp.vec3f],
     body_q: wp.array[wp.transformf],
     actuated_coords_offset: wp.array[wp.int32],
+    actuator_q_ref: wp.array[wp.float32],
     actuator_q: wp.array[wp.float32],
 ):
     """
@@ -607,7 +654,23 @@ def _eval_actuator_coords(
     q_rel = ori_base_T * ori_follower
 
     # Extract joint coordinates from relative pose
-    _joint_transform_to_coords(dof_type, pos_rel, q_rel, coord_id, actuator_q)
+    if dof_type == FKJointDoFType.D6:
+        axes = joint_d6_axes[jt_id]
+        linear = wp.transpose(axes.linear) @ pos_rel
+        reference = wp.vec3f(0.0)
+        for i in range(axes.linear_count):
+            actuator_q[coord_id + i] = linear[i]
+        ang_offset = coord_id + axes.linear_count
+        use_reference = False
+        if actuator_q_ref:
+            use_reference = True
+            for i in range(axes.angular_count):
+                reference[i] = actuator_q_ref[ang_offset + i]
+        angles, _ = d6_angular_coordinates(axes, q_rel, reference, use_reference)
+        for i in range(axes.angular_count):
+            actuator_q[ang_offset + i] = angles[i]
+    else:
+        _joint_transform_to_coords(dof_type, pos_rel, q_rel, coord_id, actuator_q)
 
 
 @wp.kernel
@@ -802,6 +865,7 @@ def _initialize_jacobian_update_masks(
 def _eval_target_relative_transformations(
     # Inputs
     joint_dof_type: wp.array[wp.int32],
+    joint_d6_axes: wp.array[D6JointAxes],
     joint_act_type: wp.array[wp.int32],
     actuated_coords_offset: wp.array[wp.int32],
     joint_X_Bj: wp.array[wp.mat33f],
@@ -899,6 +963,13 @@ def _eval_target_relative_transformations(
             q_x = wp.quat_from_axis_angle(wp.vec3f(X_B[:, 0]), actuator_q[offset_q_j])
             q_y = wp.quat_from_axis_angle(wp.vec3f(X_B[:, 1]), actuator_q[offset_q_j + 1])
             q = q_x * q_y
+        elif dof_type_j == FKJointDoFType.D6:
+            layout = joint_d6_axes[jt_id]
+            for i in range(layout.linear_count):
+                t[i] = actuator_q[offset_q_j + i]
+            for i in range(layout.angular_count):
+                axis = X_B @ _fk_d6_angular_axis(layout, i)
+                q = q * wp.quat_from_axis_angle(axis, actuator_q[offset_q_j + layout.linear_count + i])
         else:
             assert False, "Unexpected actuator dof type"  # noqa: B011
 
@@ -964,6 +1035,7 @@ def make_eval_joint_constraints_kernel(has_universal_joints: bool):
         num_joints: wp.array[wp.int32],
         joints_offset: wp.array[wp.int32],
         joint_dof_type: wp.array[wp.int32],
+        joint_d6_axes: wp.array[D6JointAxes],
         joint_act_type: wp.array[wp.int32],
         joint_bid_B: wp.array[wp.int32],
         joint_bid_F: wp.array[wp.int32],
@@ -1020,7 +1092,11 @@ def make_eval_joint_constraints_kernel(has_universal_joints: bool):
         # Get joint local positions and orientation
         x_base = joint_B_r_B[jt_id_tot]
         x_follower = joint_F_r_F[jt_id_tot]
-        X_T = wp.transpose(joint_X_Bj[jt_id_tot])
+        dof_type = joint_dof_type[jt_id_tot]
+        act_type = joint_act_type[jt_id_tot]
+        X_B = joint_X_Bj[jt_id_tot]
+        X_linear_T = _fk_translation_frame_transpose(X_B, dof_type, joint_d6_axes, jt_id_tot)
+        X_angular_T = _fk_rotation_frame_transpose(X_B, dof_type, act_type, joint_d6_axes, jt_id_tot)
 
         # Get base and follower transformations
         base_id = joint_bid_B[jt_id_tot]
@@ -1037,11 +1113,11 @@ def make_eval_joint_constraints_kernel(has_universal_joints: bool):
         pos_rel_base = (
             pos_follower_base - x_base
         )  # Relative position on base body (should match translation from controls)
-        t_error = X_T * pos_rel_base - t_rel_joint  # Error in joint frame
+        t_error = X_linear_T * pos_rel_base - t_rel_joint  # Error in joint frame
 
         # Rotation constraints: compute "error" rotation with the log map, in joint frame
         q_error_base = wp.quat_inverse(q_base) * q_follower * wp.quat_inverse(q_rel_body)
-        rot_error = X_T * quat_log(q_error_base)
+        rot_error = X_angular_T * quat_log(q_error_base)
 
         # Write out constraint
         for i in range(3):
@@ -1053,14 +1129,13 @@ def make_eval_joint_constraints_kernel(has_universal_joints: bool):
         # Correct constraints for passive universal joints
         if wp.static(has_universal_joints):
             # Check for a passive universal joint
-            dof_type_j = joint_dof_type[jt_id_tot]
-            act_type_j = joint_act_type[jt_id_tot]
-            if dof_type_j != FKJointDoFType.UNIVERSAL or act_type_j != JointActuationType.PASSIVE:
+            is_universal, a_x, a_y = _fk_passive_universal_axes(
+                X_B, joint_X_Fj[jt_id_tot], dof_type, act_type, joint_d6_axes, jt_id_tot
+            )
+            if not is_universal:
                 return
 
             # Compute constraint (dot product between x axis on base and y axis on follower)
-            a_x = X_T[0]
-            a_y = wp.transpose(joint_X_Fj[jt_id_tot])[1]
             a_x_base = unit_quat_apply(q_base, a_x)
             a_y_follower = unit_quat_apply(q_follower, a_y)
             ct = -wp.dot(a_x_base, a_y_follower)
@@ -1167,6 +1242,7 @@ def make_eval_joint_constraints_jacobian_kernel(has_universal_joints: bool):
         joints_offset: wp.array[wp.int32],
         bodies_offset: wp.array[wp.int32],
         joint_dof_type: wp.array[wp.int32],
+        joint_d6_axes: wp.array[D6JointAxes],
         joint_act_type: wp.array[wp.int32],
         joint_bid_B: wp.array[wp.int32],
         joint_bid_F: wp.array[wp.int32],
@@ -1219,7 +1295,11 @@ def make_eval_joint_constraints_jacobian_kernel(has_universal_joints: bool):
 
         # Get joint local positions and orientation
         x_follower = joint_F_r_F[jt_id_tot]
-        X_T = wp.transpose(joint_X_Bj[jt_id_tot])
+        dof_type = joint_dof_type[jt_id_tot]
+        act_type = joint_act_type[jt_id_tot]
+        X_B = joint_X_Bj[jt_id_tot]
+        X_linear_T = _fk_translation_frame_transpose(X_B, dof_type, joint_d6_axes, jt_id_tot)
+        X_angular_T = _fk_rotation_frame_transpose(X_B, dof_type, act_type, joint_d6_axes, jt_id_tot)
 
         # Get base and follower transformations
         base_id_tot = joint_bid_B[jt_id_tot]
@@ -1233,11 +1313,13 @@ def make_eval_joint_constraints_jacobian_kernel(has_universal_joints: bool):
 
         # Translation constraints
         jac_trans_c_base, jac_trans_q_base, jac_trans_c_follower, jac_trans_q_follower = (
-            _eval_translation_jacobian_blocks(X_T, q_base, q_follower, x_follower, c_base, c_follower, base_id_tot >= 0)
+            _eval_translation_jacobian_blocks(
+                X_linear_T, q_base, q_follower, x_follower, c_base, c_follower, base_id_tot >= 0
+            )
         )
         # Rotation constraints
         jac_rot_q_base, jac_rot_q_follower = _eval_rotation_jacobian_blocks(
-            X_T, q_base, q_follower, q_rel_body, base_id_tot >= 0
+            X_angular_T, q_base, q_follower, q_rel_body, base_id_tot >= 0
         )
         # Note: we need X^T * R_base^T both for translation and rotation constraints, but to get the correct
         # derivatives for non-unit quaternions (which may be encountered before convergence) we end up needing
@@ -1267,14 +1349,15 @@ def make_eval_joint_constraints_jacobian_kernel(has_universal_joints: bool):
         # Correct Jacobian for passive universal joints
         if wp.static(has_universal_joints):
             # Check for a passive universal joint
-            dof_type_j = joint_dof_type[jt_id_tot]
-            act_type_j = joint_act_type[jt_id_tot]
-            if dof_type_j != FKJointDoFType.UNIVERSAL or act_type_j != JointActuationType.PASSIVE:
+            is_universal, a_x, a_y = _fk_passive_universal_axes(
+                X_B, joint_X_Fj[jt_id_tot], dof_type, act_type, joint_d6_axes, jt_id_tot
+            )
+            if not is_universal:
                 return
 
             # Compute constraint Jacobian (cross product between x axis on base and y axis on follower)
             jac_q_base, jac_q_follower = _eval_passive_universal_jacobian_blocks(
-                X_T, wp.transpose(joint_X_Fj[jt_id_tot]), q_base, q_follower, base_id_tot >= 0
+                a_x, a_y, q_base, q_follower, base_id_tot >= 0
             )
 
             # Write out Jacobian
@@ -1302,6 +1385,7 @@ def make_eval_joint_constraints_sparse_jacobian_kernel(has_universal_joints: boo
         joints_offset: wp.array[wp.int32],
         bodies_offset: wp.array[wp.int32],
         joint_dof_type: wp.array[wp.int32],
+        joint_d6_axes: wp.array[D6JointAxes],
         joint_act_type: wp.array[wp.int32],
         joint_bid_B: wp.array[wp.int32],
         joint_bid_F: wp.array[wp.int32],
@@ -1359,7 +1443,11 @@ def make_eval_joint_constraints_sparse_jacobian_kernel(has_universal_joints: boo
 
         # Get joint local positions and orientation
         x_follower = joint_F_r_F[jt_id_tot]
-        X_T = wp.transpose(joint_X_Bj[jt_id_tot])
+        dof_type = joint_dof_type[jt_id_tot]
+        act_type = joint_act_type[jt_id_tot]
+        X_B = joint_X_Bj[jt_id_tot]
+        X_linear_T = _fk_translation_frame_transpose(X_B, dof_type, joint_d6_axes, jt_id_tot)
+        X_angular_T = _fk_rotation_frame_transpose(X_B, dof_type, act_type, joint_d6_axes, jt_id_tot)
 
         # Get base and follower transformations
         base_id = joint_bid_B[jt_id_tot]
@@ -1371,11 +1459,13 @@ def make_eval_joint_constraints_sparse_jacobian_kernel(has_universal_joints: boo
 
         # Translation constraints
         jac_trans_c_base, jac_trans_q_base, jac_trans_c_follower, jac_trans_q_follower = (
-            _eval_translation_jacobian_blocks(X_T, q_base, q_follower, x_follower, c_base, c_follower, base_id >= 0)
+            _eval_translation_jacobian_blocks(
+                X_linear_T, q_base, q_follower, x_follower, c_base, c_follower, base_id >= 0
+            )
         )
         # Rotation constraints
         jac_rot_q_base, jac_rot_q_follower = _eval_rotation_jacobian_blocks(
-            X_T, q_base, q_follower, q_rel_body, base_id >= 0
+            X_angular_T, q_base, q_follower, q_rel_body, base_id >= 0
         )
         # Note: we need X^T * R_base^T both for translation and rotation constraints, but to get the correct
         # derivatives for non-unit quaternions (which may be encountered before convergence) we end up needing
@@ -1411,14 +1501,15 @@ def make_eval_joint_constraints_sparse_jacobian_kernel(has_universal_joints: boo
         # Correct Jacobian for passive universal joints
         if wp.static(has_universal_joints):
             # Check for a passive universal joint
-            dof_type_j = joint_dof_type[jt_id_tot]
-            act_type_j = joint_act_type[jt_id_tot]
-            if dof_type_j != FKJointDoFType.UNIVERSAL or act_type_j != JointActuationType.PASSIVE:
+            is_universal, a_x, a_y = _fk_passive_universal_axes(
+                X_B, joint_X_Fj[jt_id_tot], dof_type, act_type, joint_d6_axes, jt_id_tot
+            )
+            if not is_universal:
                 return
 
             # Compute constraint Jacobian (cross product between x axis on base and y axis on follower)
             jac_q_base, jac_q_follower = _eval_passive_universal_jacobian_blocks(
-                X_T, wp.transpose(joint_X_Fj[jt_id_tot]), q_base, q_follower, base_id >= 0
+                a_x, a_y, q_base, q_follower, base_id >= 0
             )
 
             # Write out Jacobian
@@ -2046,6 +2137,7 @@ def _eval_target_constraint_velocities(
     num_joints: wp.array[wp.int32],
     joints_offset: wp.array[wp.int32],
     joint_dof_type: wp.array[wp.int32],
+    joint_d6_axes: wp.array[D6JointAxes],
     joint_act_type: wp.array[wp.int32],
     actuated_coords_offset: wp.array[wp.int32],
     actuated_dofs_offset: wp.array[wp.int32],
@@ -2126,6 +2218,19 @@ def _eval_target_constraint_velocities(
     elif dof_type_j == FKJointDoFType.UNIVERSAL:
         target_cts_u[wd_id, offset_cts_j + 3, batch_id] = actuator_u[batch_id, offset_u_j]
         target_cts_u[wd_id, offset_cts_j + 4, batch_id] = actuator_u[batch_id, offset_u_j + 1]
+    elif dof_type_j == FKJointDoFType.D6:
+        layout = joint_d6_axes[jt_id_tot]
+        for i in range(layout.linear_count):
+            target_cts_u[wd_id, offset_cts_j + i, batch_id] = actuator_u[batch_id, offset_u_j + i]
+        omega = wp.vec3f(0.0)
+        q = wp.quat_identity(dtype=wp.float32)
+        for i in range(layout.angular_count):
+            idx = layout.linear_count + i
+            axis = _fk_d6_angular_axis(layout, i)
+            omega += wp.quat_rotate(q, axis) * actuator_u[batch_id, offset_u_j + idx]
+            q = q * wp.quat_from_axis_angle(axis, actuator_q[offset_q_j + idx])
+        for i in range(3):
+            target_cts_u[wd_id, offset_cts_j + 3 + i, batch_id] = omega[i]
     else:
         assert False, "Unexpected actuator dof type"  # noqa: B011
 
