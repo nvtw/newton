@@ -45,7 +45,6 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
     incremental_init_kernel,
     incremental_init_remaining_ids_kernel,
     incremental_reset_loop_state_csr_kernel,
-    incremental_reset_loop_state_kernel,
     incremental_tile_compact_csr_and_advance_kernel,
     incremental_tile_compact_remaining_and_advance_kernel,
     partitioning_adjacency_count_kernel,
@@ -386,9 +385,7 @@ class IncrementalContactPartitioner:
         max_num_nodes: int,
         device: wp.DeviceLike = None,
         seed: int = 0,
-        use_tile_scan: bool = True,
         max_colored_partitions: int | None = None,
-        max_greedy_outer_iters: int | None = None,
         enable_warm_start: bool = False,
         endpoint_owner_coloring: bool = False,
     ) -> None:
@@ -399,10 +396,8 @@ class IncrementalContactPartitioner:
             max_num_nodes: Maximum number of bodies and particles.
             device: Warp device.
             seed: Seed for the deterministic priority permutation.
-            use_tile_scan: Use graph-capture-safe tile scans.
             max_colored_partitions: Soft regular-color cap. Any remainder
                 lands in one mass-splitting overflow bucket.
-            max_greedy_outer_iters: Optional greedy iteration limit.
             enable_warm_start: Reuse valid colors from the previous build.
             endpoint_owner_coloring: Use bounded per-endpoint elections instead
                 of constructing interaction adjacency. This requires a positive
@@ -410,8 +405,6 @@ class IncrementalContactPartitioner:
         """
         self.max_num_interactions = max_num_interactions
         self.max_num_nodes = max_num_nodes
-        # Tile-scan: single-block, graph-capture safe, no implicit allocations.
-        self.use_tile_scan = use_tile_scan
         # Validate the soft cap (None disables; int picks the overflow
         # bucket colour). Pass-through to kernels uses -1 for "disabled".
         if max_colored_partitions is not None:
@@ -434,15 +427,6 @@ class IncrementalContactPartitioner:
                 raise ValueError("endpoint-owner coloring requires max_colored_partitions >= 1")
             if enable_warm_start:
                 raise ValueError("endpoint-owner coloring replaces adjacency-based warm-start coloring")
-        # Per-instance override for the host-side greedy loop bound. ``None``
-        # uses the module-level :data:`MAX_GREEDY_OUTER_ITERS` (default 16).
-        # Mass-splitting scenes can safely lower this -- excess uncoloured
-        # elements just spill to the overflow bucket. Non-MS scenes
-        # (``max_colored_partitions is None``) need the full 16 to find a
-        # valid coloring with no fallback.
-        self._max_greedy_outer_iters_override: int | None = (
-            int(max_greedy_outer_iters) if max_greedy_outer_iters is not None else None
-        )
         self._max_colored_partitions_kernel_arg: int = (
             -1 if max_colored_partitions is None else int(max_colored_partitions)
         )
@@ -509,16 +493,9 @@ class IncrementalContactPartitioner:
         # Per-element assigned color (-1 = unassigned).
         self._interaction_id_to_partition = wp.zeros(max_num_interactions, dtype=wp.int32, device=device)
 
-        # Tile-scan flag/offset buffers padded to a multiple of TILE_SCAN_BLOCK_DIM.
-        if use_tile_scan:
-            tile_dim = int(TILE_SCAN_BLOCK_DIM)
-            padded_len = ((max_num_interactions + tile_dim - 1) // tile_dim) * tile_dim
-            padded_len = max(padded_len, tile_dim)
-        else:
-            padded_len = max_num_interactions
-        self._scan_len = padded_len
-        self._flags = wp.zeros(padded_len, dtype=wp.int32, device=device)
-        self._offsets = wp.zeros(padded_len, dtype=wp.int32, device=device)
+        # The tile scan reads whole TILE_SCAN_BLOCK_DIM blocks.
+        tile_dim = int(TILE_SCAN_BLOCK_DIM)
+        padded_len = max(((max_num_interactions + tile_dim - 1) // tile_dim) * tile_dim, tile_dim)
         self._partition_element_ids = wp.zeros(max_num_interactions, dtype=wp.int32, device=device)
 
         # In-place compacted remaining ids (survivors pack leftward).
@@ -731,44 +708,6 @@ class IncrementalContactPartitioner:
             device=self._overflow_flag.device,
         )
 
-    def reset_loop_state_only(self) -> None:
-        """Fast reset preserving the adjacency. Use when the constraint set
-        is unchanged since the last :meth:`reset` (common PGS case)."""
-        assert self._elements is not None and self._num_elements is not None, (
-            "reset() must be called before reset_loop_state_only()"
-        )
-
-        wp.launch(
-            incremental_reset_loop_state_kernel,
-            dim=self.max_num_interactions,
-            inputs=[
-                self._partition_data_concat,
-                self._color_tags,
-                self._interaction_id_to_partition,
-                self._num_elements,
-            ],
-            device=self._overflow_flag.device,
-        )
-
-        wp.launch(
-            incremental_init_remaining_ids_kernel,
-            dim=self.max_num_interactions,
-            inputs=[self._remaining_ids, self._num_elements],
-            device=self._overflow_flag.device,
-        )
-
-        wp.launch(
-            incremental_init_kernel,
-            dim=1,
-            inputs=[
-                self._current_color,
-                self._num_remaining,
-                self._partition_count,
-                self._num_elements,
-            ],
-            device=self._overflow_flag.device,
-        )
-
     def launch(self) -> None:
         """Produce one partition at the current colour. Updates partition_element_ids,
         partition_count, interaction_id_to_partition; advances current_color and
@@ -792,11 +731,6 @@ class IncrementalContactPartitioner:
         )
 
         # Fused compact + commit + advance, single-block tile-scan (graph-capture safe).
-        assert self.use_tile_scan, (
-            "IncrementalContactPartitioner.launch requires use_tile_scan=True. "
-            "The non-tile fallback was removed when the remaining-ids buffer was "
-            "introduced (wp.utils.array_scan cannot run inside wp.capture_while)."
-        )
         wp.launch_tiled(
             incremental_tile_compact_remaining_and_advance_kernel,
             dim=[1],
@@ -1178,22 +1112,12 @@ class IncrementalContactPartitioner:
                 if self._use_capture_while_greedy:
                     wp.capture_while(self._num_remaining, self._capture_speculative_step)
                 else:
-                    outer_iters = (
-                        self._max_greedy_outer_iters_override
-                        if self._max_greedy_outer_iters_override is not None
-                        else int(MAX_GREEDY_OUTER_ITERS)
-                    )
-                    for _ in range(outer_iters):
+                    for _ in range(int(MAX_GREEDY_OUTER_ITERS)):
                         self._capture_speculative_step()
             elif self._use_capture_while_greedy:
                 wp.capture_while(self._num_remaining, self._capture_build_csr_greedy_step)
             else:
-                outer_iters = (
-                    self._max_greedy_outer_iters_override
-                    if self._max_greedy_outer_iters_override is not None
-                    else int(MAX_GREEDY_OUTER_ITERS)
-                )
-                for _ in range(outer_iters):
+                for _ in range(int(MAX_GREEDY_OUTER_ITERS)):
                     self._capture_build_csr_greedy_step()
         # Force-spill anything still uncoloured into the overflow colour.
         # No-op when capture_while drained num_remaining naturally; only

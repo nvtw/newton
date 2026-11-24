@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import functools
 import itertools
-import os
 
 import numpy as np
 import warp as wp
@@ -118,13 +117,6 @@ _FALLBACK_SERIAL_WORLDS_PER_SM = 16
 _vec6 = wp.types.vector(length=6, dtype=wp.float32)
 
 _INT64_MAX = 9223372036854775807
-
-
-def _reduced_patch_rows_override() -> bool | None:
-    value = os.environ.get("PHOENX_REDUCED_PATCH_ROWS")
-    if value is None or value.lower() == "auto":
-        return None
-    return value.lower() not in ("0", "false", "off", "")
 
 
 def _fallback_world_block_dim(world_count: int, sm_count: int) -> int:
@@ -3680,11 +3672,7 @@ class ReducedContactBlockSystem:
         self.articulation_count = int(model.articulation_count)
         self.joint_dof_count = int(model.joint_dof_count)
         sm_count = max(1, int(getattr(self.device, "sm_count", 1)))
-        patch_rows_override = _reduced_patch_rows_override()
-        patch_rows_requested = bool(use_patch_rows)
-        if patch_rows_override is not None:
-            patch_rows_requested = patch_rows_override
-        self.patch_rows = self.device.is_cuda and patch_rows_requested
+        self.patch_rows = self.device.is_cuda and bool(use_patch_rows)
         # The fused substep also solves patch rows between two links; the patch tile does not.
         self.packed_internal_contacts = not self.patch_rows or self._external_rigid_rows
         if self._external_rigid_rows:

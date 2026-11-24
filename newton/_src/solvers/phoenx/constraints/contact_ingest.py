@@ -528,37 +528,6 @@ def _body_pair_boundary_kernel(
         pair_boundary[tid] = wp.int32(0)
 
 
-# ---------------------------------------------------------------------------
-# Body-pair filter helper (shared by per-shape-pair and body-pair paths).
-# ---------------------------------------------------------------------------
-
-
-@wp.func
-def _body_pair_filtered(
-    filter_keys: wp.array[wp.int64],
-    filter_count: wp.int32,
-    key: wp.int64,
-) -> wp.int32:
-    """Binary search ``filter_keys[0:filter_count]`` for ``key``.
-
-    Returns ``1`` if found, ``0`` otherwise.
-    """
-    if filter_count <= wp.int32(0):
-        return wp.int32(0)
-    lo = wp.int32(0)
-    hi = filter_count
-    while lo < hi:
-        mid = (lo + hi) >> wp.int32(1)
-        v = filter_keys[mid]
-        if v < key:
-            lo = mid + wp.int32(1)
-        elif v > key:
-            hi = mid
-        else:
-            return wp.int32(1)
-    return wp.int32(0)
-
-
 @wp.func
 def _no_response(shape_no_response: wp.array[wp.int32], shape_a: wp.int32, shape_b: wp.int32) -> wp.bool:
     """Whether either shape only reports overlaps (tracking volumes); empty mask means none."""
@@ -574,9 +543,6 @@ def _mark_valid_shape_pair_runs_kernel(
     rigid_contact_shape1: wp.array[wp.int32],
     rigid_contact_friction: wp.array[wp.float32],
     shape_filter_id: wp.array[wp.int32],
-    num_bodies: wp.int32,
-    filter_keys: wp.array[wp.int64],
-    filter_count: wp.int32,
     shape_no_response: wp.array[wp.int32],
     pair_boundary: wp.array[wp.int32],
     cid_of_contact: wp.array[wp.int32],
@@ -603,15 +569,7 @@ def _mark_valid_shape_pair_runs_kernel(
     if _no_response(shape_no_response, shape_a, shape_b):
         pair_boundary[contact] = wp.int32(0)
         return
-    body_a = shape_filter_id[shape_a]
-    body_b = shape_filter_id[shape_b]
-    if body_a == body_b:
-        pair_boundary[contact] = wp.int32(0)
-        return
-    lo = wp.min(body_a, body_b)
-    hi = wp.max(body_a, body_b)
-    key = wp.int64(lo) * wp.int64(num_bodies) + wp.int64(hi)
-    pair_boundary[contact] = wp.int32(_body_pair_filtered(filter_keys, filter_count, key) == wp.int32(0))
+    pair_boundary[contact] = wp.int32(shape_filter_id[shape_a] != shape_filter_id[shape_b])
 
 
 @wp.kernel(enable_backward=False, grid_stride=False)
@@ -725,9 +683,6 @@ def _pair_counts_and_columns_kernel(
     pair_shape_a: wp.array[wp.int32],
     pair_shape_b: wp.array[wp.int32],
     shape_filter_id: wp.array[wp.int32],
-    num_bodies: wp.int32,
-    filter_keys: wp.array[wp.int64],
-    filter_count: wp.int32,
     shape_no_response: wp.array[wp.int32],
     # out
     pair_count: wp.array[wp.int32],
@@ -766,28 +721,13 @@ def _pair_counts_and_columns_kernel(
         nxt = _clamp_contact_count(rigid_contact_count, rigid_contact_max)
     pair_count[tid] = nxt - cur
 
-    # pair_columns: 1 iff distinct filter groups + not body-pair-filtered.
+    # pair_columns: 1 iff the pair responds and joins distinct filter groups.
     sa = pair_shape_a[tid]
     sb = pair_shape_b[tid]
     if _no_response(shape_no_response, sa, sb):
         pair_columns[tid] = wp.int32(0)
         return
-    ba = shape_filter_id[sa]
-    bb = shape_filter_id[sb]
-    if ba == bb:
-        pair_columns[tid] = wp.int32(0)
-        return
-    if ba <= bb:
-        lo = ba
-        hi = bb
-    else:
-        lo = bb
-        hi = ba
-    body_key = wp.int64(lo) * wp.int64(num_bodies) + wp.int64(hi)
-    if _body_pair_filtered(filter_keys, filter_count, body_key) == wp.int32(1):
-        pair_columns[tid] = wp.int32(0)
-        return
-    pair_columns[tid] = wp.int32(1)
+    pair_columns[tid] = wp.int32(shape_filter_id[sa] != shape_filter_id[sb])
 
 
 # ---------------------------------------------------------------------------
@@ -892,11 +832,7 @@ def _contact_pack_columns_kernel(
     mu_static = resolve_friction_static_in_kernel(materials, mat_a, mat_b, default_friction) * friction_scale
     mu_dynamic = resolve_friction_in_kernel(materials, mat_a, mat_b, default_friction) * friction_scale
 
-    # Header is stored at offsets 0 / 1 / 2 (contract is
-    # ``constraint_type / body1 / body2``). Dispatcher no longer reads
-    # the type tag for contacts (cid-based dispatch) but the slot is
-    # written anyway to preserve the shared header invariant for any
-    # diagnostic / future caller that does.
+    # Shared column header: ``constraint_type / body1 / body2`` at offsets 0 / 1 / 2.
     _col_write_int(contact_cols, CONSTRAINT_TYPE_OFFSET, tid, CONSTRAINT_TYPE_CONTACT)
     _col_write_int(contact_cols, CONSTRAINT_BODY1_OFFSET, tid, b1)
     _col_write_int(contact_cols, CONSTRAINT_BODY2_OFFSET, tid, b2)
@@ -1109,8 +1045,6 @@ def ingest_contacts(
     device: wp.DeviceLike = None,
     *,
     num_bodies: int = 0,
-    filter_keys: wp.array | None = None,
-    filter_count: int = 0,
     shape_material: wp.array | None = None,
     materials: wp.array | None = None,
     enable_body_pair_grouping: bool = False,
@@ -1139,10 +1073,7 @@ def ingest_contacts(
         default_friction: Fallback friction.
         device: Warp device for the launches.
         num_bodies: Total body count; used to pack
-            ``(min_body, max_body)`` into int64 filter keys.
-        filter_keys: Sorted int64 array of canonical body-pair keys
-            to ignore.
-        filter_count: Valid entries in ``filter_keys``.
+            ``(min_body, max_body)`` into int64 body-pair grouping keys.
         shape_material, materials: Optional per-shape material lookup.
         enable_body_pair_grouping: If ``True``, contacts are sorted by
             body-pair before pair-boundary detection so multiple
@@ -1173,13 +1104,6 @@ def ingest_contacts(
     if num_active_constraints is None:
         num_active_constraints = scratch.num_contact_columns
         active_constraint_base = 0
-
-    if filter_keys is None:
-        raise ValueError(
-            "ingest_contacts: filter_keys must be non-None (use a size-1 "
-            "sentinel array when no filters are registered; the kernel "
-            "signature has no null-pointer path)."
-        )
 
     if shape_material is None:
         shape_material = wp.array([-1], dtype=wp.int32, device=device)
@@ -1347,9 +1271,6 @@ def ingest_contacts(
                 contacts.rigid_contact_shape1,
                 contact_friction,
                 filter_id_arr,
-                int(num_bodies),
-                filter_keys,
-                int(filter_count),
                 shape_no_response,
             ],
             outputs=[scratch.pair_boundary, cid_of_contact],
@@ -1438,9 +1359,6 @@ def ingest_contacts(
                     scratch.pair_shape_a,
                     scratch.pair_shape_b,
                     filter_id_arr,
-                    int(num_bodies),
-                    filter_keys,
-                    int(filter_count),
                     shape_no_response,
                 ],
                 outputs=[scratch.pair_count, scratch.pair_columns],

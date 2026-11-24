@@ -23,7 +23,6 @@ from newton._src.solvers.phoenx.body import (
     sym6_from_mat33,
 )
 from newton._src.solvers.phoenx.constraints.bilateral_joint import (
-    EXPERIMENTAL_JOINT_INVERSE,
     get_bilateral_joint_tile_width,
     get_iterate_bilateral_joint_block,
     iterate_bilateral_joint_block,
@@ -581,7 +580,7 @@ def _cost_biased_priority(
     """Read prepacked (cost << 24) | (random & 0xFFFFFF) priority.
 
     The pack happens once per step in the partitioner; coloring just
-    reads. See :func:`pack_priorities_kernel` in :mod:`graph_coloring_common`.
+    reads. See :func:`_pack_constraint_priority` in :mod:`graph_coloring_common`.
     Unsigned packed bits retain cost ordering across the sign bit. The cid
     breaks hash collisions with the same total order as endpoint elections.
     """
@@ -4011,9 +4010,7 @@ def _make_singleworld_rigid_direct_color_func(
         direct_regular_colors=direct_regular_colors,
     )
     joint_width = get_bilateral_joint_tile_width(joint_row_capacity)
-    cooperative_iterate = get_iterate_bilateral_joint_block(
-        True, dense_inverse=EXPERIMENTAL_JOINT_INVERSE, row_capacity=joint_row_capacity
-    )
+    cooperative_iterate = get_iterate_bilateral_joint_block(True, row_capacity=joint_row_capacity)
 
     @wp.func
     def _joint_pgs_enabled(

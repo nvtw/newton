@@ -13,9 +13,7 @@ import warp as wp
 import newton
 from newton._src.solvers.phoenx.articulations.block_joint_system import BlockJointSystem
 from newton._src.solvers.phoenx.body import inertia_sym6_unpack_np
-from newton._src.solvers.phoenx.constraints import bilateral_joint as bilateral_joint_module
 from newton._src.solvers.phoenx.constraints.bilateral_joint import (
-    EXPERIMENTAL_JOINT_INVERSE,
     BodyContainer,
     ConstraintContainer,
     CopyStateContainer,
@@ -26,7 +24,6 @@ from newton._src.solvers.phoenx.constraints.bilateral_joint import (
     _response,
     constraint_get_body1,
     constraint_get_body2,
-    invert_prepared_bilateral_joint_blocks,
     iterate_bilateral_joint_block,
     prepare_bilateral_joint_blocks,
 )
@@ -189,13 +186,6 @@ class TestBilateralPreparation(unittest.TestCase):
                     ],
                     device=model.device,
                 )
-                if EXPERIMENTAL_JOINT_INVERSE:
-                    wp.launch(
-                        invert_prepared_bilateral_joint_blocks,
-                        world.num_joints,
-                        [world.constraints],
-                        device=model.device,
-                    )
             finally:
                 copies.highest_index_in_use.assign(highest)
             np.testing.assert_array_equal(copies.highest_index_in_use.numpy(), highest)
@@ -377,40 +367,6 @@ class TestBilateralPreparation(unittest.TestCase):
 
 
 class TestBilateralPreparationDispatch(unittest.TestCase):
-    def test_dense_inverse_uses_complete_cuda_subgroups(self):
-        """CUDA inversion must dispatch eight lanes per joint; CPU stays scalar."""
-        world = SimpleNamespace(
-            num_joints=7,
-            constraints=object(),
-            bodies=object(),
-            _copy_state=object(),
-            _partitioner=SimpleNamespace(interaction_id_to_partition=object()),
-            max_colored_partitions=0,
-            _singleworld_overflow_only_mass_splitting=False,
-        )
-        with (
-            patch("newton._src.solvers.phoenx.articulations.block_joint_system.EXPERIMENTAL_JOINT_INVERSE", True),
-            patch(
-                "newton._src.solvers.phoenx.articulations.block_joint_system.EXPERIMENTAL_COOPERATIVE_JOINT_INVERSE",
-                True,
-            ),
-        ):
-            for cuda in (False, True):
-                device = SimpleNamespace(is_cuda=cuda)
-                system = SimpleNamespace(enabled=True, _block_world=world, model=SimpleNamespace(device=device))
-                with patch.object(wp, "launch") as launched:
-                    BlockJointSystem.prepare_and_factor(system, 100.0)
-                inverse_call = launched.call_args_list[1]
-                expected = (
-                    bilateral_joint_module.invert_prepared_bilateral_joint_blocks_cooperative
-                    if cuda
-                    else invert_prepared_bilateral_joint_blocks
-                )
-                self.assertIs(inverse_call.args[0], expected)
-                self.assertEqual(inverse_call.kwargs["dim"], 56 if cuda else 7)
-                if cuda:
-                    self.assertEqual(inverse_call.kwargs["block_dim"], 32)
-
     def test_cpu_scalar_and_cuda_complete_subgroups(self):
         """Select the scalar CPU kernel or complete CUDA eight-lane groups."""
         world = SimpleNamespace(
@@ -433,8 +389,6 @@ class TestBilateralPreparationDispatch(unittest.TestCase):
             self.assertEqual(prepare_call.kwargs["dim"], 56 if cuda else 7)
             if cuda:
                 self.assertEqual(prepare_call.kwargs["block_dim"], 32)
-            if EXPERIMENTAL_JOINT_INVERSE:
-                self.assertIs(launched.call_args_list[1].args[0], invert_prepared_bilateral_joint_blocks)
 
 
 if __name__ == "__main__":

@@ -4,7 +4,6 @@
 """Mass-metric joint blocks evaluated in the same colors as rigid contacts."""
 
 import functools
-import os
 
 import warp as wp
 
@@ -18,10 +17,6 @@ from newton._src.solvers.phoenx.constraints.constraint_container import (
 from newton._src.solvers.phoenx.constraints.constraint_joint import _ms_load_body_pair, _ms_store_body_pair
 from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
 from newton._src.solvers.phoenx.particle import ParticleContainer
-
-# Temporary experiment; select before importing PhoenX in the benchmark process.
-EXPERIMENTAL_JOINT_INVERSE = os.environ.get("PHOENX_EXPERIMENTAL_JOINT_INVERSE") == "1"
-EXPERIMENTAL_COOPERATIVE_JOINT_INVERSE = os.environ.get("PHOENX_EXPERIMENTAL_COOPERATIVE_JOINT_INVERSE") == "1"
 
 
 def get_bilateral_joint_tile_width(row_capacity: int) -> int:
@@ -201,11 +196,6 @@ def _get_bilateral_impulse_functions(row_capacity: int, *, accumulate: bool = Tr
     return _backward_bilateral_impulses, _scatter_bilateral_impulses, _solve_bilateral_impulses
 
 
-_backward_bilateral_impulses, _scatter_bilateral_impulses, _solve_bilateral_impulses = _get_bilateral_impulse_functions(
-    6
-)
-
-
 _scatter_projection_impulses = _get_bilateral_impulse_functions(6, accumulate=False)[1]
 
 
@@ -266,53 +256,6 @@ def project_physical_bilateral_joint(constraints: ConstraintContainer, bodies: B
     bodies.angular_velocity[body1] += wp.spatial_bottom(response1)
 
 
-@wp.func
-def _invert_bilateral_column(lower: Mat66, diagonal: Vec6, count: wp.int32, column: wp.int32) -> Vec6:
-    """Solve one inverse column in the scalar kernel's operation order."""
-    solution = Vec6()
-    for i in range(6):
-        if i < count:
-            value = wp.float32(0.0)
-            if i == column:
-                value = wp.float32(1.0)
-            for j in range(6):
-                if j < i:
-                    value -= lower[i, j] * solution[j]
-            solution[i] = value
-    for i in range(6):
-        if i < count:
-            solution[i] /= diagonal[i]
-    for reverse in range(6):
-        i = 5 - reverse
-        if i < count:
-            value = solution[i]
-            for j in range(6):
-                if j > i and j < count:
-                    value -= lower[j, i] * solution[j]
-            solution[i] = value
-    return solution
-
-
-@wp.kernel(enable_backward=False)
-def invert_prepared_bilateral_joint_blocks(constraints: ConstraintContainer):
-    """Precompute the inverse mass-metric block for repeated PGS sweeps."""
-    cid = wp.tid()
-    data = constraints.bilateral
-    count = data.row_count[cid]
-    if count == 0 or data.valid[cid] == 0:
-        return
-    lower = data.lower[cid]
-    diagonal = data.diagonal[cid]
-    inverse = Mat66()
-    for column in range(6):
-        if column < count:
-            solution = _invert_bilateral_column(lower, diagonal, count, column)
-            for i in range(6):
-                if i < count:
-                    inverse[i, column] = solution[i]
-    data.inverse[cid] = inverse
-
-
 @wp.func_native(
     """
 #if defined(__CUDA_ARCH__)
@@ -363,31 +306,6 @@ def _bilateral_lower_row(lower: wp.array[Mat66], cid: wp.int32, lane: wp.int32) 
 def _bilateral_diagonal(diagonal: wp.array[Vec6], cid: wp.int32, lane: wp.int32) -> wp.float32:
     """Entry ``lane`` of joint ``cid``'s stored factor diagonal."""
     ...
-
-
-@wp.kernel(enable_backward=False)
-def invert_prepared_bilateral_joint_blocks_cooperative(constraints: ConstraintContainer):
-    """Invert independent D6 columns with eight CUDA lanes per joint."""
-    tid = wp.tid()
-    cid = tid // wp.int32(8)
-    column = tid % wp.int32(8)
-    data = constraints.bilateral
-    count = data.row_count[cid]
-    if count == wp.int32(0) or data.valid[cid] == wp.int32(0):
-        return
-    lower = data.lower[cid]
-    diagonal = data.diagonal[cid]
-    solution = Vec6()
-    if column < count:
-        solution = _invert_bilateral_column(lower, diagonal, count, column)
-    inverse = Mat66()
-    for i in range(6):
-        for j in range(6):
-            entry = _shuffle_bilateral_rhs(solution[i], j)
-            if column == wp.int32(0):
-                inverse[i, j] = entry
-    if column == wp.int32(0):
-        data.inverse[cid] = inverse
 
 
 @wp.func_native("""
@@ -514,7 +432,6 @@ def get_iterate_bilateral_joint_block(
     cooperative: bool = False,
     *,
     temporal_springs: bool = False,
-    dense_inverse: bool = False,
     row_capacity: int = 6,
     structural_only: bool = False,
     accumulate: bool = True,
@@ -526,8 +443,6 @@ def get_iterate_bilateral_joint_block(
     All lanes take the same enabled/count/valid returns, and gather before
     nonleaders exit. Each row retains its original component and
     subtraction order; backward substitution and impulse scatter stay scalar.
-    With a prepared dense inverse, each lane computes one output row from the
-    original residuals and the leader scatters the gathered solution.
 
     Temporal springs solve a fresh force increment each substep. Their existing
     velocity already includes earlier increments, so their residual omits the
@@ -541,7 +456,7 @@ def get_iterate_bilateral_joint_block(
 
     Vector = wp.types.vector(length=row_capacity, dtype=wp.float32)
     tile_width = get_bilateral_joint_tile_width(row_capacity)
-    backward, scatter, solve = _get_bilateral_impulse_functions(row_capacity, accumulate=accumulate)
+    backward, _scatter, solve = _get_bilateral_impulse_functions(row_capacity, accumulate=accumulate)
 
     @wp.func
     def iterate(
@@ -596,26 +511,24 @@ def get_iterate_bilateral_joint_block(
                     residual += wp.float32(data.bias[structural, local])
                 rhs_value = -residual
 
-            if wp.static(not dense_inverse):
-                # Each row subtracts solved earlier rows in the same ascending
-                # order as the scalar forward solve. Scaling follows all rows.
-                # Each lane needs only its own row; a whole-matrix copy indexed by
-                # the lane would live in local memory.
-                lower_row = _bilateral_lower_row(data.lower, cid, tile_lane)
-                for forward_row in range(wp.static(row_capacity)):
-                    if forward_row < count:
-                        solved = _shuffle_bilateral_rhs_width(rhs_value, forward_row, wp.static(tile_width))
-                        if tile_lane > forward_row and tile_lane < count:
-                            rhs_value -= lower_row[forward_row] * solved
-                if tile_lane < count:
-                    rhs_value /= _bilateral_diagonal(data.diagonal, cid, tile_lane)
+            # Each row subtracts solved earlier rows in the same ascending
+            # order as the scalar forward solve. Scaling follows all rows.
+            # Each lane needs only its own row; a whole-matrix copy indexed by
+            # the lane would live in local memory.
+            lower_row = _bilateral_lower_row(data.lower, cid, tile_lane)
+            for forward_row in range(wp.static(row_capacity)):
+                if forward_row < count:
+                    solved = _shuffle_bilateral_rhs_width(rhs_value, forward_row, wp.static(tile_width))
+                    if tile_lane > forward_row and tile_lane < count:
+                        rhs_value -= lower_row[forward_row] * solved
+            if tile_lane < count:
+                rhs_value /= _bilateral_diagonal(data.diagonal, cid, tile_lane)
             rhs = Vector()
             for row_lane in range(wp.static(row_capacity)):
                 if row_lane < count:
                     rhs[row_lane] = _shuffle_bilateral_rhs_width(rhs_value, row_lane, wp.static(tile_width))
-            if wp.static(not dense_inverse):
-                if tile_lane != 0:
-                    return
+            if tile_lane != 0:
+                return
         else:
             rhs = Vector()
             for i in range(wp.static(row_capacity)):
@@ -632,30 +545,7 @@ def get_iterate_bilateral_joint_block(
                         residual += wp.float32(data.bias[structural, local])
                     rhs[i] = -residual
 
-        if wp.static(dense_inverse):
-            inverse = data.inverse[cid]
-            solution = Vector()
-            if wp.static(cooperative):
-                value = wp.float32(0.0)
-                if tile_lane < count:
-                    for j in range(wp.static(row_capacity)):
-                        if j < count:
-                            value += inverse[tile_lane, j] * rhs[j]
-                for row_lane in range(wp.static(row_capacity)):
-                    if row_lane < count:
-                        solution[row_lane] = _shuffle_bilateral_rhs_width(value, row_lane, wp.static(tile_width))
-                if tile_lane != 0:
-                    return
-            else:
-                for i in range(wp.static(row_capacity)):
-                    if i < count:
-                        value = wp.float32(0.0)
-                        for j in range(wp.static(row_capacity)):
-                            if j < count:
-                                value += inverse[i, j] * rhs[j]
-                        solution[i] = value
-            impulse0, impulse1 = scatter(data, cid, count, structural, solution)
-        elif wp.static(cooperative):
+        if wp.static(cooperative):
             impulse0, impulse1 = backward(data, cid, count, structural, rhs)
         else:
             impulse0, impulse1 = solve(data, cid, count, structural, rhs)
@@ -668,7 +558,7 @@ def get_iterate_bilateral_joint_block(
     return iterate
 
 
-_iterate_bilateral_scalar = get_iterate_bilateral_joint_block(False, dense_inverse=EXPERIMENTAL_JOINT_INVERSE)
+_iterate_bilateral_scalar = get_iterate_bilateral_joint_block(False)
 
 
 @wp.func

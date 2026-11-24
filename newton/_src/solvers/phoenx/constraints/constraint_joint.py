@@ -156,11 +156,6 @@ class JointConstraintData:
     # old two-axis projection.
     axis_local1: wp.vec3f
     rest_length: wp.float32
-    # NB: ``inv_initial_orientation``, ``revolution_counter``, and
-    # ``previous_quaternion_angle`` (revolute twist-tracker scratch)
-    # used to live here as separate fields. They've been folded into
-    # the ``mode_extras`` alias block above so prismatic joints don't
-    # carry 6 unused dwords.
     drive_mode: wp.int32
     # Setpoints: ``target`` is radians (revolute) or meters (prismatic);
     # ``target_velocity`` is rad/s or m/s.

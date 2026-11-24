@@ -917,32 +917,30 @@ class TestSleepingPipeline(unittest.TestCase):
         )
 
     def test_body_velocity_is_zero_after_sleep(self) -> None:
-        for readout in ("substep_end", "substep_average"):
-            with self.subTest(readout=readout):
-                model = _make_box_on_plane(box_z=0.1)
-                solver = newton.solvers.SolverPhoenX(
-                    model,
-                    substeps=2,
-                    solver_iterations=4,
-                    sleeping_velocity_threshold=0.05,
-                    sleeping_frames_required=0,
-                    velocity_readout=readout,
-                )
-                state, next_state = model.state(), model.state()
-                control, contacts = model.control(), model.contacts()
-                dt = 1.0 / 60.0
-                state.body_qd.assign([[0.012, 0, 0, 0, 0, 0.04]])
-                initial_pose = state.body_q.numpy()
-                state, next_state = _run_frames(solver, state, next_state, control, contacts, model, n=1, dt=dt)
-                self.assertEqual(_is_sleeping(solver, 1), 1)
-                np.testing.assert_array_equal(state.body_q.numpy(), initial_pose)
-                np.testing.assert_array_equal(state.body_qd.numpy(), 0.0)
+        model = _make_box_on_plane(box_z=0.1)
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            substeps=2,
+            solver_iterations=4,
+            sleeping_velocity_threshold=0.05,
+            sleeping_frames_required=0,
+            velocity_readout="substep_end",
+        )
+        state, next_state = model.state(), model.state()
+        control, contacts = model.control(), model.contacts()
+        dt = 1.0 / 60.0
+        state.body_qd.assign([[0.012, 0, 0, 0, 0, 0.04]])
+        initial_pose = state.body_q.numpy()
+        state, next_state = _run_frames(solver, state, next_state, control, contacts, model, n=1, dt=dt)
+        self.assertEqual(_is_sleeping(solver, 1), 1)
+        np.testing.assert_array_equal(state.body_q.numpy(), initial_pose)
+        np.testing.assert_array_equal(state.body_qd.numpy(), 0.0)
 
-                # An externally written velocity still wakes the body and reaches the output.
-                state.body_qd.assign([[0, 0, 0.5, 0, 0, 0]])
-                state, next_state = _run_frames(solver, state, next_state, control, contacts, model, n=1, dt=dt)
-                self.assertEqual(_is_sleeping(solver, 1), 0)
-                self.assertGreater(float(state.body_qd.numpy()[0, 2]), 0.25)
+        # An externally written velocity still wakes the body and reaches the output.
+        state.body_qd.assign([[0, 0, 0.5, 0, 0, 0]])
+        state, next_state = _run_frames(solver, state, next_state, control, contacts, model, n=1, dt=dt)
+        self.assertEqual(_is_sleeping(solver, 1), 0)
+        self.assertGreater(float(state.body_qd.numpy()[0, 2]), 0.25)
 
     def test_hysteresis_blocks_premature_sleep(self) -> None:
         """With a high ``sleeping_frames_required``, a body that physically

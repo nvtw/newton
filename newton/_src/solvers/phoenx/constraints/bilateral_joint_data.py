@@ -28,5 +28,4 @@ class BilateralJointData:
     response1: wp.array2d[wp.spatial_vector]
     lower: wp.array[Mat66]
     diagonal: wp.array[Vec6]
-    inverse: wp.array[Mat66]
     valid: wp.array[wp.int32]

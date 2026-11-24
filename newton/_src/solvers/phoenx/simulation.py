@@ -18,7 +18,6 @@ from newton._src.solvers.phoenx import diagnostics
 from newton._src.solvers.phoenx.adapter_kernels import (
     _accumulate_contact_impulse_kernel,
     _accumulate_contact_moment_kernel,
-    _accumulate_substep_velocity_kernel,
     _accumulate_temporal_contact_impulse_kernel,
 )
 from newton._src.solvers.phoenx.articulations.direct_contact_gs import (
@@ -407,7 +406,6 @@ class PhoenXWorld:
         num_cloth_bending: int = 0,
         num_soft_tetrahedra: int = 0,
         num_soft_hexahedra: int = 0,
-        collision_filter_pairs: Iterable[tuple[int, int]] | None = None,
         default_friction: float = 0.5,
         num_worlds: int = 1,
         step_layout: str = "multi_world",
@@ -417,7 +415,6 @@ class PhoenXWorld:
         enable_body_pair_grouping: bool = False,
         colored_contact_headers: bool = False,
         colored_contact_rows: bool = False,
-        colored_singleton_contact_lanes: bool | None = None,
         mass_splitting: bool = False,
         max_colored_partitions: int = 12,
         mass_splitting_batch_size: int = 8,
@@ -428,8 +425,6 @@ class PhoenXWorld:
         mass_splitting_unrolled: bool = False,
         partitioner_algorithm: str = "greedy",
         joint_coloring_priority: bool = False,
-        max_greedy_outer_iters: int | None = None,
-        enable_warm_start_coloring: bool = True,
         sor_boost: float = 1.0,
         enable_column_timers: bool = False,
         sleeping_velocity_threshold: float = 0.0,
@@ -1117,7 +1112,8 @@ class PhoenXWorld:
         ):
             raise ValueError("overflow-only mass splitting requires a rigid single world with unrolled dispatch")
         self._singleworld_overflow_only_mass_splitting = bool(mass_splitting_overflow_only)
-        singleton_eligible = (
+        # One lane per one-point contact in eligible CUDA single-world rigid scenes.
+        self._colored_singleton_contact_lanes = bool(
             self.device.is_cuda
             and step_layout == "single_world"
             and self._colored_contact_headers
@@ -1132,27 +1128,16 @@ class PhoenXWorld:
             and float(sleeping_velocity_threshold) <= 0.0
             and not self._contact_patch_enabled
         )
-        if colored_singleton_contact_lanes is True and not singleton_eligible:
-            raise ValueError("colored_singleton_contact_lanes is unsupported for this scene")
-        self._colored_singleton_contact_lanes = (
-            singleton_eligible if colored_singleton_contact_lanes is None else bool(colored_singleton_contact_lanes)
-        )
 
         # Warm-start coloring only feeds the single-world greedy build;
         # the per-world multi-world path uses a different kernel that
         # never reads the cache. Skip the allocation in that case.
-        _warm_start_active: bool = (
-            bool(enable_warm_start_coloring)
-            and step_layout == "single_world"
-            and self.partitioner_algorithm == "greedy"
-        )
+        _warm_start_active: bool = step_layout == "single_world" and self.partitioner_algorithm == "greedy"
         if self.partitioner_algorithm in ("greedy", "endpoint_owner"):
             self._partitioner = IncrementalContactPartitioner(
                 max_num_interactions=self._constraint_capacity,
                 max_num_nodes=max(1, self.num_bodies + self.num_particles),
-                use_tile_scan=True,
                 max_colored_partitions=self.max_colored_partitions,
-                max_greedy_outer_iters=max_greedy_outer_iters,
                 enable_warm_start=_warm_start_active,
                 endpoint_owner_coloring=self.partitioner_algorithm == "endpoint_owner",
                 device=self.device,
@@ -1370,10 +1355,6 @@ class PhoenXWorld:
         self._temporal_separation_bounds = None
         self._moving_surface_only: bool = False
         self._contact_views_placeholder: ContactViews = self._make_placeholder_contact_views()
-
-        # ----- Pairwise contact filter (packed int64 keys) -----
-        self._collision_filter_keys: wp.array[wp.int64]
-        self._set_collision_filter_pairs_impl(collision_filter_pairs or ())
 
         # ----- Optional material table -----
         self._shape_material: wp.array[wp.int32] | None = None
@@ -2064,40 +2045,6 @@ class PhoenXWorld:
         # reduced system's fallback would solve far slower.
         self._free_rigid_contacts_classic = bool(articulation.contact_block_system.free_rigid_pairs_possible)
         self._has_maximal_dynamic_bodies = bool(np.any(self.bodies.motion_type.numpy() == int(MOTION_DYNAMIC)))
-
-    def set_collision_filter_pairs(self, pairs: Iterable[tuple[int, int]]) -> None:
-        """Replace the body-pair contact filter (canonical (min, max), deduped)."""
-        self._set_collision_filter_pairs_impl(pairs)
-
-    def _set_collision_filter_pairs_impl(self, pairs: Iterable[tuple[int, int]]) -> None:
-        nb = int(self.num_bodies)
-        packed: list[int] = []
-        seen: set[tuple[int, int]] = set()
-        for a, b in pairs:
-            a_i = int(a)
-            b_i = int(b)
-            if a_i == b_i:
-                raise ValueError(f"collision filter pair must have two distinct bodies (got both = {a_i})")
-            if not (0 <= a_i < nb and 0 <= b_i < nb):
-                raise IndexError(
-                    f"collision filter pair ({a_i}, {b_i}) out of range [0, {nb}) for this World's body count"
-                )
-            lo = min(a_i, b_i)
-            hi = max(a_i, b_i)
-            key = (lo, hi)
-            if key in seen:
-                continue
-            seen.add(key)
-            packed.append(lo * nb + hi)
-
-        packed.sort()
-        if not packed:
-            arr = np.asarray([np.iinfo(np.int64).max], dtype=np.int64)
-        else:
-            arr = np.asarray(packed, dtype=np.int64)
-
-        self._collision_filter_keys = wp.array(arr, dtype=wp.int64, device=self.device)
-        self._collision_filter_count = int(len(packed))
 
     def _particles_or_sentinel(self) -> ParticleContainer:
         """Return the particle SoA, allocating a length-1 sentinel for
@@ -3291,8 +3238,6 @@ class PhoenXWorld:
         shape_body=None,
         shape_type=None,
         picking=None,
-        vel_accum: wp.array[wp.vec3f] | None = None,
-        omega_accum: wp.array[wp.vec3f] | None = None,
         shape_aabb_lower: wp.array[wp.vec3f] | None = None,
         shape_aabb_upper: wp.array[wp.vec3f] | None = None,
         reuse_partition: bool = False,
@@ -3635,21 +3580,6 @@ class PhoenXWorld:
             if self._penetration_free_data is not None and self._num_kinematic_bodies > 0:
                 self._penetration_free.verify_kinematic(self._penetration_free_data, self.bodies)
             self._apply_global_damping()
-            if vel_accum is not None and omega_accum is not None and self.num_bodies > 0:
-                # ``substep_average`` velocity readout: accumulate
-                # post-substep velocities so the outer-step caller can
-                # divide by ``step_dt`` and get the time-averaged value.
-                wp.launch(
-                    _accumulate_substep_velocity_kernel,
-                    dim=int(self.num_bodies) - 1,  # slot 0 is the anchor
-                    inputs=[
-                        self.bodies.velocity,
-                        self.bodies.angular_velocity,
-                        wp.float32(self.substep_dt),
-                    ],
-                    outputs=[vel_accum, omega_accum],
-                    device=self.device,
-                )
 
         # Contact matching and the next ingest use canonical order, so publish
         # final persistent state once after every substep has completed.
@@ -3775,8 +3705,6 @@ class PhoenXWorld:
             default_friction=self.default_friction,
             device=self.device,
             num_bodies=self.num_bodies,
-            filter_keys=self._collision_filter_keys,
-            filter_count=self._collision_filter_count,
             shape_material=self._shape_material,
             materials=self._materials,
             enable_body_pair_grouping=self._enable_body_pair_grouping,

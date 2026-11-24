@@ -179,7 +179,6 @@ class TestSelfContactFilter(unittest.TestCase):
         pair_first = wp.array([0, 5], dtype=wp.int32, device=device)
         rigid_contact_count = wp.array([8], dtype=wp.int32, device=device)
         num_pairs = wp.array([2], dtype=wp.int32, device=device)
-        filter_keys = wp.array([0], dtype=wp.int64, device=device)
         pair_count = wp.zeros(2, dtype=wp.int32, device=device)
         pair_columns = wp.zeros(2, dtype=wp.int32, device=device)
 
@@ -194,9 +193,6 @@ class TestSelfContactFilter(unittest.TestCase):
                 pair_shape_a,
                 pair_shape_b,
                 shape_body,
-                wp.int32(4),
-                filter_keys,
-                wp.int32(0),
                 wp.empty(0, dtype=wp.int32, device=device),
                 pair_count,
                 pair_columns,
@@ -222,7 +218,6 @@ class TestSelfContactFilter(unittest.TestCase):
         pair_first = wp.array([0], dtype=wp.int32, device=device)
         rigid_contact_count = wp.array([2], dtype=wp.int32, device=device)
         num_pairs = wp.array([1], dtype=wp.int32, device=device)
-        filter_keys = wp.array([0], dtype=wp.int64, device=device)
         pair_count = wp.zeros(1, dtype=wp.int32, device=device)
         pair_columns = wp.zeros(1, dtype=wp.int32, device=device)
 
@@ -237,9 +232,6 @@ class TestSelfContactFilter(unittest.TestCase):
                 pair_shape_a,
                 pair_shape_b,
                 shape_body,
-                wp.int32(3),
-                filter_keys,
-                wp.int32(0),
                 wp.empty(0, dtype=wp.int32, device=device),
                 pair_count,
                 pair_columns,

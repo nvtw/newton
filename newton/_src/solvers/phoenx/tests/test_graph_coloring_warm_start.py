@@ -115,7 +115,6 @@ def _make_partitioner(
         max_num_nodes=num_bodies,
         device=device,
         seed=seed,
-        use_tile_scan=True,
         max_colored_partitions=max_colored_partitions,
         enable_warm_start=enable_warm_start,
     )
