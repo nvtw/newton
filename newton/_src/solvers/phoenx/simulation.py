@@ -999,7 +999,7 @@ class PhoenXWorld:
             self._constraint_capacity,
             self.device,
             max_thread_blocks=self._max_thread_blocks,
-            cuda_blocks_per_sm=12 if self._colored_contact_headers else 4,
+            cuda_blocks_per_sm=self._singleworld_blocks_per_sm(),
         )
 
         self._fuse_threshold: int = int(FUSE_TAIL_MAX_COLOR_SIZE)
@@ -1646,6 +1646,24 @@ class PhoenXWorld:
                 if not drain_tail:
                     kernels.append(tail)
         return kernels
+
+    def _singleworld_blocks_per_sm(self) -> int:
+        """Resident blocks per SM of the persistent single-world grid.
+
+        Color-ordered contact rows and dense deformable sweeps keep more
+        blocks busy than rigid stacks do.
+        """
+        if self._colored_contact_headers:
+            return 12
+        if (
+            self.num_particles
+            or self.num_cloth_triangles
+            or self.num_cloth_bending
+            or self.num_soft_tetrahedra
+            or self.num_soft_hexahedra
+        ):
+            return 8
+        return 4
 
     def _assert_invariants(self) -> None:
         """Validate per-step buffer shapes against the documented schema."""

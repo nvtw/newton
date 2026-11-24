@@ -187,7 +187,6 @@ class Example:
             num_cloth_bending=int(self.model.edge_count),
             device=self.device,
         )
-        max_thread_blocks = 8 * self.device.sm_count if self.device.is_cuda else None
         self.world = PhoenXWorld(
             bodies=bodies,
             constraints=constraints,
@@ -204,7 +203,6 @@ class Example:
             max_colored_partitions=MASS_SPLITTING_MAX_COLORED_PARTITIONS,
             mass_splitting_unrolled=True,
             mass_splitting_batch_size=1,
-            max_thread_blocks=max_thread_blocks,
             partitioner_algorithm="greedy",
             device=self.device,
         )

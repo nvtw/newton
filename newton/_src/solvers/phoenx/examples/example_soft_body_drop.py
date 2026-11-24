@@ -245,10 +245,6 @@ class Example:
             num_soft_tetrahedra=int(self.model.tet_count),
             device=self.device,
         )
-        # Dense soft-tet sweeps have enough rows to benefit from more
-        # persistent-grid blocks than rigid stacks while keeping the
-        # solver-wide one-warp block size unchanged.
-        max_thread_blocks = 8 * self.device.sm_count if self.device.is_cuda else None
         self.world = PhoenXWorld(
             bodies=bodies,
             constraints=constraints,
@@ -271,7 +267,6 @@ class Example:
             mass_splitting=ENABLE_MASS_SPLITTING,
             max_colored_partitions=MASS_SPLITTING_MAX_COLORED_PARTITIONS,
             mass_splitting_unrolled=True,
-            max_thread_blocks=max_thread_blocks,
             # Batch size controls the short sequential run inside each
             # overflow worker. One-row overflow batches were faster on
             # soft-tet columns while preserving the bounded-colour layout.

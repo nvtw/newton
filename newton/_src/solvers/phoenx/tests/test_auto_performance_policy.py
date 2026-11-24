@@ -293,6 +293,51 @@ class TestPhoenXAutoPerformancePolicy(unittest.TestCase):
         self.assertEqual(self._resolve(step_layout="multi_world"), "multi_world")
         self.assertEqual(self._resolve(step_layout="single_world"), "single_world")
 
+    def test_overflow_only_mass_splitting_selects_its_configuration(self):
+        """Overflow-only mass splitting alone selects the unrolled, colored fast path."""
+        if not wp.get_device().is_cuda:
+            self.skipTest("Overflow-only mass splitting requires CUDA")
+        builder = newton.ModelBuilder()
+        builder.add_ground_plane()
+        for i in range(4):
+            body = builder.add_body(xform=wp.transform((0.0, 0.0, 0.1 + 0.2 * i), wp.quat_identity()))
+            builder.add_shape_box(body, hx=0.1, hy=0.1, hz=0.1)
+        model = builder.finalize()
+        options = {"step_layout": "single_world", "mass_splitting": True, "mass_splitting_overflow_only": True}
+        world = newton.solvers.SolverPhoenX(model, **options).world
+        self.assertTrue(world.mass_splitting_unrolled)
+        self.assertEqual(world.mass_splitting_batch_size, 1)
+        self.assertEqual(world.partitioner_algorithm, "endpoint_owner")
+        self.assertTrue(world._colored_contact_headers)
+        self.assertTrue(world._colored_contact_rows)
+        # Temporal iterations need uncolored contact headers.
+        world = newton.solvers.SolverPhoenX(model, temporal_iterations=True, **options).world
+        self.assertFalse(world._colored_contact_headers)
+        self.assertFalse(world._colored_contact_rows)
+        # Ordinary mass splitting keeps the batched dispatcher.
+        world = newton.solvers.SolverPhoenX(model, step_layout="single_world", mass_splitting=True).world
+        self.assertFalse(world.mass_splitting_unrolled)
+        self.assertEqual(world.mass_splitting_batch_size, 8)
+        self.assertEqual(world.partitioner_algorithm, "greedy")
+        self.assertFalse(world._colored_contact_headers)
+
+    def test_single_world_grid_occupancy_follows_the_rows(self):
+        """Colored contact rows and deformable sweeps keep more blocks resident."""
+        counts = {
+            "num_particles": 0,
+            "num_cloth_triangles": 0,
+            "num_cloth_bending": 0,
+            "num_soft_tetrahedra": 0,
+            "num_soft_hexahedra": 0,
+        }
+        rigid = SimpleNamespace(_colored_contact_headers=False, **counts)
+        self.assertEqual(PhoenXWorld._singleworld_blocks_per_sm(rigid), 4)
+        colored = SimpleNamespace(_colored_contact_headers=True, **counts)
+        self.assertEqual(PhoenXWorld._singleworld_blocks_per_sm(colored), 12)
+        for field in counts:
+            world = SimpleNamespace(_colored_contact_headers=False, **{**counts, field: 1})
+            self.assertEqual(PhoenXWorld._singleworld_blocks_per_sm(world), 8)
+
     def test_bounded_drives_refresh_contact_mobility(self):
         """Motor saturation can change the factor after warm start or in relaxation."""
         for use_bias in (True, False):

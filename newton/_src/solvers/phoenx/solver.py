@@ -385,15 +385,15 @@ class SolverPhoenX(SolverBase):
         velocity_readout: str = "substep_end",
         mass_splitting: bool = False,
         max_colored_partitions: int = 12,
-        mass_splitting_batch_size: int = 8,
+        mass_splitting_batch_size: int | None = None,
         mass_splitting_color_group_size: int = 0,
         joint_refinement_iterations: int = 0,
         direct_joint_projection_passes: int | None = None,
-        mass_splitting_unrolled: bool = False,
+        mass_splitting_unrolled: bool | None = None,
         mass_splitting_overflow_only: bool = False,
-        partitioner_algorithm: str = "greedy",
-        colored_contact_headers: bool = False,
-        colored_contact_rows: bool = False,
+        partitioner_algorithm: str | None = None,
+        colored_contact_headers: bool | None = None,
+        colored_contact_rows: bool | None = None,
         colored_singleton_contact_lanes: bool | None = None,
         enable_column_timers: bool = False,
         length_scale: float | None = None,
@@ -556,20 +556,31 @@ class SolverPhoenX(SolverBase):
             mass_splitting: Enable the graph-colored mass-splitting tail.
             max_colored_partitions: True GS colors retained before the
                 mass-splitting tail. Defaults to 12.
+            mass_splitting_batch_size: Overflow constraints one mass-splitting
+                worker solves in sequence. ``None`` (the default) selects one
+                with overflow-only mass splitting and eight otherwise.
             mass_splitting_unrolled: Use the fixed-launch mass-splitting
                 dispatcher. This can reduce graph-control overhead on
-                workloads whose overflow structure is stable.
+                workloads whose overflow structure is stable. ``None`` (the
+                default) selects it with overflow-only mass splitting.
             mass_splitting_overflow_only: Update rigid regular colors directly
                 and split only overflow constraints. Requires a single CUDA
                 world, unrolled dispatch, batch size one, and maximal PGS
-                joints when joints are present.
-            partitioner_algorithm: ``"greedy"`` (default) or
-                ``"endpoint_owner"`` (single-world mass splitting only).
+                joints when joints are present; the ``None`` defaults of
+                those arguments satisfy it.
+            partitioner_algorithm: ``"greedy"`` or ``"endpoint_owner"``
+                (single-world mass splitting only). ``None`` (the default)
+                selects ``"endpoint_owner"`` with overflow-only mass splitting
+                and ``"greedy"`` otherwise.
             colored_contact_headers: Store rigid-contact column metadata in
                 solver color order. Requires mass splitting and point-friction
                 rigid contacts. Supports single- and multi-world layouts.
+                ``None`` (the default) enables it with overflow-only mass
+                splitting unless temporal iterations, column timers or
+                surface-velocity contacts exclude it.
             colored_contact_rows: Also store per-contact solve state in solver
-                color order. Requires ``colored_contact_headers``.
+                color order. Requires ``colored_contact_headers``. ``None`` (the
+                default) follows ``colored_contact_headers``.
             colored_singleton_contact_lanes: Use one lane for one-point
                 contacts in eligible CUDA single-world rigid scenes. ``None``
                 selects automatically; ``False`` disables this optimization.
@@ -683,6 +694,14 @@ class SolverPhoenX(SolverBase):
         if joint_mode not in joint_modes:
             raise ValueError(f"joint_mode must be one of {tuple(joint_modes)}, got {joint_mode!r}")
         articulation_mode, joint_solver = joint_modes[joint_mode]
+        # Overflow-only mass splitting runs on the unrolled dispatcher with one
+        # overflow row per worker and adjacency-free endpoint coloring.
+        if mass_splitting_batch_size is None:
+            mass_splitting_batch_size = 1 if mass_splitting_overflow_only else 8
+        if mass_splitting_unrolled is None:
+            mass_splitting_unrolled = bool(mass_splitting_overflow_only)
+        if partitioner_algorithm is None:
+            partitioner_algorithm = "endpoint_owner" if mass_splitting_overflow_only else "greedy"
         self.joint_mode = joint_mode
         self._joint_solver = joint_solver
         self._articulation_mode = articulation_mode
@@ -1141,6 +1160,19 @@ class SolverPhoenX(SolverBase):
             device=self.device,
         )
 
+        if colored_contact_headers is None:
+            # Color-ordered contact storage nearly doubles overflow-only mass
+            # splitting throughput (ragdoll pile 30.9 -> 54.5 FPS).
+            colored_contact_headers = bool(
+                mass_splitting_overflow_only
+                and not temporal_iterations
+                and not enable_column_timers
+                and contact_friction_model == "point"
+                and int(rigid_contact_max) > 0
+                and not getattr(getattr(model, "_collision_pipeline", None), "_rigid_contact_surface_velocity", False)
+            )
+        if colored_contact_rows is None:
+            colored_contact_rows = colored_contact_headers
         if temporal_iterations and (
             step_layout != "single_world"
             or (mass_splitting and not mass_splitting_overflow_only)

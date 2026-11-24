@@ -1,0 +1,1 @@
+`SolverPhoenX` now chooses `mass_splitting_batch_size`, `mass_splitting_unrolled`, `partitioner_algorithm`, `colored_contact_headers` and `colored_contact_rows` from the scene (`None` defaults): `mass_splitting_overflow_only=True` alone selects its fast configuration.

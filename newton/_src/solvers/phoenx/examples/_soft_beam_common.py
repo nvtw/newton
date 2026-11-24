@@ -151,7 +151,6 @@ class SoftBeamExample:
         self.sim_substeps = int(substeps)
         self.solver_iterations = int(solver_iterations)
 
-        max_thread_blocks = 8 * self.device.sm_count if self.device.is_cuda else None
         k_lambda, k_mu = soft_tet_lame_from_youngs_poisson(float(youngs_modulus), float(poisson_ratio))
 
         builder = newton.ModelBuilder()
@@ -222,7 +221,6 @@ class SoftBeamExample:
             mass_splitting=True,
             max_colored_partitions=8,
             mass_splitting_unrolled=True,
-            max_thread_blocks=max_thread_blocks,
             mass_splitting_batch_size=1,
             partitioner_algorithm="greedy",
             device=self.device,
