@@ -995,22 +995,58 @@ def saturate_joint_drive(
     qd: wp.float32,
     dt: wp.float32,
     effort_limit: wp.float32,
+    inertia: wp.float32,
+    previous_error: wp.float32,
+    previous_bound: wp.float32,
+    decide: wp.bool,
 ):
-    """Return a drive's implicit stiffness, damping, and explicit effort under its effort limit.
+    """Return a drive's implicit stiffness, damping, explicit effort, and bound under its effort limit.
 
-    The drive's effort at the end of the step, predicted at the current velocity, is
-    ``stiffness * (target_position - q - dt * qd) + drive_damping * (target_velocity - qd)``.
-    Within ``effort_limit`` the drive stays implicit; beyond it the drive applies the limit as
-    a constant effort for this step, like the direct-equality path's saturated drive rows. A
-    limit of zero, a non-finite one, or one above ``1e18`` leaves the drive unlimited.
+    Only the first pass of a step (``decide``) updates the bound; later passes reuse it.
+
+    The bound is ``+1`` or ``-1`` while the drive applies ``+-effort_limit`` as a constant effort
+    for this step, like the direct-equality path's saturated drive rows, and ``0`` while it stays
+    implicit. A drive implicit in the previous step (``previous_bound == 0``) saturates when either
+    end-of-step effort exceeds the limit:
+
+    * the predicted effort of the drive alone. With the joint's ``inertia`` known (positive), its
+      end velocity is the drive's implicit-Euler velocity, so a stiff drive on a light joint closing
+      a small error stays implicit; otherwise the current velocity predicts it;
+    * the effort it exerted at the end of the previous step, ``stiffness * (previous_error - dt * qd)
+      + drive_damping * (target_velocity - qd)``, with ``previous_error`` its position error then and
+      ``qd`` the velocity the coupled solve produced. A drive held by a contact or a load exerts it
+      although the drive alone would close its error.
+
+    A saturated drive keeps its bound while its effort at the current velocity still exceeds the
+    limit in the same direction; otherwise it returns to the implicit drive, never directly to the
+    opposite bound. A limit of zero, a non-finite one, or one above ``1e18`` leaves the drive
+    unlimited.
     """
     limit = wp.abs(effort_limit)
     if not drive_effort_is_limited(limit):
-        return stiffness, drive_damping, wp.float32(0.0)
-    effort = stiffness * (target_position - q - dt * qd) + drive_damping * (target_velocity - qd)
-    if wp.abs(effort) <= limit:
-        return stiffness, drive_damping, wp.float32(0.0)
-    return wp.float32(0.0), wp.float32(0.0), wp.clamp(effort, -limit, limit)
+        return stiffness, drive_damping, wp.float32(0.0), wp.float32(0.0)
+    current = stiffness * (target_position - q - dt * qd) + drive_damping * (target_velocity - qd)
+    bound = wp.float32(0.0)
+    if not decide:
+        bound = previous_bound
+    elif previous_bound != wp.float32(0.0):
+        if current * previous_bound >= limit:
+            bound = previous_bound
+    else:
+        effort = current
+        if inertia > wp.float32(0.0):
+            qd_end = (inertia * qd + dt * (stiffness * (target_position - q) + drive_damping * target_velocity)) / (
+                inertia + dt * drive_damping + dt * dt * stiffness
+            )
+            effort = stiffness * (target_position - q - dt * qd_end) + drive_damping * (target_velocity - qd_end)
+        loaded = stiffness * (previous_error - dt * qd) + drive_damping * (target_velocity - qd)
+        if wp.abs(loaded) > limit:
+            effort = loaded
+        if wp.abs(effort) > limit:
+            bound = wp.sign(effort)
+    if bound == wp.float32(0.0):
+        return stiffness, drive_damping, wp.float32(0.0), bound
+    return wp.float32(0.0), wp.float32(0.0), bound * limit, bound
 
 
 @wp.func
@@ -1034,11 +1070,24 @@ def configure_implicit_joint_dynamics(
     joint_limit_kd: wp.array[wp.float32],
     joint_damping: wp.array[wp.float32],
     joint_armature: wp.array[wp.float32],
+    joint_s: wp.array[wp.spatial_vector],
+    joint_u: wp.array[wp.spatial_vector],
+    mass_diagonal: wp.array[wp.float32],
+    drive_error: wp.array[wp.float32],
+    drive_bound: wp.array[wp.float32],
+    decide_bounds: wp.bool,
     dt: wp.float32,
     factor_diagonal: wp.array[wp.float32],
     implicit_force: wp.array[wp.float32],
 ) -> None:
-    """Build one joint's linearized implicit-Euler operator diagonal and right-hand side."""
+    """Build one joint's linearized implicit-Euler operator diagonal and right-hand side.
+
+    A drive's effort limit uses the joint's inertia from the previous factor: the
+    articulated inertia ``joint_s . joint_u`` of the recursive factor or the dense
+    factor's generalized mass diagonal, whichever the active backend recorded, and
+    ``drive_error`` and ``drive_bound``, the drive's position error and effort bound of the
+    previous step, which it updates.
+    """
     dof_start = joint_qd_start[joint]
     dof_end = joint_qd_start[joint + wp.int32(1)]
     coord_start = joint_q_start[joint]
@@ -1064,9 +1113,27 @@ def configure_implicit_joint_dynamics(
                 target_velocity = wp.float32(0.0)
             elif target_mode == JointTargetMode.VELOCITY:
                 stiffness = wp.float32(0.0)
-            stiffness, drive_damping, drive_effort = saturate_joint_drive(
-                stiffness, drive_damping, target_position, target_velocity, q, qd, dt, joint_effort_limit[dof]
+            link_inertia = wp.max(wp.dot(joint_s[dof], joint_u[dof]), mass_diagonal[dof])
+            inertia = wp.float32(0.0)
+            if link_inertia > wp.float32(0.0):
+                inertia = joint_armature[dof] + link_inertia
+            stiffness, drive_damping, drive_effort, bound = saturate_joint_drive(
+                stiffness,
+                drive_damping,
+                target_position,
+                target_velocity,
+                q,
+                qd,
+                dt,
+                joint_effort_limit[dof],
+                inertia,
+                drive_error[dof],
+                drive_bound[dof],
+                decide_bounds,
             )
+            if decide_bounds:
+                drive_error[dof] = target_position - q
+                drive_bound[dof] = bound
             predicted_q = q + dt * qd
             if q < joint_limit_lower[dof] or predicted_q < joint_limit_lower[dof]:
                 stiffness = joint_limit_ke[dof]
@@ -1113,6 +1180,12 @@ def _configure_implicit_joint_dynamics_kernel(
     joint_limit_kd: wp.array[wp.float32],
     joint_damping: wp.array[wp.float32],
     joint_armature: wp.array[wp.float32],
+    joint_s: wp.array[wp.spatial_vector],
+    joint_u: wp.array[wp.spatial_vector],
+    mass_diagonal: wp.array[wp.float32],
+    drive_error: wp.array[wp.float32],
+    drive_bound: wp.array[wp.float32],
+    decide_bounds: wp.bool,
     dt: wp.float32,
     factor_diagonal: wp.array[wp.float32],
     implicit_force: wp.array[wp.float32],
@@ -1137,6 +1210,12 @@ def _configure_implicit_joint_dynamics_kernel(
         joint_limit_kd,
         joint_damping,
         joint_armature,
+        joint_s,
+        joint_u,
+        mass_diagonal,
+        drive_error,
+        drive_bound,
+        decide_bounds,
         dt,
         factor_diagonal,
         implicit_force,
@@ -4033,6 +4112,9 @@ class ReducedArticulationSystem:
         self.joint_qd_internal = wp.zeros(dof_count, dtype=wp.float32, device=self.device)
         self.joint_qd_integrator = wp.zeros(dof_count, dtype=wp.float32, device=self.device)
         self.joint_factor_diagonal = wp.zeros(dof_count, dtype=wp.float32, device=self.device)
+        # Each drive's position error and effort bound of the previous step, for its effort limit.
+        self.joint_drive_error = wp.zeros(dof_count, dtype=wp.float32, device=self.device)
+        self.joint_drive_bound = wp.zeros(dof_count, dtype=wp.float32, device=self.device)
         self.joint_implicit_force = wp.zeros(dof_count, dtype=wp.float32, device=self.device)
         self.reduced_inertia = wp.zeros(body_count, dtype=_sym_mat66, device=self.device)
         self.joint_u_matrix = wp.zeros(dof_count, dtype=wp.spatial_vector, device=self.device)
@@ -4100,8 +4182,20 @@ class ReducedArticulationSystem:
                 raise ValueError(
                     f"the dense reduced backend holds no articulation: {'; '.join(self.dense.fallback_reasons)}"
                 )
+        # Generalized mass diagonal of the latest dense factor; zero where the
+        # recursive factor's joint_u_matrix carries the joint inertia instead.
+        self.joint_mass_diagonal = (
+            self.dense.data.mass_diagonal
+            if self.dense is not None
+            else wp.zeros(max(1, dof_count), dtype=wp.float32, device=self.device)
+        )
 
         self.refresh_inertial_properties()
+        # Record the joint inertias at the initial pose, so the first step's drive effort
+        # limits already know them (see :func:`saturate_joint_drive`).
+        initial = model.state()
+        eval_fk(model, model.joint_q, model.joint_qd, initial)
+        self.factor(initial, articulated_body=True)
 
     def refresh_inertial_properties(self) -> None:
         """Refresh cached COM transforms; factorization reads body inertia directly."""
@@ -4177,11 +4271,13 @@ class ReducedArticulationSystem:
         factorize: bool = True,
         update_kinematics: bool = True,
         articulated_body: bool = False,
+        decide_bounds: bool = True,
     ) -> None:
         """Factor the generalized mass and optional implicit joint operator.
 
         With the dense backend, ``articulated_body`` also forms the articulated-body
-        factor that :meth:`solve_forces` applies.
+        factor that :meth:`solve_forces` applies. ``decide_bounds`` lets the drives'
+        effort bounds change; a refactor later in the same step keeps them.
         """
         if control is None:
             wp.copy(self.joint_factor_diagonal, self.model.joint_armature)
@@ -4209,6 +4305,12 @@ class ReducedArticulationSystem:
                     self.model.joint_limit_kd,
                     self.model.joint_damping,
                     self.model.joint_armature,
+                    self.joint_s,
+                    self.joint_u_matrix,
+                    self.joint_mass_diagonal,
+                    self.joint_drive_error,
+                    self.joint_drive_bound,
+                    wp.bool(decide_bounds),
                     wp.float32(dt),
                 ],
                 outputs=[self.joint_factor_diagonal, self.joint_implicit_force],
@@ -5256,7 +5358,11 @@ class ReducedPhoenXArticulation:
             # Integration changes the mass operator and contact Jacobians.
             # Reusing their old values applies impulses at the wrong pose.
             self.system.factor(
-                self.state, self.control, 1.0 / float(idt), update_kinematics=not self._kinematics_current
+                self.state,
+                self.control,
+                1.0 / float(idt),
+                update_kinematics=not self._kinematics_current,
+                decide_bounds=False,
             )
             if world._reduced_contacts_active_this_step and self.contact_block_system.requires_impulse_response:
                 self._refresh_impulse_response()

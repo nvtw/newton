@@ -427,6 +427,10 @@ def _configure_implicit_joint_dynamics_packed(
     joint_target_q: wp.array[wp.float32],
     joint_target_qd: wp.array[wp.float32],
     params: wp.array2d[wp.float32],
+    mass_diagonal: wp.array[wp.float32],
+    drive_error: wp.array[wp.float32],
+    drive_bound: wp.array[wp.float32],
+    decide_bounds: wp.bool,
     dt: wp.float32,
     factor_diagonal: wp.array[wp.float32],
     implicit_force: wp.array[wp.float32],
@@ -434,7 +438,8 @@ def _configure_implicit_joint_dynamics_packed(
     """Build one joint's implicit-Euler operator diagonal and right-hand side from packed parameters.
 
     The arithmetic of :func:`configure_implicit_joint_dynamics`, reading the rows of
-    :func:`_pack_dof_parameters_kernel`.
+    :func:`_pack_dof_parameters_kernel`, the previous factor's mass diagonal, and the
+    drives' previous position errors and effort bounds, which it updates.
     """
     dof_start = joint_qd_start[joint]
     dof_end = joint_qd_start[joint + wp.int32(1)]
@@ -461,9 +466,26 @@ def _configure_implicit_joint_dynamics_packed(
                 target_velocity = wp.float32(0.0)
             elif target_mode == JointTargetMode.VELOCITY:
                 stiffness = wp.float32(0.0)
-            stiffness, drive_damping, drive_effort = saturate_joint_drive(
-                stiffness, drive_damping, target_position, target_velocity, q, qd, dt, params[dof, 9]
+            inertia = wp.float32(0.0)
+            if mass_diagonal[dof] > wp.float32(0.0):
+                inertia = params[dof, 8] + mass_diagonal[dof]
+            stiffness, drive_damping, drive_effort, bound = saturate_joint_drive(
+                stiffness,
+                drive_damping,
+                target_position,
+                target_velocity,
+                q,
+                qd,
+                dt,
+                params[dof, 9],
+                inertia,
+                drive_error[dof],
+                drive_bound[dof],
+                decide_bounds,
             )
+            if decide_bounds:
+                drive_error[dof] = target_position - q
+                drive_bound[dof] = bound
             predicted_q = q + dt * qd
             lower = params[dof, 3]
             upper = params[dof, 4]
@@ -1536,6 +1558,8 @@ def make_dense_substep_kernel(
         joint_qd: wp.array[wp.float32],
         factor_diagonal: wp.array[wp.float32],
         implicit_force: wp.array[wp.float32],
+        drive_error: wp.array[wp.float32],
+        drive_bound: wp.array[wp.float32],
         joint_s: wp.array[wp.spatial_vector],
         body_i_s: wp.array[_sym_mat66],
         motion: wp.array[wp.float32],
@@ -1668,6 +1692,10 @@ def make_dense_substep_kernel(
                 joint_target_q,
                 joint_target_qd,
                 dof_parameters,
+                dense.mass_diagonal,
+                drive_error,
+                drive_bound,
+                wp.bool(not wp.static(relax)),
                 dt,
                 factor_diagonal,
                 implicit_force,
@@ -2417,6 +2445,8 @@ class DenseSubstep:
                     system.joint_qd_internal,
                     system.joint_factor_diagonal,
                     system.joint_implicit_force,
+                    system.joint_drive_error,
+                    system.joint_drive_bound,
                     system.joint_s,
                     system.body_i_s,
                     dense.motion,

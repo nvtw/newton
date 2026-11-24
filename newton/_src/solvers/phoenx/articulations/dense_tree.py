@@ -880,6 +880,8 @@ def make_dense_tree_ops(
                 entry += wp.int32(1)
             # Keep the assembled diagonal for the relative pivot floor.
             value = wp.dot(_load_motion(shared, wp.int32(motion_base) + wp.int32(_MOTION_STRIDE) * row), momentum)
+            # The next step's drive effort limits read the joint inertia.
+            dense.mass_diagonal[dof_start + row] = value
             value += _load(shared, wp.int32(diagonal_base) + row)
             _store(shared, wp.int32(diagonal_base) + row, value)
             _store(shared, diagonal_entry, value)
@@ -1803,6 +1805,7 @@ class DenseTreeOperator:
 
         data = DenseTreeData()
         data.factor = wp.zeros(max(1, factor_size), dtype=wp.float32, device=self.device)
+        data.mass_diagonal = wp.zeros(max(1, int(model.joint_dof_count)), dtype=wp.float32, device=self.device)
         data.factor_start = wp.array(factor_start, dtype=wp.int32, device=self.device)
         data.articulation_template = wp.array(articulation_template, dtype=wp.int32, device=self.device)
         data.template_dof_start = wp.array(offsets("dof_entry"), dtype=wp.int32, device=self.device)

@@ -1,0 +1,1 @@
+Decide PhoenX reduced-articulation drive effort limits from the joint inertia and the load the drive holds, so a stiff capped drive on a light joint no longer kicks it by applying its limit for a whole step.

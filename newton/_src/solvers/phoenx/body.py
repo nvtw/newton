@@ -120,6 +120,8 @@ class DenseTreeData:
     template_depth_start: wp.array[wp.int32]
     depth_start: wp.array[wp.int32]
     depth_dof: wp.array[wp.int32]
+    #: Per DOF, the generalized mass diagonal ``M_ii`` of the latest factor (zero before it).
+    mass_diagonal: wp.array[wp.float32]
 
 
 def dense_tree_data_zeros(device: wp.DeviceLike = None) -> DenseTreeData:
@@ -130,6 +132,7 @@ def dense_tree_data_zeros(device: wp.DeviceLike = None) -> DenseTreeData:
     data.articulation_template = wp.zeros(1, dtype=wp.int32, device=device)
     data.template_dof_start = wp.zeros(1, dtype=wp.int32, device=device)
     data.template_path_start = wp.zeros(1, dtype=wp.int32, device=device)
+    data.mass_diagonal = wp.zeros(1, dtype=wp.float32, device=device)
     for name in (
         "dof_entry",
         "path",
