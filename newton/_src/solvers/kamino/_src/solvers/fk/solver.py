@@ -443,67 +443,25 @@ class ForwardKinematicsSolver:
                 act_type = joint_act_type[jt_id]
                 dof_type = joint_dof_type[jt_id]
                 if act_type != JointActuationType.PASSIVE:  # Actuator: select all six constraints
-                    for i in range(6):
-                        constraint_full_to_red_map[6 * jt_id + i] = ct_count + i
-                    ct_count += 6
+                    rows = range(6)
                     if dof_type == FKJointDoFType.UNIVERSAL:
                         self.data.joints.has_universal_actuators = True
+                elif dof_type == FKJointDoFType.AXIS:
+                    rows = (3,)
+                elif dof_type == FKJointDoFType.D6:
+                    layout = d6_layouts[joints_source_id[jt_id]]
+                    linear_count = int(layout["linear_count"])
+                    angular_count = int(layout["angular_count"])
+                    rows = (*range(linear_count, 3), *range(3 + angular_count, 6))
+                    has_universal_joints |= angular_count == 2
                 else:
-                    if dof_type == FKJointDoFType.AXIS:
-                        constraint_full_to_red_map[6 * jt_id + 3] = ct_count
-                        ct_count += 1
-                    elif dof_type == FKJointDoFType.CARTESIAN:
-                        for i in range(3):
-                            constraint_full_to_red_map[6 * jt_id + 3 + i] = ct_count + i
-                        ct_count += 3
-                    elif dof_type == FKJointDoFType.CYLINDRICAL:
-                        constraint_full_to_red_map[6 * jt_id + 1] = ct_count
-                        constraint_full_to_red_map[6 * jt_id + 2] = ct_count + 1
-                        constraint_full_to_red_map[6 * jt_id + 4] = ct_count + 2
-                        constraint_full_to_red_map[6 * jt_id + 5] = ct_count + 3
-                        ct_count += 4
-                    elif dof_type == FKJointDoFType.FIXED:
-                        for i in range(6):
-                            constraint_full_to_red_map[6 * jt_id + i] = ct_count + i
-                        ct_count += 6
-                    elif dof_type == FKJointDoFType.FREE:
-                        pass
-                    elif dof_type == FKJointDoFType.PRISMATIC:
-                        constraint_full_to_red_map[6 * jt_id + 1] = ct_count
-                        constraint_full_to_red_map[6 * jt_id + 2] = ct_count + 1
-                        for i in range(3):
-                            constraint_full_to_red_map[6 * jt_id + 3 + i] = ct_count + 2 + i
-                        ct_count += 5
-                    elif dof_type == FKJointDoFType.REVOLUTE:
-                        for i in range(3):
-                            constraint_full_to_red_map[6 * jt_id + i] = ct_count + i
-                        constraint_full_to_red_map[6 * jt_id + 4] = ct_count + 3
-                        constraint_full_to_red_map[6 * jt_id + 5] = ct_count + 4
-                        ct_count += 5
-                    elif dof_type == FKJointDoFType.SPHERICAL:
-                        for i in range(3):
-                            constraint_full_to_red_map[6 * jt_id + i] = ct_count + i
-                        ct_count += 3
-                    elif dof_type == FKJointDoFType.GIMBAL or dof_type == FKJointDoFType.GIMBAL_LEFT_HANDED:
-                        for i in range(3):
-                            constraint_full_to_red_map[6 * jt_id + i] = ct_count + i
-                        ct_count += 3
-                    elif dof_type == FKJointDoFType.UNIVERSAL:
-                        for i in range(3):
-                            constraint_full_to_red_map[6 * jt_id + i] = ct_count + i
-                        constraint_full_to_red_map[6 * jt_id + 5] = ct_count + 3
-                        ct_count += 4
+                    # FK and dynamics use the same row order for specialized joints.
+                    rows = JointDoFType(dof_type).cts_axes
+                    if dof_type == FKJointDoFType.UNIVERSAL:
                         has_universal_joints = True
-                    elif dof_type == FKJointDoFType.D6:
-                        layout = d6_layouts[joints_source_id[jt_id]]
-                        linear_count = int(layout["linear_count"])
-                        angular_count = int(layout["angular_count"])
-                        for i in (*range(linear_count, 3), *range(3 + angular_count, 6)):
-                            constraint_full_to_red_map[6 * jt_id + i] = ct_count
-                            ct_count += 1
-                        has_universal_joints |= angular_count == 2
-                    else:
-                        raise RuntimeError("Unknown joint dof type")
+                for i in rows:
+                    constraint_full_to_red_map[6 * jt_id + i] = ct_count
+                    ct_count += 1
             num_constraints[wd_id] = ct_count
 
             # Copy constraints counts/map data for other worlds in equivalence class
@@ -529,39 +487,24 @@ class ForwardKinematicsSolver:
                         continue
                     dof_type = joint_dof_type[jt_id]
                     coord_id = actuated_coords_offset[jt_id]
-                    if dof_type == FKJointDoFType.CARTESIAN:
-                        for i in range(3):
-                            delta_q_max[coord_id + i] = max_step_linear
-                    elif dof_type == FKJointDoFType.CYLINDRICAL:
-                        delta_q_max[coord_id] = max_step_linear
-                        delta_q_max[coord_id + 1] = max_step_angular
-                    elif dof_type == FKJointDoFType.FIXED:
-                        pass
-                    elif dof_type == FKJointDoFType.FREE:
+                    if dof_type == FKJointDoFType.FREE:
                         for i in range(3):
                             delta_q_max[coord_id + i] = max_step_linear
                         for i in range(4):
                             delta_q_max[coord_id + 3 + i] = max_step_quat
-                    elif dof_type == FKJointDoFType.PRISMATIC:
-                        delta_q_max[coord_id] = max_step_linear
-                    elif dof_type == FKJointDoFType.REVOLUTE:
-                        delta_q_max[coord_id] = max_step_angular
                     elif dof_type == FKJointDoFType.SPHERICAL:
                         for i in range(4):
                             delta_q_max[coord_id + i] = max_step_quat
-                    elif dof_type == FKJointDoFType.GIMBAL or dof_type == FKJointDoFType.GIMBAL_LEFT_HANDED:
-                        for i in range(3):
-                            delta_q_max[coord_id + i] = max_step_angular
-                    elif dof_type == FKJointDoFType.UNIVERSAL:
-                        delta_q_max[coord_id] = max_step_angular
-                        delta_q_max[coord_id + 1] = max_step_angular
                     elif dof_type == FKJointDoFType.D6:
                         count = int(d6_layouts[joints_source_id[jt_id]]["linear_count"])
                         stop = coord_id + joints_num_actuated_coords[jt_id]
                         delta_q_max[coord_id : coord_id + count] = max_step_linear
                         delta_q_max[coord_id + count : stop] = max_step_angular
-                    else:
+                    elif dof_type == FKJointDoFType.AXIS:
                         raise RuntimeError("Invalid joint dof type for an actuator")
+                    else:
+                        for offset, axis in enumerate(JointDoFType(dof_type).dofs_axes):
+                            delta_q_max[coord_id + offset] = max_step_linear if axis < 3 else max_step_angular
 
                 # Copy delta_q_max for other worlds in equivalence class
                 for wd_id_1 in eq_class[1:]:
