@@ -327,6 +327,10 @@ class TestTemporalContactMaterial(unittest.TestCase):
         self.assertEqual(len(samples), 16)
         h = dt / 16
         gap = samples[0][0]
+        if damping == 0.0:
+            # Zero damping means none was set: the unit-mass row damps its spring, far
+            # below the Nyquist cap, at the default damping ratio of one.
+            damping = 2.0 * np.sqrt(stiffness)
         # For one unit-mass normal row, backward Euler has a closed form.
         # The impulse is unilateral: separating contact cannot pull the body.
         for actual_gap, actual_impulse in samples:
