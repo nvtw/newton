@@ -140,6 +140,16 @@ class TestBottlingFleet(unittest.TestCase):
         self.assertIsNone(duplicate.pallet)
         self.assertFalse(duplicate.empty)
 
+    def test_carried_load_does_not_block_its_own_landing(self):
+        """A truck lined up to set down holds its wrapped load over the landing space."""
+        carried = np.array([[4.6, 7.0, 0.75, 0, 0, 0, 1]], dtype=float)
+        cases = np.array([[4.6, 7.0, 1.0], [4.9, 7.2, 1.4]])
+        self.assertFalse(_observe_port(carried, cases, (4, 7), 0.5, math.pi / 2).clear)
+        self.assertTrue(_observe_port(carried, cases, (4, 7), 0.5, math.pi / 2, carried=0).clear)
+        # Another load on the landing still blocks it.
+        other = np.vstack((carried, [[4.0, 7.0, 0.5, 0, 0, 0, 1]]))
+        self.assertFalse(_observe_port(other, cases, (4, 7), 0.5, math.pi / 2, carried=0).clear)
+
     def test_landing_space_blocks_loose_cases_and_misaligned_pallets(self):
         """Keep the landing blocked until obstructing geometry actually departs."""
         cases = np.array([[4.5, 7, 0.7]])

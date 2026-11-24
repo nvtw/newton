@@ -18,6 +18,8 @@ from newton.examples.phoenx._bottling_io import _case_drives, _load_controller
 # ``putaway_s``; isaac_exec.py ``PalletPool``: shelf at (0, -60), z -5, 1.6 m
 # pitch, 20 columns). The plant runs that leg at the source's timing.
 _PUTAWAY_S = 120.0
+# The source dispatcher sends an idle truck home after this long (dispatcher.home_after_s).
+_HOME_AFTER_S = 20.0
 _SHELF_XY, _SHELF_Z, _SHELF_PITCH, _SHELF_COLUMNS, _SHELF_ROWS = (0.0, -60.0), -5.0, 1.6, 20, 4
 # m, the box above a drop-off that holds a wrapped load
 _LOAD_HALF, _LOAD_HEIGHT = wp.constant(0.8), wp.constant(2.6)
@@ -106,8 +108,17 @@ class _PortObservation:
     empty: bool
 
 
-def _observe_port(pallets, cases, xy, z, yaw):
-    """Identify a seated pallet and conservatively block occupied landing space."""
+def _observe_port(pallets, cases, xy, z, yaw, carried=None):
+    """Identify a seated pallet and conservatively block occupied landing space.
+
+    A truck lined up to set down its load already holds that pallet and its
+    cases over the landing space; ``carried`` excludes them.
+    """
+    if carried is not None:
+        load = pallets[carried, :3]
+        rides = (np.linalg.norm(cases[:, :2] - load[:2], axis=1) < 0.8) & (cases[:, 2] > load[2] - 0.05)
+        cases = cases[~rides]
+        pallets = np.delete(pallets, carried, axis=0)
     offset = pallets[:, :3] - np.array([*xy, z])
     near = (np.linalg.norm(offset[:, :2], axis=1) < 1.3) & (np.abs(offset[:, 2]) < 0.5)
     seated = (np.linalg.norm(offset[:, :2], axis=1) < 0.08) & (np.abs(offset[:, 2]) < 0.03)
@@ -150,7 +161,7 @@ class _Transfer:
     source: str
     destination: str
     pallet: int
-    phase: str = "to_pick"
+    phase: str = "go_source"
     record: dict = field(default_factory=dict)
 
 
@@ -166,6 +177,7 @@ class FleetController:
         self.planner = _load_controller(package + ".planner", root / "planner.py")
         source_model = _load_controller(package + ".model", root / "model.py")
         self.source = _load_controller(package + ".fleet_isaac", root / "fleet_isaac.py")
+        self.des = _load_controller(package + ".des", root / "des.py")
         prefix = "/Plant/Logistics/Fleet/"
         paths = {
             label[len(prefix) : -5]: label[:-5]
@@ -218,6 +230,9 @@ class FleetController:
         for truck, indices in zip(self.driver.trucks, self.q_indices, strict=True):
             truck.lift_cmd = float(initial[indices[2]])
         self.transport = transport
+        # The source executor reserves one drive segment at a time (isaac_exec.IsaacExecutor):
+        # truck -> (des.Plan, end-operation cells, log length at start, target node).
+        self.plans, self.segments, self.idle_since = {}, {}, {}
         self.missions = {}
         self.completed = []
         self.waiting = {}
@@ -253,44 +268,65 @@ class FleetController:
         port = name + "_A"
         return any(port in (mission.source, mission.destination) for mission in self.missions.values())
 
-    def _port_observation(self, name, poses):
+    def _port_observation(self, name, poses, carried=None):
         port = self.navigation.ports[name]
         return _observe_port(
-            poses[self.pallet_bodies], poses[self.transport.case_roots], port.xy, port.z, math.radians(port.yaw)
+            poses[self.pallet_bodies],
+            poses[self.transport.case_roots],
+            port.xy,
+            port.z,
+            math.radians(port.yaw),
+            carried,
         )
 
-    def _route(self, start, end, loaded):
-        if start == end:
-            return None
-        plan = self.navigation.plan(start, end, loaded=loaded)
-        if plan["n_map_hits"]:
-            raise RuntimeError(f"Forklift route {start} -> {end} intersects the plant")
-        return plan
+    def _plan(self, start, end, loaded):
+        key = (start, end, bool(loaded))
+        if key not in self.plans:
+            plan = self.des.Plan(self.navigation, self.traffic.fp, start, end, bool(loaded))
+            if plan.pl["n_map_hits"]:
+                raise RuntimeError(f"Forklift route {start} -> {end} intersects the plant")
+            self.plans[key] = plan
+        return self.plans[key]
 
-    def _queue_route(self, truck, target, loaded):
-        plan = self._route(truck.node, target, loaded)
+    def _operation_cells(self, name):
+        port = self.navigation.ports[name]
+        # The source sequencer can pull back before aligning an insertion.
+        outer = port.lineup_ref - max(self.source.PRE_D, self.source.M.PRE_INSERT) * port.u
+        return self.traffic.fp.line_cells(outer, port.ref_at_tips(port.pick_tips_s), port.truck_yaw, True)
+
+    def _start_segment(self, truck, target, loaded, operation):
+        """Reserve one drive segment and the fork operation at its end, as the source executor does."""
+        end = self._operation_cells(target) if operation else set()
+        plan = None if truck.node == target else self._plan(truck.node, target, loaded)
+        cells = end if plan is None else plan.cells | end
+        if not self.traffic.try_acquire(truck.name, cells, self.driver.t):
+            self.waiting[truck.name] = f"{truck.node}->{target}: traffic blocked"
+            return False
+        self.waiting.pop(truck.name, None)
+        self.segments[truck.name] = (plan, end, len(truck.log), target)
         if plan is not None:
-            truck.ops.extend(self.source.drive_ops(plan, loaded, f"{truck.node}->{target}"))
+            truck.ops.extend(self.source.drive_ops(plan.pl, loaded, f"{truck.node}->{target}"))
+        return True
 
-    def _mission_cells(self, truck, source, destination):
-        """Reserve the complete exchange and home route before entering an aisle."""
-        cells = set()
-        for start, end, loaded in (
-            (truck.node, source, False),
-            (source, destination, True),
-            (destination, self.homes[truck.name], False),
-        ):
-            plan = self._route(start, end, loaded)
-            if plan is not None:
-                for leg in plan["legs"]:
-                    for _, footprint in self.traffic.fp.leg_samples(leg, loaded):
-                        cells.update(footprint)
-        for name in (source, destination):
-            port = self.navigation.ports[name]
-            # The source sequencer can pull back before aligning an insertion.
-            outer = port.lineup_ref - max(self.source.PRE_D, self.source.M.PRE_INSERT) * port.u
-            cells.update(self.traffic.fp.line_cells(outer, port.ref_at_tips(port.pick_tips_s), port.truck_yaw, True))
-        return cells
+    def _release_along(self, truck):
+        """Give back the cells a driving truck has passed (isaac_exec._release_along)."""
+        plan, end, logged, _target = self.segments[truck.name]
+        op = truck.op
+        if plan is None or not isinstance(op, (self.source.Track, self.source.Leg)):
+            return
+        leg = sum(1 for entry in truck.log[logged:] if entry.get("op") == "leg")
+        if leg < len(plan.legs):
+            progress = float(op.s[min(op.idx, len(op.s) - 1)])
+            self.traffic.keep_only(truck.name, plan.needed_at(leg, progress) | end)
+
+    def _finish_segment(self, truck, sense):
+        _plan, end, _logged, target = self.segments.pop(truck.name)
+        truck.node = target
+        self._keep_footprint(truck, sense, end)
+
+    def _keep_footprint(self, truck, sense, extra=frozenset()):
+        cells = self.traffic.fp.cells(sense.rp, sense.yaw, truck.load is not None)
+        self.traffic.keep_only(truck.name, cells | set(extra))
 
     def notify_wrapper_ready(self, side, pallet_body, poses=None):
         """Release a physically seated pallet after wrapping and labelling finish.
@@ -356,15 +392,19 @@ class FleetController:
 
     def _dispatch(self, senses, poses):
         """Dispatch only observed physical stock; source timers/pools are never run."""
+        time = self.driver.t
+        blocking = {blocker for _since, blockers in self.traffic.waiting.values() for blocker in blockers}
         for truck, sense in zip(self.driver.trucks, senses, strict=True):
-            if truck.name not in self.missions:
-                cells = self.traffic.fp.cells(sense.rp, sense.yaw, truck.load is not None)
-                self.traffic.keep_only(truck.name, cells)
-                if self.traffic.hold(truck.name, cells):
-                    raise RuntimeError(f"Forklift {truck.name}: occupied traffic reservation")
-        for truck in self.driver.trucks:
-            if not truck.idle() or truck.name in self.missions:
+            if truck.name in self.missions:
+                self.idle_since.pop(truck.name, None)
                 continue
+            cells = self.traffic.fp.cells(sense.rp, sense.yaw, truck.load is not None)
+            self.traffic.keep_only(truck.name, cells)
+            if self.traffic.hold(truck.name, cells):
+                raise RuntimeError(f"Forklift {truck.name}: occupied traffic reservation")
+            if not truck.idle():
+                continue
+            idle_since = self.idle_since.setdefault(truck.name, time)
             for source, destination, pallet, empty in self._transfer_requests(truck.name):
                 mission = self._available_transfer(source, destination, poses, pallet=pallet, empty=empty)
                 if mission is None:
@@ -372,23 +412,30 @@ class FleetController:
                         f"{source}->{destination}: stock, landing or transfer reservation unavailable"
                     )
                     continue
-                cells = self._mission_cells(truck, source, destination)
-                if not self.traffic.try_acquire(truck.name, cells, self.driver.t):
-                    self.waiting[truck.name] = f"{source}->{destination}: traffic blocked"
-                    continue
                 self.missions[truck.name] = mission
                 self.wrapper_ready.pop(source, None)
                 self.waiting.pop(truck.name, None)
-                self._queue_route(truck, source, False)
                 break
+            else:
+                # The source dispatcher sends an idle truck home at once when it stands
+                # in a waiting truck's way, else after home_after_s.
+                home = self.homes[truck.name]
+                if truck.node != home and (truck.name in blocking or time - idle_since >= _HOME_AFTER_S):
+                    self.missions[truck.name] = _Transfer(home, home, -1, phase="go_home")
 
     def _advance_missions(self, poses, senses):
         for truck, sense in zip(self.driver.trucks, senses, strict=True):
             mission = self.missions.get(truck.name)
+            if truck.name in self.segments and not truck.idle():
+                self._release_along(truck)
             if mission is None or not truck.idle():
                 continue
-            if mission.phase == "to_pick":
-                truck.node = mission.source
+            if mission.phase == "go_source":
+                if self._start_segment(truck, mission.source, False, True):
+                    mission.phase = "to_pick"
+            elif mission.phase == "to_pick":
+                if truck.name in self.segments:
+                    self._finish_segment(truck, sense)
                 observed = self._port_observation(mission.source, poses)
                 if observed.pallet != mission.pallet:
                     self.waiting[truck.name] = f"{mission.source}: reserved pallet is no longer seated"
@@ -412,11 +459,15 @@ class FleetController:
                     or relative["tilt_deg"] > 3.0
                 ):
                     raise RuntimeError(f"Forklift {truck.name}: pallet is not supported after pickup withdrawal")
-                mission.phase = "to_place"
-                self._queue_route(truck, mission.destination, True)
+                self._keep_footprint(truck, sense)
+                mission.phase = "go_destination"
+            elif mission.phase == "go_destination":
+                if self._start_segment(truck, mission.destination, True, True):
+                    mission.phase = "to_place"
             elif mission.phase == "to_place":
-                truck.node = mission.destination
-                if not self._port_observation(mission.destination, poses).clear:
+                if truck.name in self.segments:
+                    self._finish_segment(truck, sense)
+                if not self._port_observation(mission.destination, poses, carried=truck.load).clear:
                     self.waiting[truck.name] = f"{mission.destination}: landing space occupied"
                     continue
                 mission.record = {}
@@ -435,12 +486,32 @@ class FleetController:
                 )
                 if mission.destination.startswith("dropoff_"):
                     self.putaways.append((self.driver.t + _PUTAWAY_S, mission.destination))
-                mission.phase = "home"
-                self._queue_route(truck, self.homes[truck.name], False)
+                self._keep_footprint(truck, sense)
+                mission.phase = "go_home"
+            elif mission.phase == "go_home":
+                if self._start_segment(truck, self.homes[truck.name], False, False):
+                    mission.phase = "home"
             elif mission.phase == "home":
-                truck.node = self.homes[truck.name]
+                self._finish_segment(truck, sense)
                 del self.missions[truck.name]
                 self.waiting.pop(truck.name, None)
+        self._resolve_deadlock()
+
+    def _resolve_deadlock(self):
+        """Break a wait-for cycle: a truck in it that carries nothing gives its task back (dispatcher._resolve)."""
+        cycle = self.traffic.cycle() if self.traffic.waiting else None
+        if not cycle:
+            return
+        for name in cycle:
+            mission = self.missions.get(name)
+            if mission is None or mission.phase != "go_source" or self.trucks[name].load is not None:
+                continue
+            if mission.source in self.navigation.ports and mission.source.startswith("WL_"):
+                self.wrapper_ready[mission.source] = mission.pallet
+            del self.missions[name]
+            self.traffic.waiting.pop(name, None)
+            self.waiting[name] = "yielded a deadlocked task"
+            return
 
     def _put_away(self, time):
         """Queue the source's put-away of the next due wrapped pallet from its drop-off into the rack shelf."""
