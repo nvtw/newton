@@ -5,7 +5,8 @@
 
 Run `uv run scripts/benchmark_phoenx_bottling_plant.py` with the local plant
 assets installed. The default run uses headless OptiX and advances 330 seconds
-of simulation. Use `--window START STOP` to select frame intervals and
+of simulation. Use `--window START STOP` to select frame intervals (the run
+then stops after the last window unless `--num-frames` is given) and
 `--timing-output FILE` to save the timings and final controller report.
 Each window records contact and production counts at both ends so runs can
 be compared at the same factory workload.
@@ -36,8 +37,12 @@ def _workload(example):
 
 def main():
     parser = Example.create_parser()
-    parser.set_defaults(viewer="optix", headless=True, num_frames=19_800)
+    parser.set_defaults(viewer="optix", headless=True, num_frames=None)
     parser.add_argument("--window", type=int, nargs=2, action="append", metavar=("START", "STOP"))
+    # Simulate only up to the last requested window; the full run is 330 s of factory time.
+    requested, _ = parser.parse_known_args()
+    if requested.num_frames is None:
+        parser.set_defaults(num_frames=max(stop for _, stop in requested.window) if requested.window else 19_800)
     viewer, args = newton.examples.init(parser)
     windows = args.window or [(600, 1800), (6600, 7800), (13_200, 14_400)]
     if any(start < 0 or start >= stop or stop > args.num_frames for start, stop in windows):
