@@ -365,8 +365,6 @@ class Example:
                 direct_contact_mask=_fleet_direct_contact_mask(self.model.joint_label, exact),
                 velocity_iterations=1,
                 enable_body_pair_grouping=True,
-                parallel_contact_prepare=self.model.device.is_cuda and not mass_splitting,
-                island_parallel_iterations=self.model.device.is_cuda and not mass_splitting,
                 mass_splitting=mass_splitting,
                 mass_splitting_overflow_only=mass_splitting,
                 max_colored_partitions=args.max_colored_partitions,

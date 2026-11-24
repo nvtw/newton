@@ -219,7 +219,6 @@ class Example:
             substeps=args.substeps,
             solver_iterations=args.iterations,
             velocity_iterations=1,
-            parallel_contact_prepare=self.model.device.is_cuda,
             # Exact mechanism contact responses keep the idle machine at rest;
             # color groups are about twice as fast but let it creep slowly.
             contact_chunk_size=64 if args.fast_contacts else 0,

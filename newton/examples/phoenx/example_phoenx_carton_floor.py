@@ -184,8 +184,6 @@ class Example:
             contact_hertz=80,
             enable_body_pair_grouping=True,
             contact_chunk_size=64,
-            parallel_contact_prepare=self.model.device.is_cuda,
-            island_parallel_iterations=self.model.device.is_cuda,
             sleeping_velocity_threshold=0.01,
             sleeping_frames_required=30 * self.substeps,
         )

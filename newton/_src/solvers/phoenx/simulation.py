@@ -449,8 +449,8 @@ class PhoenXWorld:
         sleeping_frames_required: int = 30,
         sleeping_motion_threshold: float = 0.0,
         prepare_refresh_stride: int | str = "auto",
-        parallel_contact_prepare: bool = False,
-        island_parallel_iterations: bool = False,
+        parallel_contact_prepare: bool | None = None,
+        island_parallel_iterations: bool | None = None,
         contact_chunk_size: int = 0,
         contact_friction_model: str = "point",
         combine_direct_prepare_projection: bool = False,
@@ -904,43 +904,40 @@ class PhoenXWorld:
                 "mass splitting without packed contacts, deformables, sleeping, "
                 "symmetric sweeps, or unrolled mass splitting; sor_boost must be 1.0"
             )
-        self.parallel_contact_prepare = bool(parallel_contact_prepare)
-        self.island_parallel_iterations = bool(island_parallel_iterations)
-        if island_parallel_iterations and (
-            step_layout != "single_world"
-            or not self.device.is_cuda
-            or self.num_particles
-            or self.num_cloth_triangles
-            or self.num_cloth_bending
-            or self.num_soft_tetrahedra
-            or self.num_soft_hexahedra
-            or contact_friction_model != "point"
-            or colored_contact_headers
-            or colored_contact_rows
-            or mass_splitting
-            or symmetric_color_sweep
-        ):
+        # Both schedules are pure performance choices: ``None`` enables them
+        # wherever they apply, ``True`` insists and reports why one cannot.
+        rigid_single_world = (
+            step_layout == "single_world"
+            and self.device.is_cuda
+            and not (
+                self.num_particles
+                or self.num_cloth_triangles
+                or self.num_cloth_bending
+                or self.num_soft_tetrahedra
+                or self.num_soft_hexahedra
+                or colored_contact_headers
+                or colored_contact_rows
+            )
+            and contact_friction_model == "point"
+        )
+        island_eligible = rigid_single_world and not mass_splitting and not symmetric_color_sweep
+        prepare_eligible = rigid_single_world and not mass_splitting_unrolled
+        if island_parallel_iterations is None:
+            island_parallel_iterations = island_eligible
+        elif island_parallel_iterations and not island_eligible:
             raise ValueError(
                 "island_parallel_iterations requires CUDA single-world forward rigid point-contact sweeps "
                 "without packed rows, mass splitting, or deformables"
             )
-        if self.parallel_contact_prepare and (
-            step_layout != "single_world"
-            or not self.device.is_cuda
-            or self.num_particles
-            or self.num_cloth_triangles
-            or self.num_cloth_bending
-            or self.num_soft_tetrahedra
-            or self.num_soft_hexahedra
-            or colored_contact_headers
-            or colored_contact_rows
-            or contact_friction_model != "point"
-            or mass_splitting_unrolled
-        ):
+        if parallel_contact_prepare is None:
+            parallel_contact_prepare = prepare_eligible
+        elif parallel_contact_prepare and not prepare_eligible:
             raise ValueError(
                 "parallel_contact_prepare requires CUDA single-world rigid point contacts "
                 "without packed rows, deformables, or unrolled mass splitting"
             )
+        self.parallel_contact_prepare = bool(parallel_contact_prepare)
+        self.island_parallel_iterations = bool(island_parallel_iterations)
 
         if self.prepare_refresh_stride != 1 and cached_prepare_unsupported:
             raise NotImplementedError(
