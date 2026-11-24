@@ -5227,7 +5227,10 @@ class PhoenXWorld:
             response.compute(self._contact_container)
         self._direct_contact_response_current = False
         iterations = self.solver_iterations if use_bias else self._active_velocity_iterations
-        if iterations > 0:
+        if iterations <= 0:
+            return
+
+        def sweep() -> None:
             if use_bias and direct is not None:
                 direct.compute_bias_velocity()
                 response.apply_bias_velocity(-1.0)
@@ -5241,6 +5244,18 @@ class PhoenXWorld:
             )
             if use_bias and direct is not None:
                 response.apply_bias_velocity(1.0)
+
+        sweep()
+        if use_bias and direct is not None and direct.has_bounded_drives:
+            # Owned contacts load their mechanisms only here, so test the motor
+            # caps against that load. A cap that changes removes or adds motor
+            # impulse the contacts already answered: sweep them again against the
+            # corrected motor before the substep integrates.
+            def resweep() -> None:
+                response.compute(self._contact_container)
+                sweep()
+
+            direct.resolve_bounded_drives(1.0 / self.substep_dt, use_bias=True, after_change=resweep)
 
     def _solve_maximal_articulated_contacts(self, *, use_bias: bool, refresh_mobility: bool) -> None:
         """Run one exact articulation-response contact correction sweep."""

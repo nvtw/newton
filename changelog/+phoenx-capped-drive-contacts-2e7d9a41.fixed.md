@@ -1,0 +1,1 @@
+Test PhoenX motor effort caps against the load of exactly solved contacts and settle those contacts on the capped motor, so a force-limited drive pressing a light link into a wall no longer launches it.

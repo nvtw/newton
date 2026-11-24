@@ -3041,15 +3041,18 @@ class DirectEqualitySystem:
             device=self.model.device,
         )
 
-    def resolve_bounded_drives(self, idt: wp.float32, *, use_bias: bool) -> None:
-        """Activate finite effort bounds and correct the direct solution."""
+    def resolve_bounded_drives(self, idt: wp.float32, *, use_bias: bool, after_change=None) -> None:
+        """Activate finite effort bounds and correct the direct solution.
+
+        ``after_change`` runs after a correction, only when a bound changed.
+        """
         if not self.enabled or not self.has_bounded_drives:
             return
         # A newly clamped drive can expose another bound in a coupled
         # mechanism. Nested conditionals keep the common unsaturated path to
         # one row scan and only perform extra scans after an actual refactor.
         self._find_new_bounds(idt, self.drive_active_set_flag)
-        self._correct_new_bounds(idt, use_bias=use_bias)
+        self._correct_new_bounds(idt, use_bias=use_bias, after_change=after_change)
 
     def _find_new_bounds(self, idt: wp.float32, any_flag: wp.array) -> None:
         """Scan bounded drive rows; ``drive_active_set_flag`` and ``any_flag`` mark a change.
@@ -3099,7 +3102,7 @@ class DirectEqualitySystem:
             device=self.model.device,
         )
 
-    def _correct_new_bounds(self, idt: wp.float32, *, use_bias: bool) -> None:
+    def _correct_new_bounds(self, idt: wp.float32, *, use_bias: bool, after_change=None) -> None:
         """Refactor and correct after :meth:`_find_new_bounds` flagged a change."""
 
         def activate_and_correct(remaining_passes: int) -> None:
@@ -3114,11 +3117,12 @@ class DirectEqualitySystem:
                     on_false=None,
                 )
 
-        wp.capture_if(
-            self.drive_active_set_flag,
-            on_true=lambda: activate_and_correct(3),
-            on_false=None,
-        )
+        def correct() -> None:
+            activate_and_correct(3)
+            if after_change is not None:
+                after_change()
+
+        wp.capture_if(self.drive_active_set_flag, on_true=correct, on_false=None)
 
     def _refactor_changed_bounds(self, idt: wp.float32) -> None:
         """Refactor after a bound activation, limited to the changed mechanisms.

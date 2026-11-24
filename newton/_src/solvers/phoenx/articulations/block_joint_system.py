@@ -666,10 +666,10 @@ class BlockJointSystem(DirectEqualitySystem):
             block_dim=32 if self.model.device.is_cuda else 256,
         )
 
-    def _correct_new_bounds(self, idt, *, use_bias):
+    def _correct_new_bounds(self, idt, *, use_bias, after_change=None):
         self._resolving_bounds = True
         try:
-            super()._correct_new_bounds(idt, use_bias=use_bias)
+            super()._correct_new_bounds(idt, use_bias=use_bias, after_change=after_change)
         finally:
             self._resolving_bounds = False
 
