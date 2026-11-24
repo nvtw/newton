@@ -2241,7 +2241,6 @@ class ConfigEnvG1PhoenX:
     multi_world_scheduler: str = g1_recipe.MULTI_WORLD_SCHEDULER
     prepare_refresh_stride: int | str = g1_recipe.PREPARE_REFRESH_STRIDE
     joint_mode: str = "maximal_direct"
-    reduced_articulation_path: str = "reference"
     reduced_backend: str = "auto"
 
 
@@ -2553,7 +2552,6 @@ class EnvG1PhoenX:
             multi_world_scheduler=self.config.multi_world_scheduler,
             prepare_refresh_stride=self.config.prepare_refresh_stride,
             joint_mode=str(self.config.joint_mode),
-            reduced_articulation_path=str(self.config.reduced_articulation_path),
             reduced_backend=str(self.config.reduced_backend),
         )
 

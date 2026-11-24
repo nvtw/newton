@@ -43,7 +43,6 @@ def benchmark_phoenx(
     solver_iterations: int,
     velocity_iterations: int,
     joint_mode: str,
-    reduced_articulation_path: str,
     actuation_model: str,
     parse_meshes: bool,
     auto_reset: bool,
@@ -65,7 +64,6 @@ def benchmark_phoenx(
         solver_iterations=int(solver_iterations),
         velocity_iterations=int(velocity_iterations),
         joint_mode=str(joint_mode),
-        reduced_articulation_path=str(reduced_articulation_path),
         actuation_model=str(actuation_model),
         parse_meshes=bool(parse_meshes),
         auto_reset=bool(auto_reset),
@@ -102,7 +100,6 @@ def benchmark_phoenx(
         "solver_iterations": int(solver_iterations),
         "velocity_iterations": int(velocity_iterations),
         "joint_mode": str(joint_mode),
-        "reduced_articulation_path": str(reduced_articulation_path),
         "actuation_model": str(actuation_model),
         "parse_meshes": bool(parse_meshes),
         "auto_reset": bool(auto_reset),
@@ -175,12 +172,6 @@ def _parse_args() -> argparse.Namespace:
         help="PhoenX articulation mode used by the environment-step benchmark.",
     )
     parser.add_argument(
-        "--reduced-articulation-path",
-        choices=("reference", "persistent"),
-        default=g1_recipe.REDUCED_ARTICULATION_PATH,
-        help="Reduced articulation execution path used by the environment-step benchmark.",
-    )
-    parser.add_argument(
         "--actuation-model",
         choices=("explicit_torque", "constraint_drive"),
         default=g1_recipe.ACTUATION_MODEL,
@@ -209,7 +200,6 @@ def main() -> int:
         solver_iterations=args.solver_iterations,
         velocity_iterations=args.velocity_iterations,
         joint_mode=args.joint_mode,
-        reduced_articulation_path=args.reduced_articulation_path,
         actuation_model=args.actuation_model,
         parse_meshes=args.parse_meshes,
         auto_reset=not bool(args.no_auto_reset),

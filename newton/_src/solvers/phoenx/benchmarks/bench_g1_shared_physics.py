@@ -78,11 +78,6 @@ def main() -> int:
         default="reduced",
     )
     parser.add_argument(
-        "--reduced-articulation-path",
-        choices=("reference", "persistent"),
-        default="reference",
-    )
-    parser.add_argument(
         "--cuda-profiler-api",
         action="store_true",
         help="Bracket only measured graph replays with the CUDA profiler API.",
@@ -134,7 +129,6 @@ def main() -> int:
     solver = newton.solvers.SolverPhoenX(
         model,
         joint_mode=args.joint_mode,
-        reduced_articulation_path=args.reduced_articulation_path,
         contact_friction_model=args.contact_friction_model,
         substeps=1,
         solver_iterations=args.solver_iterations,
@@ -213,7 +207,6 @@ def main() -> int:
         json.dumps(
             {
                 "joint_mode": args.joint_mode,
-                "reduced_articulation_path": args.reduced_articulation_path,
                 "contact_friction_model": args.contact_friction_model,
                 "active_contact_count": contact_count,
                 "articulation_contact_points_max": reduced_contact_points_max,

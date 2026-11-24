@@ -4332,70 +4332,6 @@ class TestReducedArticulation(unittest.TestCase):
             atol=2.0e-6,
         )
 
-    def test_persistent_relax_publish_matches_reference_under_graph_capture(self):
-        device = wp.get_preferred_device()
-        if not device.is_cuda:
-            self.skipTest("reduced articulation tests require CUDA graph capture")
-
-        model = _make_contact_overflow_model(device, contact_count=2 * _POINTS_PER_PAGE + 8)
-        state_reference = model.state()
-        state_persistent = model.state()
-        output_reference = model.state()
-        output_persistent = model.state()
-        qd = state_reference.joint_qd.numpy()
-        qd[2] = -0.2
-        for state in (state_reference, state_persistent):
-            state.joint_qd.assign(qd)
-            newton.eval_fk(model, state.joint_q, state.joint_qd, state)
-
-        reference = newton.solvers.SolverPhoenX(
-            model,
-            reduced_backend="aba",
-            enable_body_pair_grouping=False,  # keep one contact point per sphere
-            joint_mode="reduced",
-            reduced_articulation_path="reference",
-            substeps=2,
-            solver_iterations=4,
-            velocity_iterations=1,
-        )
-        persistent = newton.solvers.SolverPhoenX(
-            model,
-            reduced_backend="aba",
-            enable_body_pair_grouping=False,  # keep one contact point per sphere
-            joint_mode="reduced",
-            reduced_articulation_path="persistent",
-            substeps=2,
-            solver_iterations=4,
-            velocity_iterations=1,
-        )
-        contacts_reference = model.contacts()
-        contacts_persistent = model.contacts()
-        dt = 1.0 / 1000.0
-
-        with wp.ScopedCapture(device=device) as capture:
-            model.collide(state_reference, contacts_reference)
-            reference.step(state_reference, output_reference, None, contacts_reference, dt)
-            model.collide(state_persistent, contacts_persistent)
-            persistent.step(state_persistent, output_persistent, None, contacts_persistent, dt)
-        wp.capture_launch(capture.graph)
-
-        persistent_block = persistent._reduced_articulation.contact_block_system
-        self.assertGreater(int(persistent_block.max_page_count.numpy()[0]), _CACHED_PAGE_COUNT)
-        for persistent_value, reference_value in (
-            (output_persistent.joint_q, output_reference.joint_q),
-            (output_persistent.joint_qd, output_reference.joint_qd),
-            (output_persistent.body_q, output_reference.body_q),
-            (output_persistent.body_qd, output_reference.body_qd),
-        ):
-            np.testing.assert_allclose(persistent_value.numpy(), reference_value.numpy(), rtol=2.0e-6, atol=2.0e-6)
-        for field in ("impulses", "lambdas", "derived"):
-            np.testing.assert_allclose(
-                getattr(persistent.world._contact_container, field).numpy(),
-                getattr(reference.world._contact_container, field).numpy(),
-                rtol=2.0e-6,
-                atol=2.0e-6,
-            )
-
     def test_reduced_contact_friction_model_is_explicit(self):
         device = wp.get_preferred_device()
         if not device.is_cuda:
@@ -4409,13 +4345,6 @@ class TestReducedArticulation(unittest.TestCase):
         self.assertTrue(patch._reduced_articulation.contact_block_system.patch_rows)
         self.assertEqual(point.world.contact_friction_model, "point")
         self.assertEqual(patch.world.contact_friction_model, "point")
-        with self.assertRaisesRegex(ValueError, "persistent reduced articulation path"):
-            newton.solvers.SolverPhoenX(
-                model,
-                joint_mode="reduced",
-                contact_friction_model="patch",
-                reduced_articulation_path="persistent",
-            )
 
     def test_velocity_only_relax_publish_matches_full_publish_under_graph_capture(self):
         device = wp.get_preferred_device()
@@ -5338,11 +5267,11 @@ class TestReducedVelocityProductStep(unittest.TestCase):
                 )
 
     def test_midpoint_step_matches_across_execution_paths(self):
-        # Serial kernels, the fused warp advance+publish, and the persistent path
-        # must apply the same midpoint step and publish the same new pose.
+        # Serial kernels and the fused warp advance+publish must apply the same
+        # midpoint step and publish the same new pose.
         model = _make_capsule_ball_chain(self.device, 4, tilt=0.2, qd=((3, 0.4), (5, 2.0), (12, 25.0), (13, 8.0)))
         results = []
-        for path in ("serial", "reference", "persistent"):
+        for path in ("serial", "reference"):
             state0, state1 = self._initial_states(model)
             solver = newton.solvers.SolverPhoenX(
                 model,
@@ -5350,7 +5279,6 @@ class TestReducedVelocityProductStep(unittest.TestCase):
                 joint_mode="reduced",
                 substeps=4,
                 solver_iterations=4,
-                reduced_articulation_path="persistent" if path == "persistent" else "reference",
             )
             if path == "serial":
                 system = solver._reduced_articulation.system
@@ -5362,10 +5290,8 @@ class TestReducedVelocityProductStep(unittest.TestCase):
             wp.capture_launch(capture.graph)
             self.assertEqual(int(solver._reduced_articulation.system.midpoint.flag.numpy()[0]), 1)
             results.append((state1.joint_q.numpy(), state1.joint_qd.numpy(), state1.body_q.numpy()))
-        # The warp paths share every kernel. The serial kernels differ only in rounding,
-        # which the 25 rad/s tip amplifies to about 1e-5 of its rate within a frame.
-        for reference, value in zip(results[1], results[2], strict=True):
-            np.testing.assert_array_equal(value, reference)
+        # The serial kernels differ only in rounding, which the 25 rad/s tip
+        # amplifies to about 1e-5 of its rate within a frame.
         for reference, value in zip(results[1], results[0], strict=True):
             np.testing.assert_allclose(value, reference, rtol=1.0e-4, atol=1.0e-3)
 

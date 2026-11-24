@@ -150,7 +150,6 @@ def _build_handle(
     substeps: int,
     solver_iterations: int,
     velocity_iterations: int,
-    reduced_articulation_path: str,
     frame_dt: float,
     device: wp.context.Device,
 ) -> tuple[SceneHandle, list[newton.State]]:
@@ -164,7 +163,6 @@ def _build_handle(
         solver = newton.solvers.SolverPhoenX(
             model,
             joint_mode="reduced",
-            reduced_articulation_path=reduced_articulation_path,
             substeps=substeps,
             solver_iterations=solver_iterations,
             velocity_iterations=velocity_iterations,
@@ -222,7 +220,6 @@ def main() -> None:
     parser.add_argument("--substeps", type=int, default=1)
     parser.add_argument("--solver-iterations", type=int, default=4)
     parser.add_argument("--velocity-iterations", type=int, default=1)
-    parser.add_argument("--reduced-articulation-path", choices=("reference", "persistent"), default="reference")
     parser.add_argument("--frame-dt", type=float, default=1.0 / 200.0)
     parser.add_argument("--warmup-frames", type=int, default=16)
     parser.add_argument("--measure-frames", type=int, default=64)
@@ -245,7 +242,6 @@ def main() -> None:
                         args.substeps,
                         args.solver_iterations,
                         args.velocity_iterations,
-                        args.reduced_articulation_path,
                         args.frame_dt,
                         device,
                     )
@@ -256,7 +252,6 @@ def main() -> None:
                     )
                     result["robot_count"] = robot_count
                     result["layout"] = layout
-                    result["reduced_articulation_path"] = args.reduced_articulation_path
                     joint_q = state_box[0].joint_q.numpy()
                     joint_qd = state_box[0].joint_qd.numpy()
                     body_q = state_box[0].body_q.numpy()

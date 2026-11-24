@@ -3636,7 +3636,6 @@ class ReducedContactBlockSystem:
         row_tile_width: int,
         max_depth: int,
         use_depth_warp: bool,
-        allow_patch_rows: bool = True,
         use_patch_rows: bool = False,
         external_rigid_rows: bool = False,
     ):
@@ -3685,7 +3684,7 @@ class ReducedContactBlockSystem:
         patch_rows_requested = bool(use_patch_rows)
         if patch_rows_override is not None:
             patch_rows_requested = patch_rows_override
-        self.patch_rows = allow_patch_rows and self.device.is_cuda and patch_rows_requested
+        self.patch_rows = self.device.is_cuda and patch_rows_requested
         # The fused substep also solves patch rows between two links; the patch tile does not.
         self.packed_internal_contacts = not self.patch_rows or self._external_rigid_rows
         if self._external_rigid_rows:
@@ -3722,8 +3721,6 @@ class ReducedContactBlockSystem:
             _make_build_packed_patch_rows_warp_kernel() if self.patch_rows and use_depth_warp else None
         )
         self.transpose_kernel = _transpose_generalized_contact_response_kernel
-        self.biased_page_launcher = None
-        self.relax_page_launcher = None
         # Dense-backend row builder, see DenseTreeOperator.build_contact_rows.
         self.dense_rows = None
         self.requires_impulse_response = not (
@@ -3777,7 +3774,6 @@ class ReducedContactBlockSystem:
         self.enabled = wp.zeros(articulation_count, dtype=wp.int32, device=self.device)
         self.total_point_count = wp.zeros(articulation_count, dtype=wp.int32, device=self.device)
         self.max_page_count = wp.zeros(1, dtype=wp.int32, device=self.device)
-        self.biased_advanced = wp.zeros(1, dtype=wp.int32, device=self.device)
         self.multi_page_active = wp.zeros(1, dtype=wp.int32, device=self.device)
         self.overflow_page_active = wp.zeros(1, dtype=wp.int32, device=self.device)
         self.transpose_active = wp.zeros(1, dtype=wp.int32, device=self.device)
@@ -4343,7 +4339,6 @@ class ReducedContactBlockSystem:
         prepare: bool,
     ) -> None:
         if prepare:
-            self.biased_advanced.zero_()
             self.deferred_active.zero_()
             self.max_page_count.zero_()
             self.multi_page_active.zero_()
@@ -4375,11 +4370,9 @@ class ReducedContactBlockSystem:
             assert self.packed_response is not None
             assert self.packed_previous_row_body is not None
             assert self.packed_previous_row_body_pair is not None
-            fused_bias = use_bias and prepare and self.biased_page_launcher is not None
-            fused_relax = not use_bias and self.relax_page_launcher is not None
             # Cached point rows are consumed immediately, so refresh them in the solve block.
             fused_point_refresh = not prepare and not gathered and not self.patch_rows
-            if not gathered and not fused_relax and not fused_point_refresh:
+            if not gathered and not fused_point_refresh:
                 finalize_kernel = (
                     _finalize_reduced_contact_patch_rows_kernel
                     if self.patch_rows
@@ -4487,12 +4480,6 @@ class ReducedContactBlockSystem:
             if build_rows and self.dense_rows is not None:
                 # Dense trees overwrite the articulated-body rows of a mixed fleet.
                 self.dense_rows.build_contact_rows(self, bodies, cc, prepare)
-            if fused_bias:
-                self.biased_page_launcher(columns, bodies, idt, sor_boost, cc, iterations)
-                return
-            if fused_relax:
-                self.relax_page_launcher(columns, bodies, idt, sor_boost, cc, iterations)
-                return
             if self.patch_rows:
                 wp.launch_tiled(
                     self.solve_kernel[build_rows],

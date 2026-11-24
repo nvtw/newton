@@ -407,7 +407,6 @@ class SolverPhoenX(SolverBase):
         contact_chunk_size: int = 0,
         enable_body_pair_grouping: bool | None = None,
         joint_mode: str = "maximal_direct",
-        reduced_articulation_path: str = "reference",
         reduced_backend: str = "auto",
         reduced_articulations: Sequence[int] | Sequence[str] | None = None,
         direct_joint_mask: np.ndarray | None = None,
@@ -481,7 +480,7 @@ class SolverPhoenX(SolverBase):
                 point normal but couples friction into one central 2D row for
                 each convex shape pair. Raw meshes, heightfields, and compound
                 body-pair columns retain point friction. Patch friction supports
-                maximal and reference reduced articulations.
+                maximal and reduced articulations.
             prepare_refresh_stride: Refresh cached rigid contact/joint
                 prepare data every N substeps. ``"auto"`` chooses a
                 conservative stride from the substep count and falls back
@@ -651,9 +650,6 @@ class SolverPhoenX(SolverBase):
                 or ``maximal_pgs`` and ``direct_joint_mask``. Unselected mechanisms keep
                 regular contact iteration. ``None`` preserves the mode's default policy.
                 This is a runtime solver policy, not an authored physical property.
-            reduced_articulation_path: ``"reference"`` uses the established
-                reduced solver. Experimental ``"persistent"`` enables
-                topology-proven cross-phase articulation fusion on CUDA.
             reduced_articulations: Articulations that ``joint_mode="reduced"`` solves in
                 reduced coordinates, as articulation indices or shell-style patterns
                 on :attr:`~newton.Model.articulation_label`. The others become rigid
@@ -665,7 +661,7 @@ class SolverPhoenX(SolverBase):
                 articulation's generalized mass with the composite-rigid-body
                 algorithm and factors it on one warp without fill-in; trees with
                 more than 64 DOFs or joints keep the articulated-body path. It
-                requires CUDA, the ``"reference"`` path, and at most 32 joints per
+                requires CUDA and at most 32 joints per
                 tree depth. Trees whose contacts all touch static or kinematic
                 geometry then run each substep fused in two kernels per tree,
                 about twice the throughput of ``"aba"`` on humanoid fleets.
@@ -847,15 +843,6 @@ class SolverPhoenX(SolverBase):
             raise ValueError(
                 "contact_chunk_size with joints requires joint_mode='maximal_pgs' or grouped maximal-direct contacts"
             )
-        if reduced_articulation_path not in ("reference", "persistent"):
-            raise ValueError(
-                f"reduced_articulation_path must be 'reference' or 'persistent', got {reduced_articulation_path!r}"
-            )
-        if (
-            articulation_mode in ("maximal", "maximal_projected", "maximal_articulated")
-            and reduced_articulation_path != "reference"
-        ):
-            raise ValueError("reduced_articulation_path requires joint_mode='hybrid' or 'reduced'")
         valid_combine_modes = ("average", "min", "multiply", "max")
         if friction_combine_mode not in valid_combine_modes:
             raise ValueError(
@@ -866,12 +853,6 @@ class SolverPhoenX(SolverBase):
             raise ValueError(f"contact_friction_model must be 'point' or 'patch', got {contact_friction_model!r}")
         if contact_friction_model == "patch" and articulation_mode not in ("maximal", "reduced"):
             raise ValueError("contact_friction_model='patch' requires a maximal or reduced joint_mode")
-        if (
-            contact_friction_model == "patch"
-            and articulation_mode == "reduced"
-            and reduced_articulation_path == "persistent"
-        ):
-            raise ValueError("contact_friction_model='patch' does not support the persistent reduced articulation path")
         if contact_friction_model == "patch" and mass_splitting:
             raise ValueError("contact_friction_model='patch' currently requires mass_splitting=False")
         if articulation_mode in ("maximal_projected", "maximal_articulated", "hybrid") and mass_splitting:
@@ -894,7 +875,6 @@ class SolverPhoenX(SolverBase):
             )
         if reduced_backend not in ("aba", "dense", "auto"):
             raise ValueError(f"reduced_backend must be 'aba', 'dense', or 'auto', got {reduced_backend!r}")
-        self.reduced_articulation_path = reduced_articulation_path
         self.reduced_backend = reduced_backend
         self._reduced_articulation_selection = _select_articulations(model, reduced_articulations)
         self._reduced_articulation: ReducedPhoenXArticulation | None = None
@@ -1384,7 +1364,6 @@ class SolverPhoenX(SolverBase):
                         if external_rigid_rows
                         else reduced_model,
                         self.bodies,
-                        execution_path=self.reduced_articulation_path,
                         contact_friction_model=contact_friction_model,
                         backend=backend,
                         external_rigid_rows=external_rigid_rows,
@@ -1392,7 +1371,7 @@ class SolverPhoenX(SolverBase):
 
                 def build_fused() -> ReducedPhoenXArticulation | None:
                     """Build the dense trees with a fused substep, which also solves free-body contacts."""
-                    if not self.device.is_cuda or self.reduced_articulation_path != "reference":
+                    if not self.device.is_cuda:
                         return None
                     try:
                         candidate = build_reduced("dense", external_rigid_rows=True)
@@ -1586,13 +1565,12 @@ class SolverPhoenX(SolverBase):
                 solver_scheme != "soft"
                 or articulation_mode not in ("maximal", "maximal_projected", "hybrid", "reduced")
                 or (articulation_mode == "reduced" and contact_friction_model != "point")
-                or reduced_articulation_path != "reference"
                 or colored_contact_rows
                 or colored_contact_headers
             ):
                 raise ValueError(
                     "Surface-velocity contacts require the soft solve with maximal, projected, hybrid or "
-                    "reduced joints, the reference reduced path, point friction for reduced trees, and "
+                    "reduced joints, point friction for reduced trees, and "
                     "no colored contact rows or headers"
                 )
 

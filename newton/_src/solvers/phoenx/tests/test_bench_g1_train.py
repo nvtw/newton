@@ -46,7 +46,6 @@ class TestBenchG1Train(unittest.TestCase):
         self.assertEqual(args.solver_iterations, g1_recipe.SOLVER_ITERATIONS)
         self.assertEqual(args.velocity_iterations, g1_recipe.VELOCITY_ITERATIONS)
         self.assertEqual(args.joint_mode, g1_recipe.JOINT_MODE)
-        self.assertEqual(args.reduced_articulation_path, g1_recipe.REDUCED_ARTICULATION_PATH)
         self.assertEqual(args.actuation_model, g1_recipe.ACTUATION_MODEL)
         self.assertEqual(args.contact_geometry, g1_recipe.CONTACT_GEOMETRY)
 
@@ -93,7 +92,6 @@ class TestBenchG1Train(unittest.TestCase):
         config = _g1_env_config(args)
 
         self.assertEqual(config.joint_mode, g1_recipe.JOINT_MODE)
-        self.assertEqual(config.reduced_articulation_path, g1_recipe.REDUCED_ARTICULATION_PATH)
         self.assertEqual(config.contact_geometry, g1_recipe.CONTACT_GEOMETRY)
         self.assertEqual(config.contact_friction_model, g1_recipe.CONTACT_FRICTION_MODEL)
         self.assertEqual(config.actuation_model, g1_recipe.ACTUATION_MODEL)
@@ -205,7 +203,6 @@ class TestBenchG1TrainAnalyticalDynamics(unittest.TestCase):
             solver_iterations=g1_recipe.SOLVER_ITERATIONS,
             velocity_iterations=g1_recipe.VELOCITY_ITERATIONS,
             joint_mode=g1_recipe.JOINT_MODE,
-            reduced_articulation_path=g1_recipe.REDUCED_ARTICULATION_PATH,
         )
 
         substeps = g1_recipe.SIM_SUBSTEPS

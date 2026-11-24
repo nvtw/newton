@@ -28,13 +28,8 @@ from newton._src.solvers.phoenx.articulations.reduced_contact import (
     reduced_contact_prepare,
 )
 from newton._src.solvers.phoenx.articulations.reduced_contact_block import (
-    _POINTS_PER_PAGE,
-    _SOLVE_GENERALIZED_CONTACT_TILE_DEVICES,
     ReducedContactBlockSystem,
-    _finalize_reduced_contact_rows_device,
     _model_pair_endpoints,
-    _sync_contact_warp,
-    shape_pairs_are_dense,
 )
 from newton._src.solvers.phoenx.articulations.reduced_loop import ReducedLoopSystem
 from newton._src.solvers.phoenx.body import (
@@ -3819,360 +3814,6 @@ def _make_advance_reduced_articulations_warp_kernel(
     )[1]
 
 
-@functools.cache
-def _make_biased_contact_advance_publish_kernel(max_dofs: int):
-    solve_device = _SOLVE_GENERALIZED_CONTACT_TILE_DEVICES[max_dofs]
-    advance_device = _make_advance_reduced_articulations_warp_ops(
-        include_external=False, include_coriolis=True, fuse_publish=True
-    )[0]
-    module = wp.get_module(f"reduced_contact_bias_advance_publish_{max_dofs}")
-
-    @wp.kernel(enable_backward=False, module=module)
-    def _biased_contact_advance_publish_kernel(
-        columns: ContactColumnContainer,
-        bodies: BodyContainer,
-        idt: wp.float32,
-        sor_boost: wp.float32,
-        cc: ContactContainer,
-        iterations: wp.int32,
-        enabled: wp.array[wp.int32],
-        point_count: wp.array[wp.int32],
-        point_contact: wp.array2d[wp.int32],
-        point_column: wp.array2d[wp.int32],
-        normal: wp.array2d[wp.vec3],
-        tangent0: wp.array2d[wp.vec3],
-        row_velocity: wp.array2d[wp.float32],
-        page_index: wp.array[wp.int32],
-        max_page_count: wp.array[wp.int32],
-        packed_jacobian: wp.array2d[wp.float32],
-        packed_response: wp.array2d[wp.float32],
-        max_depth: wp.int32,
-        articulation_depth_start: wp.array2d[wp.int32],
-        articulation_depth_joint: wp.array[wp.int32],
-        generalized_delta: wp.array2d[wp.float32],
-        body_delta: wp.array2d[wp.spatial_vector],
-        articulation_count: wp.int32,
-        joint_parent_lane: wp.array[wp.int32],
-        child_start: wp.array[wp.int32],
-        child_joint: wp.array[wp.int32],
-        joint_type: wp.array[wp.int32],
-        joint_parent: wp.array[wp.int32],
-        joint_child: wp.array[wp.int32],
-        joint_q_start: wp.array[wp.int32],
-        joint_qd_start: wp.array[wp.int32],
-        joint_x_p: wp.array[wp.transform],
-        joint_x_c: wp.array[wp.transform],
-        joint_axis: wp.array[wp.vec3],
-        joint_dof_dim: wp.array2d[wp.int32],
-        body_com: wp.array[wp.vec3],
-        body_mass: wp.array[wp.float32],
-        body_world: wp.array[wp.int32],
-        gravity: wp.array[wp.vec3],
-        body_x_com: wp.array[wp.transform],
-        zero_generalized_acceleration: wp.array[wp.float32],
-        joint_f: wp.array[wp.float32],
-        joint_implicit_force: wp.array[wp.float32],
-        external_force_com: wp.array[wp.spatial_vector],
-        dt: wp.float32,
-        joint_q: wp.array[wp.float32],
-        joint_qd: wp.array[wp.float32],
-        joint_qd_integrator: wp.array[wp.float32],
-        joint_s: wp.array[wp.spatial_vector],
-        joint_u_matrix: wp.array[wp.spatial_vector],
-        joint_d_inv: wp.array2d[wp.float32],
-        body_inertia_spatial: wp.array[_sym_mat66],
-        body_velocity: wp.array[wp.spatial_vector],
-        body_coriolis: wp.array[wp.spatial_vector],
-        body_bias: wp.array[wp.spatial_vector],
-        generalized_rhs: wp.array[wp.float32],
-        body_work: wp.array[wp.spatial_vector],
-        joint_work: wp.array[wp.float32],
-        body_acceleration: wp.array[wp.spatial_vector],
-        generalized_acceleration: wp.array[wp.float32],
-        joint_qd_public: wp.array[wp.float32],
-        body_q: wp.array[wp.transform],
-        public_body_qd: wp.array[wp.spatial_vector],
-        midpoint: _MidpointWorkspace,
-        articulation_origin: wp.array[wp.vec3],
-        body_q_local: wp.array[wp.transform],
-        body_q_com: wp.array[wp.transform],
-        joint_anchor_local: wp.array[wp.transform],
-        joint_s_publish: wp.array[wp.spatial_vector],
-        advanced: wp.array[wp.int32],
-    ):
-        articulation, lane = wp.tid()
-        solve_device(
-            articulation,
-            lane,
-            columns,
-            idt,
-            sor_boost,
-            cc,
-            iterations,
-            wp.bool(True),
-            wp.bool(True),
-            enabled,
-            point_count,
-            point_contact,
-            point_column,
-            normal,
-            tangent0,
-            row_velocity,
-            page_index,
-            packed_jacobian,
-            packed_response,
-            bodies,
-            wp.bool(True),
-            max_depth,
-            articulation_depth_start,
-            articulation_depth_joint,
-            generalized_delta,
-            body_delta,
-        )
-        _sync_contact_warp()
-        if page_index[0] + wp.int32(1) < max_page_count[0]:
-            return
-
-        thread = articulation * wp.int32(32) + lane
-        target_linear_momentum = advance_device(
-            thread,
-            articulation_count,
-            wp.int32(32),
-            max_depth,
-            articulation_depth_start,
-            articulation_depth_joint,
-            joint_parent_lane,
-            child_start,
-            child_joint,
-            joint_type,
-            joint_parent,
-            joint_child,
-            joint_qd_start,
-            joint_qd,
-            joint_s,
-            joint_u_matrix,
-            joint_d_inv,
-            joint_f,
-            joint_implicit_force,
-            body_mass,
-            body_world,
-            gravity,
-            body_q_com,
-            body_inertia_spatial,
-            external_force_com,
-            dt,
-            body_velocity,
-            body_coriolis,
-            body_bias,
-            generalized_rhs,
-            body_work,
-            joint_work,
-            body_acceleration,
-            generalized_acceleration,
-            public_body_qd,
-            bodies,
-            midpoint,
-        )
-        for depth in range(max_depth + wp.int32(1)):
-            index = articulation_depth_start[articulation, depth] + lane
-            depth_end = articulation_depth_start[articulation, depth + wp.int32(1)]
-            while index < depth_end:
-                joint = articulation_depth_joint[index]
-                for dof in range(joint_qd_start[joint], joint_qd_start[joint + wp.int32(1)]):
-                    joint_qd_integrator[dof] = joint_qd[dof]
-                index += wp.int32(32)
-            _sync_contact_warp()
-        _finish_and_publish_reduced_warp_device(
-            thread,
-            articulation_count,
-            wp.int32(32),
-            max_depth,
-            articulation_depth_start,
-            articulation_depth_joint,
-            joint_q,
-            joint_qd,
-            joint_qd_integrator,
-            joint_q_start,
-            joint_qd_start,
-            joint_type,
-            joint_parent,
-            joint_child,
-            joint_x_p,
-            joint_x_c,
-            joint_axis,
-            joint_dof_dim,
-            body_com,
-            body_x_com,
-            zero_generalized_acceleration,
-            dt,
-            wp.bool(True),
-            body_mass,
-            target_linear_momentum,
-            wp.bool(True),
-            joint_qd_public,
-            body_q,
-            bodies,
-            articulation_origin,
-            body_q_local,
-            body_q_com,
-            joint_anchor_local,
-            joint_s_publish,
-            public_body_qd,
-            midpoint.flag,
-        )
-        if articulation == wp.int32(0) and lane == wp.int32(0):
-            advanced[0] = wp.int32(1)
-
-    return _biased_contact_advance_publish_kernel
-
-
-@functools.cache
-def _make_relax_and_publish_reduced_contacts_kernel(max_dofs: int):
-    solve_device = _SOLVE_GENERALIZED_CONTACT_TILE_DEVICES[max_dofs]
-    module = wp.get_module(f"reduced_contact_relax_publish_{max_dofs}")
-
-    @wp.kernel(enable_backward=False, module=module)
-    def _relax_and_publish_reduced_contacts_kernel(
-        columns: ContactColumnContainer,
-        bodies: BodyContainer,
-        idt: wp.float32,
-        sor_boost: wp.float32,
-        cc: ContactContainer,
-        iterations: wp.int32,
-        enabled: wp.array[wp.int32],
-        point_count: wp.array[wp.int32],
-        point_contact: wp.array2d[wp.int32],
-        point_column: wp.array2d[wp.int32],
-        point0: wp.array2d[wp.vec3],
-        point1: wp.array2d[wp.vec3],
-        normal: wp.array2d[wp.vec3],
-        tangent0: wp.array2d[wp.vec3],
-        row_velocity: wp.array2d[wp.float32],
-        page_index: wp.array[wp.int32],
-        max_page_count: wp.array[wp.int32],
-        packed_jacobian: wp.array2d[wp.float32],
-        packed_response: wp.array2d[wp.float32],
-        max_depth: wp.int32,
-        articulation_depth_start: wp.array2d[wp.int32],
-        articulation_depth_joint: wp.array[wp.int32],
-        generalized_delta: wp.array2d[wp.float32],
-        body_delta: wp.array2d[wp.spatial_vector],
-        articulation_count: wp.int32,
-        joint_q: wp.array[wp.float32],
-        joint_qd_integrator: wp.array[wp.float32],
-        joint_q_start: wp.array[wp.int32],
-        joint_qd_start: wp.array[wp.int32],
-        joint_type: wp.array[wp.int32],
-        joint_parent: wp.array[wp.int32],
-        joint_child: wp.array[wp.int32],
-        joint_x_p: wp.array[wp.transform],
-        joint_x_c: wp.array[wp.transform],
-        joint_axis: wp.array[wp.vec3],
-        joint_dof_dim: wp.array2d[wp.int32],
-        body_com: wp.array[wp.vec3],
-        body_mass: wp.array[wp.float32],
-        body_x_com: wp.array[wp.transform],
-        zero_generalized_acceleration: wp.array[wp.float32],
-        joint_qd_public: wp.array[wp.float32],
-        body_q: wp.array[wp.transform],
-        articulation_origin: wp.array[wp.vec3],
-        body_q_local: wp.array[wp.transform],
-        body_q_com: wp.array[wp.transform],
-        joint_anchor_local: wp.array[wp.transform],
-        joint_s_publish: wp.array[wp.spatial_vector],
-        body_qd: wp.array[wp.spatial_vector],
-        midpoint_flag: wp.array[wp.int32],
-    ):
-        articulation, lane = wp.tid()
-        if lane < wp.int32(_POINTS_PER_PAGE):
-            _finalize_reduced_contact_rows_device(
-                articulation,
-                lane,
-                columns,
-                bodies,
-                enabled,
-                point_count,
-                page_index,
-                point_column,
-                point0,
-                point1,
-                normal,
-                tangent0,
-                row_velocity,
-            )
-        _sync_contact_warp()
-        solve_device(
-            articulation,
-            lane,
-            columns,
-            idt,
-            sor_boost,
-            cc,
-            iterations,
-            wp.bool(False),
-            wp.bool(False),
-            enabled,
-            point_count,
-            point_contact,
-            point_column,
-            normal,
-            tangent0,
-            row_velocity,
-            page_index,
-            packed_jacobian,
-            packed_response,
-            bodies,
-            wp.bool(True),
-            max_depth,
-            articulation_depth_start,
-            articulation_depth_joint,
-            generalized_delta,
-            body_delta,
-        )
-        _sync_contact_warp()
-        if page_index[0] + wp.int32(1) >= max_page_count[0]:
-            _finish_and_publish_reduced_warp_device(
-                articulation * wp.int32(32) + lane,
-                articulation_count,
-                wp.int32(32),
-                max_depth,
-                articulation_depth_start,
-                articulation_depth_joint,
-                joint_q,
-                bodies.reduced.joint_qd,
-                joint_qd_integrator,
-                joint_q_start,
-                joint_qd_start,
-                joint_type,
-                joint_parent,
-                joint_child,
-                joint_x_p,
-                joint_x_c,
-                joint_axis,
-                joint_dof_dim,
-                body_com,
-                body_x_com,
-                zero_generalized_acceleration,
-                wp.float32(0.0),
-                wp.bool(False),
-                body_mass,
-                wp.vec3(0.0),
-                wp.bool(False),
-                joint_qd_public,
-                body_q,
-                bodies,
-                articulation_origin,
-                body_q_local,
-                body_q_com,
-                joint_anchor_local,
-                joint_s_publish,
-                body_qd,
-                midpoint_flag,
-            )
-
-    return _relax_and_publish_reduced_contacts_kernel
-
-
 @wp.kernel(enable_backward=False, module="unique")
 def _solve_reduced_deferred_contacts_kernel(
     schedule_section_end: wp.array[wp.int32],
@@ -4873,74 +4514,6 @@ class ReducedArticulationSystem:
         return self.solve_forces(self.zero_generalized_force, body_force)
 
 
-_PERSISTENT_ELIGIBLE = "eligible"
-
-
-def _build_persistent_articulation_eligibility(
-    model: Model,
-    loop_joint_indices: np.ndarray,
-) -> tuple[np.ndarray, tuple[str, ...]]:
-    """Prove which reduced trees have no dynamic coupling outside the tree."""
-    articulation_count = int(model.articulation_count)
-    eligible = np.ones(articulation_count, dtype=bool)
-    reasons = [_PERSISTENT_ELIGIBLE] * articulation_count
-    if articulation_count == 0:
-        return eligible, tuple(reasons)
-
-    def reject(articulation: int, reason: str) -> None:
-        if articulation >= 0 and eligible[articulation]:
-            eligible[articulation] = False
-            reasons[articulation] = reason
-
-    articulation_start = model.articulation_start.numpy()
-    articulation_end = model.articulation_end.numpy()
-    joint_child = model.joint_child.numpy()
-    body_articulation = np.full(int(model.body_count), -1, dtype=np.int32)
-    for articulation in range(articulation_count):
-        start = int(articulation_start[articulation])
-        end = int(articulation_end[articulation])
-        body_articulation[joint_child[start:end]] = articulation
-
-    if int(getattr(model, "particle_count", 0) or 0) > 0:
-        for articulation in range(articulation_count):
-            reject(articulation, "deformable scene")
-
-    joint_parent = model.joint_parent.numpy()
-    for joint in np.asarray(loop_joint_indices, dtype=np.int32):
-        parent = int(joint_parent[joint])
-        child = int(joint_child[joint])
-        parent_articulation = int(body_articulation[parent]) if parent >= 0 else -1
-        child_articulation = int(body_articulation[child]) if child >= 0 else -1
-        reject(parent_articulation, "loop or external joint")
-        reject(child_articulation, "loop or external joint")
-
-    # An all-against-all list of one large world proves nothing and is costly to build.
-    pairs_array = None if shape_pairs_are_dense(model) else getattr(model, "shape_contact_pairs", None)
-    if pairs_array is None:
-        for articulation in range(articulation_count):
-            reject(articulation, "unproven collision topology")
-        return eligible, tuple(reasons)
-
-    if model.shape_body is None:
-        if int(model.shape_count) > 0:
-            for articulation in range(articulation_count):
-                reject(articulation, "missing shape ownership")
-        return eligible, tuple(reasons)
-
-    shape_body = model.shape_body.numpy()
-    for shape_a, shape_b in pairs_array.numpy():
-        body_a = int(shape_body[int(shape_a)])
-        body_b = int(shape_body[int(shape_b)])
-        articulation_a = int(body_articulation[body_a]) if body_a >= 0 else -1
-        articulation_b = int(body_articulation[body_b]) if body_b >= 0 else -1
-        if articulation_a >= 0 and body_b >= 0:
-            reject(articulation_a, "dynamic contact")
-        if articulation_b >= 0 and body_a >= 0:
-            reject(articulation_b, "dynamic contact")
-
-    return eligible, tuple(reasons)
-
-
 def _merge_touching_trees(model: Model, starts: np.ndarray, ends: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Join consecutive trees of one world whose shapes may touch into one articulation range.
 
@@ -5059,27 +4632,19 @@ class ReducedPhoenXArticulation:
         model: Model,
         bodies: BodyContainer,
         *,
-        execution_path: str = "reference",
         contact_friction_model: str = "point",
         backend: str = "aba",
         external_rigid_rows: bool = False,
     ):
         if backend not in ("aba", "dense"):
             raise ValueError(f"backend must be 'aba' or 'dense', got {backend!r}")
-        if backend == "dense" and execution_path != "reference":
-            raise ValueError("the dense reduced backend requires the reference execution path")
-        if execution_path not in ("reference", "persistent"):
-            raise ValueError(f"execution_path must be 'reference' or 'persistent', got {execution_path!r}")
         if contact_friction_model not in ("point", "patch"):
             raise ValueError(f"contact_friction_model must be 'point' or 'patch', got {contact_friction_model!r}")
-        if execution_path == "persistent" and contact_friction_model == "patch":
-            raise ValueError("persistent reduced articulations do not support patch friction")
-        self.execution_path = execution_path
         self.model = model
         self.bodies = bodies
         self.system = ReducedArticulationSystem(model, dense=backend == "dense")
-        if self.system.runtime_slots and (execution_path != "reference" or not model.device.is_cuda):
-            raise ValueError("runtime reduced articulations require CUDA and the reference execution path")
+        if self.system.runtime_slots and not model.device.is_cuda:
+            raise ValueError("runtime reduced articulations require CUDA")
         self.state = model.state()
         self.control = model.control(clone_variables=True)
         self._kinematics_current = False
@@ -5189,22 +4754,6 @@ class ReducedPhoenXArticulation:
         self.body_is_reduced_np = body_is_reduced_np.astype(bool)
         self.tree_joint_mask_np = tree_joint_mask_np.astype(bool)
         self.loop_system = ReducedLoopSystem(model, self.body_is_reduced_np)
-        self.persistent_eligible_np, self.persistent_ineligible_reasons = _build_persistent_articulation_eligibility(
-            model, self.loop_system.joint_indices_np
-        )
-        self.persistent_eligible = wp.array(
-            self.persistent_eligible_np.astype(np.int32), dtype=wp.int32, device=model.device
-        )
-        if execution_path == "persistent":
-            if not model.device.is_cuda:
-                raise ValueError("execution_path='persistent' currently requires CUDA")
-            if not self.system.use_warp_advance:
-                raise ValueError("persistent reduced articulations require at most 32 joints at each tree depth")
-            if not bool(np.all(self.persistent_eligible_np)):
-                rejected = sorted(
-                    {reason for reason in self.persistent_ineligible_reasons if reason != _PERSISTENT_ELIGIBLE}
-                )
-                raise ValueError(f"persistent articulation path is not proven safe: {', '.join(rejected)}")
         self.contact_block_system = ReducedContactBlockSystem(
             model,
             articulation_depth_start=self.system.advance_articulation_depth_start,
@@ -5213,7 +4762,6 @@ class ReducedPhoenXArticulation:
             row_tile_width=self.system.advance_tile_width,
             max_depth=self.system.advance_max_depth,
             use_depth_warp=self.system.use_warp_advance,
-            allow_patch_rows=execution_path != "persistent",
             use_patch_rows=contact_friction_model == "patch",
             external_rigid_rows=external_rigid_rows,
         )
@@ -5235,9 +4783,6 @@ class ReducedPhoenXArticulation:
                 or bool(self.loop_system.joint_indices_np.size)
             )
             self.contact_block_system.dense_rows = dense
-        if execution_path == "persistent":
-            self.contact_block_system.biased_page_launcher = self._launch_persistent_biased_page
-            self.contact_block_system.relax_page_launcher = self._launch_persistent_relax_page
         # Fused substep of dense trees with private contacts, installed by the solver. A relax
         # step leaves its factor for the next biased step at the same pose.
         self.fused_substep = None
@@ -5625,172 +5170,9 @@ class ReducedPhoenXArticulation:
             device=self.model.device,
         )
 
-    def _launch_persistent_biased_page(
-        self,
-        columns: ContactColumnContainer,
-        bodies: BodyContainer,
-        idt: wp.float32,
-        sor_boost: float,
-        cc: ContactContainer,
-        iterations: int,
-    ) -> None:
-        contact = self.contact_block_system
-        assert contact.packed_jacobian is not None
-        assert contact.packed_response is not None
-        kernel = _make_biased_contact_advance_publish_kernel(contact.contact_dof_width)
-        wp.launch_tiled(
-            kernel,
-            dim=[int(self.model.articulation_count)],
-            block_dim=32,
-            inputs=[
-                columns,
-                bodies,
-                idt,
-                wp.float32(sor_boost),
-                cc,
-                wp.int32(iterations),
-                contact.enabled,
-                contact.point_count,
-                contact.point_contact,
-                contact.point_column,
-                contact.normal,
-                contact.tangent0,
-                contact.row_velocity,
-                contact.page_index,
-                contact.max_page_count,
-                contact.packed_jacobian,
-                contact.packed_response,
-                wp.int32(self.system.advance_max_depth),
-                self.system.advance_articulation_depth_start,
-                self.system.advance_articulation_depth_joint,
-                contact.generalized_delta,
-                contact.generalized_body_delta,
-                wp.int32(self.model.articulation_count),
-                self.system.advance_joint_parent_lane,
-                self.system.factor_child_start,
-                self.system.factor_child_joint,
-                self.model.joint_type,
-                self.model.joint_parent,
-                self.model.joint_child,
-                self.model.joint_q_start,
-                self.model.joint_qd_start,
-                self.model.joint_X_p,
-                self.model.joint_X_c,
-                self.model.joint_axis,
-                self.model.joint_dof_dim,
-                self.model.body_com,
-                self.model.body_mass,
-                self.model.body_world,
-                self.model.gravity,
-                self.system.body_x_com,
-                self.system.zero_generalized_force,
-                self.control.joint_f,
-                self.system.joint_implicit_force,
-                self.state.body_f,
-                wp.float32(1.0 / float(idt)),
-                self.state.joint_q,
-                self.system.joint_qd_internal,
-                self.system.joint_qd_integrator,
-                self.system.joint_s,
-                self.system.joint_u_matrix,
-                self.system.joint_d_inv,
-                self.system.body_i_s,
-                self.system.body_velocity,
-                self.system.body_coriolis,
-                self.system.body_bias,
-                self.system.generalized_rhs,
-                self.system.body_work,
-                self.system.joint_work,
-                self.system.body_acceleration,
-                self.system.generalized_acceleration,
-                self.state.joint_qd,
-                self.state.body_q,
-                self.state.body_qd,
-                self.system.bind_midpoint_state(self.state),
-                self.system.articulation_origin,
-                self.system.body_q_local,
-                self.system.body_q_com,
-                self.system.joint_anchor_local,
-                self.system.joint_s_publish,
-                contact.biased_advanced,
-            ],
-            device=self.model.device,
-        )
-
-    def _launch_persistent_relax_page(
-        self,
-        columns: ContactColumnContainer,
-        bodies: BodyContainer,
-        idt: wp.float32,
-        sor_boost: float,
-        cc: ContactContainer,
-        iterations: int,
-    ) -> None:
-        contact = self.contact_block_system
-        assert contact.packed_jacobian is not None
-        assert contact.packed_response is not None
-        kernel = _make_relax_and_publish_reduced_contacts_kernel(contact.contact_dof_width)
-        wp.launch_tiled(
-            kernel,
-            dim=[int(self.model.articulation_count)],
-            block_dim=32,
-            inputs=[
-                columns,
-                bodies,
-                idt,
-                wp.float32(sor_boost),
-                cc,
-                wp.int32(iterations),
-                contact.enabled,
-                contact.point_count,
-                contact.point_contact,
-                contact.point_column,
-                contact.point0,
-                contact.point1,
-                contact.normal,
-                contact.tangent0,
-                contact.row_velocity,
-                contact.page_index,
-                contact.max_page_count,
-                contact.packed_jacobian,
-                contact.packed_response,
-                wp.int32(self.system.advance_max_depth),
-                self.system.advance_articulation_depth_start,
-                self.system.advance_articulation_depth_joint,
-                contact.generalized_delta,
-                contact.generalized_body_delta,
-                wp.int32(self.model.articulation_count),
-                self.state.joint_q,
-                self.system.joint_qd_integrator,
-                self.model.joint_q_start,
-                self.model.joint_qd_start,
-                self.model.joint_type,
-                self.model.joint_parent,
-                self.model.joint_child,
-                self.model.joint_X_p,
-                self.model.joint_X_c,
-                self.model.joint_axis,
-                self.model.joint_dof_dim,
-                self.model.body_com,
-                self.model.body_mass,
-                self.system.body_x_com,
-                self.system.zero_generalized_force,
-                self.state.joint_qd,
-                self.state.body_q,
-                self.system.articulation_origin,
-                self.system.body_q_local,
-                self.system.body_q_com,
-                self.system.joint_anchor_local,
-                self.system.joint_s_publish,
-                self.state.body_qd,
-                self.system.midpoint.flag,
-            ],
-            device=self.model.device,
-        )
-
     def finish_relax(self) -> None:
         """Publish bias-free velocity corrections without advancing configuration."""
-        if self.execution_path == "persistent" or self.fused_substep is not None:
+        if self.fused_substep is not None:
             return
         # Relax changes only velocities, so the pose-derived buffers from the
         # preceding full publication remain current.
@@ -5811,13 +5193,6 @@ class ReducedPhoenXArticulation:
         """
         self._kinematics_current = True
         if self.fused_substep is not None:
-            return
-        if self.execution_path == "persistent" and split_dynamics:
-            wp.capture_if(
-                self.contact_block_system.biased_advanced,
-                on_true=lambda: None,
-                on_false=lambda: self._advance_and_publish_fused(dt),
-            )
             return
         if (
             split_dynamics
