@@ -134,7 +134,6 @@ def _resolve_auto_step_layout(
     contact_friction_model: str,
     joint_mode: str,
     temporal_iterations: bool = False,
-    cuda: bool = True,
 ) -> str:
     """Resolve the model-facing PhoenX scheduler policy."""
     if step_layout not in ("auto", "multi_world", "single_world"):
@@ -150,10 +149,9 @@ def _resolve_auto_step_layout(
         and joint_mode == "maximal_direct"
     )
     if step_layout == "auto":
-        # Maximal PGS joints run only on the single-world scheduler. Multi-world
-        # temporal sweeps replay contact impulses per body, which needs CUDA point contacts.
-        temporal_single_world = temporal_iterations and (not cuda or contact_friction_model != "point")
-        single_world = joint_mode == "maximal_pgs" or temporal_single_world or large_rigid_contact_world
+        # Maximal PGS joints run only on the single-world scheduler; temporal sweeps
+        # are validated there (multi-world temporal sweeps open masonry joints).
+        single_world = joint_mode == "maximal_pgs" or temporal_iterations or large_rigid_contact_world
         return "single_world" if single_world else "multi_world"
     return step_layout
 
@@ -471,10 +469,10 @@ class SolverPhoenX(SolverBase):
                 responses still run once per substep. Smaller contact steps can
                 reduce oscillation of heavy bodies on light movable supports;
                 the required schedule depends on the scene. Requires rigid
-                bodies and uncolored contact headers. The multi-world layout
+                bodies and uncolored contact headers; ``step_layout="auto"``
+                selects the single-world layout. An explicit multi-world layout
                 and mass splitting other than unrolled overflow-only splitting
-                also require CUDA and point contacts; otherwise
-                ``step_layout="auto"`` selects the single-world layout.
+                also require CUDA and point contacts.
             contact_hertz: Natural frequency [Hz] of the rigid contact springs
                 (soft rows with damping ratio 1). ``None`` (the default) uses
                 the stiffest spring the sweep schedule keeps stable, which
@@ -550,7 +548,7 @@ class SolverPhoenX(SolverBase):
                 Supported values are ``"average"``, ``"min"``, ``"multiply"``,
                 and ``"max"``. Defaults to ``"average"``.
             step_layout: ``"auto"`` keeps the multi-world scheduler except
-                for maximal PGS joints, temporal iterations without CUDA point contacts, or one rigid contact-only
+                for maximal PGS joints, temporal iterations, or one rigid contact-only
                 world with at least 2,048 bodies, where it selects ``"single_world"``. Explicit
                 ``"multi_world"`` and ``"single_world"`` override the policy.
                 The single-world layout colors all constraints together and can
@@ -776,7 +774,6 @@ class SolverPhoenX(SolverBase):
             contact_friction_model=contact_friction_model,
             joint_mode=joint_mode,
             temporal_iterations=bool(temporal_iterations),
-            cuda=model.device.is_cuda,
         )
         if parallel_contact_prepare is None and step_layout != "single_world" and scene_world_count > 1:
             # The multi-world schedulers spread many worlds over the device

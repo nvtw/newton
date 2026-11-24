@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import unittest
+from typing import ClassVar
 from unittest.mock import patch
 
 import numpy as np
@@ -140,7 +141,7 @@ class TestTemporalIterationPhysics(unittest.TestCase):
 class TestTemporalLayouts(unittest.TestCase):
     """Every dispatcher runs the substep's contact substeps."""
 
-    LAYOUTS = {
+    LAYOUTS: ClassVar[dict[str, dict]] = {
         "multi_world_fast_tail": {"step_layout": "multi_world", "multi_world_scheduler": "fast_tail"},
         "multi_world_block_world": {"step_layout": "multi_world", "multi_world_scheduler": "block_world"},
         "multi_world_mass_splitting": {"step_layout": "multi_world", "mass_splitting": True},
@@ -187,7 +188,14 @@ class TestTemporalLayouts(unittest.TestCase):
                     state, control = model.state(), model.control()
                     observables = solver.observables({SolverBase.ObservableKind.CONTACT_F}, contacts=contacts)
 
-                    def step(state=state, control=control, contacts=contacts, pipeline=pipeline, solver=solver):
+                    def step(
+                        state=state,
+                        control=control,
+                        contacts=contacts,
+                        pipeline=pipeline,
+                        solver=solver,
+                        observables=observables,
+                    ):
                         pipeline.collide(state, contacts, dt=dt)
                         solver.step(state, state, control, contacts, dt, observables=observables)
 
@@ -205,6 +213,48 @@ class TestTemporalLayouts(unittest.TestCase):
                     force_z = observables.contact_f.numpy()[:count, 2]
                     support = [abs(float(force_z[body0 == b].sum() - force_z[body1 == b].sum())) for b in boxes]
                     np.testing.assert_allclose(support, weight, rtol=2.0e-3)
+
+
+@unittest.skipUnless(wp.is_cuda_available(), "CUDA device required")
+class TestTemporalStiffMaterial(unittest.TestCase):
+    def test_stiff_box_rests_when_substeps_reuse_rows(self):
+        """A box on four stiff undamped corner springs keeps its resting pose.
+
+        Substeps that reuse prepared rows advanced the gaps by the integrated motion on
+        top of the motion the contact substeps had tracked, so the next substep saw
+        twice the penetration and the box was thrown off (7.6 m/s after two seconds).
+        """
+        with wp.ScopedDevice("cuda:0"):
+            builder = newton.ModelBuilder()
+            cfg = builder.ShapeConfig(density=2000, ke=1.0e8, kd=0.0, mu=0.7)
+            body = builder.add_body(xform=wp.transform((0, 0, 0.1), wp.quat_identity()))
+            builder.add_shape_box(body, hx=0.2, hy=0.1, hz=0.1, cfg=cfg)
+            builder.add_ground_plane(cfg=cfg)
+            model = builder.finalize()
+            solver = SolverPhoenX(
+                model,
+                step_layout="single_world",
+                substeps=8,
+                solver_iterations=8,
+                temporal_iterations=True,
+                sleeping_velocity_threshold=0,
+            )
+            self.assertGreater(solver.world.prepare_refresh_stride, 1)
+            state, control = model.state(), model.control()
+            contacts = model._collision_pipeline.contacts()
+
+            def step():
+                solver.collide(state, contacts, dt=1 / 60)
+                solver.step(state, state, control, contacts, 1 / 60)
+
+            step()
+            with wp.ScopedCapture() as capture:
+                step()
+            for _ in range(118):
+                wp.capture_launch(capture.graph)
+            # The undamped springs ring at a few millimetres per second.
+            self.assertLess(float(np.abs(state.body_qd.numpy()).max()), 0.02)
+            self.assertAlmostEqual(float(state.body_q.numpy()[0, 2]), 0.1, delta=1.0e-4)
 
 
 class _FirstSweepRecorded(Exception):

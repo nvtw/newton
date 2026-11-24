@@ -380,12 +380,6 @@ _ISLAND_ROW_GROUPS = 64
 #: :func:`temporal_sweep_relaxation_kernel`.
 _TEMPORAL_SWEEP_COUPLING_BUDGET = 6.0
 
-#: Ordered passes over owned contacts per temporal contact substep. The exact
-#: mechanism response couples every manifold of a component; a single warm-started
-#: pass leaves a steady period-two rocking of a resting hinged pair (8.4 mm/s),
-#: two passes settle it (0.5 mm/s). The passes share one launch.
-_TEMPORAL_OWNED_CONTACT_PASSES = 2
-
 
 class PhoenXWorld:
     """PhoenX solver driver.
@@ -1553,13 +1547,16 @@ class PhoenXWorld:
         return bool(self.device.is_cuda and not self._contact_patch_enabled and self.num_particles == 0)
 
     @property
-    def _element_ids_by_color(self) -> wp.array:
-        """Active constraint ids in color order: ``[0, num_active_constraints)`` of the layout's coloring."""
-        return (
-            self._world_element_ids_by_color
-            if self.step_layout == "multi_world"
-            else self._partitioner.element_ids_by_color
-        )
+    def _colored_elements(self) -> tuple[wp.array, wp.array]:
+        """The layout's colored constraint ids and their one-element count array.
+
+        Multi-world coloring leaves out elements without a dynamic endpoint, so its
+        colored prefix can be shorter than ``num_active_constraints``.
+        """
+        if self.step_layout == "multi_world":
+            nw = self._partition_count
+            return self._world_element_ids_by_color, self._world_csr_offsets[nw : nw + 1]
+        return self._partitioner.element_ids_by_color, self._num_active_constraints
 
     def _fast_tail_fixed_tpw(self) -> int:
         """Static kernel axis for fixed-tpw launches; 0 keeps dynamic lookup."""
@@ -2860,8 +2857,7 @@ class PhoenXWorld:
     def _temporal_close_sweep(self, iteration: int) -> None:
         """Close biased sweep ``iteration``; see :meth:`_temporal_enter_sweep`.
 
-        Owned contacts take :data:`_TEMPORAL_OWNED_CONTACT_PASSES` ordered passes
-        at the contact substep's step.
+        Owned contacts take one ordered pass at the contact substep's step.
         """
         if not self.temporal_iterations:
             return
@@ -2869,7 +2865,7 @@ class PhoenXWorld:
             self._solve_direct_contacts(
                 use_bias=True,
                 refresh_mobility=iteration == 0,
-                iterations=_TEMPORAL_OWNED_CONTACT_PASSES,
+                iterations=1,
                 inverse_dt=self.solver_iterations / float(self.substep_dt),
             )
         self._temporal_end_sweep(iteration == self.solver_iterations - 1)
@@ -2948,8 +2944,7 @@ class PhoenXWorld:
                     self._contact_cols,
                     self.bodies,
                     self._contact_container,
-                    self._element_ids_by_color,
-                    self._num_active_constraints,
+                    *self._colored_elements,
                     self._contact_offset,
                 )
             else:
@@ -2971,8 +2966,7 @@ class PhoenXWorld:
         entries.refresh_cached_warm_start(
             self._contact_cols,
             self._contact_container,
-            self._element_ids_by_color,
-            self._num_active_constraints,
+            *self._colored_elements,
             self._contact_offset,
         )
         apply_forces = self.num_bodies > 0 and self._has_maximal_dynamic_bodies
@@ -3055,13 +3049,14 @@ class PhoenXWorld:
         the substep's remaining solves.
         """
         if self._temporal_contacts_active():
+            # Every contact substep advances the gaps, the last included: they then follow
+            # the substep's integrated motion into the rows a following substep reuses.
+            self._temporal_contact_rows(float(self.substep_dt) / self.solver_iterations)
             if last:
                 self._contact_container.separation_bounds = None
                 self._apply_contact_coefficients(self._temporal_contact_coefficients[0])
-            else:
-                self._temporal_contact_rows(float(self.substep_dt) / self.solver_iterations)
-                if self._temporal_record_contacts is not None:
-                    self._accumulate_contact_impulses(self._temporal_record_contacts, temporal_only=True)
+            elif self._temporal_record_contacts is not None:
+                self._accumulate_contact_impulses(self._temporal_record_contacts, temporal_only=True)
         if not last:
             if self._temporal_fused_sweep_entry():
                 # The next sweep's fused entry accumulates before it changes any velocity.
@@ -3524,8 +3519,7 @@ class PhoenXWorld:
         if self._temporal_contact_body_entries is not None:
             self._temporal_contact_body_entries.build(
                 self._contact_cols,
-                self._element_ids_by_color,
-                self._num_active_constraints,
+                *self._colored_elements,
                 self._contact_offset,
                 self._contact_cols.articulation_owner,
                 packed_columns=False,
@@ -4026,12 +4020,12 @@ class PhoenXWorld:
 
         self._dispatcher.begin_step()
         if self._colored_contact_headers:
-            colored_element_ids = self._element_ids_by_color
+            colored_element_ids, colored_count = self._colored_elements
             contact_pack_colored_headers(
                 self._contact_cols,
                 self._contact_cols_packed,
                 colored_element_ids,
-                self._num_active_constraints,
+                colored_count,
                 self._contact_offset,
                 self._constraint_capacity,
                 device=self.device,
@@ -4040,7 +4034,7 @@ class PhoenXWorld:
                 contact_build_colored_row_offsets(
                     self._contact_cols_packed,
                     colored_element_ids,
-                    self._num_active_constraints,
+                    colored_count,
                     self._contact_offset,
                     self._contact_row_counts,
                     self._contact_row_offsets,
@@ -5174,8 +5168,10 @@ class PhoenXWorld:
         # The next substep reuses this substep's prepared rows: advance their
         # gaps by the motion just integrated.
         next_substep = self._current_substep_index + 1
+        # Temporal contact substeps advance the gaps themselves.
         advance_gap = (
-            self.prepare_refresh_stride > 1
+            not self._temporal_contacts_active()
+            and self.prepare_refresh_stride > 1
             and next_substep < self.substeps
             and next_substep % self.prepare_refresh_stride != 0
         )
