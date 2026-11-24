@@ -20,6 +20,59 @@ from newton.examples.phoenx._bottling_io import (
 from newton.solvers import phoenx
 
 
+def zero_pressure_conveyors(module):
+    """Return the vendor CTP ``Conveyors`` with zero-pressure release at its pass-through pusher stations.
+
+    The vendor's PS-x1 decides each new case once its blade area is clear:
+    ``divert = not near_spur_full and (toggle or far_spur_full)``, else it
+    passes the case on toward the terminal station. While the terminal
+    palletizer waits for its pallet exchange, its spur and then the spine
+    fill. A case passed into the backed-up spine stays in the station zone,
+    and the station makes no further decision until the far spur drains,
+    starving its own palletizer. The source's 64-case CTP run exchanged no
+    pallets and never met this. As on a zero-pressure line, a station never
+    releases a case into a backed-up spine: while any spine zone on the way
+    to the terminal station stands, or the terminal station holds a case
+    for its full spur, it diverts the case to its own spur, and while that
+    spur is full too it holds the case at its blade until one has room.
+    """
+
+    class Conveyors(module.Conveyors):
+        def __init__(self, interface):
+            super().__init__(interface)
+            terminals = {station["station_zone"]: station for station in self.stations.values() if station["terminal"]}
+            self.spine_ahead = {}
+            for pzid, station in self.stations.items():
+                if station["terminal"]:
+                    continue
+                zones, zone = [], station["station_zone"]
+                while zone not in terminals:
+                    zone = next(z for z in self.graph[zone] if z not in station["spur"])
+                    zones.append(zone)
+                self.spine_ahead[pzid] = (zones, terminals[zone])
+
+        def _stations(self, t, beams, ppos):
+            seen = dict(beams)
+            for pzid, (zones, terminal) in self.spine_ahead.items():
+                station = self.stations[pzid]
+                backed_up = terminal["state"] != "IDLE" or not all(self.run.get(zone, True) for zone in zones)
+                if station["state"] != "IDLE" or not backed_up:
+                    continue
+                if self._spur_full(pzid, beams):
+                    # Input override: the vendor has no hold for a case whose both exits
+                    # are full; it decides as soon as its blade-area eye (<zone>:clear)
+                    # reads clear, and then passes. Only for this scan's decision, that
+                    # eye is presented to the vendor logic as occupied, so it keeps the
+                    # case pending and its zone stopped. The physical eye and every other
+                    # reader of it are unaffected.
+                    seen[f"{station['station_zone']}:clear"] = True
+                else:
+                    station["toggle"] = True
+            super()._stations(t, seen, ppos)
+
+    return Conveyors
+
+
 def _placement_motions(authored, orientation, slot, pick_q, offset_xy, limits):
     """Place the carton center on the source trajectory using its measured horizontal offset in the robot base."""
     if not np.any(offset_xy):
@@ -234,7 +287,7 @@ class TransportController:
         }
         interface["eyes"] = {k: v for k, v in interface["eyes"].items() if v["zone"] in interface["zones"]}
         self.interface = interface
-        self.conveyors = module.Conveyors(interface)
+        self.conveyors = zero_pressure_conveyors(module)(interface)
         self.beams = {}
         frame = scene.frames[prefix]
         self.eye_names = tuple(interface["eyes"])

@@ -27,6 +27,7 @@ from newton.examples.phoenx._bottling_io import (
     _PHOTOEYE_BATCH_SIZE,
     _case_drives,
     _case_photoeyes,
+    _load_controller,
     _photoeyes,
     _valves,
 )
@@ -37,7 +38,11 @@ from newton.examples.phoenx._bottling_process import (
     add_filling_transport,
 )
 from newton.examples.phoenx._bottling_scene import PlantScene, add_round_bottle, load_plant
-from newton.examples.phoenx._bottling_transport import _carton_support_quadrants, _placement_motions
+from newton.examples.phoenx._bottling_transport import (
+    _carton_support_quadrants,
+    _placement_motions,
+    zero_pressure_conveyors,
+)
 from newton.examples.phoenx._bottling_wrap import (
     WrapperController,
     build_wrapper,
@@ -142,6 +147,40 @@ class TestBottlingPlant(unittest.TestCase):
                 wp.launch(_robot_steps, dim=len(steps), inputs=[cases, after])
             wp.capture_launch(capture.graph)
             np.testing.assert_array_equal(after.numpy(), [state for _, state in steps])
+
+    def test_pass_through_station_never_releases_into_a_backed_up_spine(self):
+        """Hold a case at PZ1's station while the spine backs up toward an exchanging PZ2, then divert it."""
+        vendor = Path(newton.examples.get_local_asset_directory("bottling_plant")) / (
+            "sim/exts/bottling_plant.runtime/bottling_plant_runtime/vendor/ctp_v01"
+        )
+        if not (vendor / "controller.py").is_file():
+            self.skipTest("The bottling plant's local source assets are not available")
+        module = _load_controller("_test_bottling_transport", vendor / "controller.py")
+        interface = json.loads((vendor / "interface.json").read_text())
+
+        def run(conveyors, backed_up, near_full):
+            """Return PZ1's station decision as a case arrives, and again once PZ1's spur takes cases."""
+            # PZ2 waits for its pallet exchange: its spur is full and its station holds a
+            # case, so the spine zone before it stands.
+            beams = {"PF_PZ2_Z0:end": True, "ST_U2:end": True, "FS_U_M3:end": True} if backed_up else {}
+            beams["PF_PZ1_Z0:end"] = near_full
+            for i in range(90):
+                conveyors.step(i / 60.0, beams, {})
+            conveyors.step(1.5, {**beams, "ST_U1:250": True}, {})
+            station = conveyors.stations["PZ1"]
+            first = "divert" if station["state"] == "ARMED" else "pass" if station["passing"] else "hold"
+            conveyors.step(1.6, {**beams, "ST_U1:250": True, "PF_PZ1_Z0:end": False}, {})
+            then = "divert" if station["state"] == "ARMED" else "pass" if station["passing"] else "hold"
+            return first, then
+
+        # With its own spur full, the vendor station passes the case into the
+        # backed-up spine, where it holds the station until PZ2 resumes.
+        self.assertEqual(run(module.Conveyors(interface), backed_up=True, near_full=True)[0], "pass")
+        wrapped = zero_pressure_conveyors(module)
+        self.assertEqual(run(wrapped(interface), backed_up=True, near_full=True), ("hold", "divert"))
+        self.assertEqual(run(wrapped(interface), backed_up=True, near_full=False)[0], "divert")
+        # With the spine flowing the vendor's alternation is unchanged: the first case passes.
+        self.assertEqual(run(wrapped(interface), backed_up=False, near_full=False)[0], "pass")
 
     def test_accumulation_table_feeds_the_ifm_with_its_drive(self):
         """Run the IFM's feed with its infeed drive and stop it for a standing mass at PE-A1."""
