@@ -262,6 +262,7 @@ class Example:
             # automatically -- no additional parameters needed.
             self.solver = newton.solvers.SolverPhoenX(
                 self.model,
+                collision_pipeline=self.collision_pipeline,
                 substeps=self.sim_substeps,
                 solver_iterations=8,
                 velocity_iterations=1,
