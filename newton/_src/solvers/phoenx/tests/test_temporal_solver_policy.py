@@ -132,7 +132,6 @@ class TestTemporalSolverPolicy(unittest.TestCase):
             {"prepare_refresh_stride": 2},
             {"contact_chunk_size": 6},
             {"velocity_readout": "finite_difference"},
-            {"velocity_readout": "substep_average"},
             {"solver_scheme": "unknown"},
         ):
             with self.subTest(override=override), self.assertRaises(ValueError):

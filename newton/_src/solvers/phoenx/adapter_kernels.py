@@ -230,56 +230,6 @@ def _export_body_state_kernel(
 
 
 @wp.kernel(enable_backward=False)
-def _export_body_state_avg_kernel(
-    # PhoenX body container (slot index = tid + 1).
-    position: wp.array[wp.vec3f],
-    orientation: wp.array[wp.quatf],
-    body_com: wp.array[wp.vec3f],
-    island_root: wp.array[wp.int32],
-    sleeping_enabled: bool,
-    # Time-integrated velocity accumulators (length = N).
-    vel_accum: wp.array[wp.vec3f],
-    omega_accum: wp.array[wp.vec3f],
-    inv_dt: wp.float32,
-    # Newton State outputs.
-    body_q: wp.array[wp.transform],
-    body_qd: wp.array[wp.spatial_vector],
-):
-    """Substep-averaged velocity readout. Pose is substep-end; velocity is
-    accumulator * inv_dt = time-averaged over the outer step."""
-    tid = wp.tid()
-    src = tid + 1
-    rot = orientation[src]
-    com_world = position[src]
-    origin = com_world - wp.quat_rotate(rot, body_com[tid])
-    body_q[tid] = wp.transform(origin, rot)
-    if sleeping_enabled and island_root[src] >= 0:
-        body_qd[tid] = wp.spatial_vector()
-    else:
-        v_avg = vel_accum[tid] * inv_dt
-        w_avg = omega_accum[tid] * inv_dt
-        body_qd[tid] = wp.spatial_vector(v_avg, w_avg)
-
-
-@wp.kernel(enable_backward=False)
-def _accumulate_substep_velocity_kernel(
-    velocity: wp.array[wp.vec3f],
-    angular_velocity: wp.array[wp.vec3f],
-    substep_dt: wp.float32,
-    # Accumulators; length = N (one slot per Newton body, slot 0 of
-    # PhoenX is the static anchor and isn't reflected back).
-    vel_accum: wp.array[wp.vec3f],
-    omega_accum: wp.array[wp.vec3f],
-):
-    """Accumulate ``velocity * dt`` per substep for time-averaged readout
-    (matches MuJoCo Warp's post-integration qvel convention)."""
-    tid = wp.tid()
-    src = tid + 1  # PhoenX slot 0 is the static world anchor.
-    vel_accum[tid] = vel_accum[tid] + velocity[src] * substep_dt
-    omega_accum[tid] = omega_accum[tid] + angular_velocity[src] * substep_dt
-
-
-@wp.kernel(enable_backward=False)
 def _snapshot_pre_step_velocity_kernel(
     # PhoenX body container (length N + 1 with slot 0 = anchor).
     velocity: wp.array[wp.vec3f],

@@ -18,7 +18,6 @@ from newton._src.solvers.phoenx import diagnostics
 from newton._src.solvers.phoenx.adapter_kernels import (
     _accumulate_contact_impulse_kernel,
     _accumulate_contact_moment_kernel,
-    _accumulate_substep_velocity_kernel,
     _accumulate_temporal_contact_impulse_kernel,
 )
 from newton._src.solvers.phoenx.articulations.direct_contact_gs import (
@@ -416,7 +415,6 @@ class PhoenXWorld:
         enable_body_pair_grouping: bool = False,
         colored_contact_headers: bool = False,
         colored_contact_rows: bool = False,
-        colored_singleton_contact_lanes: bool | None = None,
         mass_splitting: bool = False,
         max_colored_partitions: int = 12,
         mass_splitting_batch_size: int = 8,
@@ -1116,7 +1114,8 @@ class PhoenXWorld:
         ):
             raise ValueError("overflow-only mass splitting requires a rigid single world with unrolled dispatch")
         self._singleworld_overflow_only_mass_splitting = bool(mass_splitting_overflow_only)
-        singleton_eligible = (
+        # One lane per one-point contact in eligible CUDA single-world rigid scenes.
+        self._colored_singleton_contact_lanes = bool(
             self.device.is_cuda
             and step_layout == "single_world"
             and self._colored_contact_headers
@@ -1130,11 +1129,6 @@ class PhoenXWorld:
             and self.num_bodies < (1 << 20)
             and float(sleeping_velocity_threshold) <= 0.0
             and not self._contact_patch_enabled
-        )
-        if colored_singleton_contact_lanes is True and not singleton_eligible:
-            raise ValueError("colored_singleton_contact_lanes is unsupported for this scene")
-        self._colored_singleton_contact_lanes = (
-            singleton_eligible if colored_singleton_contact_lanes is None else bool(colored_singleton_contact_lanes)
         )
 
         # Warm-start coloring only feeds the single-world greedy build;
@@ -3251,8 +3245,6 @@ class PhoenXWorld:
         shape_body=None,
         shape_type=None,
         picking=None,
-        vel_accum: wp.array[wp.vec3f] | None = None,
-        omega_accum: wp.array[wp.vec3f] | None = None,
         shape_aabb_lower: wp.array[wp.vec3f] | None = None,
         shape_aabb_upper: wp.array[wp.vec3f] | None = None,
         reuse_partition: bool = False,
@@ -3595,21 +3587,6 @@ class PhoenXWorld:
             if self._penetration_free_data is not None and self._num_kinematic_bodies > 0:
                 self._penetration_free.verify_kinematic(self._penetration_free_data, self.bodies)
             self._apply_global_damping()
-            if vel_accum is not None and omega_accum is not None and self.num_bodies > 0:
-                # ``substep_average`` velocity readout: accumulate
-                # post-substep velocities so the outer-step caller can
-                # divide by ``step_dt`` and get the time-averaged value.
-                wp.launch(
-                    _accumulate_substep_velocity_kernel,
-                    dim=int(self.num_bodies) - 1,  # slot 0 is the anchor
-                    inputs=[
-                        self.bodies.velocity,
-                        self.bodies.angular_velocity,
-                        wp.float32(self.substep_dt),
-                    ],
-                    outputs=[vel_accum, omega_accum],
-                    device=self.device,
-                )
 
         # Contact matching and the next ingest use canonical order, so publish
         # final persistent state once after every substep has completed.

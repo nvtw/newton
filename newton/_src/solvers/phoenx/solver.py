@@ -29,7 +29,6 @@ from newton._src.solvers.phoenx.adapter_kernels import (
     _apply_joint_forces_kernel,
     _contact_impulse_to_force_wrapper_kernel,
     _export_body_qdd_kernel,
-    _export_body_state_avg_kernel,
     _export_body_state_fd_kernel,
     _export_body_state_kernel,
     _import_body_forces_kernel,
@@ -403,7 +402,6 @@ class SolverPhoenX(SolverBase):
         partitioner_algorithm: str | None = None,
         colored_contact_headers: bool | None = None,
         colored_contact_rows: bool | None = None,
-        colored_singleton_contact_lanes: bool | None = None,
         enable_column_timers: bool = False,
         length_scale: float | None = None,
         sor_boost: float = 1.0,
@@ -559,8 +557,8 @@ class SolverPhoenX(SolverBase):
                 before graph capture; ``"fast_tail"`` and
                 ``"block_world[_32|_64|_128]"`` force a path for
                 benchmarking.
-            velocity_readout: ``"substep_end"`` (default, bit-faithful),
-                ``"finite_difference"``, or ``"substep_average"``.
+            velocity_readout: ``"substep_end"`` (default, bit-faithful) or
+                ``"finite_difference"``.
                 Sleeping bodies report a zero twist in the substep readouts.
             mass_splitting: Enable the graph-colored mass-splitting tail.
             max_colored_partitions: True GS colors retained before the
@@ -590,9 +588,6 @@ class SolverPhoenX(SolverBase):
             colored_contact_rows: Also store per-contact solve state in solver
                 color order. Requires ``colored_contact_headers``. ``None`` (the
                 default) follows ``colored_contact_headers``.
-            colored_singleton_contact_lanes: Use one lane for one-point
-                contacts in eligible CUDA single-world rigid scenes. ``None``
-                selects automatically; ``False`` disables this optimization.
             enable_column_timers: Collect per-constraint-column timing
                 counters for diagnostics. Defaults to ``False``.
             length_scale: Scene length units per metre [1/m], which scale the contact
@@ -952,7 +947,7 @@ class SolverPhoenX(SolverBase):
             if self._uses_maximal_tree_projector
             else model.body_inv_inertia
         )
-        valid_readouts = ("substep_end", "finite_difference", "substep_average")
+        valid_readouts = ("substep_end", "finite_difference")
         if velocity_readout not in valid_readouts:
             raise ValueError(f"velocity_readout must be one of {valid_readouts}, got {velocity_readout!r}")
         self._velocity_readout = velocity_readout
@@ -985,13 +980,11 @@ class SolverPhoenX(SolverBase):
         """Runtime creation state when the model reserves rows with
         :meth:`~newton.ModelBuilder.reserve_dynamic_capacity`; see :mod:`newton.solvers.phoenx`."""
 
-        # FD/substep-avg readout buffers — always allocated so graph capture
-        # has stable refs; only written when the corresponding readout fires.
+        # FD readout buffers — always allocated so graph capture has stable
+        # refs; only written when the finite-difference readout fires.
         n_newton_bodies = int(model.body_count)
         self._fd_pos_prev = wp.zeros(max(1, n_newton_bodies), dtype=wp.vec3f, device=self.device)
         self._fd_orient_prev = wp.zeros(max(1, n_newton_bodies), dtype=wp.quatf, device=self.device)
-        self._substep_vel_accum = wp.zeros(max(1, n_newton_bodies), dtype=wp.vec3f, device=self.device)
-        self._substep_omega_accum = wp.zeros(max(1, n_newton_bodies), dtype=wp.vec3f, device=self.device)
         # body_qdd snapshot buffers (linear + angular velocity, pre-step).
         # Always allocated; the FD launch is gated on state.body_qdd being live.
         self._qdd_vel_prev = wp.zeros(max(1, n_newton_bodies), dtype=wp.vec3f, device=self.device)
@@ -1269,7 +1262,6 @@ class SolverPhoenX(SolverBase):
             partitioner_algorithm=partitioner_algorithm,
             colored_contact_headers=colored_contact_headers,
             colored_contact_rows=colored_contact_rows,
-            colored_singleton_contact_lanes=colored_singleton_contact_lanes,
             enable_column_timers=enable_column_timers,
             sor_boost=sor_boost,
             sleeping_velocity_threshold=float(sleeping_velocity_threshold),
@@ -2022,24 +2014,6 @@ class SolverPhoenX(SolverBase):
                 outputs=[state_out.body_q, state_out.body_qd],
                 device=self.device,
             )
-        elif self._velocity_readout == "substep_average":
-            inv_dt = 1.0 / float(dt) if dt > 0.0 else 0.0
-            wp.launch(
-                _export_body_state_avg_kernel,
-                dim=n,
-                inputs=[
-                    self.bodies.position,
-                    self.bodies.orientation,
-                    self.model.body_com,
-                    self.bodies.island_root,
-                    self._sleeping_enabled,
-                    self._substep_vel_accum,
-                    self._substep_omega_accum,
-                    wp.float32(inv_dt),
-                ],
-                outputs=[state_out.body_q, state_out.body_qd],
-                device=self.device,
-            )
         else:
             wp.launch(
                 _export_body_state_kernel,
@@ -2207,15 +2181,6 @@ class SolverPhoenX(SolverBase):
         if want_body_qdd:
             self._snapshot_pre_step_velocity()
 
-        if self._velocity_readout == "substep_average":
-            self._substep_vel_accum.zero_()
-            self._substep_omega_accum.zero_()
-            world_vel_accum = self._substep_vel_accum
-            world_omega_accum = self._substep_omega_accum
-        else:
-            world_vel_accum = None
-            world_omega_accum = None
-
         # When sleeping is enabled, hand the broad-phase per-shape AABB
         # arrays to the world so it can compute body diagonals for the
         # spin-velocity term of the sleep score. ``narrow_phase`` is
@@ -2246,8 +2211,6 @@ class SolverPhoenX(SolverBase):
             contacts=contacts if self._shape_body is not None else None,
             shape_body=self._shape_body,
             shape_type=self.model.shape_type,
-            vel_accum=world_vel_accum,
-            omega_accum=world_omega_accum,
             shape_aabb_lower=shape_aabb_lower,
             shape_aabb_upper=shape_aabb_upper,
             # Opt-in (set by callers that substep against a fixed contact set,
