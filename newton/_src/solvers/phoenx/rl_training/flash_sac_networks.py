@@ -37,12 +37,6 @@ _TILE_REDUCTION_BLOCK_DIM = 256
 
 
 @wp.kernel
-def _copy_2d_same_kernel(src: wp.array2d[Any], dst: wp.array2d[Any]):
-    row, col = wp.tid()
-    dst[row, col] = src[row, col]
-
-
-@wp.kernel
 def _scale_1d_kernel(values: wp.array[wp.float32], scale: wp.array[wp.float32], found_inf: wp.array[wp.int32]):
     i = wp.tid()
     value = values[i] / scale[0]
@@ -760,21 +754,6 @@ def _batch_norm_inv_std_amp_kernel(
 
 
 @wp.kernel
-def _batch_norm_inv_std_relu_amp_kernel(
-    x: wp.array2d[Any],
-    mean: wp.array[wp.float32],
-    inv_std: wp.array[wp.float32],
-    scale: wp.array[wp.float32],
-    bias: wp.array[wp.float32],
-    out: wp.array2d[wp.float32],
-):
-    row, col = wp.tid()
-    centered = wp.float16(wp.float32(x[row, col]) - mean[col])
-    normalized = wp.float32(centered) * inv_std[col]
-    out[row, col] = wp.max(normalized * scale[col] + bias[col], wp.float32(0.0))
-
-
-@wp.kernel
 def _batch_norm_inv_std_amp_dual_kernel(
     x: wp.array2d[Any],
     mean: wp.array[wp.float32],
@@ -828,12 +807,6 @@ def _batch_norm_inv_std_relu_kernel(
     row, col = wp.tid()
     normalized = (wp.float32(x[row, col]) - mean[col]) * inv_std[col]
     out[row, col] = wp.max(normalized * scale[col] + bias[col], wp.float32(0.0))
-
-
-@wp.kernel
-def _relu_kernel(x: wp.array2d[Any], out: wp.array2d[Any]):
-    row, col = wp.tid()
-    out[row, col] = wp.max(x[row, col], wp.float32(0.0))
 
 
 @wp.kernel

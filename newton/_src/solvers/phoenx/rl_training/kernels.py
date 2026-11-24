@@ -579,64 +579,6 @@ def mingru_sequence_backward_kernel(
         )
 
 
-@wp.kernel(module="unique")
-def mingru_sequence_backward_initial_kernel(
-    combined: wp.array2d[wp.float32],
-    x: wp.array2d[wp.float32],
-    recurrent: wp.array2d[wp.float32],
-    grad_out: wp.array2d[wp.float32],
-    dones: wp.array[wp.float32],
-    use_dones: wp.int32,
-    initial_state: wp.array3d[wp.float32],
-    layer: wp.int32,
-    num_steps: wp.int32,
-    num_envs: wp.int32,
-    hidden_dim: wp.int32,
-    grad_combined: wp.array2d[Any],
-    grad_highway_input: wp.array2d[wp.float32],
-):
-    env, hidden = wp.tid()
-    grad_recurrent_next = wp.float32(0.0)
-    for reverse_step in range(num_steps):
-        step = num_steps - wp.int32(1) - reverse_step
-        row = step * num_envs + env
-        reset_before = use_dones != wp.int32(0) and step > wp.int32(0) and dones[row - num_envs] > wp.float32(0.5)
-        prev_recurrent = wp.float32(0.0)
-        if step == wp.int32(0):
-            prev_recurrent = initial_state[layer, env, hidden]
-        elif step > wp.int32(0) and not reset_before:
-            prev_recurrent = recurrent[row - num_envs, hidden]
-
-        hidden_pre = combined[row, hidden]
-        gate_pre = combined[row, hidden_dim + hidden]
-        proj_pre = combined[row, wp.int32(2) * hidden_dim + hidden]
-        candidate = _mingru_hidden_candidate(hidden_pre)
-        gate = _sigmoid(gate_pre)
-        current_recurrent = recurrent[row, hidden]
-        proj = _sigmoid(proj_pre)
-        x_val = x[row, hidden]
-
-        grad_y = grad_out[row, hidden]
-        grad_proj = grad_y * (current_recurrent - x_val)
-        grad_recurrent = grad_y * proj + grad_recurrent_next
-        grad_highway_input[row, hidden] = grad_y * (wp.float32(1.0) - proj)
-
-        grad_gate = grad_recurrent * (candidate - prev_recurrent)
-        grad_candidate = grad_recurrent * gate
-        if reset_before:
-            grad_recurrent_next = wp.float32(0.0)
-        else:
-            grad_recurrent_next = grad_recurrent * (wp.float32(1.0) - gate)
-
-        grad_combined[row, hidden] = grad_combined.dtype(
-            grad_candidate * _mingru_hidden_candidate_grad(hidden_pre, candidate)
-        )
-        grad_combined[row, hidden_dim + hidden] = grad_combined.dtype(grad_gate * gate * (wp.float32(1.0) - gate))
-        grad_combined[row, wp.int32(2) * hidden_dim + hidden] = grad_combined.dtype(
-            grad_proj * proj * (wp.float32(1.0) - proj)
-        )
-
-
 @wp.kernel
 def add_2d_kernel(a: wp.array2d[wp.float32], b: wp.array2d[wp.float32], count: wp.int32, out: wp.array2d[wp.float32]):
     row, col = wp.tid()
@@ -723,31 +665,6 @@ def dense_input_grad_kernel(
 
 
 @wp.kernel
-def dense_weight_grad_tiled_kernel(
-    x: wp.array2d[wp.float32],
-    grad_pre: wp.array2d[wp.float32],
-    batch_size: wp.int32,
-    weight_grad: wp.array2d[wp.float32],
-):
-    in_tile, out_tile = wp.tid()
-    total = wp.tile_zeros(shape=(DENSE_TILE_IN, DENSE_TILE_OUT), dtype=wp.float32)
-    batch_tiles = (batch_size + DENSE_TILE_BATCH - wp.int32(1)) // DENSE_TILE_BATCH
-    for tile in range(batch_tiles):
-        x_tile = wp.tile_load(
-            x,
-            shape=(DENSE_TILE_BATCH, DENSE_TILE_IN),
-            offset=(tile * DENSE_TILE_BATCH, in_tile * DENSE_TILE_IN),
-        )
-        grad_tile = wp.tile_load(
-            grad_pre,
-            shape=(DENSE_TILE_BATCH, DENSE_TILE_OUT),
-            offset=(tile * DENSE_TILE_BATCH, out_tile * DENSE_TILE_OUT),
-        )
-        wp.tile_matmul(wp.tile_transpose(x_tile), grad_tile, total)
-    wp.tile_store(weight_grad, total, offset=(in_tile * DENSE_TILE_IN, out_tile * DENSE_TILE_OUT))
-
-
-@wp.kernel
 def dense_weight_grad_splitk_tiled_kernel(
     x: wp.array2d[wp.float32],
     grad_pre: wp.array2d[wp.float32],
@@ -787,19 +704,6 @@ def dense_weight_grad_reduce_kernel(
     for k in range(kchunks):
         total = total + partials[k, in_col, out_col]
     weight_grad[in_col, out_col] = total
-
-
-@wp.kernel
-def dense_bias_grad_kernel(
-    grad_pre: wp.array2d[wp.float32],
-    batch_size: wp.int32,
-    bias_grad: wp.array[wp.float32],
-):
-    out_col = wp.tid()
-    total = wp.float32(0.0)
-    for row in range(batch_size):
-        total = total + grad_pre[row, out_col]
-    bias_grad[out_col] = total
 
 
 @wp.kernel
@@ -1314,19 +1218,6 @@ def value_column_symmetry_loss_grad_kernel(
     delta = values[row, value_col] - mirrored_values[row, value_col]
     output_grad[row, value_col] = output_grad[row, value_col] + coeff[0] * delta * inv_batch
     wp.atomic_add(loss, 0, wp.float32(0.5) * coeff[0] * delta * delta * inv_batch)
-
-
-@wp.kernel
-def mse_loss_2d_kernel(
-    predictions: wp.array2d[wp.float32],
-    targets: wp.array2d[wp.float32],
-    rows: wp.int32,
-    cols: wp.int32,
-    loss: wp.array[wp.float32],
-):
-    row, col = wp.tid()
-    delta = predictions[row, col] - targets[row, col]
-    wp.atomic_add(loss, 0, wp.float32(0.5) * delta * delta / wp.float32(rows * cols))
 
 
 @wp.kernel
@@ -1852,13 +1743,6 @@ def rollout_reward_done_success_sums_kernel(
 
 
 @wp.kernel
-def normalize_kernel(x: wp.array[wp.float32], mean: wp.float32, inv_std: wp.float32, count: wp.int32):
-    i = wp.tid()
-    if i < count:
-        x[i] = (x[i] - mean) * inv_std
-
-
-@wp.kernel
 def normalize_from_stats_kernel(x: wp.array[wp.float32], stats: wp.array[wp.float32], count: wp.int32, eps: wp.float32):
     i = wp.tid()
     if i < count:
@@ -2354,20 +2238,6 @@ def sac_critic_loss_kernel(
 
 
 @wp.kernel
-def sac_actor_loss_kernel(
-    q1: wp.array2d[wp.float32],
-    q2: wp.array2d[wp.float32],
-    log_probs: wp.array[wp.float32],
-    batch_size: wp.int32,
-    alpha: wp.float32,
-    loss: wp.array[wp.float32],
-):
-    i = wp.tid()
-    min_q = wp.min(q1[i, 0], q2[i, 0])
-    wp.atomic_add(loss, 0, (alpha * log_probs[i] - min_q) / wp.float32(batch_size))
-
-
-@wp.kernel
 def sac_critic_loss_backward_kernel(
     q1: wp.array2d[wp.float32],
     q2: wp.array2d[wp.float32],
@@ -2400,52 +2270,6 @@ def sac_actor_q_backward_kernel(
     else:
         q1_grad[i, 0] = grad if q1[i, 0] <= q2[i, 0] else wp.float32(0.0)
         q2_grad[i, 0] = grad if q2[i, 0] < q1[i, 0] else wp.float32(0.0)
-
-
-@wp.kernel
-def sac_actor_policy_backward_kernel(
-    policy_out: wp.array2d[wp.float32],
-    eps: wp.array2d[wp.float32],
-    q_input_grad1: wp.array2d[wp.float32],
-    q_input_grad2: wp.array2d[wp.float32],
-    q1: wp.array2d[wp.float32],
-    q2: wp.array2d[wp.float32],
-    log_probs: wp.array[wp.float32],
-    obs_dim: wp.int32,
-    action_dim: wp.int32,
-    batch_size: wp.int32,
-    alpha: wp.float32,
-    log_std_min: wp.float32,
-    log_std_max: wp.float32,
-    average_critics: wp.bool,
-    loss: wp.array[wp.float32],
-    policy_out_grad: wp.array2d[wp.float32],
-):
-    row = wp.tid()
-    inv_batch = wp.float32(1.0) / wp.float32(batch_size)
-    q = wp.min(q1[row, 0], q2[row, 0])
-    if average_critics:
-        q = wp.float32(0.5) * (q1[row, 0] + q2[row, 0])
-    wp.atomic_add(loss, 0, (alpha * log_probs[row] - q) * inv_batch)
-    for action in range(action_dim):
-        mean = policy_out[row, action]
-        raw_log_std = policy_out[row, action_dim + action]
-        log_std = _clip(raw_log_std, log_std_min, log_std_max)
-        std_eps = wp.exp(log_std) * eps[row, action]
-        value = wp.tanh(mean + std_eps)
-        action_grad = q_input_grad1[row, obs_dim + action] + q_input_grad2[row, obs_dim + action]
-        correction_grad = (
-            wp.float32(2.0)
-            * value
-            * (wp.float32(1.0) - value * value)
-            / (wp.float32(1.0) - value * value + wp.float32(TANH_EPS))
-        )
-        pre_grad = action_grad * (wp.float32(1.0) - value * value) + alpha * inv_batch * correction_grad
-        policy_out_grad[row, action] = pre_grad
-        log_std_grad = wp.float32(0.0)
-        if raw_log_std >= log_std_min and raw_log_std <= log_std_max:
-            log_std_grad = pre_grad * std_eps - alpha * inv_batch
-        policy_out_grad[row, action_dim + action] = log_std_grad
 
 
 @wp.kernel
@@ -2596,12 +2420,6 @@ def soft_update_1d_kernel(src: wp.array[wp.float32], tau: wp.float32, dst: wp.ar
 def soft_update_2d_kernel(src: wp.array2d[wp.float32], tau: wp.float32, dst: wp.array2d[wp.float32]):
     i, j = wp.tid()
     dst[i, j] = (wp.float32(1.0) - tau) * dst[i, j] + tau * src[i, j]
-
-
-@wp.kernel
-def soft_update_3d_kernel(src: wp.array3d[wp.float32], tau: wp.float32, dst: wp.array3d[wp.float32]):
-    i, j, k = wp.tid()
-    dst[i, j, k] = (wp.float32(1.0) - tau) * dst[i, j, k] + tau * src[i, j, k]
 
 
 @wp.kernel

@@ -410,15 +410,6 @@ def _image_word(base: _shared_handle, index: wp.int32) -> wp.uint32:
 
 @wp.func_native(
     _device_only(
-        f"""asm volatile("st.shared.u16 [%0], %1;" :: "r"({_ADDRESS.format(scale=2)}), "h"((unsigned short)value));""",
-        "",
-    )
-)
-def _store_u16(base: _shared_handle, index: wp.int32, value: wp.int32): ...
-
-
-@wp.func_native(
-    _device_only(
         f"""
     unsigned value;
     asm volatile("ld.shared.u8 %0, [%1];" : "=r"(value) : "r"({_ADDRESS.format(scale=1)}));
