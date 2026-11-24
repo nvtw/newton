@@ -361,6 +361,7 @@ class TestPhoenXAutoPerformancePolicy(unittest.TestCase):
                     has_bounded_drives=True,
                     compute_bias_velocity=Mock(),
                     apply_bias_velocity=Mock(),
+                    resolve_bounded_drives=Mock(),
                 )
                 response.direct = direct
                 world = SimpleNamespace(
@@ -379,6 +380,11 @@ class TestPhoenXAutoPerformancePolicy(unittest.TestCase):
                 PhoenXWorld._solve_direct_contacts(world, use_bias=use_bias, refresh_mobility=use_bias)
                 response.compute.assert_called_once_with(world._contact_container)
                 schedule.solve.assert_called_once()
+                # The biased pass tests the motor caps against the contact load; a cap
+                # change would refresh the mobility and sweep the contacts again.
+                self.assertEqual(direct.resolve_bounded_drives.call_count, int(use_bias))
+                if use_bias:
+                    self.assertIn("after_change", direct.resolve_bounded_drives.call_args.kwargs)
 
     def test_contact_columns_use_shape_pair_capacity(self) -> None:
         """Size contact columns from shape pairs instead of contact points."""
