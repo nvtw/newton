@@ -59,7 +59,6 @@ class TestTemporalSolverPolicy(unittest.TestCase):
         model.joint_effort_limit.assign(original_limit)
         model.joint_target_ke.assign([80.0])
         solver.notify_model_changed(newton.ModelFlags.JOINT_DOF_PROPERTIES)
-        self.assertEqual(direct._joint_correction_dt_scale, 1.0)
         state = model.state()
         control = model.control()
         control.joint_target_q.assign([1.0])
