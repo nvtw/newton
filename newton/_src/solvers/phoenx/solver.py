@@ -13,14 +13,12 @@ from __future__ import annotations
 
 import fnmatch
 import math
-import warnings
 from collections.abc import Sequence
 
 import numpy as np
 import warp as wp
 
 import newton
-from newton._src.exceptions import NewtonDeprecationWarning
 from newton._src.geometry.broad_phase_implicit_tree import BroadPhaseImplicitTree
 from newton._src.geometry.types import GeoType
 from newton._src.sim import BodyFlags, CollisionPipeline, Contacts, Control, JointType, Model, ModelFlags, State
@@ -412,8 +410,6 @@ class SolverPhoenX(SolverBase):
         island_parallel_iterations: bool | None = None,
         contact_chunk_size: int = 0,
         enable_body_pair_grouping: bool | None = None,
-        solver_flavor: str | None = None,
-        jacobi_max_colors: int | None = None,
         joint_mode: str = "maximal_direct",
         reduced_articulation_path: str = "reference",
         reduced_backend: str = "auto",
@@ -648,10 +644,6 @@ class SolverPhoenX(SolverBase):
                 projector; other topologies use pure reduced ownership without
                 redundant maximal joint rows. ``"hybrid"`` retains the
                 articulated-body preconditioner.
-            solver_flavor: Deprecated compatibility argument. Omit it or pass
-                ``"standard"``. The experimental ``"simple"`` Jacobi solver
-                moved out of production PhoenX; use PhoenX Mini under ``phoenx.experimental.mini`` for solver experiments.
-            jacobi_max_colors: Deprecated compatibility argument with no effect.
             direct_joint_mask: Optional per-joint boolean mask for
                 ``joint_mode="maximal_pgs"``. Masked joints are solved as exact
                 mechanisms, as in ``"maximal_direct"``, between the color sweeps;
@@ -698,22 +690,6 @@ class SolverPhoenX(SolverBase):
         if solver_scheme not in ("soft", "tgs"):
             raise ValueError("solver_scheme must be 'soft' or 'tgs'")
         self.solver_scheme = solver_scheme
-        if solver_flavor is not None:
-            warnings.warn(
-                "SolverPhoenX.solver_flavor is deprecated; omit it to use the production solver.",
-                NewtonDeprecationWarning,
-                stacklevel=2,
-            )
-            if solver_flavor != "standard":
-                raise ValueError(
-                    "solver_flavor='simple' was removed from production PhoenX; use PhoenX Mini under phoenx.experimental.mini"
-                )
-        if jacobi_max_colors is not None:
-            warnings.warn(
-                "SolverPhoenX.jacobi_max_colors is deprecated and has no effect.",
-                NewtonDeprecationWarning,
-                stacklevel=2,
-            )
         joint_modes = {
             "maximal_direct": ("maximal", "direct"),
             "maximal_pgs": ("maximal", "block_pgs"),

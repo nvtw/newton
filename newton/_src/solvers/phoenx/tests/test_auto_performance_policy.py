@@ -339,12 +339,6 @@ class TestPhoenXAutoPerformancePolicy(unittest.TestCase):
         self.assertTrue(parser.parse_args(["--reduced-coordinates"]).reduced_coordinates)
         self.assertFalse(parser.parse_args(["--no-reduced-coordinates"]).reduced_coordinates)
 
-    def test_removed_simple_solver_points_to_mini(self) -> None:
-        """Deprecate the old flavor argument and direct experiments to Mini."""
-        model = newton.ModelBuilder().finalize()
-        with self.assertWarns(DeprecationWarning), self.assertRaisesRegex(ValueError, "PhoenX Mini"):
-            newton.solvers.SolverPhoenX(model, solver_flavor="simple")
-
 
 if __name__ == "__main__":
     unittest.main()
