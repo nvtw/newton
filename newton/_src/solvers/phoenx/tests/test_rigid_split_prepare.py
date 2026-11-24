@@ -26,7 +26,7 @@ def energy(model, state):
     return float(total)
 
 
-def run_scene(parallel, mass_splitting=True, *, chunk_size=0):
+def run_scene(parallel, mass_splitting=True, *, chunk_size=0, step_layout="single_world"):
     builder = newton.ModelBuilder(gravity=wp.vec3(0.0))
     cfg = newton.ModelBuilder.ShapeConfig(density=0.0, mu=0.5, gap=0.001)
     positions = (
@@ -57,7 +57,7 @@ def run_scene(parallel, mass_splitting=True, *, chunk_size=0):
         model,
         collision_pipeline=pipeline,
         joint_mode="maximal_direct",
-        step_layout="single_world",
+        step_layout=step_layout,
         mass_splitting=mass_splitting,
         parallel_contact_prepare=parallel,
         contact_chunk_size=chunk_size,
@@ -69,6 +69,8 @@ def run_scene(parallel, mass_splitting=True, *, chunk_size=0):
         sor_boost=1.0,
     )
     world = solver.world
+    if parallel is None:
+        assert world.parallel_contact_prepare
     reference_momentum = _total_momentum(model, state)
     reference_energy = energy(model, state)
     snapshots = []
@@ -151,13 +153,34 @@ class TestParallelPrepareSplit(unittest.TestCase):
         builder.add_body(mass=1.0, inertia=wp.mat33(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0))
         model = builder.finalize(device="cuda:0")
         for options in (
-            {"step_layout": "multi_world"},
+            {"step_layout": "multi_world", "sleeping_velocity_threshold": 0.1},
             {"step_layout": "single_world", "contact_friction_model": "patch"},
             {"step_layout": "single_world", "joint_mode": "reduced"},
             {"step_layout": "single_world", "mass_splitting_unrolled": True},
         ):
             with self.subTest(options=options), self.assertRaises(ValueError):
                 newton.solvers.SolverPhoenX(model, parallel_contact_prepare=True, **options)
+
+    def test_one_world_multi_world_prepares_in_parallel(self):
+        """A one-world multi-world layout prepares contacts in parallel with the serial result."""
+        baseline = run_scene(False, mass_splitting=False, step_layout="multi_world")
+        candidate = run_scene(None, mass_splitting=False, step_layout="multi_world")
+        for frame, (before, after) in enumerate(zip(baseline, candidate, strict=True)):
+            for key in ("q", "qd", "derived", "impulses", "anchors"):
+                with self.subTest(frame=frame, field=key):
+                    np.testing.assert_array_equal(before[key].view(np.uint8), after[key].view(np.uint8))
+
+    def test_many_worlds_keep_the_fused_prepare(self):
+        """Several worlds already spread the fused per-world prepare over the device."""
+        template = newton.ModelBuilder()
+        body = template.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.5)))
+        template.add_shape_box(body, hx=0.1, hy=0.1, hz=0.1)
+        template.add_ground_plane()
+        builder = newton.ModelBuilder()
+        builder.replicate(template, 2)
+        model = builder.finalize(device="cuda:0")
+        solver = newton.solvers.SolverPhoenX(model, step_layout="multi_world")
+        self.assertFalse(solver.world.parallel_contact_prepare)
 
     def test_ragged_columns_and_changing_copies_match_exactly(self):
         baseline = run_scene(False)

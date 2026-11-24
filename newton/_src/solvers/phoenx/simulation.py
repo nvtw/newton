@@ -889,9 +889,8 @@ class PhoenXWorld:
             )
         # Both schedules are pure performance choices: ``None`` enables them
         # wherever they apply, ``True`` insists and reports why one cannot.
-        rigid_single_world = (
-            step_layout == "single_world"
-            and self.device.is_cuda
+        rigid_point_world = (
+            self.device.is_cuda
             and not (
                 self.num_particles
                 or self.num_cloth_triangles
@@ -903,8 +902,13 @@ class PhoenXWorld:
             )
             and contact_friction_model == "point"
         )
+        rigid_single_world = rigid_point_world and step_layout == "single_world"
         island_eligible = rigid_single_world and not mass_splitting
-        prepare_eligible = rigid_single_world and not mass_splitting_unrolled
+        # The multi-world schedulers prepare a world's colors on one thread
+        # group; the fused kernel then only applies the cached warm starts.
+        prepare_eligible = (rigid_single_world and not mass_splitting_unrolled) or (
+            rigid_point_world and step_layout != "single_world" and not cached_prepare_unsupported
+        )
         if island_parallel_iterations is None:
             island_parallel_iterations = island_eligible
         elif island_parallel_iterations and not island_eligible:
@@ -916,8 +920,9 @@ class PhoenXWorld:
             parallel_contact_prepare = prepare_eligible
         elif parallel_contact_prepare and not prepare_eligible:
             raise ValueError(
-                "parallel_contact_prepare requires CUDA single-world rigid point contacts "
-                "without packed rows, deformables, or unrolled mass splitting"
+                "parallel_contact_prepare requires CUDA rigid point contacts without packed rows, deformables, "
+                "or unrolled mass splitting; the multi-world layouts also exclude patch friction, mass "
+                "splitting, and sleeping"
             )
         self.parallel_contact_prepare = bool(parallel_contact_prepare)
         self.island_parallel_iterations = bool(island_parallel_iterations)
@@ -5278,13 +5283,24 @@ class PhoenXWorld:
         if split_bias:
             direct.apply_bias_velocity(1.0)
 
+    def _prepare_multi_world_contacts(self, idt: wp.float32) -> bool:
+        """Prepare contact geometry in parallel when enabled; return whether the fused kernel reuses it."""
+        if not self._refresh_prepare_this_substep():
+            return True
+        if not self.parallel_contact_prepare:
+            return False
+        self._launch_parallel_contact_prepare(
+            idt, self._contact_container, False, self._dispatch_specialization_flags()["has_soft_contact_pd"]
+        )
+        return True
+
     def _solve_main(self, *, num_iterations: int | None = None, solve_direct: bool = True) -> None:
         """Run the fused multi-world prepare and biased iterate phase."""
         if self._constraint_capacity == 0:
             return
         idt = wp.float32(1.0 / self.substep_dt)
         contact_views = self._active_contact_views()
-        cached_prepare = not self._refresh_prepare_this_substep()
+        cached_prepare = self._prepare_multi_world_contacts(idt)
         direct = getattr(self, "_direct_equality_system", None)
         direct_enabled = direct is not None and direct.enabled
         for fixed_tpw in self._fast_tail_auto_fixed_choices():
@@ -5486,7 +5502,7 @@ class PhoenXWorld:
             raise NotImplementedError("block-world scheduler currently supports rigid multi-world scenes only")
         block_dim = self._validate_block_world_dim(self._multi_world_block_dim if block_dim is None else block_dim)
         contact_views = self._active_contact_views()
-        cached_prepare = not self._refresh_prepare_this_substep()
+        cached_prepare = self._prepare_multi_world_contacts(wp.float32(1.0 / self.substep_dt))
         direct = getattr(self, "_direct_equality_system", None)
         direct_enabled = direct is not None and direct.enabled
         kernel = get_block_world_kernel(

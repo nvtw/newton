@@ -512,11 +512,13 @@ class SolverPhoenX(SolverBase):
                 the unrolled dispatcher. Values above one require soft single-world
                 mass splitting with direct joints or a ``direct_joint_mask``.
             parallel_contact_prepare: Parallel geometry preparation for CUDA
-                single-world maximal rigid point contacts. Preserves ordered
-                contact warm starts, including mass-split copy states. ``None``
-                (default) enables it wherever it applies; ``True`` requires it
-                and raises when the scene has deformables, patch friction or
-                unrolled mass splitting. Independent kernels may change
+                maximal rigid point contacts in the single-world layout or a
+                one-world scene. Preserves ordered contact warm starts,
+                including mass-split copy states. ``None`` (default) enables
+                it wherever it applies; ``True`` requires it and raises when
+                the scene has deformables, patch friction or unrolled mass
+                splitting, or, in a multi-world layout, mass splitting or
+                sleeping. Independent kernels may change
                 floating-point rounding relative to serial preparation.
             island_parallel_iterations: Schedule independent rigid islands on separate
                 CUDA blocks during contact iterations and velocity relaxation, and
@@ -760,6 +762,10 @@ class SolverPhoenX(SolverBase):
             contact_friction_model=contact_friction_model,
             joint_mode=joint_mode,
         )
+        if parallel_contact_prepare is None and step_layout != "single_world" and scene_world_count > 1:
+            # The multi-world schedulers spread many worlds over the device
+            # already; only one world leaves its contact columns on one thread group.
+            parallel_contact_prepare = False
         if joint_solver == "block_pgs" and (
             articulation_mode != "maximal"
             or has_deformables

@@ -1,0 +1,1 @@
+`SolverPhoenX` now also enables `parallel_contact_prepare` by default for a one-world scene in a multi-world layout, where the fused per-world kernel prepared every contact column on one thread group; pass `parallel_contact_prepare=False` to keep the fused preparation.
