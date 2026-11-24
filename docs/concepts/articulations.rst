@@ -512,8 +512,40 @@ Joint types
      - 7 (3D position + 4D quaternion)
      - 6
 
-D6 joints are the most general joint type in Newton and can be used to represent any combination of translational and rotational degrees of freedom.
-Prismatic, revolute, planar, and universal joints can be seen as special cases of the D6 joint.
+.. _d6-joint-conventions:
+
+D6 joint conventions
+^^^^^^^^^^^^^^^^^^^^
+
+:meth:`~newton.ModelBuilder.add_joint_d6` takes ordered lists of enabled translation
+and rotation axes. Both lists are expressed in the parent joint anchor frame at
+the zero configuration. Use up to three orthonormal axes in each list for
+consistent forward and inverse kinematics. The linear and angular bases can
+differ. An orthonormal angular triple can be left- or right-handed, and positive
+rotation follows the right-hand rule about each authored axis.
+
+Linear displacement is the sum of the enabled linear axes scaled by their
+coordinates. Angular motion is an intrinsic rotation sequence: each later axis
+is carried by the preceding rotations. For axes X and Y in that order, the
+relative rotation is :math:`R_x(a)R_y(b)`. A missing angular axis removes a
+rotation from the sequence. Rotation-vector constraints and swing–twist locks
+can permit different orientations from this sequence.
+
+Each enabled axis contributes one scalar to both ``joint_q`` and ``joint_qd``.
+Linear entries come first, in meters and meters per second. Angular entries
+follow, in radians and radians per second. Angular rates are derivatives of
+the authored coordinates. To obtain angular velocity, weight each transported
+axis by its rate and sum the results. With three angular axes, the rate map
+loses rank at gimbal lock, so the same angular velocity may have multiple
+Euler rate representations. Angle recovery and continuity near singularities
+depend on the solver or kinematics routine.
+
+Per-axis limits and drive targets refer to the scalar coordinates and their
+rates where supported by the solver. Three angular axes allow arbitrary
+orientation, but keep scalar Euler coordinates and per-axis targets, unlike
+the quaternion state of a ``JointType.BALL`` joint. A planar joint is one
+possible D6 layout: two translation axes spanning a plane and a rotation
+axis normal to that plane.
 
 Definition of ``joint_q``
 ^^^^^^^^^^^^^^^^^^^^^^^^^

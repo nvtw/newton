@@ -91,6 +91,9 @@ class TestKaminoD6(unittest.TestCase):
             body = builder.add_link(mass=1.0, inertia=_INERTIA, lock_inertia=True)
             linear = _LINEAR[:linear_count]
             angular = _ANGULAR[:angular_count]
+            if (linear_count, angular_count) == (1, 1):
+                # A shared orthogonal frame cannot represent this slider and hinge.
+                angular = np.array(((0.6, 0.0, 0.8),), dtype=np.float32)
             joint = builder.add_joint_d6(
                 -1,
                 body,

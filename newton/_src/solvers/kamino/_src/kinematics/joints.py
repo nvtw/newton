@@ -279,13 +279,10 @@ def gimbal_transported_axes(coords: wp.vec3f, third_axis_sign: wp.float32) -> wp
 @wp.func
 def gimbal_reciprocal_axes(coords: wp.vec3f, third_axis_sign: wp.float32) -> wp.mat33f:
     """Return reciprocal angular axes ``E^-T`` for an authored gimbal chart."""
-    a0, a1, a2 = transform_3d_rotational_axes(
-        wp.vec3(1.0, 0.0, 0.0),
-        wp.vec3(0.0, 1.0, 0.0),
-        wp.vec3(0.0, 0.0, third_axis_sign),
-        coords[0],
-        coords[1],
-    )
+    axes = gimbal_transported_axes(coords, third_axis_sign)
+    a0 = wp.vec3f(axes[:, 0])
+    a1 = wp.vec3f(axes[:, 1])
+    a2 = wp.vec3f(axes[:, 2])
     c12 = wp.cross(a1, a2)
     det = wp.dot(a0, c12)
     if wp.abs(det) < 1.0e-7:

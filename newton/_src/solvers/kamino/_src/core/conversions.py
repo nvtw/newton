@@ -32,8 +32,8 @@ from .joints import (
     JointActuationType,
     JointDoFType,
     JointsModel,
-    _axis_rotmatn_from_vec3f,
     _has_missing_implicit_pd_gains,
+    complete_joint_axis_basis,
     has_dynamic_cts_wp,
     has_effort_cts_wp,
     has_friction_cts_wp,
@@ -682,20 +682,6 @@ def joint_conversion_kernel(
         joint_num_bounded_cts[joint_id] = num_friction_cts_j + num_effort_cts_j
 
 
-@wp.func
-def _complete_d6_basis(axes: mat63f, start: int, count: int) -> wp.mat33f:
-    if count == 0:
-        return wp.identity(3, dtype=wp.float32)
-    first = axes[start]
-    if count == 1:
-        return _axis_rotmatn_from_vec3f(first)
-    second = axes[start + 1]
-    third = wp.cross(first, second)
-    if count == 3:
-        third = axes[start + 2]
-    return wp.matrix_from_cols(first, second, third)
-
-
 @wp.kernel
 def joint_frame_conversion_kernel(
     # Inputs:
@@ -748,7 +734,7 @@ def joint_frame_conversion_kernel(
         axes = D6JointAxes()
         axes.linear_count = model_joint_dof_dim[joint_id, 0]
         axes.angular_count = model_joint_dof_dim[joint_id, 1]
-        axes.linear = _complete_d6_basis(dof_axes_j, 0, axes.linear_count)
+        axes.linear = complete_joint_axis_basis(dof_axes_j, 0, axes.linear_count)
         axes.third_axis_sign = 1.0
         if axes.angular_count == 2:
             # Complete the intrinsic XYZ chart with the locked angle in the middle.
@@ -756,14 +742,12 @@ def joint_frame_conversion_kernel(
             last = dof_axes_j[axes.linear_count + 1]
             axes.angular = wp.matrix_from_cols(first, wp.cross(last, first), last)
         elif axes.angular_count == 3:
-            first = dof_axes_j[axes.linear_count]
-            second = dof_axes_j[axes.linear_count + 1]
-            third = wp.cross(first, second)
+            axes.angular = complete_joint_axis_basis(dof_axes_j, axes.linear_count, 2)
+            third = wp.vec3f(axes.angular[:, 2])
             if wp.dot(third, dof_axes_j[axes.linear_count + 2]) < 0.0:
                 axes.third_axis_sign = -1.0
-            axes.angular = wp.matrix_from_cols(first, second, third)
         else:
-            axes.angular = _complete_d6_basis(dof_axes_j, axes.linear_count, axes.angular_count)
+            axes.angular = complete_joint_axis_basis(dof_axes_j, axes.linear_count, axes.angular_count)
         joint_d6_axes[joint_id] = axes
     X_B_j = wp.quat_to_matrix(q_p_j) @ R_axis_j
     X_F_j = wp.quat_to_matrix(q_c_j) @ R_axis_j

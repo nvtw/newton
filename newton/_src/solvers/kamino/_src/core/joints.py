@@ -485,6 +485,20 @@ def _axis_rotmatn_from_vec3f(vec: wp.vec3f) -> wp.mat33f:
     return wp.matrix_from_cols(ax, ay, az)
 
 
+@wp.func
+def complete_joint_axis_basis(axes: mat63f, start: int, count: int) -> wp.mat33f:
+    """Complete an ordered set of orthonormal axes while preserving its supplied columns."""
+    if count == 0:
+        return wp.identity(3, dtype=wp.float32)
+    first = axes[start]
+    if count == 1:
+        return _axis_rotmatn_from_vec3f(first)
+    second = axes[start + 1]
+    if count == 3:
+        return wp.matrix_from_cols(first, second, axes[start + 2])
+    return wp.matrix_from_cols(first, second, wp.cross(first, second))
+
+
 class JointDoFType(IntEnum):
     """
     An enumeration of the supported joint Degrees-of-Freedom (DoF) types.
@@ -1216,23 +1230,20 @@ class JointDoFType(IntEnum):
         # Determine the joint axes matrix based on the DoF type and axes
         if dof_type == JointDoFType.FIXED or dof_type == JointDoFType.ROD:
             pass  # R_axis_j is already set to identity
-        elif dof_type == JointDoFType.REVOLUTE:
-            R_axis_j = _axis_rotmatn_from_vec3f(dof_axes[0])
-        elif dof_type == JointDoFType.PRISMATIC:
-            R_axis_j = _axis_rotmatn_from_vec3f(dof_axes[0])
-        elif dof_type == JointDoFType.CYLINDRICAL:
-            R_axis_j = _axis_rotmatn_from_vec3f(dof_axes[0])
+        elif (
+            dof_type == JointDoFType.REVOLUTE
+            or dof_type == JointDoFType.PRISMATIC
+            or dof_type == JointDoFType.CYLINDRICAL
+        ):
+            R_axis_j = complete_joint_axis_basis(dof_axes, 0, 1)
         elif dof_type == JointDoFType.UNIVERSAL:
-            ax = dof_axes[0]
-            ay = dof_axes[1]
-            az = wp.cross(ax, ay)
-            R_axis_j = wp.matrix_from_cols(ax, ay, az)
+            R_axis_j = complete_joint_axis_basis(dof_axes, 0, 2)
         elif dof_type == JointDoFType.SPHERICAL:
             R_axis_j = wp.matrix_from_cols(dof_axes[0], dof_axes[1], dof_axes[2])
         elif dof_type == JointDoFType.GIMBAL or dof_type == JointDoFType.GIMBAL_LEFT_HANDED:
-            R_axis_j = wp.matrix_from_cols(dof_axes[0], dof_axes[1], wp.cross(dof_axes[0], dof_axes[1]))
+            R_axis_j = complete_joint_axis_basis(dof_axes, 0, 2)
         elif dof_type == JointDoFType.CARTESIAN:
-            R_axis_j = wp.matrix_from_cols(dof_axes[0], dof_axes[1], dof_axes[2])
+            R_axis_j = complete_joint_axis_basis(dof_axes, 0, 3)
         elif dof_type == JointDoFType.FREE:
             assert wp.norm_l2(dof_axes[0] - dof_axes[3]) < 1e-6, "Linear and rotational axes for free joint must match"
             assert wp.norm_l2(dof_axes[1] - dof_axes[4]) < 1e-6, "Linear and rotational axes for free joint must match"

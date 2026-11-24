@@ -441,11 +441,8 @@ D6 joints
 
 SCC, LOX, and PADMM support D6 joints authored with
 :meth:`newton.ModelBuilder.add_joint_d6` or imported from USD. A D6 joint
-has zero to three linear axes and zero to three angular axes. Each family
-must be orthonormal and can have its own orientation. Omitted axes are
-locked. Coordinates and rates are ordered with linear axes first, in
-meters and meters per second, followed by the intrinsic angular axes, in
-radians and radians per second.
+follows Newton's :ref:`d6-joint-conventions`. Kamino requires each axis
+family to be orthonormal and supports independent linear and angular bases.
 
 Each active axis supports position limits, direct effort, implicit drives,
 effort limits, armature, damping, and Coulomb friction. With three angular

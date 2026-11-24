@@ -7865,13 +7865,23 @@ class ModelBuilder:
         custom_attributes: dict[str, Any] | None = None,
         **kwargs,
     ) -> int:
-        """Adds a generic joint with custom linear and angular axes. The number of axes determines the number of degrees of freedom of the joint.
+        """Add a D6 joint with up to three linear and three angular axes.
+
+        Express both axis lists in the parent joint anchor frame at the zero
+        configuration. Use orthonormal axes within each list for consistent
+        forward and inverse kinematics. The two lists can use different bases.
+
+        Coordinates and rates are stored in list order, with linear entries
+        [m, m/s] first and angular entries [rad, rad/s] second. Linear motion
+        is the sum of the configured axes scaled by their coordinates. Angular
+        motion composes intrinsic rotations in the authored order, so each
+        later axis moves with the previous rotations. See :ref:`d6-joint-conventions`.
 
         Args:
             parent: The index of the parent body.
             child: The index of the child body.
-            linear_axes: A list of linear axes.
-            angular_axes: A list of angular axes.
+            linear_axes: Configurations for the enabled translation axes, in coordinate order.
+            angular_axes: Configurations for the enabled rotation axes, in composition order.
             label: The label of the joint.
             parent_xform: The transform from the parent body frame to the joint parent anchor frame.
             child_xform: The transform from the child body frame to the joint child anchor frame.
