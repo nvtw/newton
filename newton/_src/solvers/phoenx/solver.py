@@ -22,7 +22,8 @@ import newton
 from newton._src.geometry.broad_phase_implicit_tree import BroadPhaseImplicitTree
 from newton._src.geometry.types import GeoType
 from newton._src.sim import BodyFlags, CollisionPipeline, Contacts, Control, JointType, Model, ModelFlags, State
-from newton._src.sim.collide import _estimate_rigid_contact_max
+from newton._src.sim.collide import _HYDRO_PAIR_MAX_CONTACTS, _estimate_rigid_contact_max
+from newton._src.sim.shape_contact_pairs import _shape_contact_pair_count_for_mask
 from newton._src.solvers.phoenx.adapter_kernels import (
     _apply_joint_drive_control_kernel,
     _apply_joint_forces_kernel,
@@ -181,6 +182,7 @@ def _shape_pair_estimate(model) -> int:
 
 def _estimate_rigid_contact_max_phoenx(model) -> int | None:
     """Tight rigid_contact_max: pairs * 5 (CPP) * 2 (safety), bounded by Newton's neighbor budget.
+    Hydroelastic pairs keep their own per-pair cap.
     None when pair count is unavailable (caller falls back to Newton's default)."""
     if _shape_pair_estimate(model) <= 0:
         return None
@@ -191,12 +193,19 @@ def _estimate_rigid_contact_max_phoenx(model) -> int | None:
     SAFETY = 2
     contacts_per_pair = PRIMITIVE_CPP * SAFETY
     finalized_pairs = int(getattr(model, "shape_contact_pair_count", 0) or 0)
+    pair_contacts = finalized_pairs * contacts_per_pair
+    if finalized_pairs > 0:
+        # A hydroelastic pair reduces its contact patch to up to _HYDRO_PAIR_MAX_CONTACTS points.
+        hydroelastic = (model.shape_flags.numpy() & int(newton.ShapeFlags.HYDROELASTIC)) != 0
+        if np.count_nonzero(hydroelastic) > 1:
+            hydroelastic_pairs = _shape_contact_pair_count_for_mask(model, hydroelastic)
+            pair_contacts += hydroelastic_pairs * (_HYDRO_PAIR_MAX_CONTACTS - contacts_per_pair)
     # Every pair touching at once is impossible for more than a few bodies:
     # the pair count grows with the square of the shapes of a world, the
     # contacts only with the shapes. Newton's neighbor budget bounds that
     # for the finalized shapes; it does not know the reserved runtime shapes,
     # which keep their own pair budget.
-    capacity = min(finalized_pairs * contacts_per_pair, _estimate_rigid_contact_max(model))
+    capacity = min(pair_contacts, _estimate_rigid_contact_max(model))
     capacity += (_shape_pair_estimate(model) - finalized_pairs) * contacts_per_pair
     return max(1000, capacity)
 

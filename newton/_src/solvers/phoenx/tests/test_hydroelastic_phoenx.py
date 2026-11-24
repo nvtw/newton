@@ -266,6 +266,38 @@ class TestPhoenXHydroelasticImpact(unittest.TestCase):
         self.assertLess(abs(float(dropped[-1])), 1.0e-3, msg="dropped cube did not come to rest on the cube")
 
 
+@unittest.skipUnless(wp.is_cuda_available(), "Hydroelastic requires CUDA")
+class TestPhoenXHydroelasticCapacity(unittest.TestCase):
+    """The collision pipeline PhoenX creates holds every hydroelastic contact."""
+
+    def test_own_pipeline_holds_hydroelastic_contacts(self) -> None:
+        """Before, a hydroelastic pair was budgeted like a convex pair (10 contacts),
+        so 32 worlds of two stacked cubes overflowed 1504 contacts into 1000 slots."""
+        half = 0.05
+        world = newton.ModelBuilder()
+        world.default_shape_cfg = _small_hydroelastic_cube_config(gap=0.002)
+        for level in range(2):
+            body = world.add_body(
+                xform=wp.transform((0.0, 0.0, half + level * (2.0 * half - 5.0e-4)), wp.quat_identity())
+            )
+            world.add_shape_box(body=body, hx=half, hy=half, hz=half)
+        scene = newton.ModelBuilder()
+        scene.add_ground_plane()
+        scene.replicate(world, 32)
+        model = scene.finalize()
+
+        solver = SolverPhoenX(model, substeps=2, solver_iterations=4)
+        pipeline = model._collision_pipeline
+        contacts = pipeline.contacts()
+        state_0, state_1 = model.state(), model.state()
+        graph = _capture_frame(pipeline, solver, state_0, state_1, contacts, 1.0 / 120.0)
+        wp.capture_launch(graph)
+
+        count = int(contacts.rigid_contact_count.numpy()[0])
+        self.assertLessEqual(count, int(contacts.rigid_contact_max), msg="rigid contact buffer overflowed")
+        self.assertTrue(np.isfinite(state_0.body_q.numpy()).all())
+
+
 if __name__ == "__main__":
     wp.init()
     unittest.main()
