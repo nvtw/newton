@@ -5182,8 +5182,36 @@ class PhoenXWorld:
             direct.wait_factor()
         self._direct_factor_pending = False
 
-    def _solve_direct_contacts(self, *, use_bias: bool, refresh_mobility: bool) -> None:
-        """Run deterministic contact sweeps through the direct equality mobility."""
+    def _temporal_owned_contacts(self) -> bool:
+        """Whether temporal sweeps solve the contacts that exact mechanisms own.
+
+        Each temporal sweep is a contact substep: its rows and impulses describe
+        ``dt / solver_iterations``. Owned contacts then take one sweep each, at that
+        step, instead of all their sweeps over the whole substep after the others.
+        """
+        return (
+            self._temporal_contacts_active()
+            and self._direct_contact_response is not None
+            and self._direct_contact_schedule is not None
+        )
+
+    def _reapply_owned_contact_impulses(self) -> None:
+        """Enter a temporal sweep with the owned contacts' impulses of the previous one."""
+        self._direct_contact_schedule.warm_start(self.bodies, self._contact_container)
+
+    def _solve_direct_contacts(
+        self,
+        *,
+        use_bias: bool,
+        refresh_mobility: bool,
+        iterations: int | None = None,
+        inverse_dt: float | None = None,
+    ) -> None:
+        """Run deterministic contact sweeps through the direct equality mobility.
+
+        ``iterations`` and ``inverse_dt`` default to the substep's sweep counts and
+        step; a temporal sweep passes one sweep and its own step.
+        """
         response = self._direct_contact_response
         schedule = self._direct_contact_schedule
         if not self._contact_input_active_this_step or response is None or schedule is None:
@@ -5197,7 +5225,10 @@ class PhoenXWorld:
         ):
             response.compute(self._contact_container)
         self._direct_contact_response_current = False
-        iterations = self.solver_iterations if use_bias else self._active_velocity_iterations
+        if iterations is None:
+            iterations = self.solver_iterations if use_bias else self._active_velocity_iterations
+        if inverse_dt is None:
+            inverse_dt = 1.0 / self.substep_dt
         if iterations <= 0:
             return
 
@@ -5208,7 +5239,7 @@ class PhoenXWorld:
             schedule.solve(
                 self.bodies,
                 self._contact_container,
-                1.0 / self.substep_dt,
+                inverse_dt,
                 self.sor_boost,
                 iterations=iterations,
                 use_bias=use_bias,

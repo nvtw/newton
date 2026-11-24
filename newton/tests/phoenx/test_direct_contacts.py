@@ -118,5 +118,87 @@ class TestDirectContactsCappedDrive(unittest.TestCase):
         self.assertLess(abs(v), 0.05)
 
 
+@unittest.skipUnless(wp.is_cuda_available(), "Graph-captured direct contacts require CUDA")
+class TestDirectContactsTemporal(unittest.TestCase):
+    def test_temporal_sweeps_hold_a_gripped_capsule(self):
+        """Temporal sweeps also step the contacts that an exact mechanism owns.
+
+        Two driven pads of one exact mechanism squeeze a 15 g capsule through
+        stiff authored springs. Every temporal sweep advances the regular rows
+        by dt/n; when the owned pad contacts were solved once per substep after
+        those sweeps, the capsule kept rattling at 0.34 m/s.
+        """
+        with wp.ScopedDevice("cuda:0"):
+            substeps, dt = 10, 1.0 / 600.0
+            radius, half_length, mass, hx = 0.0075, 0.075, 0.015, 0.01
+            builder = newton.ModelBuilder()
+            builder.rigid_gap = 0.003
+            volume = np.pi * radius**2 * 2.0 * half_length + 4.0 / 3.0 * np.pi * radius**3
+            spring = {"ke": 1.0e5, "kd": 50.0, "mu": 1.0, "restitution": 0.0}
+            capsule = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.5)))
+            builder.add_shape_capsule(
+                capsule,
+                radius=radius,
+                half_height=half_length,
+                cfg=builder.ShapeConfig(density=mass / volume, **spring),
+            )
+            base = builder.add_link(
+                xform=wp.transform(wp.vec3(0.0, 0.0, 0.5)), mass=1.0, inertia=wp.mat33(np.eye(3) * 1.0e-3)
+            )
+            joints = [builder.add_joint_fixed(-1, base, parent_xform=wp.transform(wp.vec3(0.0, 0.0, 0.5)))]
+            for side in (-1.0, 1.0):
+                x = side * (radius + hx + 0.002)
+                pad = builder.add_link(xform=wp.transform(wp.vec3(x, 0.0, 0.5)))
+                density = 0.05 / (8.0 * hx * 0.01 * 0.02)
+                builder.add_shape_box(pad, hx=hx, hy=0.01, hz=0.02, cfg=builder.ShapeConfig(density=density, **spring))
+                joints.append(
+                    builder.add_joint_prismatic(
+                        base,
+                        pad,
+                        axis=(1.0, 0.0, 0.0),
+                        parent_xform=wp.transform(wp.vec3(x, 0.0, 0.0)),
+                        target_ke=50.0,
+                        target_kd=1.0,
+                    )
+                )
+            builder.add_articulation(joints)
+            model = builder.finalize()
+            pipeline = newton.CollisionPipeline(model, contact_matching="sticky")
+            solver = SolverPhoenX(
+                model,
+                collision_pipeline=pipeline,
+                joint_mode="maximal_direct",
+                substeps=1,
+                solver_iterations=16,
+                velocity_iterations=1,
+                temporal_iterations=True,
+            )
+            state_0, state_1, control = model.state(), model.state(), model.control()
+            targets = control.joint_target_q.numpy()
+            starts = model.joint_q_start.numpy()
+            targets[starts[joints[1]]] = 0.007
+            targets[starts[joints[2]]] = -0.007
+            control.joint_target_q.assign(targets)
+            contacts = pipeline.contacts()
+
+            def frame():
+                nonlocal state_0, state_1
+                for _ in range(substeps):
+                    pipeline.collide(state_0, contacts)
+                    solver.step(state_0, state_1, control, contacts, dt)
+                    state_0, state_1 = state_1, state_0
+
+            frame()
+            with wp.ScopedCapture() as capture:
+                frame()
+            heights, speeds = [], []
+            for _ in range(180):
+                wp.capture_launch(capture.graph)
+                heights.append(float(state_0.body_q.numpy()[capsule, 2]))
+                speeds.append(float(np.abs(state_0.body_qd.numpy()[capsule]).max()))
+        self.assertLess(max(speeds[-60:]), 0.1)
+        self.assertLess(float(np.ptp(heights[-60:])), 5.0e-5)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -72,12 +72,15 @@ class SingleWorldDispatcher:
                 # Test drive bounds only once contact warm starts load the mechanisms.
                 direct.resolve_bounded_drives(idt, use_bias=False)
             temporal = w.temporal_iterations
+            owned_sweeps = temporal and w._temporal_owned_contacts()
             if temporal:
                 w._temporal_begin_sweeps()
             for iteration in range(w.solver_iterations):
                 last = iteration == w.solver_iterations - 1
                 if temporal and iteration > 0:
                     w._temporal_next_sweep(idt)
+                    if owned_sweeps:
+                        w._reapply_owned_contact_impulses()
                 if self._island_schedule is None:
                     w._partitioner.begin_sweep()
                 w._singleworld_head_plus_tail_sweep(
@@ -90,13 +93,21 @@ class SingleWorldDispatcher:
                     # Limits and contacts must react to the capped motor during
                     # iteration, not retain an uncapped reaction at integration.
                     direct.resolve_bounded_drives(idt, use_bias=last or temporal)
+                    if owned_sweeps:
+                        w._solve_direct_contacts(
+                            use_bias=True,
+                            refresh_mobility=iteration == 0,
+                            iterations=1,
+                            inverse_dt=float(idt) * w.solver_iterations,
+                        )
                 if temporal:
                     w._temporal_end_sweep(last)
         elif direct is not None and direct.enabled:
             w._warm_start_owned_contacts()
             direct.solve(use_bias=True)
             direct.resolve_bounded_drives(idt, use_bias=True)
-        w._solve_direct_contacts(use_bias=True, refresh_mobility=True)
+        if not (w._regular_pgs_active_this_step and w.temporal_iterations and w._temporal_owned_contacts()):
+            w._solve_direct_contacts(use_bias=True, refresh_mobility=True)
         if w._maximal_tree_projector is not None:
             if w._direct_tree_contacts:
                 w._maximal_tree_projector.factor_contact_response()
