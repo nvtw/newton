@@ -14,6 +14,9 @@ a packed field waits on the accumulation table before the IFM.
 The source assets remain outside the repository and require NVIDIA Storage
 access; see ``newton/examples/assets/bottling_plant/README.md``.
 
+The bottle supply is sized for ``--num-frames`` and at least 330 simulated
+seconds; an interactive run that goes on past it warns once when the supply is
+exhausted, and the line then runs dry. Pass ``--num-frames`` for longer runs.
 Each palletizer's empty-pallet dispenser holds 15 pallets, more than an hour
 of production; the source's refill of an empty magazine is not simulated. As in
 the source, wrapped pallets leave their drop-offs 120 s after they land: the
@@ -43,6 +46,7 @@ import argparse
 import json
 import math
 import time
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -233,6 +237,7 @@ class Example:
             extra = demand if args.extra_bottles is None else min(demand, args.extra_bottles)
             if extra:
                 self.supply = BottleSupply(self.scene, extra, joints)
+                self.supply_duration, self.supply_exhausted = duration, False
             else:
                 self.scene.builder.reserve_dynamic_capacity(joints=joints)
         self.scene.builder.validate_inertia_detailed = args.diagnostics
@@ -491,6 +496,16 @@ class Example:
     def step(self):
         if self.supply is not None:
             self.supply.admit()
+            # Once a simulated minute, report the supply running out.
+            if round(self.sim_time / self.frame_dt) % 3600 == 3599 and not self.supply_exhausted:
+                admitted = int(self.controller.bottle_count.numpy()[0]) - len(self.scene.bottle_bodies)
+                if admitted >= self.supply.capacity:
+                    warnings.warn(
+                        f"The bottle supply, sized for {self.supply_duration:.0f} s, ran out at "
+                        f"{self.sim_time:.0f} s; pass --num-frames to size it for a longer run.",
+                        stacklevel=2,
+                    )
+                    self.supply_exhausted = True
         if self.graph is None:
             self.simulate()
         else:
