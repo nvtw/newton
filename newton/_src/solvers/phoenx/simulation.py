@@ -1149,7 +1149,6 @@ class PhoenXWorld:
             self._partitioner = IncrementalContactPartitioner(
                 max_num_interactions=self._constraint_capacity,
                 max_num_nodes=max(1, self.num_bodies + self.num_particles),
-                use_tile_scan=True,
                 max_colored_partitions=self.max_colored_partitions,
                 max_greedy_outer_iters=max_greedy_outer_iters,
                 enable_warm_start=_warm_start_active,

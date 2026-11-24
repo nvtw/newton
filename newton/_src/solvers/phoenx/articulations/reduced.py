@@ -4611,10 +4611,6 @@ class ReducedArticulationSystem:
         self.body_force.zero_()
         return self.solve_forces(generalized_force, self.body_force)
 
-    def solve_body_forces(self, body_force: wp.array[wp.spatial_vector]) -> wp.array[wp.float32]:
-        """Apply the factored inverse mass to world-origin body wrenches."""
-        return self.solve_forces(self.zero_generalized_force, body_force)
-
 
 def _merge_touching_trees(model: Model, starts: np.ndarray, ends: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Join consecutive trees of one world whose shapes may touch into one articulation range.
@@ -4775,7 +4771,6 @@ class ReducedPhoenXArticulation:
         tree_joint_mask_np = tree_joint_mask.numpy()
         constraint_node_np = bodies.constraint_node.numpy()
         body_articulation_np = np.full(int(model.body_count) + 1, -1, dtype=np.int32)
-        articulation_constraint_node_np = np.empty(int(model.articulation_count), dtype=np.int32)
         body_joint_np = np.full(int(model.body_count), -1, dtype=np.int32)
         # Loop-closing constraints may name the same child after its tree
         # joint. Following them as ancestors can replace the path or cycle.
@@ -4802,10 +4797,8 @@ class ReducedPhoenXArticulation:
             body_is_reduced_np[children] = 1
             constraint_node = int(children[0]) + 1
             constraint_node_np[children + 1] = constraint_node
-            articulation_constraint_node_np[articulation] = constraint_node
             body_articulation_np[children + 1] = articulation
         bodies.constraint_node.assign(constraint_node_np)
-        self.articulation_constraint_node = wp.array(articulation_constraint_node_np, device=model.device)
 
         reduced = ReducedArticulationData()
         reduced.enabled = wp.ones(1, dtype=wp.int32, device=model.device)

@@ -765,7 +765,6 @@ class TestIncrementalGraphColoring(unittest.TestCase):
             max_num_nodes=num_bodies,
             device=device,
             seed=seed,
-            use_tile_scan=True,
         )
         p.reset(elements_arr, num_elements_arr)
 
@@ -773,10 +772,9 @@ class TestIncrementalGraphColoring(unittest.TestCase):
         # still-uncolored elements. ``num_remaining`` is the device-side
         # condition array; ``incremental_advance_kernel`` decrements it every
         # iteration, so the loop terminates when every element is colored.
-        # ``use_tile_scan=True`` routes the per-call scan through a
-        # single-block tile-scan kernel, which -- unlike ``wp.utils.array_scan``
-        # -- performs no implicit device allocations and is therefore a valid
-        # graph-capture body.
+        # The per-call scan is a single-block tile scan, which -- unlike
+        # ``wp.utils.array_scan`` -- performs no implicit device allocations
+        # and is therefore a valid graph-capture body.
         with wp.ScopedCapture() as capture:
             wp.capture_while(
                 p.num_remaining,
@@ -877,7 +875,6 @@ class TestIncrementalGraphColoring(unittest.TestCase):
             max_num_nodes=800,
             device=device,
             seed=0,
-            use_tile_scan=True,
         )
         p.reset(elements_arr, num_elements_arr)
 
@@ -977,7 +974,6 @@ class TestMaxColorsOverflowGuard(unittest.TestCase):
             max_num_nodes=num_elements + 1,
             device=device,
             seed=0,
-            use_tile_scan=True,
         )
         p.reset(elements_arr, num_elements_arr)
 
@@ -1011,7 +1007,6 @@ class TestMaxColorsOverflowGuard(unittest.TestCase):
             max_num_nodes=num_elements + 1,
             device=device,
             seed=0,
-            use_tile_scan=True,
         )
         p.reset(elements_arr, num_elements_arr)
         p.build_csr()  # must not raise
@@ -1061,7 +1056,6 @@ class TestGreedyOverflowDoesNotHang(unittest.TestCase):
             max_num_nodes=num_elements + 1,
             device=device,
             seed=0,
-            use_tile_scan=True,
         )
         p.reset(elements_arr, num_elements_arr)
 

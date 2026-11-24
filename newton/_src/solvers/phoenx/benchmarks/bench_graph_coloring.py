@@ -182,7 +182,6 @@ def _run_partitioner_with_costs(
         max_num_interactions=n,
         max_num_nodes=snapshot.num_bodies,
         device=device,
-        use_tile_scan=True,
     )
     p.reset(elements, num_elements)
 
@@ -222,7 +221,6 @@ def algo_gpu_greedy_jp(snapshot: Snapshot, device: wp.DeviceLike) -> tuple[int, 
         max_num_interactions=n,
         max_num_nodes=snapshot.num_bodies,
         device=device,
-        use_tile_scan=True,
     )
     p.reset(elements, num_elements)
     p._packed_priorities.assign(_pack_priorities(np.zeros(n, dtype=np.int32), snapshot.random_values))
@@ -246,7 +244,6 @@ def algo_owner_election(snapshot: Snapshot, device: wp.DeviceLike) -> tuple[int,
         max_num_nodes=snapshot.num_bodies,
         device=device,
         seed=0,
-        use_tile_scan=True,
         max_colored_partitions=_OWNER_MAX_COLORS,
         endpoint_owner_coloring=True,
     )

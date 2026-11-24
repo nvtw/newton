@@ -216,9 +216,8 @@ def contact_partitions_get_random_value(
     """Read the prepacked (cost << 24) | (random & 0xFFFFFF) priority.
 
     Replaces a 2-load + cast + shift + OR per access with a single int32
-    load. Pack happens once per step in
-    :func:`pack_priorities_kernel` (called from
-    ``set_costs_from_contacts``); coloring kernels just read.
+    load. The partitioner packs once per step with
+    :func:`_pack_constraint_priority`; coloring kernels just read.
     """
     return packed_priorities[i]
 
@@ -237,26 +236,6 @@ def _endpoint_owner_priority(priority: wp.int32, element: wp.int32) -> wp.uint64
     # Preserve this path's unsigned packed-priority ordering, with a unique
     # element identifier breaking ties. Only active elements enter elections.
     return (wp.uint64(wp.uint32(priority)) << wp.uint64(32)) | wp.uint64(wp.uint32(element))
-
-
-@wp.kernel(enable_backward=False)
-def pack_priorities_kernel(
-    random_values: wp.array[wp.int32],
-    cost_values: wp.array[wp.int32],
-    packed_priorities: wp.array[wp.int32],
-):
-    """Pack ``(cost, random)`` into a single int32 priority.
-
-    Writes ``packed[i] = (cost[i] << 24) | (random[i] & 0xFFFFFF)``.
-    Caller is responsible for keeping ``cost_values[i] <= 255`` (the
-    contact-count bias only goes through 8 bits) and
-    ``random_values[i] < 2^24`` (16M-element headroom; the partitioner
-    seeds with ``permutation(max_num_interactions) + 1``).
-    """
-    tid = wp.tid()
-    if tid >= packed_priorities.shape[0]:
-        return
-    packed_priorities[tid] = _pack_priority(cost_values[tid], random_values[tid])
 
 
 @wp.kernel(enable_backward=False)
@@ -941,23 +920,6 @@ def incremental_init_remaining_ids_kernel(
     if tid >= num_elements[0]:
         return
     remaining_ids[tid] = tid
-
-
-@wp.kernel(enable_backward=False)
-def incremental_reset_loop_state_kernel(
-    partition_data_concat: wp.array[wp.int64],
-    color_tags: wp.array[wp.int32],
-    interaction_id_to_partition: wp.array[int],
-    num_elements: wp.array[int],
-):
-    """Reset per-element partitioner state without touching adjacency.
-    Skipped between PGS iterations since the constraint set is unchanged."""
-    tid = wp.tid()
-    if tid >= num_elements[0]:
-        return
-    partition_data_concat[tid] = _UNPARTITIONED | wp.int64(tid)
-    color_tags[tid] = wp.int32(0)
-    interaction_id_to_partition[tid] = -1
 
 
 @wp.kernel(enable_backward=False)

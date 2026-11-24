@@ -126,7 +126,6 @@ class TestColoringOverflowBucket(unittest.TestCase):
             max_num_nodes=num_bodies,
             device=device,
             seed=0,
-            use_tile_scan=True,
             max_colored_partitions=max_colored_partitions,
         )
         p.reset(elements_arr, num_elements_arr)
@@ -161,7 +160,6 @@ class TestColoringOverflowBucket(unittest.TestCase):
             max_num_nodes=num_bodies,
             device=device,
             seed=0,
-            use_tile_scan=True,
             max_colored_partitions=max_colored_partitions,
         )
         p.reset(elements_arr, num_elements_arr)
@@ -194,7 +192,6 @@ class TestColoringOverflowBucket(unittest.TestCase):
             max_num_nodes=num_bodies,
             device=device,
             seed=0,
-            use_tile_scan=True,
             max_colored_partitions=max_colored_partitions,
             endpoint_owner_coloring=True,
         )
@@ -361,7 +358,6 @@ class TestColoringOverflowBucket(unittest.TestCase):
             max_num_nodes=n + 1,
             device=device,
             seed=0,
-            use_tile_scan=True,
             # max_colored_partitions left at default None → legacy
             # error-on-overflow behaviour.
         )

@@ -303,12 +303,6 @@ class WorldBuilder:
         """Index of world 0's static anchor."""
         return 0
 
-    def world_body_of(self, world_id: int) -> int:
-        """Body index of world ``world_id``'s static anchor."""
-        if not (0 <= world_id < self._num_worlds):
-            raise IndexError(f"world_id {world_id} out of range [0, {self._num_worlds})")
-        return world_id
-
     def add_body(self, descriptor: RigidBodyDescriptor) -> int:
         """Append a validated descriptor and return its body index."""
         next_index = len(self._bodies)

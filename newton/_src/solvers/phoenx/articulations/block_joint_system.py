@@ -291,9 +291,6 @@ class BlockJointSystem(DirectEqualitySystem):
 
     def bind_world(self, world, joint_idx_to_cid):
         self._block_world = world
-        world._block_joint_contact_columns = wp.array(
-            np.arange(world.max_contact_columns), dtype=wp.int32, device=self.model.device
-        )
         self._block_mapping = np.asarray(joint_idx_to_cid, dtype=np.int32).copy()
         self._resolving_bounds = False
         count = world.num_joints

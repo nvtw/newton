@@ -581,7 +581,7 @@ def _cost_biased_priority(
     """Read prepacked (cost << 24) | (random & 0xFFFFFF) priority.
 
     The pack happens once per step in the partitioner; coloring just
-    reads. See :func:`pack_priorities_kernel` in :mod:`graph_coloring_common`.
+    reads. See :func:`_pack_constraint_priority` in :mod:`graph_coloring_common`.
     Unsigned packed bits retain cost ordering across the sign bit. The cid
     breaks hash collisions with the same total order as endpoint elections.
     """
