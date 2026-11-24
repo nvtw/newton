@@ -1810,7 +1810,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         has_edge = edge_slot >= 0
 
                         if has_edge:
-                            _corner_ownership = int(0)
+                            corner_ownership = int(0)
                             if wp.static(enable_heightfields):
                                 if tri_type == GeoType.HFIELD:
                                     v0s, v1s = get_edge_from_heightfield(
@@ -1820,7 +1820,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                         my_edge_idx,
                                     )
                                 else:
-                                    v0s, v1s, _corner_ownership = get_mesh_edge_specialized(
+                                    v0s, v1s, corner_ownership = get_mesh_edge_specialized(
                                         mesh_id_tri,
                                         mesh_edge_indices,
                                         mesh_edge_centers,
@@ -1831,7 +1831,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                         my_edge_idx,
                                     )
                             else:
-                                v0s, v1s, _corner_ownership = get_mesh_edge_specialized(
+                                v0s, v1s, corner_ownership = get_mesh_edge_specialized(
                                     mesh_id_tri,
                                     mesh_edge_indices,
                                     mesh_edge_centers,
@@ -1844,7 +1844,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                             v0 = wp.cw_mul(v0s, inv_sdf_scale)
                             v1 = wp.cw_mul(v1s, inv_sdf_scale)
 
-                            dist_unscaled, point_unscaled, _best_endpoint = do_edge_sdf_collision(
+                            dist_unscaled, point_unscaled, best_endpoint = do_edge_sdf_collision(
                                 texture_sdf,
                                 mesh_id_sdf,
                                 v0,
@@ -2260,7 +2260,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                         has_edge = edge_slot >= 0
 
                         if has_edge:
-                            _corner_ownership = int(0)
+                            corner_ownership = int(0)
                             if wp.static(enable_heightfields):
                                 if tri_type == GeoType.HFIELD:
                                     v0s, v1s = get_edge_from_heightfield(
@@ -2270,7 +2270,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                         my_edge_idx,
                                     )
                                 else:
-                                    v0s, v1s, _corner_ownership = get_mesh_edge_specialized(
+                                    v0s, v1s, corner_ownership = get_mesh_edge_specialized(
                                         mesh_id_tri,
                                         mesh_edge_indices,
                                         mesh_edge_centers,
@@ -2281,7 +2281,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                                         my_edge_idx,
                                     )
                             else:
-                                v0s, v1s, _corner_ownership = get_mesh_edge_specialized(
+                                v0s, v1s, corner_ownership = get_mesh_edge_specialized(
                                     mesh_id_tri,
                                     mesh_edge_indices,
                                     mesh_edge_centers,
@@ -2294,7 +2294,7 @@ def create_narrow_phase_process_mesh_mesh_contacts_kernel(
                             v0 = wp.cw_mul(v0s, inv_sdf_scale)
                             v1 = wp.cw_mul(v1s, inv_sdf_scale)
 
-                            dist_unscaled, point_unscaled, _best_endpoint = do_edge_sdf_collision(
+                            dist_unscaled, point_unscaled, best_endpoint = do_edge_sdf_collision(
                                 texture_sdf,
                                 mesh_id_sdf,
                                 v0,
