@@ -54,6 +54,10 @@ GUIDE_FRICTION = (0.08, 0.1)  # dynamic and static friction of the process guide
 _CHUTE_MARGIN = 2.0  # outfeed funnel and chute speed over mass flow, for the looser flowing stream
 # m above the deck, from the IFM's RailsOuter colliders that continue the neck.
 _GUARD_BANDS = ((0.018, 0.043), (0.088, 0.113))
+# m, deck width beyond each guard line. The guards start above the 16 mm heel, so a
+# bottle pressed against a guard passes its heel under the guard line; a deck ending
+# on that line let a packed bottle's heel slip off its edge and the bottle drop 16 mm.
+_DECK_UNDER_GUARD = 0.02
 _EYE = (0.065, 0.19)  # m above the deck, body and neck beams of the IFM's inlet eye
 IFM_RECEIVING_BELT = "/Plant/Line/IFM/Modules/IFM_A/Belts/S2"
 
@@ -264,7 +268,8 @@ def _add_table(scene, name, outline, center, speed, *, inflow, outflow=None, spl
     for part, xs in enumerate(parts):
         rs, ls = np.interp(xs, x_stations, right_stations), np.interp(xs, x_stations, left_stations)
         vertices, indices = _strip(
-            np.column_stack((xs, y - rs, np.full_like(xs, z))), np.column_stack((xs, y + ls, np.full_like(xs, z)))
+            np.column_stack((xs, y - rs - _DECK_UNDER_GUARD, np.full_like(xs, z))),
+            np.column_stack((xs, y + ls + _DECK_UNDER_GUARD, np.full_like(xs, z))),
         )
         deck = newton.Mesh(vertices, indices, compute_inertia=False, enable_surface_velocity=not motor_off)
         decks.append(f"{label}/Deck" + (f"_{part}" if splits else ""))
