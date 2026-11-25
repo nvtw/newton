@@ -55,6 +55,7 @@ from newton.examples.phoenx.example_phoenx_bottling_plant import (
     _local_fixture_drives,
     production_cartons,
 )
+from newton.tests.test_convex_refinement_regressions import _bottle_heel_hull
 from newton.tests.unittest_utils import requires
 from newton.viewer import ViewerNull
 
@@ -1861,6 +1862,77 @@ def Xform "Plant" {
             np.testing.assert_allclose(
                 signs * contacts.rigid_contact_surface_velocity.numpy()[:count, 0], -0.2, atol=1e-6
             )
+
+    @unittest.skipUnless(wp.is_cuda_available(), "CUDA device required")
+    def test_abutting_belt_pieces_slide_as_one_surface(self):
+        """Fuse a belt's abutting collider pieces so their buried end caps cannot stop a heel.
+
+        The source authors IFM belts as 0.748 m chamfered bars on one body. As
+        separate meshes, the second bar's end cap pushed a bottle heel crossing
+        the joint back along -x and tipped the bottle.
+        """
+        profile = "(-0.04125,-0.005), (-0.04125,0.0038), (-0.04005,0.005), (0.04005,0.005), (0.04125,-0.005), (0.04125,0.0038)"
+        # The source's own triangulation, whose two end caps are fanned differently.
+        indices = (
+            "10,0,4, 10,6,0, 5,10,4, 5,11,10, 1,5,4, 1,4,0, 1,2,3, 1,3,5, 7,0,6, 7,1,0, "
+            "7,2,1, 7,8,2, 9,6,10, 9,10,11, 9,7,6, 9,8,7, 9,5,3, 9,11,5, 9,3,2, 9,2,8"
+        )
+        pieces = ""
+        for name, (x0, x1) in (("Collider_00", (-0.748, 0.0)), ("Collider_01", (0.0, 0.748))):
+            points = ", ".join(f"({x},{yz[1:]}" for x in (x0, x1) for yz in profile.split(", "))
+            pieces += f"""
+  def Mesh "{name}" (prepend apiSchemas = ["PhysicsCollisionAPI"]) {{
+   uniform token physics:approximation = "convexHull"
+   point3f[] points = [{points}]
+   int[] faceVertexCounts = [{", ".join(["3"] * 20)}]
+   int[] faceVertexIndices = [{indices}]
+  }}"""
+        with tempfile.TemporaryDirectory() as directory, wp.ScopedDevice("cuda:0"):
+            root = Path(directory)
+            path = root / "scenarios/line_sim/line_sim.usda"
+            path.parent.mkdir(parents=True)
+            path.write_text(f"""#usda 1.0
+(defaultPrim = "Plant"; metersPerUnit = 1; upAxis = "Z")
+def Xform "Plant" {{
+ def Xform "Belt" (prepend apiSchemas = ["PhysicsRigidBodyAPI"]) {{
+  bool physics:kinematicEnabled = true
+  custom bool physxSurfaceVelocity:surfaceVelocityEnabled = true
+  double3 xformOp:translate = (43.4605, 38.3575, 0.945)
+  uniform token[] xformOpOrder = ["xformOp:translate"]{pieces}
+ }}
+}}
+""")
+            scene = load_plant(root, visuals=False, motor_off=True)
+            self.assertEqual(len(scene.belts), 1, "the abutting pieces form one belt surface")
+            mesh = scene.belts[0][0]
+            faces = np.asarray(mesh.indices).reshape(-1, 3)
+            edges = {(int(a), int(b)) for face in faces for a, b in zip(face, np.roll(face, -1), strict=True)}
+            self.assertEqual(len(edges), 3 * len(faces), "every directed edge is used once")
+            self.assertTrue(all((b, a) in edges for a, b in edges), "the fused surface is closed")
+            centers = np.asarray(mesh.vertices)[faces].mean(axis=1)
+            self.assertFalse(np.any(np.abs(centers[:, 0]) < 1.0e-6), "no end cap remains at the joint")
+
+            builder = scene.builder
+            heel = builder.add_body(mass=1.0, inertia=wp.mat33(np.eye(3)))
+            builder.add_shape_convex_hull(
+                heel, mesh=_bottle_heel_hull(), cfg=builder.ShapeConfig(density=0.0, gap=0.001)
+            )
+            model = builder.finalize()
+            pipeline = newton.CollisionPipeline(model)
+            contacts, state = pipeline.contacts(), model.state()
+            poses = state.body_q.numpy()
+            # The heel straddles the joint, its rim at the joint for +-25.5 mm, 10 um deep.
+            for dx in (-0.0255, -0.0125, 0.0, 0.0125, 0.0255):
+                for yaw in (0.0, 0.1, 0.2):
+                    with self.subTest(dx=dx, yaw=yaw):
+                        q = wp.quat_from_axis_angle(wp.vec3(0.0, 0.0, 1.0), yaw)
+                        poses[heel] = (43.4605 + dx, 38.3575, 0.95 - 1.0e-5, *q)
+                        state.body_q.assign(poses)
+                        pipeline.collide(state, contacts)
+                        count = int(contacts.rigid_contact_count.numpy()[0])
+                        self.assertGreater(count, 0)
+                        normals = contacts.rigid_contact_normal.numpy()[:count]
+                        self.assertGreater(float(np.min(np.abs(normals[:, 2]))), 0.9999, normals)
 
     def test_position_drive_after_free_root(self):
         """A case clamp still receives its position command after a free root."""

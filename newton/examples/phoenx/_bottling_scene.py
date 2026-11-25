@@ -142,6 +142,75 @@ def _mesh_normals(mesh):
     return normals
 
 
+def merge_abutting_meshes(meshes):
+    """Fuse closed meshes that meet face to face into single closed surfaces.
+
+    A belt authored as abutting pieces buries each piece's end cap against its
+    neighbour's. Separate meshes keep those caps as walls a sliding product can
+    hit. Two pieces abut where the triangles built only from vertices they share
+    cover one planar polygon on each piece with opposite winding, however each
+    piece triangulated it. Both copies are dropped and the pieces welded.
+
+    Args:
+        meshes: Closed, outward-wound meshes in one common frame.
+
+    Returns:
+        ``(members, mesh)`` pairs: the input indices each output mesh replaces.
+        Pieces without an abutting partner are returned unchanged.
+    """
+    points = np.concatenate([np.asarray(m.vertices, dtype=np.float32) for m in meshes])
+    welded, inverse = np.unique(points, axis=0, return_inverse=True)
+    offsets = np.cumsum([0] + [len(m.vertices) for m in meshes])
+    faces = [inverse.ravel()[np.asarray(m.indices).reshape(-1, 3) + offsets[i]] for i, m in enumerate(meshes)]
+    kept = [np.ones(len(f), dtype=bool) for f in faces]
+    root = list(range(len(meshes)))
+
+    def find(i):
+        while root[i] != i:
+            i = root[i]
+        return i
+
+    def boundary(patch):
+        edges = {
+            (int(a), int(b)) for face in patch for a, b in ((face[0], face[1]), (face[1], face[2]), (face[2], face[0]))
+        }
+        return {(a, b) for a, b in edges if (b, a) not in edges}
+
+    for a, b in itertools.combinations(range(len(meshes)), 2):
+        shared = np.intersect1d(faces[a], faces[b])
+        if len(shared) < 3:
+            continue
+        cap_a = np.isin(faces[a], shared).all(axis=1)
+        cap_b = np.isin(faces[b], shared).all(axis=1)
+        if not cap_a.any() or not cap_b.any():
+            continue
+        rim = boundary(faces[a][cap_a])
+        if rim != {(j, i) for i, j in boundary(faces[b][cap_b])}:
+            continue
+        # The shared polygon must be flat up to the float32 rounding of its corners.
+        corners = welded[np.unique(faces[a][cap_a])].astype(np.float64)
+        corners -= corners.mean(axis=0)
+        normal = np.linalg.svd(corners)[2][2]
+        if np.abs(corners @ normal).max() > 4.0 * np.finfo(np.float32).eps * np.abs(welded).max():
+            continue
+        kept[a] &= ~cap_a
+        kept[b] &= ~cap_b
+        root[find(b)] = find(a)
+
+    groups = {}
+    for i in range(len(meshes)):
+        groups.setdefault(find(i), []).append(i)
+    result = []
+    for members in groups.values():
+        if len(members) == 1:
+            result.append((members, meshes[members[0]]))
+            continue
+        triangles = np.concatenate([faces[i][kept[i]] for i in members])
+        used, indices = np.unique(triangles, return_inverse=True)
+        result.append((members, newton.Mesh(welded[used], indices.ravel(), compute_inertia=False)))
+    return result
+
+
 def _prepare_wrapper_inventory(stage):
     """Start with empty wrapper ports, matching the source live scenario."""
     from pxr import Usd  # noqa: PLC0415 - OpenUSD is optional.
@@ -652,6 +721,7 @@ def load_plant(
         mesh.texture_transform = matrix
 
     meshes = {}
+    belt_pieces = {}
     owner_cache = {}
 
     def owner(prim):
@@ -729,11 +799,9 @@ def load_plant(
                 mesh.mass = centered.mass
                 mesh.com = wp.vec3(np.asarray(centered.com) + center)
                 mesh.inertia = centered.inertia
-            if velocity is not None:
-                if _value(prim, "physics:approximation", "none") == "convexHull":
-                    # Cook the authored hull before assigning its velocity field.
-                    mesh = mesh.compute_convex_hull()
-                mesh = moving_mesh(mesh, velocity)
+            if velocity is not None and _value(prim, "physics:approximation", "none") == "convexHull":
+                # Cook the authored hull before assigning its velocity field.
+                mesh = mesh.compute_convex_hull()
             meshes[key] = mesh
         return meshes[key]
 
@@ -807,6 +875,14 @@ def load_plant(
                     if "/Packers/" in label and label.endswith(("/Belts/IN_A", "/Belts/IN_B")):
                         linear = (0.2 if label.endswith("IN_A") else 0.4, 0.0, 0.0)
                 velocity = (tuple(linear), tuple(angular), tuple(pose.p) + tuple(pose.q), tuple(scale), label)
+        if velocity is not None and kind in ("Mesh", "Cube"):
+            if kind == "Mesh":
+                mesh = mesh_for(prim, visual=visual, velocity=velocity)
+            else:
+                mesh = newton.Mesh.create_box(float(_value(prim, "size", 2.0)) / 2.0, compute_inertia=False)
+            # Pieces of one belt surface are fused once all are known.
+            belt_pieces.setdefault((body, velocity, repr(cfg), repr(custom_attributes)), []).append((mesh, kw))
+            return
         if kind == "Mesh":
             mesh = mesh_for(prim, visual=visual, velocity=velocity)
             approximation = _value(prim, "physics:approximation", "none")
@@ -834,23 +910,18 @@ def load_plant(
             density = _value(prim, "physics:density", 0.0)
             if collision and density > 0.0:
                 cfg.density = density
-            half = float(_value(prim, "size", 2.0)) / 2.0
-            if velocity is not None:
-                mesh = moving_mesh(newton.Mesh.create_box(half, compute_inertia=False), velocity)
-                builder.add_shape_mesh(body, mesh=mesh, scale=scale, **kw)
-            else:
-                half = half * np.abs(scale)
-                label = kw["label"]
-                if collision and ("/Inlet/Colliders/" in label or ("/BottleLanes/" in label and "/Guides" in label)):
-                    pose = kw["xform"]
-                    if float(pose.p[2]) - half[2] - _BELT_TOP < _RAIL_CLEARANCE:
-                        # The source's lower rail band starts 18 mm above the belt, 2 mm
-                        # above the bottle's 16 mm base ring. A rocking bottle's rim slid
-                        # under it and was levered over; raise the band to clear the ring.
-                        lift = _RAIL_CLEARANCE - (float(pose.p[2]) - half[2] - _BELT_TOP)
-                        kw["xform"] = wp.transform(wp.vec3(pose.p[0], pose.p[1], pose.p[2] + lift), pose.q)
-                        scene.metadata.setdefault("rail_band_lift_m", lift)
-                builder.add_shape_box(body, hx=half[0], hy=half[1], hz=half[2], **kw)
+            half = float(_value(prim, "size", 2.0)) / 2.0 * np.abs(scale)
+            label = kw["label"]
+            if collision and ("/Inlet/Colliders/" in label or ("/BottleLanes/" in label and "/Guides" in label)):
+                pose = kw["xform"]
+                if float(pose.p[2]) - half[2] - _BELT_TOP < _RAIL_CLEARANCE:
+                    # The source's lower rail band starts 18 mm above the belt, 2 mm
+                    # above the bottle's 16 mm base ring. A rocking bottle's rim slid
+                    # under it and was levered over; raise the band to clear the ring.
+                    lift = _RAIL_CLEARANCE - (float(pose.p[2]) - half[2] - _BELT_TOP)
+                    kw["xform"] = wp.transform(wp.vec3(pose.p[0], pose.p[1], pose.p[2] + lift), pose.q)
+                    scene.metadata.setdefault("rail_band_lift_m", lift)
+            builder.add_shape_box(body, hx=half[0], hy=half[1], hz=half[2], **kw)
         elif kind == "Sphere":
             builder.add_shape_sphere(body, radius=float(_value(prim, "radius", 1.0)) * max(abs(scale)), **kw)
         elif kind == "Plane":
@@ -1285,6 +1356,11 @@ def load_plant(
             "source_has_authored_wrapper_dynamics": False,
         }
 
+    for (body, velocity, _, _), pieces in belt_pieces.items():
+        # A belt authored as abutting pieces moves as one surface; fusing them
+        # removes the buried end caps that otherwise stop a sliding bottle.
+        for members, mesh in merge_abutting_meshes([mesh for mesh, _ in pieces]):
+            builder.add_shape_mesh(body, mesh=moving_mesh(mesh, velocity), scale=velocity[3], **pieces[members[0]][1])
     _bridge_transfers(builder, scene)
     if decomposed:
         # Case end walls are flat 3.2 mm plates with a hand hole that nothing
