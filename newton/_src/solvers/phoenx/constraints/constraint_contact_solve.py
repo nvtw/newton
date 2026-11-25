@@ -1807,6 +1807,14 @@ def _make_contact_iterate_at(
                     impulse_coeff_n = wp.float32(0.0)
                     mu_s_eff = mu_s
                     mu_k_eff = mu_k
+                # The friction anchors of a near speculative point pull back
+                # through the same damped spring as those of a touching point.
+                # Only the speculative normal row targets its gap exactly.
+                mass_coeff_t = mass_coeff_n
+                impulse_coeff_t = impulse_coeff_n
+                if is_speculative:
+                    mass_coeff_t = mass_coeff
+                    impulse_coeff_t = impulse_coeff
 
                 if normal_only:
                     if wp.static(has_soft_contact_pd):
@@ -1907,6 +1915,8 @@ def _make_contact_iterate_at(
                                         bias_t2_val,
                                         mu_s_eff,
                                         mu_k_eff,
+                                        mass_coeff_t,
+                                        impulse_coeff_t,
                                         row_sor,
                                         mobility_nt1,
                                         mobility_nt2,
@@ -1936,6 +1946,8 @@ def _make_contact_iterate_at(
                                     mu_k_eff,
                                     mass_coeff_n,
                                     impulse_coeff_n,
+                                    mass_coeff_t,
+                                    impulse_coeff_t,
                                     row_sor,
                                     pd_eff_soft_n,
                                     pd_gamma_n,

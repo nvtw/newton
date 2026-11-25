@@ -830,6 +830,8 @@ def reduced_contact_iterate_staged(
             mu_dynamic,
             row_mass_coeff,
             row_impulse_coeff,
+            wp.float32(1.0),
+            wp.float32(0.0),
             sor_boost,
             wp.float32(0.0),
             wp.float32(0.0),

@@ -30,10 +30,10 @@ def _solve_sticking_equilibrium(cc: ContactContainer, sor: float, loads: wp.arra
     impulse_coeff = wp.float32(0.1)
     jv = wp.float32(0.02) * cc.impulses[0, k]
     bias = -jv - impulse_coeff * cc.impulses[0, k] / mass_coeff
+    # Tangent rows are soft like the normal row, so their fixed point holds
+    # the tangent load with the matching anchor bias.
+    bias_t1 = -impulse_coeff * cc.impulses[1, k] / mass_coeff
     if k == 0:
-        # Point tangent rows are soft like the normal row, so their fixed
-        # point holds the tangent load with the matching anchor bias.
-        bias_t1 = -impulse_coeff * cc.impulses[1, k] / mass_coeff
         contact_project_velocity_update_no_soft_pd(
             cc,
             k,
@@ -72,10 +72,12 @@ def _solve_sticking_equilibrium(cc: ContactContainer, sor: float, loads: wp.arra
             1.0,
             1.0,
             bias,
-            0.0,
+            bias_t1,
             0.0,
             0.7,
             0.7,
+            mass_coeff,
+            impulse_coeff,
             mass_coeff,
             impulse_coeff,
             sor,
@@ -100,10 +102,12 @@ def _solve_sticking_equilibrium(cc: ContactContainer, sor: float, loads: wp.arra
             1.0,
             1.0,
             bias,
-            0.0,
+            bias_t1,
             0.0,
             0.7,
             0.7,
+            mass_coeff,
+            impulse_coeff,
             mass_coeff,
             impulse_coeff,
             sor,
@@ -156,6 +160,8 @@ def _solve_contact(cc: ContactContainer, coupled: wp.bool, impulse: wp.array[wp.
             0.0,
             10.0,
             10.0,
+            1.0,
+            0.0,
             1.0,
             0.0,
             1.0,
@@ -216,6 +222,8 @@ def _solve_rank_one_contact(cc: ContactContainer, impulse: wp.array[wp.vec3]):
         0.0,
         1.0,
         0.0,
+        1.0,
+        0.0,
         0.0,
         0.0,
         0.0,
@@ -245,6 +253,8 @@ def _solve_sliding_contact(
         0.0,
         friction_coefficient,
         friction_coefficient,
+        1.0,
+        0.0,
         1.0,
         0.0,
         1.0,

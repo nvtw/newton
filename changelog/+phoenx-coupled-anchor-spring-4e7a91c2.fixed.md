@@ -1,0 +1,1 @@
+Fix resting stacks rocking in `SolverPhoenX` multi-world scenes with mass splitting: the coupled normal-tangent contact solve now pulls friction anchors back as a damped spring, like the other contact solves.
