@@ -521,6 +521,9 @@ class Example:
             # Host PLCs overlap this frame's GPU work; see PlantController.after_step.
             self.controller.after_step()
         self.sim_time += self.frame_dt
+        if self.args.diagnostics and round(self.sim_time / self.frame_dt) % 60 == 0:
+            # Stop at the second a product leaves the line instead of at the end of the run.
+            self._check_products(self.state_0.body_q.numpy())
 
     def render(self):
         state = self._render_states[self._render_state_index] if self._render_state_prepared else self.state_0
@@ -755,7 +758,11 @@ class Example:
             default=12,
             help="Regular colors before the overflow partition when --mass-splitting is enabled.",
         )
-        parser.add_argument("--diagnostics", action="store_true")
+        parser.add_argument(
+            "--diagnostics",
+            action="store_true",
+            help="Validate inertia in detail and check every simulated second that no product left the line.",
+        )
         parser.add_argument(
             "--filling-room-physics",
             action=_FillingRoomAction,
