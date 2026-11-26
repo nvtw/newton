@@ -48,12 +48,14 @@ _INERTIA_SYMMETRY_RTOL = 1.0e-5
 _INERTIA_SYMMETRY_ATOL = 1.0e-8
 
 
-def _inverse_inertia(inertia: wp.mat33) -> wp.mat33:
+def _inverse_inertia(inertia: wp.mat33 | np.ndarray) -> wp.mat33:
     """Invert on the host in float64, preserving Warp's zero result for singular tensors."""
     try:
-        return wp.mat33(np.linalg.inv(np.asarray(inertia, dtype=np.float64).reshape(3, 3)))
+        inverse = np.linalg.inv(np.asarray(inertia, dtype=np.float64).reshape(3, 3))
     except np.linalg.LinAlgError:
         return wp.mat33(0.0)
+    # Unpacked floats build the matrix several times faster than an array.
+    return wp.mat33(*inverse.ravel().tolist())
 
 
 @wp.func
