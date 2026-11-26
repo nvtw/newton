@@ -356,43 +356,48 @@ class TestPhoenXAutoPerformancePolicy(unittest.TestCase):
     def test_bounded_drives_refresh_contact_mobility(self):
         """A motor cap that refactors the joint system refreshes the contact mobility it changed."""
         for use_bias in (True, False):
-            for factor_changed in (0, 1):
-                with self.subTest(use_bias=use_bias, factor_changed=factor_changed):
-                    response = SimpleNamespace(compute=Mock(), apply_bias_velocity=Mock())
-                    schedule = SimpleNamespace(solve=Mock())
-                    direct = SimpleNamespace(
-                        has_bounded_drives=True,
-                        compute_bias_velocity=Mock(),
-                        bias_velocity=object(),
-                        resolve_bounded_drives=Mock(),
-                        factor_changed=wp.array([factor_changed], dtype=wp.int32, device="cpu"),
-                    )
-                    response.direct = direct
-                    world = SimpleNamespace(
-                        _contact_input_active_this_step=True,
-                        _direct_contact_response=response,
-                        _direct_contact_schedule=schedule,
-                        _direct_equality_system=direct,
-                        # The owned warm start computed this substep's mobility.
-                        _direct_contact_response_current=True,
-                        _contact_container=object(),
-                        bodies=object(),
-                        solver_iterations=4,
-                        _active_velocity_iterations=1,
-                        substep_dt=1.0 / 240.0,
-                        sor_boost=1.0,
-                    )
-                    PhoenXWorld._solve_direct_contacts(world, use_bias=use_bias, refresh_mobility=use_bias)
-                    self.assertEqual(response.compute.call_count, factor_changed)
-                    self.assertEqual(int(direct.factor_changed.numpy()[0]), 0)
-                    # The substep's first biased pass computes the joint bias velocity once.
-                    self.assertEqual(direct.compute_bias_velocity.call_count, int(use_bias) * (1 + factor_changed))
-                    schedule.solve.assert_called_once()
-                    # The biased pass tests the motor caps against the contact load; a cap
-                    # change would refresh the mobility and sweep the contacts again.
-                    self.assertEqual(direct.resolve_bounded_drives.call_count, int(use_bias))
-                    if use_bias:
-                        self.assertIn("after_change", direct.resolve_bounded_drives.call_args.kwargs)
+            with self.subTest(use_bias=use_bias):
+                response = SimpleNamespace(compute=Mock(), apply_bias_velocity=Mock())
+                schedule = SimpleNamespace(solve=Mock())
+                direct = SimpleNamespace(
+                    has_bounded_drives=True,
+                    compute_bias_velocity=Mock(),
+                    bias_velocity=object(),
+                    resolve_bounded_drives=Mock(),
+                )
+                response.direct = direct
+                world = SimpleNamespace(
+                    _contact_input_active_this_step=True,
+                    _direct_contact_response=response,
+                    _direct_contact_schedule=schedule,
+                    _direct_equality_system=direct,
+                    # The owned warm start computed this substep's mobility.
+                    _direct_contact_response_current=True,
+                    _contact_container=object(),
+                    bodies=object(),
+                    solver_iterations=4,
+                    _active_velocity_iterations=1,
+                    substep_dt=1.0 / 240.0,
+                    sor_boost=1.0,
+                )
+                PhoenXWorld._solve_direct_contacts(world, use_bias=use_bias, refresh_mobility=use_bias)
+                # The warm start's mobility is current; bound changes refresh it themselves.
+                response.compute.assert_not_called()
+                # The substep's first biased pass computes the joint bias velocity once.
+                self.assertEqual(direct.compute_bias_velocity.call_count, int(use_bias))
+                schedule.solve.assert_called_once()
+                # The biased pass tests the motor caps against the contact load; a cap
+                # change refreshes the mobility and sweeps the contacts again.
+                self.assertEqual(direct.resolve_bounded_drives.call_count, int(use_bias))
+                if use_bias:
+                    self.assertIn("after_change", direct.resolve_bounded_drives.call_args.kwargs)
+
+                # The direct system's bound-change hook refreshes the mobility and,
+                # for biased solves, the joint bias velocity.
+                direct.compute_bias_velocity.reset_mock()
+                PhoenXWorld._refresh_direct_contact_response(world, use_bias)
+                response.compute.assert_called_once()
+                self.assertEqual(direct.compute_bias_velocity.call_count, int(use_bias))
 
     def test_contact_columns_use_shape_pair_capacity(self) -> None:
         """Size contact columns from shape pairs instead of contact points."""

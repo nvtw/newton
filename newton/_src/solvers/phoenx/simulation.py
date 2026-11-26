@@ -5145,8 +5145,6 @@ class PhoenXWorld:
         schedule = self._direct_contact_schedule
         if response is not None and schedule is not None:
             response.compute(self._contact_container)
-            if response.direct is not None and response.direct.has_bounded_drives:
-                response.direct.factor_changed.zero_()
             # The biased sweep of this substep reuses this response.
             self._direct_contact_response_current = True
             schedule.warm_start(self.bodies, self._contact_container)
@@ -5303,6 +5301,20 @@ class PhoenXWorld:
         """Enter a temporal sweep with the owned contacts' impulses of the previous one."""
         self._direct_contact_schedule.warm_start(self.bodies, self._contact_container)
 
+    def _refresh_direct_contact_response(self, use_bias: bool) -> None:
+        """Recompute the direct contact mobility and, for biased sweeps, the joint bias velocity.
+
+        Both follow the factor and the substep's poses only, not velocities. The
+        direct system also calls this after a bound change refactors it, so the
+        contact solves always see the current motor response.
+        """
+        response = self._direct_contact_response
+        if not self._contact_input_active_this_step or response is None or self._direct_contact_schedule is None:
+            return
+        response.compute(self._contact_container)
+        if use_bias and response.direct is not None:
+            response.direct.compute_bias_velocity()
+
     def _solve_direct_contacts(
         self,
         *,
@@ -5321,27 +5333,12 @@ class PhoenXWorld:
         if not self._contact_input_active_this_step or response is None or schedule is None:
             return
         direct = response.direct
-        bounded = direct is not None and direct.has_bounded_drives
-
-        def refresh_responses() -> None:
-            # Contact mobility and the joint bias velocity follow the factor and the
-            # substep's poses only, not velocities: refresh them when either changed.
-            response.compute(self._contact_container)
-            if use_bias and direct is not None:
-                direct.compute_bias_velocity()
-            if bounded:
-                direct.factor_changed.zero_()
 
         if refresh_mobility and not self._direct_contact_response_current:
-            refresh_responses()
-        else:
-            if refresh_mobility and use_bias and direct is not None:
-                # The owned warm start computed this substep's mobility.
-                direct.compute_bias_velocity()
-            if bounded:
-                # Effort-bound activation can refactor the joint system after the
-                # last refresh, which changes the motor response the contacts see.
-                wp.capture_if(direct.factor_changed, on_true=refresh_responses, on_false=None)
+            self._refresh_direct_contact_response(use_bias)
+        elif refresh_mobility and use_bias and direct is not None:
+            # The owned warm start computed this substep's mobility.
+            direct.compute_bias_velocity()
         self._direct_contact_response_current = False
         if iterations is None:
             iterations = self.solver_iterations if use_bias else self._active_velocity_iterations
@@ -5370,11 +5367,7 @@ class PhoenXWorld:
             # caps against that load. A cap that changes removes or adds motor
             # impulse the contacts already answered: sweep them again against the
             # corrected motor before the substep integrates.
-            def resweep() -> None:
-                refresh_responses()
-                sweep()
-
-            direct.resolve_bounded_drives(1.0 / self.substep_dt, use_bias=True, after_change=resweep)
+            direct.resolve_bounded_drives(1.0 / self.substep_dt, use_bias=True, after_change=sweep)
 
     def _solve_maximal_articulated_contacts(self, *, use_bias: bool, refresh_mobility: bool) -> None:
         """Run one exact articulation-response contact correction sweep."""

@@ -1571,6 +1571,7 @@ class SolverPhoenX(SolverBase):
                         )
                         self.world._direct_contact_response = self._direct_contact_response
                         self.world._direct_contact_schedule = self._direct_contact_schedule
+                        exact.after_factor_change = self.world._refresh_direct_contact_response
 
         if num_cloth_triangles > 0:
             self.world.populate_cloth_triangles_from_model(model)
@@ -1756,6 +1757,7 @@ class SolverPhoenX(SolverBase):
         )
         self.world._direct_contact_response = self._direct_contact_response
         self.world._direct_contact_schedule = self._direct_contact_schedule
+        direct.after_factor_change = self.world._refresh_direct_contact_response
 
     def _refresh_direct_joint_ownership(self) -> None:
         """Reapply direct-drive and residual-PGS ownership after property edits."""

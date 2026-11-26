@@ -418,6 +418,67 @@ class TestDirectJointTypes(unittest.TestCase):
         self.assertTrue(np.isfinite(state.body_q.numpy()).all())
         self.assertTrue(np.isfinite(response.data.mobility.numpy()[:1]).all())
 
+    def test_drive_bound_change_refreshes_contact_response(self) -> None:
+        """Activating an effort bound refactors the joints and refreshes the owned contact response."""
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        builder.add_ground_plane()
+        shape_cfg = newton.ModelBuilder.ShapeConfig(density=0.0, mu=0.5)
+        for x, target in ((-0.012, 0.03), (0.012, -0.03)):
+            base = builder.add_link(
+                xform=wp.transform(wp.vec3(x, 0.0, 0.1), wp.quat_identity()), mass=1.0, inertia=_INERTIA
+            )
+            builder.add_shape_box(base, hx=0.01, hy=0.01, hz=0.01, cfg=shape_cfg)
+            # The bounded drive pushes the bases into each other.
+            slide = builder.add_joint_prismatic(
+                parent=-1,
+                child=base,
+                axis=newton.Axis.X,
+                parent_xform=wp.transform(wp.vec3(x, 0.0, 0.1), wp.quat_identity()),
+                target_q=target,
+                target_ke=2000.0,
+                target_kd=20.0,
+                effort_limit=3.0,
+                limit_lower=-np.inf,
+                limit_upper=np.inf,
+            )
+            builder.add_articulation([slide])
+        builder.color()
+        model = builder.finalize(device=wp.get_preferred_device())
+        model.joint_target_mode.fill_(int(newton.JointTargetMode.POSITION))
+        selected = np.ones(model.joint_count, dtype=bool)
+        solver = newton.solvers.SolverPhoenX(
+            model,
+            joint_mode="maximal_pgs",
+            step_layout="single_world",
+            temporal_iterations=True,
+            direct_joint_mask=selected,
+            direct_contact_mask=selected,
+        )
+        world = solver.world
+        exact = solver._direct_equality_system
+        exact = getattr(exact, "exact", exact)
+        self.assertEqual(exact.after_factor_change, world._refresh_direct_contact_response)
+        refreshes = []
+
+        def refresh(use_bias: bool) -> None:
+            refreshes.append(use_bias)
+            world._refresh_direct_contact_response(use_bias)
+
+        exact.after_factor_change = refresh
+        state_0, state_1 = model.state(), model.state()
+        newton.eval_fk(model, model.joint_q, model.joint_qd, state_0)
+        control = model.control()
+        contacts = model._collision_pipeline.contacts()
+        model._collision_pipeline.collide(state_0, contacts)
+        # Uncaptured, the bound conditionals run only when a bound changes.
+        solver.step(state_0, state_1, control, contacts, 1.0 / 120.0)
+        self.assertGreater(int(contacts.rigid_contact_count.numpy()[0]), 0)
+        self.assertTrue(exact.drive_saturated.numpy().any())
+        # The first step's warm-start projection activates the bounds.
+        self.assertTrue(refreshes)
+        self.assertTrue(np.isfinite(state_1.body_q.numpy()).all())
+        self.assertTrue(np.isfinite(world._direct_contact_response.data.mobility.numpy()).all())
+
     def test_selected_exact_mechanism_contacts(self) -> None:
         """Solve selected ground contacts exactly while retaining ordinary contacts."""
         for mode in ("maximal_direct", "maximal_pgs"):
