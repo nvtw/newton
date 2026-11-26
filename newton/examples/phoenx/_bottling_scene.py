@@ -720,6 +720,17 @@ def load_plant(
         matrix[1] /= rows
         mesh.texture_transform = matrix
 
+    geometry_types = {"Mesh", "Cube", "Sphere", "Cylinder", "Capsule", "Cone", "Plane"}
+    geometry = [prim for prim in prims if prim.GetTypeName() in geometry_types]
+    # Material bindings by purpose, resolved in batches below.
+    bound_materials = {"physics": {}, "": {}}
+
+    def bound_material(prim, purpose=""):
+        material = bound_materials[purpose].get(prim.GetPath())
+        if material is None:
+            material = UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial(purpose)[0]
+        return material
+
     meshes = {}
     belt_pieces = {}
     owner_cache = {}
@@ -755,7 +766,7 @@ def load_plant(
         stack = points.GetPropertyStack()
         source = (stack[0].layer.identifier, str(stack[0].path)) if stack else str(prim.GetPath())
         # Instance proxies have distinct paths but share the same authored geometry.
-        material = UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial()[0] if visual else None
+        material = bound_material(prim) if visual else None
         material_key = None
         if material:
             material_stack = material.GetPrim().GetPrimStack()
@@ -818,7 +829,7 @@ def load_plant(
         )
         custom_attributes = None
         if collision:
-            material = UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial("physics")[0]
+            material = bound_material(prim, "physics")
             if material:
                 cfg.mu = float(_value(material.GetPrim(), "physics:dynamicFriction", 0.5))
                 cfg.mu_static = max(cfg.mu, float(_value(material.GetPrim(), "physics:staticFriction", cfg.mu)))
@@ -956,12 +967,10 @@ def load_plant(
 
     wrappers = {}
     wrapper_proxies = {}
-    geometry_types = {"Mesh", "Cube", "Sphere", "Cylinder", "Capsule", "Cone", "Plane"}
     instancers = [UsdGeom.PointInstancer(p) for p in prims if p.IsA(UsdGeom.PointInstancer)]
     prototypes = {path for instancer in instancers for path in instancer.GetPrototypesRel().GetTargets()}
-    for prim in prims:
-        if prim.GetTypeName() not in geometry_types:
-            continue
+    placements = []
+    for prim in geometry:
         # Walk this prim's ancestors instead of scanning every instancer
         # prototype for every geometry prim in the factory.
         if not prototypes.isdisjoint(prim.GetPath().GetPrefixes()):
@@ -1007,6 +1016,15 @@ def load_plant(
             wrapper = parent_path.removesuffix("/Physics/Static") + "/Wrapper"
             wrapper_proxies.setdefault(wrapper, []).append((prim, matrix, body))
             collision = False
+        placements.append((prim, matrix, body, collision, visible))
+    # Resolve the placed prims' material bindings in one batch per purpose, so
+    # UsdShade shares its binding caches instead of rebuilding them per prim.
+    for purpose, column in (("physics", 3), ("", 4)):
+        bound = [placement[0] for placement in placements if placement[column]]
+        if bound:
+            materials = UsdShade.MaterialBindingAPI.ComputeBoundMaterials(bound, purpose)[0]
+            bound_materials[purpose].update(zip((prim.GetPath() for prim in bound), materials, strict=True))
+    for prim, matrix, body, collision, visible in placements:
         if collision:
             add_geometry(prim, matrix, body, visual=False, collision=True)
         if visible:
