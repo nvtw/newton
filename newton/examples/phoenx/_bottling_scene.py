@@ -56,11 +56,37 @@ _BELT_TOP = 0.95
 # base ring collides as the round profile those hulls approximate: (shape,
 # radius, bottom, top) in m, from the source's Hull_01..Hull_07 rings; the
 # shoulder cone's top is its apex. The base ring hull Hull_00 is kept.
-_BOTTLE_PROFILE = (
-    ("cylinder", 0.0305, 0.016, 0.1212),
-    ("cone", 0.0304, 0.1212, 0.2016),
-    ("cylinder", 0.016, 0.1593, 0.2297),
-)
+_BODY_RADIUS, _BODY_BOTTOM, _BODY_TOP = 0.0305, 0.016, 0.1212
+_SHOULDER_APEX = 0.2016
+_NECK_RADIUS, _NECK_BOTTOM, _NECK_TOP = 0.016, 0.1593, 0.2297
+# No piece may end at full radius on the plane where a neighbour's piece
+# starts at full radius: bottles abreast touched there with a vertical normal,
+# which lifted and spun them in a pressed file until they fell off. So the
+# base ring rises into the body cylinder and the shoulder cone starts inside
+# the cylinder's top, each recessed from the body's surface: neither leaves a
+# bulge, and only a neighbour pressed in by the recess reaches their ends.
+# The cone keeps the source's apex, so its shoulder starts up to 3.3 mm
+# inside the source's at the body's top.
+_JOIN_RECESS, _JOIN_OVERLAP = 0.002, 0.004
+
+
+def _convex(vertices):
+    """Convex hull keeping every given vertex."""
+    mesh = newton.Mesh(np.asarray(vertices, dtype=np.float32), [0, 1, 2], compute_inertia=False)
+    mesh.maxhullvert = len(mesh.vertices)
+    return mesh.compute_convex_hull()
+
+
+def seal_base_ring(mesh):
+    """Raise the base ring hull's top ring into the body cylinder, recessed from its surface."""
+    vertices = np.asarray(mesh.vertices, dtype=np.float64)
+    top = vertices[vertices[:, 2] >= vertices[:, 2].max() - 1.0e-6]
+    center = top[:, :2].mean(axis=0)
+    radius = np.linalg.norm(top[:, :2] - center, axis=1).max()
+    raised = top.copy()
+    raised[:, :2] = center + (top[:, :2] - center) * ((_BODY_RADIUS - _JOIN_RECESS) / radius)
+    raised[:, 2] += _JOIN_OVERLAP
+    return _convex(np.vstack((vertices, raised)))
 
 
 def add_round_bottle(builder, body, collision_root, *, xform=None, **kw):
@@ -70,7 +96,12 @@ def add_round_bottle(builder, body, collision_root, *, xform=None, **kw):
     the remaining shape arguments, such as the glass's ``cfg``.
     """
     pose = wp.transform_identity() if xform is None else xform
-    for shape, radius, bottom, top in _BOTTLE_PROFILE:
+    shoulder = (_BODY_RADIUS - _JOIN_RECESS, _BODY_TOP - _JOIN_OVERLAP, _SHOULDER_APEX)
+    for shape, radius, bottom, top in (
+        ("cylinder", _BODY_RADIUS, _BODY_BOTTOM, _BODY_TOP),
+        ("cone", *shoulder),
+        ("cylinder", _NECK_RADIUS, _NECK_BOTTOM, _NECK_TOP),
+    ):
         center = wp.transform_multiply(pose, wp.transform((0.0, 0.0, 0.5 * (bottom + top)), wp.quat_identity()))
         add = builder.add_shape_cylinder if shape == "cylinder" else builder.add_shape_cone
         label = f"{collision_root}/Round_{shape}_{1000.0 * bottom:.0f}mm/collision"
@@ -736,6 +767,8 @@ def load_plant(
         return material
 
     meshes = {}
+    # Source base-ring hulls and their sealed hulls, by source hull identity.
+    sealed_rings = {}
     belt_pieces = {}
     owner_cache = {}
 
@@ -852,11 +885,15 @@ def load_plant(
                 # Photo-eyes trace the source's hulls, on which its PLCs were tuned.
                 hull = mesh_for(prim, visual=False, velocity=None)
                 scene.metadata.setdefault("bottle_sensor_hulls", []).append((hull, pose, scale))
-            if not path.endswith("/Hull_00"):
-                if path.endswith("/Hull_01"):
-                    del kw["label"]
-                    add_round_bottle(builder, body, path.rsplit("/", 1)[0], **kw)
-                return
+            if path.endswith("/Hull_01"):
+                del kw["label"]
+                add_round_bottle(builder, body, path.rsplit("/", 1)[0], **kw)
+            elif path.endswith("/Hull_00"):
+                ring = mesh_for(prim, visual=False, velocity=None)
+                if id(ring) not in sealed_rings:
+                    sealed_rings[id(ring)] = (ring, seal_base_ring(ring))
+                builder.add_shape_convex_hull(body, mesh=sealed_rings[id(ring)][1], scale=scale, **kw)
+            return
         color = _value(prim, "primvars:displayColor", None)
         if visual and color is not None and len(color):
             kw["color"] = tuple(color[0])

@@ -38,7 +38,7 @@ from newton.examples.phoenx._bottling_process import (
     add_filling_bottles,
     add_filling_transport,
 )
-from newton.examples.phoenx._bottling_scene import PlantScene, add_round_bottle, load_plant
+from newton.examples.phoenx._bottling_scene import PlantScene, add_round_bottle, load_plant, seal_base_ring
 from newton.examples.phoenx._bottling_transport import (
     _carton_support_quadrants,
     _placement_motions,
@@ -424,6 +424,53 @@ class TestBottlingPlant(unittest.TestCase):
         # Bottles short of the open line end stand upright.
         on_line = (poses[:, 0] < 9.4) & (poses[:, 2] > 0.9)
         self.assertTrue(np.all(np.linalg.norm(poses[on_line, 3:5], axis=1) < np.sin(np.radians(7.5))))
+
+    @unittest.skipUnless(wp.is_cuda_available(), "CUDA device required")
+    def test_abreast_plant_bottles_touch_on_their_sides(self):
+        """Plant bottles abreast touch on their sides, never on the joins of their collider pieces.
+
+        Pieces ending on a shared plane at full radius made a bottle's base
+        ring top touch its neighbour's body cylinder, and a cylinder's top its
+        neighbour's shoulder, with a vertical normal; in a pressed file those
+        contacts lifted and spun bottles until they left the line. Their true
+        outline is vertical where abreast bottles meet in a jam.
+        """
+        builder = newton.ModelBuilder()
+        glass = builder.ShapeConfig(density=0.0, mu=0.16, mu_static=0.2, gap=0.002)
+        ring = seal_base_ring(_bottle_heel_hull())
+        bottles = []
+        for _ in range(2):
+            body = builder.add_body(mass=0.57, inertia=wp.mat33(np.eye(3) * 1.0e-3))
+            builder.add_shape_convex_hull(body, mesh=ring, cfg=glass)
+            add_round_bottle(builder, body, f"/Bottle_{body}", cfg=glass)
+            bottles.append(body)
+        with wp.ScopedDevice("cuda:0"):
+            model = builder.finalize()
+            pipeline = newton.CollisionPipeline(model, contact_matching="sticky", speculative_contact_gap_max=0.005)
+            state, contacts = model.state(), pipeline.contacts()
+            poses = state.body_q.numpy()
+            with wp.ScopedCapture() as capture:
+                pipeline.collide(state, contacts, dt=1.0 / 120.0)
+            shape_body = model.shape_body.numpy()
+            steepest = 0.0
+            # Pressed up to 0.5 mm into each other: upright, leaning in as far as
+            # that allows, or rocked away onto the heel; one up to 3 mm higher.
+            for overlap in (0.0, 0.0002, 0.0005):
+                for lean in (0.0, 0.004, -0.03):
+                    for lift in np.arange(-0.003, 0.0031, 0.001):
+                        q = wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), -lean)
+                        poses[bottles[0]] = (0.0, 0.0, 0.0, *q)
+                        poses[bottles[1]] = (0.0, 0.061 - overlap, lift, *wp.quat_identity())
+                        state.body_q.assign(poses)
+                        wp.capture_launch(capture.graph)
+                        count = int(contacts.rigid_contact_count.numpy()[0])
+                        pair = shape_body[contacts.rigid_contact_shape0.numpy()[:count]] >= 0
+                        pair &= shape_body[contacts.rigid_contact_shape1.numpy()[:count]] >= 0
+                        normals = contacts.rigid_contact_normal.numpy()[:count][pair]
+                        if len(normals):
+                            steepest = max(steepest, float(np.abs(normals[:, 2]).max()))
+        # The shoulder's own slope leans contact normals up to 0.35.
+        self.assertLess(steepest, 0.5)
 
     def test_wrapper_wrap_continues_from_accumulated_target(self):
         """A second wrap starts from the drive's accumulated target, not the wrapped angle."""
