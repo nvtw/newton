@@ -2742,8 +2742,6 @@ def _solve_reduced_contact_point(
         mu_dynamic,
         row_mass_coeff,
         row_impulse_coeff,
-        wp.float32(1.0),
-        wp.float32(0.0),
         sor_boost,
         wp.float32(0.0),
         wp.float32(0.0),

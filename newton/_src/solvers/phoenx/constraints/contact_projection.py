@@ -400,8 +400,6 @@ def _make_contact_project_coupled_velocity_update(has_soft_contact_pd: bool, tan
         mu_k: wp.float32,
         mass_coeff_n: wp.float32,
         impulse_coeff_n: wp.float32,
-        mass_coeff_t: wp.float32,
-        impulse_coeff_t: wp.float32,
         sor_boost: wp.float32,
         pd_eff_soft_n: wp.float32,
         pd_gamma_n: wp.float32,
@@ -414,11 +412,7 @@ def _make_contact_project_coupled_velocity_update(has_soft_contact_pd: bool, tan
 
         Cross mobilities account for the velocity change from the normal
         impulse before Coulomb friction acts. The returned world-space
-        impulse acts on side 2. The tangent rows take their own soft
-        coefficients ``mass_coeff_t`` and ``impulse_coeff_t``. With the
-        normal row's soft coefficients the friction anchor bias is an
-        implicit spring and damper, see :func:`_make_contact_frame_velocity_update`;
-        ``1`` and ``0`` make it a plain velocity target.
+        impulse acts on side 2.
         """
         lam_n_old = cc_get_normal_lambda(cc, k)
         lam_t1_old = cc_get_tangent1_lambda(cc, k)
@@ -456,10 +450,8 @@ def _make_contact_project_coupled_velocity_update(has_soft_contact_pd: bool, tan
             return normal_update.delta * normal - lam_t1_old * tangent1 - lam_t2_old * tangent2
 
         # The normal impulse changes tangential velocity before friction acts.
-        # The soft unconstrained impulse is (1 - c_i) lambda_old - c_m K^-1 rhs.
-        rhs_t1 = mass_coeff_t * (jv_t1 + bias_t1 + mobility_nt1 * normal_update.delta)
-        rhs_t2 = mass_coeff_t * (jv_t2 + bias_t2 + mobility_nt2 * normal_update.delta)
-        keep = wp.float32(1.0) - impulse_coeff_t
+        rhs_t1 = jv_t1 + bias_t1 + mobility_nt1 * normal_update.delta
+        rhs_t2 = jv_t2 + bias_t2 + mobility_nt2 * normal_update.delta
         if wp.static(tangent_mobility_stored):
             mobility_t1 = eff_t1
             mobility_t2 = eff_t2
@@ -472,8 +464,8 @@ def _make_contact_project_coupled_velocity_update(has_soft_contact_pd: bool, tan
             mobility_t2,
             rhs_t1,
             rhs_t2,
-            keep * lam_t1_old,
-            keep * lam_t2_old,
+            lam_t1_old,
+            lam_t2_old,
             mu_s * lambda_n_friction,
             mu_k * lambda_n_friction,
         )
@@ -707,23 +699,16 @@ def contact_project_tangent_delta(
     bias_t2: wp.float32,
     mu_s: wp.float32,
     mu_k: wp.float32,
-    mass_coeff: wp.float32,
-    impulse_coeff: wp.float32,
     sor: wp.float32,
     mobility_nt1: wp.float32,
     mobility_nt2: wp.float32,
     mobility_t1t2: wp.float32,
 ) -> wp.vec2f:
-    """Solve the coupled tangent block after the normal row has been updated.
-
-    ``mass_coeff`` and ``impulse_coeff`` are the tangent rows' soft
-    coefficients, see :func:`_make_contact_project_coupled_velocity_update`.
-    """
+    """Solve the coupled tangent block after the normal row has been updated."""
     old1 = cc_get_tangent1_lambda(cc, k)
     old2 = cc_get_tangent2_lambda(cc, k)
-    rhs1 = mass_coeff * (jv_t1 + bias_t1 + mobility_nt1 * normal_delta)
-    rhs2 = mass_coeff * (jv_t2 + bias_t2 + mobility_nt2 * normal_delta)
-    keep = wp.float32(1.0) - impulse_coeff
+    rhs1 = jv_t1 + bias_t1 + mobility_nt1 * normal_delta
+    rhs2 = jv_t2 + bias_t2 + mobility_nt2 * normal_delta
     mobility1 = wp.float32(1.0) / eff_t1 if eff_t1 > wp.float32(0.0) else wp.float32(0.0)
     mobility2 = wp.float32(1.0) / eff_t2 if eff_t2 > wp.float32(0.0) else wp.float32(0.0)
     friction = contact_project_friction_metric(
@@ -732,8 +717,8 @@ def contact_project_tangent_delta(
         mobility2,
         rhs1,
         rhs2,
-        keep * old1,
-        keep * old2,
+        old1,
+        old2,
         mu_s * normal_load,
         mu_k * normal_load,
     )

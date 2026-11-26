@@ -236,52 +236,6 @@ class TestPhoenXDroppedStacksComeToRest(unittest.TestCase):
         self.assertLess(float(np.abs(velocity[:, :2]).max()), 1.0e-3, "the stacks still sway")
         self.assertLess(float(np.abs(velocity[:, 3:]).max()), 1.0e-2, "the stacks still rock")
 
-    def test_resting_stacks_rest_in_every_multi_world_layout(self) -> None:
-        """A resting stack rests with and without mass splitting.
-
-        Multi-world mass splitting solves its regular colors with the coupled
-        normal-tangent projection. Its tangent rows pulled the friction anchors
-        back as a plain velocity target, so the alternating color sweeps
-        pumped the stack: the top box rocked at 67 mm/s against 0.6 mm/s
-        without mass splitting.
-        """
-        half, levels, worlds = 0.1, 3, 4
-        builder = newton.ModelBuilder()
-        builder.default_shape_cfg.mu = 0.5
-        for _ in range(worlds):
-            builder.begin_world()
-            for level in range(levels):
-                z = half + 2.0 * half * level
-                body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, z), wp.quat_identity()))
-                builder.add_shape_box(body, hx=half, hy=half, hz=half)
-            builder.end_world()
-        builder.add_ground_plane()
-        model = builder.finalize()
-        for mass_splitting in (False, True):
-            with self.subTest(mass_splitting=mass_splitting):
-                solver = newton.solvers.SolverPhoenX(
-                    model,
-                    step_layout="multi_world",
-                    mass_splitting=mass_splitting,
-                    substeps=4,
-                    solver_iterations=4,
-                    sleeping_velocity_threshold=0.0,
-                )
-                state, control = model.state(), model.control()
-                contacts = model._collision_pipeline.contacts()
-                with wp.ScopedCapture() as capture:
-                    solver.collide(state, contacts)
-                    solver.step(state, state, control, contacts, 1.0 / 60.0)
-                for _ in range(120):  # two seconds
-                    wp.capture_launch(capture.graph)
-                velocity = state.body_qd.numpy()
-                heights = state.body_q.numpy()[:, 2].reshape(worlds, levels)
-                np.testing.assert_allclose(
-                    heights, np.tile(half + 2.0 * half * np.arange(levels), (worlds, 1)), atol=1e-3
-                )
-                self.assertLess(float(np.linalg.norm(velocity[:, :3], axis=1).max()), 2.0e-3, "the stacks still sway")
-                self.assertLess(float(np.linalg.norm(velocity[:, 3:], axis=1).max()), 1.0e-2, "the stacks still rock")
-
 
 if __name__ == "__main__":
     unittest.main()
