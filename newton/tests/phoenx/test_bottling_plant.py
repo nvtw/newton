@@ -184,6 +184,33 @@ class TestBottlingPlant(unittest.TestCase):
         # With the spine flowing the vendor's alternation is unchanged: the first case passes.
         self.assertEqual(run(wrapped(interface), backed_up=False, near_full=False)[0], "pass")
 
+    def test_incline_stops_behind_a_full_curve(self):
+        """Stop each lane's incline and level bridge while the curve and merge stand full."""
+        vendor = Path(newton.examples.get_local_asset_directory("bottling_plant")) / (
+            "sim/exts/bottling_plant.runtime/bottling_plant_runtime/vendor/ctp_v01"
+        )
+        if not (vendor / "controller.py").is_file():
+            self.skipTest("The bottling plant's local source assets are not available")
+        module = _load_controller("_test_bottling_bridges", vendor / "controller.py")
+        interface = json.loads((vendor / "interface.json").read_text())
+        lanes = [zone[3:] for zone in interface["zones"] if zone.startswith("BT_")]
+        beams = {}
+        for lane in lanes:
+            beams.update({f"MS_{lane}:hold": True, f"CV_{lane}:end": True, f"IN_{lane}:end": True})
+
+        def run(conveyors):
+            for i in range(240):
+                conveyors.step(i / 60.0, beams, {})
+            return {lane: (conveyors.run[f"IN_{lane}"], conveyors.run[f"BT_{lane}"]) for lane in lanes}
+
+        # The eyeless vendor bridge always runs, so the incline drives its queue into the crest.
+        self.assertTrue(all(all(state) for state in run(module.Conveyors(interface)).values()))
+        self.assertFalse(any(any(state) for state in run(zero_pressure_conveyors(module)(interface)).values()))
+        # With the curve clear, bridge and incline run.
+        for lane in lanes:
+            beams[f"CV_{lane}:end"] = False
+        self.assertTrue(all(all(state) for state in run(zero_pressure_conveyors(module)(interface)).values()))
+
     def test_accumulation_table_feeds_the_ifm_with_its_drive(self):
         """Run the IFM's feed with its infeed drive and stop it for a standing mass at PE-A1."""
         infeed = SimpleNamespace(

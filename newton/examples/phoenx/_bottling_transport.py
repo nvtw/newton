@@ -21,7 +21,7 @@ from newton.solvers import phoenx
 
 
 def zero_pressure_conveyors(module):
-    """Return the vendor CTP ``Conveyors`` with zero-pressure release at its pass-through pusher stations.
+    """Return the vendor CTP ``Conveyors`` with zero-pressure accumulation at its bridges and pusher stations.
 
     The vendor's PS-x1 decides each new case once its blade area is clear:
     ``divert = not near_spur_full and (toggle or far_spur_full)``, else it
@@ -40,6 +40,21 @@ def zero_pressure_conveyors(module):
     class Conveyors(module.Conveyors):
         def __init__(self, interface):
             super().__init__(interface)
+            # The vendor runs a zone unless its end eye is blocked while its
+            # downstream zone stands, so a zone without an end eye always runs.
+            # Each lane's short level bridge (BT_x) between the incline and the
+            # curve has none: it kept driving into a stopped curve, and the
+            # incline behind it never stopped, pressing the queue into the
+            # cases at the crest until one was levered up and tipped. A bridge
+            # cannot accumulate a case of its own, so it runs with its
+            # downstream zone: presented with an occupied end eye, the vendor
+            # rule runs it exactly while its downstream accepts.
+            self.bridge_eyes = {
+                f"{zone}:end": True
+                for zone in self.zones
+                if zone not in self.end_eye and len(self.graph.get(zone) or ()) == 1
+            }
+            self.end_eye.update({eye[: -len(":end")]: eye for eye in self.bridge_eyes})
             terminals = {station["station_zone"]: station for station in self.stations.values() if station["terminal"]}
             self.spine_ahead = {}
             for pzid, station in self.stations.items():
@@ -50,6 +65,9 @@ def zero_pressure_conveyors(module):
                     zone = next(z for z in self.graph[zone] if z not in station["spur"])
                     zones.append(zone)
                 self.spine_ahead[pzid] = (zones, terminals[zone])
+
+        def step(self, t, beams, pusher_pos):
+            return super().step(t, {**beams, **self.bridge_eyes}, pusher_pos)
 
         def _stations(self, t, beams, ppos):
             seen = dict(beams)
