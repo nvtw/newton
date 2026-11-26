@@ -2038,6 +2038,28 @@ def _apply_direct_equality_descriptor_kernel(
 _APPLY_LANES = 32
 
 
+@wp.func
+def _gather_body_wrench_tiled(
+    body: wp.int32,
+    lane: wp.int32,
+    body_row_start: wp.array[wp.int32],
+    descriptor: wp.array[wp.vec2i],
+    row_wrench0: wp.array[wp.spatial_vector],
+    row_wrench1: wp.array[wp.spatial_vector],
+    delta: wp.array[wp.float32],
+    row_scale: wp.array[wp.float32],
+) -> wp.spatial_vector:
+    """Sum a body's scaled row wrenches; lanes stride over its rows and a fixed-order tile reduction combines them."""
+    partial = wp.spatial_vector()
+    for incidence in range(body_row_start[body] + lane, body_row_start[body + wp.int32(1)], wp.block_dim()):
+        metadata = descriptor[incidence]
+        row = metadata[0]
+        source = metadata[1] >> wp.int32(1)
+        row_wrench = row_wrench0[source] if (metadata[1] & wp.int32(1)) == wp.int32(0) else row_wrench1[source]
+        partial += row_scale[row] * delta[row] * row_wrench
+    return wp.tile_sum(wp.tile(partial, preserve_type=True))[0]
+
+
 @wp.kernel(enable_backward=False)
 def _apply_direct_equality_descriptor_tiled_kernel(
     row_bodies: wp.array[wp.int32],
@@ -2061,17 +2083,42 @@ def _apply_direct_equality_descriptor_tiled_kernel(
     if active[0] == wp.int32(0):
         return
     body = row_bodies[slot]
-    partial = wp.spatial_vector()
-    for incidence in range(body_row_start[body] + lane, body_row_start[body + wp.int32(1)], wp.block_dim()):
-        metadata = descriptor[incidence]
-        row = metadata[0]
-        source = metadata[1] >> wp.int32(1)
-        row_wrench = row_wrench0[source] if (metadata[1] & wp.int32(1)) == wp.int32(0) else row_wrench1[source]
-        partial += row_scale[row] * delta[row] * row_wrench
-    wrench = wp.tile_sum(wp.tile(partial, preserve_type=True))[0]
+    wrench = _gather_body_wrench_tiled(
+        body, lane, body_row_start, descriptor, row_wrench0, row_wrench1, delta, row_scale
+    )
     if lane == 0 and body > wp.int32(0) and bodies.inverse_mass[body] > wp.float32(0.0):
         bodies.velocity[body] += bodies.inverse_mass[body] * wp.spatial_top(wrench)
         bodies.angular_velocity[body] += mat33_from_sym6(bodies.inverse_inertia_world[body]) * wp.spatial_bottom(wrench)
+
+
+@wp.kernel(enable_backward=False)
+def _compute_direct_bias_velocity_tiled_kernel(
+    row_bodies: wp.array[wp.int32],
+    body_row_start: wp.array[wp.int32],
+    descriptor: wp.array[wp.vec2i],
+    row_wrench0: wp.array[wp.spatial_vector],
+    row_wrench1: wp.array[wp.spatial_vector],
+    delta: wp.array[wp.float32],
+    row_scale: wp.array[wp.float32],
+    bodies: BodyContainer,
+    bias_velocity: wp.array[wp.spatial_vector],
+):
+    """Store the velocity of each endpoint body's scaled row impulses, one warp per body.
+
+    Bodies without rows keep their zero bias velocity.
+    """
+    slot, lane = wp.tid()
+    body = row_bodies[slot]
+    wrench = _gather_body_wrench_tiled(
+        body, lane, body_row_start, descriptor, row_wrench0, row_wrench1, delta, row_scale
+    )
+    if lane == 0:
+        value = wp.spatial_vectorf(0.0)
+        if body > wp.int32(0) and bodies.inverse_mass[body] > wp.float32(0.0):
+            linear = bodies.inverse_mass[body] * wp.spatial_top(wrench)
+            angular = mat33_from_sym6(bodies.inverse_inertia_world[body]) * wp.spatial_bottom(wrench)
+            value = wp.spatial_vectorf(linear[0], linear[1], linear[2], angular[0], angular[1], angular[2])
+        bias_velocity[body] = value
 
 
 @functools.cache
@@ -2207,51 +2254,6 @@ def _make_fused_subgroup_projection_kernel(width: int, packed: bool):
             )
 
     return project
-
-
-@wp.kernel(enable_backward=False)
-def _compute_direct_bias_velocity_kernel(
-    body_row_start: wp.array[wp.int32],
-    body_rows: wp.array[wp.int32],
-    row_joint: wp.array[wp.int32],
-    row_local: wp.array[wp.int32],
-    joint_to_structural: wp.array[wp.int32],
-    joint_parent: wp.array[wp.int32],
-    joint_child: wp.array[wp.int32],
-    row_wrench0: wp.array2d[wp.spatial_vector],
-    row_wrench1: wp.array2d[wp.spatial_vector],
-    delta: wp.array[wp.float32],
-    row_scale: wp.array[wp.float32],
-    bodies: BodyContainer,
-    bias_velocity: wp.array[wp.spatial_vector],
-):
-    body = wp.tid()
-    bias_velocity[body] = wp.spatial_vectorf(0.0)
-    if body <= wp.int32(0) or bodies.inverse_mass[body] <= wp.float32(0.0):
-        return
-    wrench = wp.spatial_vector()
-    for incidence in range(body_row_start[body], body_row_start[body + wp.int32(1)]):
-        row = body_rows[incidence]
-        joint = row_joint[row]
-        structural_index = joint_to_structural[joint]
-        local_row = row_local[row]
-        wrench += (
-            row_scale[row]
-            * delta[row]
-            * _row_wrench_for_body(
-                body,
-                joint,
-                structural_index,
-                local_row,
-                joint_parent,
-                joint_child,
-                row_wrench0,
-                row_wrench1,
-            )
-        )
-    linear = bodies.inverse_mass[body] * wp.spatial_top(wrench)
-    angular = mat33_from_sym6(bodies.inverse_inertia_world[body]) * wp.spatial_bottom(wrench)
-    bias_velocity[body] = wp.spatial_vectorf(linear[0], linear[1], linear[2], angular[0], angular[1], angular[2])
 
 
 @wp.kernel(enable_backward=False)
@@ -3287,24 +3289,21 @@ class DirectEqualitySystem:
             device=self.model.device,
         )
         self.solver.solve(self.bias_rhs, self.bias_delta)
-        wp.launch(
-            _compute_direct_bias_velocity_kernel,
-            dim=int(self.model.body_count) + 1,
+        wp.launch_tiled(
+            _compute_direct_bias_velocity_tiled_kernel,
+            dim=[self._apply_bodies.size],
             inputs=[
+                self._apply_bodies,
                 self.body_row_start,
-                self.body_rows,
-                self.row_joint,
-                self.row_local,
-                self.joint_to_structural,
-                self.model.joint_parent,
-                self.model.joint_child,
-                self.row_wrench0,
-                self.row_wrench1,
+                self._body_row_wrench_descriptors,
+                self._apply_wrench0,
+                self._apply_wrench1,
                 self.bias_delta,
                 self.row_scale,
                 self.bodies,
                 self.bias_velocity,
             ],
+            block_dim=_APPLY_LANES,
             device=self.model.device,
         )
 
@@ -3316,6 +3315,26 @@ class DirectEqualitySystem:
             _apply_direct_bias_velocity_kernel,
             dim=int(self.model.body_count) + 1,
             inputs=[self.bias_velocity, self.bodies, wp.float32(scale)],
+            device=self.model.device,
+        )
+
+    def _apply_delta(self, active: wp.array[wp.int32]) -> None:
+        """Apply the scaled solution impulses in :attr:`delta` to their bodies."""
+        wp.launch_tiled(
+            _apply_direct_equality_descriptor_tiled_kernel,
+            dim=[self._apply_bodies.size],
+            inputs=[
+                self._apply_bodies,
+                self.body_row_start,
+                self._body_row_wrench_descriptors,
+                self._apply_wrench0,
+                self._apply_wrench1,
+                self.delta,
+                self.row_scale,
+                self.bodies,
+                active,
+            ],
+            block_dim=_APPLY_LANES,
             device=self.model.device,
         )
 
@@ -3426,23 +3445,7 @@ class DirectEqualitySystem:
                 inputs=[self.delta, self.row_scale, self.accumulated_impulse, active],
                 device=self.model.device,
             )
-            wp.launch_tiled(
-                _apply_direct_equality_descriptor_tiled_kernel,
-                dim=[self._apply_bodies.size],
-                inputs=[
-                    self._apply_bodies,
-                    self.body_row_start,
-                    self._body_row_wrench_descriptors,
-                    self._apply_wrench0,
-                    self._apply_wrench1,
-                    self.delta,
-                    self.row_scale,
-                    self.bodies,
-                    active,
-                ],
-                block_dim=_APPLY_LANES,
-                device=self.model.device,
-            )
+            self._apply_delta(active)
 
         if gate:
             solve_active_system()
