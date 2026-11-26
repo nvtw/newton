@@ -246,27 +246,28 @@ class TestDirectBodyResponse(unittest.TestCase):
                 direct.solver.compute()
                 shared.compute(contacts)
                 legacy.compute(contacts)
-                for field in ("contact_response", "mobility"):
-                    np.testing.assert_array_equal(
-                        getattr(shared.data, field).numpy().view(np.uint32),
-                        getattr(legacy.data, field).numpy().view(np.uint32),
-                        err_msg=field,
-                    )
-                # Check the normal-axis twist against the dense constrained
+                np.testing.assert_array_equal(
+                    shared.data.mobility.numpy().view(np.uint32), legacy.data.mobility.numpy().view(np.uint32)
+                )
+                # Check the normal mobility against the dense constrained
                 # inverse mass, independently of either basis layout.
                 inverse = direct.dense_inverse_mass
                 jacobian = direct.dense_jacobian
                 constrained = inverse - inverse @ jacobian.T @ np.linalg.solve(
                     jacobian @ inverse @ jacobian.T, jacobian @ inverse
                 )
-                twists = shared.data.contact_response.numpy()
+                normal_mobility = shared.data.mobility.numpy()[0]
+                r0 = np.asarray([0.1, 0.2, -0.15])
+                r1 = np.asarray([-0.15, 0.12, -0.13])
                 for index, pair in enumerate(pairs):
                     loads = np.zeros((6, 6))
                     loads[pair[0]] = [0.0, 0.0, -1.0, -0.2, 0.1, 0.0]
                     loads[pair[1]] = [0.0, 0.0, 1.0, 0.12, 0.15, 0.0]
                     expected = np.zeros_like(loads)
                     expected[1:] = (constrained @ loads[1:].ravel()).reshape(5, 6)
-                    np.testing.assert_allclose(twists[index, :, 0], expected[pair], rtol=2.0e-5, atol=2.0e-6)
+                    twist0, twist1 = expected[pair]
+                    relative = twist1[:3] + np.cross(twist1[3:], r1) - twist0[:3] - np.cross(twist0[3:], r0)
+                    np.testing.assert_allclose(1.0 / normal_mobility[index], relative[2], rtol=1.0e-4)
                 # Body responses are indexed by basis slot: per body when shared,
                 # per column endpoint otherwise. Both must agree bitwise.
                 slots = []

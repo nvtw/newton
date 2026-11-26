@@ -300,6 +300,12 @@ lanes per column, as the other per-column passes use, cut the prepare from
 189 to 56 us per substep: 47.72 -> 49.42 FPS. Rows are prepared
 independently, so any lane count is bitwise identical.
 
+The direct-contact response launched one thread per contact slot, endpoint
+and axis (8.6M threads for the 1.44M-slot buffer) only to store six twists
+that the mobility kernel read once. Forming them in the mobility kernel
+removes 15 launches of 24 us per frame (the mobility kernel grows from 5.3
+to 8.9 us) and a 207 MB array: 49.36-49.42 -> 50.32 FPS, bitwise identical.
+
 
 
 Contacts on non-tree `maximal_direct` mechanisms are solved through the exact

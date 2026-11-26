@@ -54,7 +54,6 @@ class DirectContactResponseData:
     body_basis_item: wp.array[wp.int32]
     body_basis_task: wp.array[wp.int32]
     body_basis_active: wp.array[wp.int32]
-    contact_response: wp.array3d[wp.spatial_vector]
     mechanism_body_start: wp.array[wp.int32]
     mechanism_body: wp.array[wp.int32]
     mechanism_row_start: wp.array[wp.int32]
@@ -297,59 +296,30 @@ def _endpoint_twist_delta(
     return twist
 
 
-@wp.kernel(enable_backward=False)
-def _compute_contact_endpoint_response_kernel(
+@wp.func
+def _contact_relative_velocity(
     response: DirectContactResponseData,
     bodies: BodyContainer,
-    contacts: ContactContainer,
-):
-    contact, endpoint, axis = wp.tid()
-    if response.contact_mechanism[contact] < wp.int32(0):
-        return
-    normal = cc_get_normal(contacts, contact)
-    tangent0 = cc_get_tangent1(contacts, contact)
-    direction = normal
-    if axis == wp.int32(1):
-        direction = tangent0
-    elif axis == wp.int32(2):
-        direction = wp.cross(normal, tangent0)
-    r0 = cc_get_r0(contacts, contact)
-    r1 = cc_get_r1(contacts, contact)
+    column: wp.int32,
+    r0: wp.vec3,
+    r1: wp.vec3,
+    direction: wp.vec3,
+) -> wp.vec3:
+    """Relative contact-point velocity from a unit impulse pair along ``direction``."""
     force0 = -direction
     force1 = direction
     torque0 = wp.cross(r0, force0)
     torque1 = wp.cross(r1, force1)
     wrench0 = wp.spatial_vectorf(force0[0], force0[1], force0[2], torque0[0], torque0[1], torque0[2])
     wrench1 = wp.spatial_vectorf(force1[0], force1[1], force1[2], torque1[0], torque1[1], torque1[2])
-    response.contact_response[contact, endpoint, axis] = _endpoint_twist_delta(
-        response,
-        bodies,
-        response.contact_column[contact],
-        endpoint,
-        wrench0,
-        wrench1,
-    )
-
-
-@wp.func
-def _contact_pair_inverse_mobility(
-    response: DirectContactResponseData,
-    contacts: ContactContainer,
-    contact: wp.int32,
-    direction0: wp.vec3,
-    source_axis: wp.int32,
-) -> wp.float32:
-    r0 = cc_get_r0(contacts, contact)
-    r1 = cc_get_r1(contacts, contact)
-    velocity0 = response.contact_response[contact, 0, source_axis]
-    velocity1 = response.contact_response[contact, 1, source_axis]
-    relative = (
+    velocity0 = _endpoint_twist_delta(response, bodies, column, wp.int32(0), wrench0, wrench1)
+    velocity1 = _endpoint_twist_delta(response, bodies, column, wp.int32(1), wrench0, wrench1)
+    return (
         wp.spatial_top(velocity1)
         + wp.cross(wp.spatial_bottom(velocity1), r1)
         - wp.spatial_top(velocity0)
         - wp.cross(wp.spatial_bottom(velocity0), r0)
     )
-    return wp.dot(relative, direction0)
 
 
 @wp.func
@@ -397,17 +367,21 @@ def _compute_contact_mobility_kernel(
     normal = cc_get_normal(contacts, contact)
     tangent0 = cc_get_tangent1(contacts, contact)
     tangent1 = wp.cross(normal, tangent0)
-    inverse00 = _contact_pair_inverse_mobility(response, contacts, contact, normal, wp.int32(0))
-    inverse01 = _contact_pair_inverse_mobility(response, contacts, contact, normal, wp.int32(1))
-    inverse02 = _contact_pair_inverse_mobility(response, contacts, contact, normal, wp.int32(2))
-    inverse11 = _contact_pair_inverse_mobility(response, contacts, contact, tangent0, wp.int32(1))
-    inverse12 = _contact_pair_inverse_mobility(response, contacts, contact, tangent0, wp.int32(2))
-    inverse22 = _contact_pair_inverse_mobility(response, contacts, contact, tangent1, wp.int32(2))
+    r0 = cc_get_r0(contacts, contact)
+    r1 = cc_get_r1(contacts, contact)
+    column = response.contact_column[contact]
+    relative0 = _contact_relative_velocity(response, bodies, column, r0, r1, normal)
+    relative1 = _contact_relative_velocity(response, bodies, column, r0, r1, tangent0)
+    relative2 = _contact_relative_velocity(response, bodies, column, r0, r1, tangent1)
+    inverse00 = wp.dot(relative0, normal)
+    inverse01 = wp.dot(relative1, normal)
+    inverse02 = wp.dot(relative2, normal)
+    inverse11 = wp.dot(relative1, tangent0)
+    inverse12 = wp.dot(relative2, tangent0)
+    inverse22 = wp.dot(relative2, tangent1)
 
     body0 = response.contact_body0[contact]
     body1 = response.contact_body1[contact]
-    r0 = cc_get_r0(contacts, contact)
-    r1 = cc_get_r1(contacts, contact)
     unconstrained00 = _unconstrained_pair_cross_mobility(bodies, body0, r0, normal, normal, body1, r1)
     unconstrained11 = _unconstrained_pair_cross_mobility(bodies, body0, r0, tangent0, tangent0, body1, r1)
     unconstrained22 = _unconstrained_pair_cross_mobility(bodies, body0, r0, tangent1, tangent1, body1, r1)
@@ -640,10 +614,6 @@ class DirectContactResponse:
         self.data.rhs = self.contact_batch.rhs
         self.data.solution = self.contact_batch.solution
         self.data.gram = self.contact_batch.gram
-        # A manifold's response is fully described by the two endpoint
-        # twists under twelve endpoint spatial-wrench basis vectors.
-        self.contact_response_dim = (capacity, 2, 3)
-        self.data.contact_response = wp.zeros(self.contact_response_dim, dtype=wp.spatial_vector, device=device)
         self.data.mobility = wp.zeros((10, capacity), dtype=wp.float32, device=device)
         self.data.body_row_start = direct.body_row_start
         self.data.body_rows = direct.body_rows
@@ -715,12 +685,6 @@ class DirectContactResponse:
             _compute_body_response_kernel,
             dim=self.body_response_dim,
             inputs=[self.data, self.direct.bodies],
-            device=self.direct.model.device,
-        )
-        wp.launch(
-            _compute_contact_endpoint_response_kernel,
-            dim=self.contact_response_dim,
-            inputs=[self.data, self.direct.bodies, contacts],
             device=self.direct.model.device,
         )
         wp.launch(
