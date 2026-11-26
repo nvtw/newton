@@ -108,6 +108,17 @@ def _set_sealer(lines: CaseLines, cell: int, t: wp.float64, state: int):
     lines.sealer_t_state[cell] = t
 
 
+@wp.func
+def station_offers_case(ready: int, station: int, picks_done: int) -> bool:
+    """Whether the KR10 may place a row into the case locked at the pack station.
+
+    A filled case stays locked until the sealer takes it. The source KR10
+    (``robots_l02._box_ok``) refuses a case it already filled; without that, a
+    backed-up outfeed made it place a fourth row onto the full case.
+    """
+    return ready != 0 and station == 4 and picks_done < 3
+
+
 @wp.kernel
 def case_line_plcs(
     lines: CaseLines,
@@ -394,7 +405,7 @@ def case_line_plcs(
         delta = lines.v_tr / (ramp * wp.float64(60.0))
         lines.zone_velocity[cell, z] = current + wp.clamp(target - current, -delta, delta)
 
-    line_ready[cell] = int(lines.ready[cell] != 0 and lines.station[cell] == 4)
+    line_ready[cell] = int(station_offers_case(lines.ready[cell], lines.station[cell], lines.picks_done[cell]))
     lines.status[cell, 0] = lines.station[cell]
     lines.status[cell, 1] = lines.sealer[cell]
     lines.status[cell, 2] = lines.magazine[cell]

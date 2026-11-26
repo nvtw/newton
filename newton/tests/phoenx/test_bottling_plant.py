@@ -13,6 +13,7 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton.examples.phoenx._bottling_case_plc import station_offers_case
 from newton.examples.phoenx._bottling_control import (
     _Belt,
     _belt_speeds,
@@ -149,6 +150,24 @@ class TestBottlingPlant(unittest.TestCase):
                 wp.launch(_robot_steps, dim=len(steps), inputs=[cases, after])
             wp.capture_launch(capture.graph)
             np.testing.assert_array_equal(after.numpy(), [state for _, state in steps])
+
+    @unittest.skipUnless(wp.is_cuda_available(), "CUDA device required")
+    def test_pack_station_refuses_a_filled_case(self):
+        """Offer the locked case to the KR10 only until its three rows are placed, as the source _box_ok."""
+
+        @wp.kernel
+        def offers(cases: wp.array2d[int], out: wp.array[int]):
+            i = wp.tid()
+            out[i] = int(station_offers_case(cases[i, 0], cases[i, 1], cases[i, 2]))
+
+        locked = 4
+        # ready, station, rows placed -> offered
+        steps = [((1, locked, 0), 1), ((1, locked, 2), 1), ((1, locked, 3), 0), ((0, locked, 0), 0), ((1, 3, 0), 0)]
+        with wp.ScopedDevice("cuda:0"):
+            cases = wp.array([case for case, _ in steps], dtype=int)
+            out = wp.zeros(len(steps), dtype=int)
+            wp.launch(offers, dim=len(steps), inputs=[cases, out])
+            np.testing.assert_array_equal(out.numpy(), [offered for _, offered in steps])
 
     def test_pass_through_station_never_releases_into_a_backed_up_spine(self):
         """Hold a case at PZ1's station while the spine backs up toward an exchanging PZ2, then divert it."""
