@@ -44,7 +44,9 @@ def _value(prim, name, default):
 
 
 def _quat(value):
-    return wp.quat(*value.GetImaginary(), value.GetReal())
+    # Indexing Gf vectors is several times faster than iterating them.
+    imaginary = value.GetImaginary()
+    return wp.quat(imaginary[0], imaginary[1], imaginary[2], value.GetReal())
 
 
 #: Bottle lanes and packer inlets carry bottles on belts whose top is at this height [m].
@@ -627,7 +629,9 @@ def load_plant(
 
     def transform(matrix):
         parts = Gf.Transform(matrix)
-        return wp.transform(parts.GetTranslation(), _quat(parts.GetRotation().GetQuat())), np.array(parts.GetScale())
+        translation = parts.GetTranslation()
+        position = (translation[0], translation[1], translation[2])
+        return wp.transform(position, _quat(parts.GetRotation().GetQuat())), np.array(parts.GetScale())
 
     for prim in prims:
         if not prim.HasAPI(UsdPhysics.RigidBodyAPI) or not _value(prim, "physics:rigidBodyEnabled", True):
