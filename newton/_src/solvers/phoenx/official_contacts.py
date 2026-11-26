@@ -9,8 +9,10 @@ import warp as wp
 
 from newton._src.geometry.kernels import triangle_closest_point_barycentric
 from newton._src.geometry.types import GeoType
+from newton._src.sim.enums import ShapeFrictionMode
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
     ContactColumnContainer,
+    contact_pair_friction_mode,
     contact_set_friction,
     contact_set_friction_dynamic,
 )
@@ -36,15 +38,24 @@ def override_soft_contact_column_friction_kernel(
     soft_friction: wp.float32,
     contact_columns: ContactColumnContainer,
 ):
-    """Apply Newton's absolute soft-contact friction to deformable columns."""
+    """Apply Newton's absolute soft-contact friction to deformable columns.
+
+    A deformable endpoint counts as ``ShapeFrictionMode.NONE``, so a column against a
+    frictionless rigid shape stays frictionless.
+    """
 
     column = wp.tid()
     if column >= num_contact_columns[0]:
         return
     pair = pair_source_idx[column]
-    if pair_shape_a[pair] >= rigid_shape_count or pair_shape_b[pair] >= rigid_shape_count:
-        contact_set_friction(contact_columns, column, soft_friction)
-        contact_set_friction_dynamic(contact_columns, column, soft_friction)
+    shape_a = pair_shape_a[pair]
+    shape_b = pair_shape_b[pair]
+    if shape_a >= rigid_shape_count or shape_b >= rigid_shape_count:
+        friction = soft_friction
+        if contact_pair_friction_mode(contact_columns, shape_a, shape_b) == int(ShapeFrictionMode.NONE):
+            friction = wp.float32(0.0)
+        contact_set_friction(contact_columns, column, friction)
+        contact_set_friction_dynamic(contact_columns, column, friction)
 
 
 @wp.kernel(enable_backward=False)

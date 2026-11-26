@@ -83,6 +83,7 @@ from newton._src.solvers.phoenx.helpers.data_packing import (
 from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
 from newton._src.solvers.phoenx.particle import ParticleContainer
 from newton._src.solvers.phoenx.solver_config import PHOENX_BOOST_CONTACT_NORMAL
+from newton._src.solvers.solver import contact_friction_mode
 
 __all__ = [
     "CONTACT_DWORDS",
@@ -120,6 +121,7 @@ __all__ = [
     "contact_iterate_multi_no_soft_pd",
     "contact_owned_elsewhere",
     "contact_pack_colored_headers",
+    "contact_pair_friction_mode",
     "contact_pair_wrench_kernel",
     "contact_per_contact_error_kernel",
     "contact_per_contact_wrench_kernel",
@@ -285,6 +287,9 @@ class ContactColumnContainer:
     #: Per shape, the torsional and rolling friction coefficients [m]; a
     #: column takes the mean of its two shapes. Empty when every one is zero.
     shape_angular_friction: wp.array[wp.vec2f]
+    #: Per rigid shape, its :class:`~newton.ShapeFrictionMode`. Empty when
+    #: every shape is ``SLIDING``.
+    shape_friction_mode: wp.array[wp.int32]
 
 
 def contact_column_container_zeros(
@@ -304,6 +309,7 @@ def contact_column_container_zeros(
     c.angular_friction = wp.zeros(angular_columns, dtype=wp.vec2f, device=device)
     c.angular_impulse = wp.zeros(angular_columns, dtype=wp.vec3f, device=device)
     c.shape_angular_friction = wp.empty(0, dtype=wp.vec2f, device=device)
+    c.shape_friction_mode = wp.empty(0, dtype=wp.int32, device=device)
     patch_capacity = num_columns if enable_patch_friction else 1
     c.patch = contact_patch_friction_zeros(patch_capacity, device=device)
     return c
@@ -1184,6 +1190,18 @@ def contact_set_side1_counts_extra(c: ContactColumnContainer, local_cid: wp.int3
 
 
 @wp.func
+def contact_pair_friction_mode(constraints: ContactColumnContainer, shape_a: wp.int32, shape_b: wp.int32) -> wp.int32:
+    """Return the :class:`~newton.ShapeFrictionMode` bits of a shape pair.
+
+    Shape indices past the rigid shapes are deformable endpoints, which count as ``NONE``.
+    """
+    count = constraints.shape_friction_mode.shape[0]
+    return contact_friction_mode(
+        constraints.shape_friction_mode, wp.where(shape_a < count, shape_a, -1), wp.where(shape_b < count, shape_b, -1)
+    )
+
+
+@wp.func
 def contact_angular_friction(
     constraints: ContactColumnContainer,
     cid: wp.int32,
@@ -1203,6 +1221,8 @@ def contact_angular_friction(
     when body-pair grouping bundles shape pairs with different normals into one column.
     """
     mu = constraints.angular_friction[cid]
+    if mu[0] == wp.float32(0.0) and mu[1] == wp.float32(0.0):
+        return w1, w2
     load = wp.float32(0.0)
     for i in range(contact_count):
         load += wp.max(cc_get_normal_lambda(cc, contact_first + i), wp.float32(0.0))

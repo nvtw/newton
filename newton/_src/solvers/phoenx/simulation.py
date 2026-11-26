@@ -13,7 +13,7 @@ import warp as wp
 from newton._src.geometry.types import GeoType
 from newton._src.sim.collide import CollisionPipeline
 from newton._src.sim.contacts import Contacts
-from newton._src.sim.enums import JointType
+from newton._src.sim.enums import FRICTION_ROLLING_BIT, FRICTION_TORSIONAL_BIT, JointType, ShapeFrictionMode
 from newton._src.solvers.phoenx import diagnostics
 from newton._src.solvers.phoenx.adapter_kernels import (
     _accumulate_contact_impulse_kernel,
@@ -4741,14 +4741,23 @@ class PhoenXWorld:
             if container is not None:
                 container.length_scale = float(length_scale)
 
-    def _set_angular_friction(self, coefficients: np.ndarray) -> None:
-        """Solve torsional and rolling friction with per-shape ``(mu_torsional, mu_rolling)`` [m].
+    def _set_contact_friction(self, modes: np.ndarray, coefficients: np.ndarray) -> None:
+        """Apply per-shape :class:`~newton.ShapeFrictionMode` and ``(mu_torsional, mu_rolling)`` [m].
 
-        Columns get the arrays only when a shape has a nonzero coefficient.
+        Columns get the mode array only when a shape is not ``SLIDING``, and the
+        torsional and rolling friction arrays only when a shape enables a component
+        whose coefficient is nonzero somewhere.
         """
         columns = getattr(self, "_contact_cols", None)
         if columns is None:
             return
+        # Modes are fixed after construction; keep the array a captured graph holds.
+        if np.any(modes != int(ShapeFrictionMode.SLIDING)) and columns.shape_friction_mode.shape[0] != len(modes):
+            columns.shape_friction_mode = wp.array(modes, dtype=wp.int32, device=self.device)
+        enabled_bits = int(np.bitwise_or.reduce(modes, initial=0))
+        coefficients = coefficients * np.array(
+            [bool(enabled_bits & FRICTION_TORSIONAL_BIT), bool(enabled_bits & FRICTION_ROLLING_BIT)], dtype=np.float32
+        )
         enabled = bool(np.any(coefficients > 0.0))
         count = columns.data.shape[1] if enabled else 0
         containers = [columns]

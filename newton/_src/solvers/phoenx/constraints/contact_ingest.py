@@ -20,12 +20,14 @@ from newton._src.geometry.active_prefix_sort import (
     dispatch_active_prefix,
     radix_sort_prefix,
 )
+from newton._src.sim.enums import FRICTION_ROLLING_BIT, FRICTION_TORSIONAL_BIT, ShapeFrictionMode
 from newton._src.solvers.phoenx.body import BodyContainer
 from newton._src.solvers.phoenx.constraints.constraint_contact import (
     ContactColumnContainer,
     ContactViews,
     _col_write_int,
     _contact_uses_stale_anchor_start_gap,
+    contact_pair_friction_mode,
     contact_set_contact_count,
     contact_set_contact_first,
     contact_set_count1,
@@ -478,13 +480,14 @@ def _body_pair_boundary_kernel(
     shape_material: wp.array[wp.int32],
     materials: wp.array[MaterialData],
     default_friction: wp.float32,
+    contact_cols: ContactColumnContainer,
     # out
     pair_boundary: wp.array[wp.int32],
     cid_of_contact: wp.array[wp.int32],
 ):
     """Body-pair-grouping variant of :func:`_contact_pair_boundary_kernel`:
-    emit a 1 wherever the (already-sorted) body-pair key changes,
-    instead of comparing adjacent shape pairs.
+    emit a 1 wherever the (already-sorted) body-pair key, friction, or
+    friction mode changes, instead of comparing adjacent shape pairs.
 
     With contacts sorted by body pair, every body pair contributes one
     run regardless of how many shape pairs sit underneath it. The
@@ -520,6 +523,8 @@ def _body_pair_boundary_kernel(
     )
     if (
         body_pair_keys[tid] != body_pair_keys[tid - 1]
+        or contact_pair_friction_mode(contact_cols, shape0[tid], shape1[tid])
+        != contact_pair_friction_mode(contact_cols, shape0[tid - 1], shape1[tid - 1])
         or friction[0] != previous_friction[0]
         or friction[1] != previous_friction[1]
     ):
@@ -828,7 +833,10 @@ def _contact_pack_columns_kernel(
         mat_a = shape_material[sa]
     if shape_material.shape[0] > sb:
         mat_b = shape_material[sb]
+    mode = contact_pair_friction_mode(contact_cols, sa, sb)
     friction_scale = _contact_friction_scale(first, contact_friction)
+    if mode == int(ShapeFrictionMode.NONE):
+        friction_scale = wp.float32(0.0)
     mu_static = resolve_friction_static_in_kernel(materials, mat_a, mat_b, default_friction) * friction_scale
     mu_dynamic = resolve_friction_in_kernel(materials, mat_a, mat_b, default_friction) * friction_scale
 
@@ -840,8 +848,13 @@ def _contact_pack_columns_kernel(
     contact_set_friction(contact_cols, tid, mu_static)
     contact_set_friction_dynamic(contact_cols, tid, mu_dynamic)
     if contact_cols.angular_friction.shape[0] > tid:
-        contact_cols.angular_friction[tid] = 0.5 * (
-            contact_cols.shape_angular_friction[sa] + contact_cols.shape_angular_friction[sb]
+        # Only a rigid pair rotates against its contact; deformable endpoints get none.
+        mean = wp.vec2f(0.0, 0.0)
+        if sa < contact_cols.shape_angular_friction.shape[0] and sb < contact_cols.shape_angular_friction.shape[0]:
+            mean = 0.5 * (contact_cols.shape_angular_friction[sa] + contact_cols.shape_angular_friction[sb])
+        contact_cols.angular_friction[tid] = wp.vec2f(
+            wp.where((mode & FRICTION_TORSIONAL_BIT) != 0, mean[0], 0.0),
+            wp.where((mode & FRICTION_ROLLING_BIT) != 0, mean[1], 0.0),
         )
     contact_set_contact_first(contact_cols, tid, first)
     contact_set_contact_count(contact_cols, tid, count)
@@ -1318,6 +1331,7 @@ def ingest_contacts(
                     shape_material,
                     materials,
                     wp.float32(default_friction),
+                    contact_cols,
                 ],
                 outputs=[scratch.pair_boundary, cid_of_contact],
                 device=device,
