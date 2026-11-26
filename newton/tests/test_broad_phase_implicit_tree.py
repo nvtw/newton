@@ -217,6 +217,54 @@ class TestBroadPhaseImplicitTree(unittest.TestCase):
             self.assertEqual(int(counts[i].numpy()[0]), len(expected) + 1)
             self.assertEqual({tuple(p) for p in pairs[i].numpy()[1 : len(expected) + 1]}, expected)
 
+    def test_sparse_active_leaves_with_strided_query_match_all_pairs(self):
+        """Every sibling level of every active leaf is walked, also when lanes take several work items."""
+        if not wp.is_cuda_available():
+            self.skipTest("CUDA graph capture requires a CUDA device")
+        device = wp.get_device("cuda:0")
+        rng = np.random.default_rng(7)
+        n = 3000
+        world = wp.zeros(n, dtype=wp.int32, device=device)
+        group = wp.ones(n, dtype=wp.int32, device=device)
+        centers = rng.uniform(-2.0, 2.0, (n, 3)).astype(np.float32)
+        half = rng.uniform(0.01, 0.15, (n, 3)).astype(np.float32)
+        # A few large boxes span many subtrees, as static scenery does.
+        half[:5] = 3.0
+        lower = wp.array(centers - half, dtype=wp.vec3, device=device)
+        upper = wp.array(centers + half, dtype=wp.vec3, device=device)
+        data = _ShapeActivity()
+        # Mostly passive shapes with sparse active ones, like a sleeping scene.
+        active = (rng.uniform(size=n) < 0.1).astype(np.int32)
+        active[:2] = (1, 0)
+        data.active = wp.array(active, dtype=wp.int32, device=device)
+        tree = BroadPhaseImplicitTree(
+            world,
+            device=device,
+            filter_func=_has_active_endpoint,
+            filter_data_type=_ShapeActivity,
+            passive_shape=_passive,
+        )
+        oracle = BroadPhaseAllPairs(world, device=device)
+        pairs = wp.empty(n * 64, dtype=wp.vec2i, device=device)
+        count = wp.zeros(1, dtype=wp.int32, device=device)
+        oracle_pairs = wp.empty(n * 64, dtype=wp.vec2i, device=device)
+        oracle_count = wp.zeros(1, dtype=wp.int32, device=device)
+        oracle.launch(lower, upper, None, group, world, n, oracle_pairs, oracle_count, device=device)
+        expected = {
+            tuple(p) for p in oracle_pairs.numpy()[: int(oracle_count.numpy()[0])] if active[p[0]] or active[p[1]]
+        }
+        self.assertGreater(len(expected), 100)
+        # A launch narrower than the work lets each lane loop over several (leaf, level) items.
+        for threads in (tree._query_threads, 97):
+            tree._query_threads = threads
+            with wp.ScopedCapture(device=device) as capture:
+                tree.launch(lower, upper, None, group, world, n, pairs, count, device=device, filter_data=data)
+            wp.capture_launch(capture.graph)
+            size = int(count.numpy()[0])
+            found = {tuple(p) for p in pairs.numpy()[:size]}
+            self.assertEqual(len(found), size)
+            self.assertEqual(found, expected)
+
     def test_indexed_exclusions_match_sorted_prefix(self):
         model_shapes, shapes = 12, 15
         # Include sparse rows, a missing first shape, and extra runtime shape ids.

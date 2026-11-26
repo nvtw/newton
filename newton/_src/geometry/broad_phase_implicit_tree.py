@@ -31,6 +31,9 @@ from .implicit_bvh import (
 
 wp.set_module_options({"enable_backward": False})
 
+# Query lanes loop over the (active leaf, ancestor level) work items.
+_QUERY_MAX_THREADS = 1 << 21
+
 
 @wp.func
 def _spread_20(v: wp.uint64) -> wp.uint64:
@@ -50,8 +53,11 @@ def _tree_keys(
     displacement: wp.array[wp.vec3],
     keys: wp.array[wp.uint64],
     values: wp.array[int],
+    active_count: wp.array[wp.int32],
 ):
     leaf = wp.tid()
+    if leaf == 0:
+        active_count[0] = 0
     shape = shape_index[leaf]
     center = (lower[shape] + upper[shape]) * 0.5
     if displacement.shape[0] > 0:
@@ -86,6 +92,8 @@ def _make_pair_kernels(filter_func: Any, filter_data_type: Any, passive_shape: A
         leaf_base: int,
         shape_count: int,
         filter_data: Any,
+        active_slots: wp.array[wp.int32],
+        active_count: wp.array[wp.int32],
     ):
         slot = wp.tid()
         node = leaf_base + slot
@@ -127,14 +135,19 @@ def _make_pair_kernels(filter_func: Any, filter_data_type: Any, passive_shape: A
         record.upper = high + rounding
         span = record.upper - record.lower
         record.max_span = wp.max(span[0], wp.max(span[1], span[2]))
+        active = True
         if wp.static(passive_shape is not None):
             if passive_shape(shape, filter_data):
                 # Active leaves own pairs with passive leaves regardless of their AABB sizes.
                 record.max_span = wp.inf
+                active = False
             else:
                 # Finite endpoints can still overflow when subtracting them. Reserve infinity for passive leaves.
                 record.max_span = wp.min(record.max_span, wp.static(float(np.finfo(np.float32).max)))
         nodes[node] = record
+        if active:
+            # Only active leaves query; listing them keeps every query lane busy.
+            active_slots[wp.atomic_add(active_count, 0, 1)] = slot
 
     @wp.kernel(enable_backward=False, module=module)
     def query(
@@ -154,65 +167,64 @@ def _make_pair_kernels(filter_func: Any, filter_data_type: Any, passive_shape: A
         candidate_pair: wp.array[wp.vec2i],
         candidate_pair_count: wp.array[int],
         max_candidate_pair: int,
+        active_slots: wp.array[wp.int32],
+        active_count: wp.array[wp.int32],
+        depth: int,
+        thread_count: int,
     ):
-        leaf = wp.tid()
-        if leaf >= tree.item_count:
-            return
-        query_node = tree.leaf_base + leaf
-        query_lower, query_upper, query_span, _query_last = _node_load(tree, query_node)
-        if wp.static(passive_shape is not None):
-            if query_span == wp.inf:
-                return
-        shape1 = tree.leaf_item[leaf]
         # An ancestor always contains the query leaf, so its bound cannot
         # reject it. Visit only the sibling subtrees along the leaf-to-root
-        # path. These disjoint subtrees contain every other leaf exactly once.
-        ancestor = query_node
-        node = ancestor ^ wp.int32(1)
-        stop = implicit_bvh_next_subtree(node)
-        while ancestor > wp.int32(1):
-            if node == stop:
-                ancestor = ancestor >> wp.int32(1)
-                node = ancestor ^ wp.int32(1)
-                stop = implicit_bvh_next_subtree(node)
-                continue
-            lower, upper, max_span, last_leaf = _node_load(tree, node)
-            # The leaf with the smaller span (ties: smaller slot) reports a pair.
-            if (
-                max_span < query_span
-                or (max_span == query_span and last_leaf <= leaf)
-                or aabb_disjoint(lower, upper, query_lower, query_upper)
-            ):
-                node = implicit_bvh_next_subtree(node)
-            elif node < tree.leaf_base:
-                node = node * wp.int32(2)
-            else:
-                shape2 = tree.leaf_item[node - tree.leaf_base]
-                pair_world_id = wp.int32(0)
-                if shape_world[shape1] == wp.int32(-1) and shape_world[shape2] == wp.int32(-1):
-                    pair_world_id = wp.int32(1)
-                process_pair(
-                    shape1,
-                    shape2,
-                    pair_world_id,
-                    wp.int32(1),
-                    shape_lower,
-                    shape_upper,
-                    shape_gap,
-                    shape_displacement,
-                    collision_group,
-                    shape_world,
-                    filter_pairs,
-                    num_filter_pairs,
-                    shape_body,
-                    body_flags,
-                    include_static_kinematic_pairs,
-                    filter_data,
-                    candidate_pair,
-                    candidate_pair_count,
-                    max_candidate_pair,
-                )
-                node = implicit_bvh_next_subtree(node)
+        # path. These disjoint subtrees contain every other leaf exactly once,
+        # so each (leaf, level) work item walks one of them in its own lane:
+        # a lane walks one short chain instead of the whole path, and lanes of
+        # a warp share a level, whose sibling subtrees neighboring leaves share.
+        count = active_count[0]
+        for work in range(wp.tid(), count * depth, thread_count):
+            level = work // count
+            leaf = active_slots[work - level * count]
+            query_node = tree.leaf_base + leaf
+            query_lower, query_upper, query_span, _query_last = _node_load(tree, query_node)
+            shape1 = tree.leaf_item[leaf]
+            node = (query_node >> level) ^ wp.int32(1)
+            stop = implicit_bvh_next_subtree(node)
+            while node != stop:
+                lower, upper, max_span, last_leaf = _node_load(tree, node)
+                # The leaf with the smaller span (ties: smaller slot) reports a pair.
+                if (
+                    max_span < query_span
+                    or (max_span == query_span and last_leaf <= leaf)
+                    or aabb_disjoint(lower, upper, query_lower, query_upper)
+                ):
+                    node = implicit_bvh_next_subtree(node)
+                elif node < tree.leaf_base:
+                    node = node * wp.int32(2)
+                else:
+                    shape2 = tree.leaf_item[node - tree.leaf_base]
+                    pair_world_id = wp.int32(0)
+                    if shape_world[shape1] == wp.int32(-1) and shape_world[shape2] == wp.int32(-1):
+                        pair_world_id = wp.int32(1)
+                    process_pair(
+                        shape1,
+                        shape2,
+                        pair_world_id,
+                        wp.int32(1),
+                        shape_lower,
+                        shape_upper,
+                        shape_gap,
+                        shape_displacement,
+                        collision_group,
+                        shape_world,
+                        filter_pairs,
+                        num_filter_pairs,
+                        shape_body,
+                        body_flags,
+                        include_static_kinematic_pairs,
+                        filter_data,
+                        candidate_pair,
+                        candidate_pair_count,
+                        max_candidate_pair,
+                    )
+                    node = implicit_bvh_next_subtree(node)
 
     return leaves, query
 
@@ -280,6 +292,11 @@ class BroadPhaseImplicitTree:
         # which the leaf kernel below writes while reading this order.
         self.values = wp.empty(2 * self.shape_count, dtype=wp.int32, device=device)
         self.leaf_base = self.tree.leaf_base
+        # Query work items are (active leaf, ancestor level) pairs.
+        self._depth = self.leaf_base.bit_length() - 1
+        self._query_threads = max(1, min(self.shape_count * self._depth, _QUERY_MAX_THREADS))
+        self._active_slots = wp.empty(self.shape_count, dtype=wp.int32, device=device)
+        self._active_count = wp.zeros(1, dtype=wp.int32, device=device)
         self._empty_filter_data = EmptyFilterData()
         self._set_filter_kernels(filter_func, filter_data_type, passive_shape=passive_shape)
 
@@ -347,7 +364,16 @@ class BroadPhaseImplicitTree:
         wp.launch(
             _tree_keys,
             dim=self.shape_count,
-            inputs=[self.shape_index, shape_lower, shape_upper, shape_gap, shape_displacement, self.keys, self.values],
+            inputs=[
+                self.shape_index,
+                shape_lower,
+                shape_upper,
+                shape_gap,
+                shape_displacement,
+                self.keys,
+                self.values,
+                self._active_count,
+            ],
             device=device,
             record_tape=False,
         )
@@ -368,6 +394,8 @@ class BroadPhaseImplicitTree:
                 self.leaf_base,
                 self.shape_count,
                 pair_data,
+                self._active_slots,
+                self._active_count,
             ],
             device=device,
             record_tape=False,
@@ -390,10 +418,14 @@ class BroadPhaseImplicitTree:
             candidate_pair,
             candidate_pair_count,
             candidate_pair.shape[0],
+            self._active_slots,
+            self._active_count,
+            self._depth,
+            self._query_threads,
         ]
         wp.launch(
             query,
-            dim=self.shape_count,
+            dim=self._query_threads,
             inputs=[self.tree.data, *pair_inputs],
             device=device,
             record_tape=False,
