@@ -4733,6 +4733,7 @@ class CollisionPipeline:
                 self.narrow_phase.shape_aabb_upper,
                 self.geom_data,
                 self.geom_transform,
+                getattr(self.narrow_phase, "_counter_array", None),
             ],
             device=self.device,
             record_tape=False,
