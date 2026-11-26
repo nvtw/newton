@@ -169,6 +169,36 @@ class TestBottlingPlant(unittest.TestCase):
             wp.launch(offers, dim=len(steps), inputs=[cases, out])
             np.testing.assert_array_equal(out.numpy(), [offered for _, offered in steps])
 
+    def test_sealed_case_check_skips_put_away_loads(self):
+        """Check sealed cases in the plant, not those put away with their wrapped load below the floor."""
+        design = SimpleNamespace(CASE={"L": 0.4, "W": 0.3, "H": 0.3, "cells": (3, 4)})
+        identity = [0.0, 0.0, 0.0, 1.0]
+        cases = {"in_plant": [0], "put_away": [1], "empty": [2]}
+        poses = [[0.0, 0.0, 1.0, *identity], [0.0, 0.0, -5.0, *identity], [5.0, 0.0, 1.0, *identity]]
+        bottles = []
+        for z in (1.0, -5.0):
+            for i in range(12):
+                poses.append([0.1 * (i % 4) - 0.15, 0.1 * (i // 4) - 0.1, z + 0.01, *identity])
+                bottles.append(len(poses) - 1)
+        poses = np.asarray(poses, dtype=np.float32)
+        labels = [*cases, *(f"bottle{i}" for i in range(len(bottles)))]
+        plant = SimpleNamespace(
+            bottle_bodies=np.asarray(bottles),
+            supply=None,
+            scene=SimpleNamespace(metadata={}),
+            args=SimpleNamespace(motor_off=False),
+            model=SimpleNamespace(body_com=wp.zeros(len(poses), dtype=wp.vec3, device="cpu"), body_label=labels),
+            controller=SimpleNamespace(
+                case_modules=SimpleNamespace(design=design),
+                sealed=wp.array([1, 1, 0], dtype=int, device="cpu"),
+                case_body_groups=cases,
+            ),
+        )
+        Example._check_products(plant, poses)
+        plant.controller.sealed = wp.array([1, 1, 1], dtype=int, device="cpu")
+        with self.assertRaisesRegex(AssertionError, "sealed case empty contains 0 bottles"):
+            Example._check_products(plant, poses)
+
     def test_pass_through_station_never_releases_into_a_backed_up_spine(self):
         """Hold a case at PZ1's station while the spine backs up toward an exchanging PZ2, then divert it."""
         vendor = Path(newton.examples.get_local_asset_directory("bottling_plant")) / (

@@ -579,7 +579,8 @@ class Example:
             bodies = self.controller.bottles.numpy()
             bodies = bodies[bodies >= 0]
         # Wrapped loads put away into the source's rack shelf below the floor have left the plant.
-        bodies = bodies[poses[bodies, 2] > -2.0]
+        in_plant = -2.0
+        bodies = bodies[poses[bodies, 2] > in_plant]
         bottles = poses[bodies]
         # Even floor-level pallets support the case contents above 0.1 m.
         lowest = int(np.argmin(bottles[:, 2]))
@@ -610,9 +611,9 @@ class Example:
         expected = int(np.prod(design["cells"]))
         sealed = self.controller.sealed.numpy()
         for index, case_bodies in enumerate(self.controller.case_body_groups.values()):
-            if not sealed[index]:
-                continue
             case = poses[case_bodies[0]]
+            if not sealed[index] or case[2] <= in_plant:
+                continue
             inverse = case[3:] * np.array([-1.0, -1.0, -1.0, 1.0])
             local = rotate(inverse, centers - case[:3])
             inside = np.all(np.abs(local[:, :2]) < half_width, axis=1) & (local[:, 2] > 0.0)
