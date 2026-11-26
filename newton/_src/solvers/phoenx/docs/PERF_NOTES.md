@@ -236,6 +236,34 @@ Rejected: loading the next row's data ahead of each row (bed: 82 vs 78 us
 per merged sweep, and not bitwise); reserving eight whole blocks for the
 deepest small islands (45.1 vs 44.6-44.7 FPS, within noise).
 
+## Bottling plant collision passes (2026-11-26)
+
+Same factory and window; two collision passes per frame. Collision-only
+timings replay one captured `collide()` on a saved frame-600 state (186k
+shapes, 86k active tree leaves, 303k candidate pairs, 386k contacts). Both
+changes return a bitwise-identical contact set, sticky match indices included.
+
+| Per pass | Before | After |
+| --- | ---: | ---: |
+| Tree query (one lane per active leaf and ancestor level) | 660 us | 490 us |
+| Mesh midphase (one thread per mesh pair) | 342 us | 161 us |
+| `collide()` | 2.48 ms | 2.07 ms |
+| Physics FPS (frames 600-1200) | 44.8 | 46.4 |
+
+The midphase pairs are bottles against the pasteuriser deck and guard
+meshes: 75k queries finding 0-4 triangles each (53k none), so one tiled
+query per warp walked a dozen traversals in sequence.
+
+Measured and not kept: a GJK separation cutoff in the split GJK kernel
+(bitwise, neutral: 98% of the 215k separated bottle pairs keep a contact);
+aligned (cell-boundary) tree splits (9% fewer node visits, 23.0M -> 20.8M,
+for 18 extra launches); sorting leaves larger than 0.5-2 m to their own
+subtrees (visits -2.5%); 8-16 narrow-phase blocks per SM instead of 4
+(collide -2%, within frame noise). The remaining pass is bound by the
+1.9k cylinder-cone overlap refinements (about 600 us tail, worst pairs
+in the raycast fallback) and 72k bottle-base-hull vs deck-triangle
+contacts at about 320k cycles each (12% in the reducer writes).
+
 ## Direct-mechanism contact sweep (2026-11-06)
 
 Contacts on non-tree `maximal_direct` mechanisms are solved through the exact
