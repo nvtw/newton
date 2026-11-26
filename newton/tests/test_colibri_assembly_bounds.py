@@ -204,10 +204,9 @@ class TestColibriAssemblyBounds(unittest.TestCase):
     def test_contact_display_snapshots_only_when_enabled(self):
         """Toggle contact display without racing live buffers or copying when hidden."""
         example = PhoenxExample.__new__(PhoenxExample)
-        example.contacts = scene.newton.Contacts(2, 0, device="cpu", requested_attributes={"force"})
+        example.contacts = scene.newton.Contacts(2, 0, device="cpu")
         example.contacts.rigid_contact_count.assign([1])
         example.contacts.rigid_contact_point0.assign([[1, 2, 3], [0, 0, 0]])
-        example.contacts.force.assign(np.ones((2, 6), dtype=np.float32))
         example.state_0 = scene.newton.State()
         example._render_states = (scene.newton.State(), scene.newton.State())
         example._render_state_index = 0
@@ -233,20 +232,16 @@ class TestColibriAssemblyBounds(unittest.TestCase):
             self.assertIsNotNone(snapshot)
             np.testing.assert_array_equal(snapshot.rigid_contact_count.numpy(), [1])
             np.testing.assert_array_equal(snapshot.rigid_contact_point0.numpy()[0], [1, 2, 3])
-            np.testing.assert_array_equal(snapshot.force.numpy(), 1)
             example.contacts.rigid_contact_count.zero_()
             example.contacts.rigid_contact_point0.zero_()
-            example.contacts.force.zero_()
             calls.clear()
             example.sim_time = 0.5
             example.render()
             self.assertIn(("contacts", snapshot, example._render_states[index]), calls)
             np.testing.assert_array_equal(snapshot.rigid_contact_count.numpy(), [1])
             np.testing.assert_array_equal(snapshot.rigid_contact_point0.numpy()[0], [1, 2, 3])
-            np.testing.assert_array_equal(snapshot.force.numpy(), 1)
             example.contacts.rigid_contact_count.assign([1])
             example.contacts.rigid_contact_point0.assign([[1, 2, 3], [0, 0, 0]])
-            example.contacts.force.assign(np.ones((2, 6), dtype=np.float32))
         buffers = tuple(example._render_contacts)
         example.viewer.show_contacts = False
         with patch.object(scene.wp, "copy", side_effect=AssertionError("Unexpected contact copy")):

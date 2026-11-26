@@ -462,7 +462,6 @@ class Example:
                     self.contacts.rigid_contact_max,
                     0,
                     device=self.contacts.device,
-                    requested_attributes={"force"} if self.contacts.force is not None else None,
                 )
                 self._render_contacts[self._render_state_index] = contacts
             # Contact glyphs share the pose snapshot's reuse event, so rendering
@@ -475,7 +474,6 @@ class Example:
                 "rigid_contact_point1",
                 "rigid_contact_offset0",
                 "rigid_contact_normal",
-                "force",
             ):
                 source = getattr(self.contacts, name)
                 if source is not None:
