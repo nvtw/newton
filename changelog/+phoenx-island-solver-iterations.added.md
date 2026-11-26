@@ -1,0 +1,1 @@
+Add the per-body ``phoenx:solver_iterations`` attribute to ``SolverPhoenX``: islands of bodies that request more PGS sweeps than ``solver_iterations`` (e.g. tall plank stacks) sweep that often while the rest of the scene keeps the global count.

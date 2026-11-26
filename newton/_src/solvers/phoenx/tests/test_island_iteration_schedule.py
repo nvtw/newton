@@ -170,6 +170,104 @@ class TestIslandIterationSchedule(unittest.TestCase):
                         for expected, result in zip(expected_step, actual_step, strict=True):
                             np.testing.assert_array_equal(result.view(np.uint8), expected.view(np.uint8))
 
+    @unittest.skipUnless(wp.is_cuda_available(), "Island iteration scheduling requires CUDA")
+    def test_islands_sweep_their_requested_iterations(self):
+        """Sweep a stack's island five times and a pendulum's twice in the same captured step.
+
+        Islands are independent sets, so each one must follow the trajectory of
+        a scene that sweeps every island as often as it requested, bit for bit.
+        A fixed contact frequency keeps the contact spring independent of the
+        global count.
+        """
+        with wp.ScopedDevice("cuda:0"):
+            builder = newton.ModelBuilder()
+            newton.solvers.SolverPhoenX.register_custom_attributes(builder)
+            builder.add_ground_plane()
+            cfg = newton.ModelBuilder.ShapeConfig(density=1000.0, mu=0.6)
+            stack = []
+            for i in range(3):
+                body = builder.add_body(
+                    xform=wp.transform(p=wp.vec3(0.0, 0.0, 0.1 + 0.201 * i), q=wp.quat_identity()),
+                    custom_attributes={"phoenx:solver_iterations": 5},
+                )
+                builder.add_shape_box(body, hx=0.1, hy=0.1, hz=0.1, cfg=cfg)
+                stack.append(body)
+            parent = -1
+            joints = []
+            for i in range(2):
+                link = builder.add_link(
+                    xform=wp.transform(p=wp.vec3(2.0, 0.0, 2.0 - 0.4 * i), q=wp.quat_rpy(0.0, 0.3, 0.0))
+                )
+                builder.add_shape_box(
+                    link, hx=0.05, hy=0.05, hz=0.15, cfg=newton.ModelBuilder.ShapeConfig(density=500.0)
+                )
+                joints.append(
+                    builder.add_joint_revolute(
+                        parent,
+                        link,
+                        parent_xform=wp.transform(p=wp.vec3(2.0, 0.0, 2.0) if parent < 0 else wp.vec3(0.0, 0.0, -0.2)),
+                        child_xform=wp.transform(p=wp.vec3(0.0, 0.0, 0.2)),
+                        axis=newton.Axis.Y,
+                    )
+                )
+                parent = link
+            builder.add_articulation(joints)
+            model = builder.finalize()
+            requested = model.phoenx.solver_iterations.numpy()
+            pipeline = newton.CollisionPipeline(model, contact_matching="sticky")
+
+            def run(iterations, per_body, merge_width=None):
+                model.phoenx.solver_iterations.assign(requested if per_body else np.zeros_like(requested))
+                solver = newton.solvers.SolverPhoenX(
+                    model,
+                    collision_pipeline=pipeline,
+                    step_layout="single_world",
+                    joint_mode="maximal_pgs",
+                    mass_splitting=False,
+                    substeps=2,
+                    solver_iterations=iterations,
+                    contact_hertz=20.0,
+                )
+                schedule = solver.world._dispatcher._island_schedule
+                if merge_width is not None:
+                    # The stack's island, with the wider colors, is swept by the grid.
+                    schedule.merge_width = merge_width
+                state = model.state()
+                # Drop the stack so that its contacts are still converging.
+                state.body_qd.assign(np.tile([0.0, 0.0, -1.0, 0.0, 0.0, 0.0], (model.body_count, 1)))
+                control, contacts = model.control(), pipeline.contacts()
+
+                def step():
+                    pipeline.collide(state, contacts)
+                    solver.step(state, state, control, contacts, 1 / 120)
+
+                step()
+                with wp.ScopedCapture() as capture:
+                    step()
+                for _ in range(10):
+                    wp.capture_launch(capture.graph)
+                if per_body:
+                    self.assertEqual({2, 5} - set(schedule.island_iterations.numpy().tolist()), set())
+                return state.body_q.numpy()
+
+            light, heavy = run(2, False), run(5, False)
+            self.assertFalse(np.array_equal(light[stack], heavy[stack]))
+            pendulum = np.setdiff1d(np.arange(model.body_count), stack)
+            for merge_width in (None, 1):
+                mixed = run(2, True, merge_width)
+                np.testing.assert_array_equal(mixed[stack].view(np.uint8), heavy[stack].view(np.uint8))
+                np.testing.assert_array_equal(mixed[pendulum].view(np.uint8), light[pendulum].view(np.uint8))
+
+    def test_requests_require_the_island_schedule(self):
+        """Reject sweep requests above ``solver_iterations`` that no island schedule could honor."""
+        builder = newton.ModelBuilder()
+        newton.solvers.SolverPhoenX.register_custom_attributes(builder)
+        body = builder.add_body(custom_attributes={"phoenx:solver_iterations": 4})
+        builder.add_shape_sphere(body, radius=0.1)
+        model = builder.finalize(device="cpu")
+        with self.assertRaisesRegex(ValueError, "island schedule"):
+            newton.solvers.SolverPhoenX(model, step_layout="single_world", solver_iterations=2)
+
 
 if __name__ == "__main__":
     unittest.main()

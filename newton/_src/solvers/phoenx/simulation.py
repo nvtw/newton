@@ -435,6 +435,7 @@ class PhoenXWorld:
         prepare_refresh_stride: int | str = "auto",
         parallel_contact_prepare: bool | None = None,
         island_parallel_iterations: bool | None = None,
+        body_solver_iterations: np.ndarray | None = None,
         contact_chunk_size: int = 0,
         contact_friction_model: str = "point",
         combine_direct_prepare_projection: bool = False,
@@ -463,6 +464,11 @@ class PhoenXWorld:
                 worlds currently support up to ``3``; joint-only worlds
                 may use larger values.
             gravity: 3-tuple or iterable of ``num_worlds`` 3-tuples.
+            body_solver_iterations: Optional per-body minimum of biased
+                sweeps per substep, indexed like the body container. An
+                island sweeps as often as its most demanding dynamic body
+                asks, at least ``solver_iterations`` times. Requires the
+                island schedule and no temporal iterations.
             contact_friction_model: "point" uses per-contact tangent
                 rows. Experimental "patch" uses one coupled central
                 tangent block for each eligible convex shape pair.
@@ -1510,6 +1516,23 @@ class PhoenXWorld:
         self._sleeping_shape_aabb_lower: wp.array[wp.vec3f] | None = None
         self._sleeping_shape_aabb_upper: wp.array[wp.vec3f] | None = None
 
+        #: Per-body minimum biased sweeps, or ``None`` when every island runs
+        #: ``solver_iterations``; see :class:`IslandIterationSchedule`.
+        self.body_solver_iterations = None
+        self._body_sweep_request = 0
+        if body_solver_iterations is not None:
+            requested = np.asarray(body_solver_iterations, dtype=np.int32).ravel()
+            if requested.size > self.num_bodies:
+                raise ValueError("body_solver_iterations has more entries than bodies")
+            most = int(requested.max(initial=0))
+            if most > self.solver_iterations:
+                if self.temporal_iterations:
+                    raise ValueError("body_solver_iterations does not support temporal_iterations")
+                padded = np.zeros(self.num_bodies, dtype=np.int32)
+                padded[: requested.size] = requested
+                self.body_solver_iterations = wp.array(padded, dtype=wp.int32, device=self.device)
+                self._body_sweep_request = most
+
         # Step-time dispatcher. Each (step_layout, mass_splitting)
         # combination has a dedicated class under :mod:`phoenx.dispatch`
         # so the hot path is straight-line with no capability checks.
@@ -1524,6 +1547,12 @@ class PhoenXWorld:
         else:
             self._dispatcher = (
                 MultiWorldMassSplittingDispatcher(self) if self.mass_splitting_enabled else MultiWorldDispatcher(self)
+            )
+
+        if self.body_solver_iterations is not None and getattr(self._dispatcher, "_island_schedule", None) is None:
+            raise ValueError(
+                "body_solver_iterations above solver_iterations requires the island schedule "
+                "(island_parallel_iterations)"
             )
 
         self._assert_invariants()
@@ -2908,6 +2937,11 @@ class PhoenXWorld:
         if self.temporal_iterations:
             self._temporal_apply_forces(self.solver_iterations - 1)
 
+    @property
+    def max_solver_iterations(self) -> int:
+        """Biased sweeps per substep; islands that request fewer skip the later ones."""
+        return max(self.solver_iterations, self._body_sweep_request)
+
     def _project_direct_after_sweep(self, direct, iteration: int, idt: wp.float32) -> None:
         """Project exact mechanisms after biased sweep ``iteration`` of a single- or multi-world substep.
 
@@ -2915,7 +2949,7 @@ class PhoenXWorld:
         positions, so each one carries the joint recovery bias. Limits and contacts
         react to capped motors during iteration.
         """
-        use_bias = self.temporal_iterations or iteration == self.solver_iterations - 1
+        use_bias = self.temporal_iterations or iteration == self.max_solver_iterations - 1
         direct.solve(use_bias=use_bias)
         direct.resolve_bounded_drives(idt, use_bias=use_bias)
 
@@ -6046,6 +6080,7 @@ class PhoenXWorld:
         reverse_colors: bool = False,
         structural_projection: bool = False,
         island_schedule=None,
+        iteration: int = 0,
     ) -> None:
         """Run one colour sweep from the partitioner's cursor.
 
@@ -6058,7 +6093,8 @@ class PhoenXWorld:
         three launches; only small colours between large ones enter the
         guarded loop. On CPU, launch threads run serially, so each colour gets
         its own launch. With an island schedule, independent components run in
-        separate blocks across both large and small colors.
+        separate blocks across both large and small colors, and islands with
+        fewer than ``iteration + 1`` requested sweeps skip the sweep.
         """
         heads = self._singleworld_kernels()[::2]
         if head_kernel in heads:
@@ -6085,7 +6121,7 @@ class PhoenXWorld:
         if island_schedule is not None:
             # Each island's block walks all of its colors in order, so the head
             # handles small colors too and no device-wide boundary separates them.
-            island_schedule.iterate(self, head_kernel, idt)
+            island_schedule.iterate(self, head_kernel, idt, iteration)
             return
         kernel, drain_tail = get_singleworld_one_launch_kernel(head_kernel, tail_kernel)
         if drain_tail:

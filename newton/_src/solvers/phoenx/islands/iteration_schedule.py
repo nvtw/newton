@@ -152,6 +152,44 @@ def _merge_wide_islands(
 
 
 @wp.kernel(enable_backward=False)
+def _request_island_iterations(
+    keys: wp.array[int],
+    columns: wp.array[int],
+    starts: wp.array[int],
+    num_colors: wp.array[int],
+    bodies: BodyContainer,
+    constraints: ConstraintContainer,
+    contacts: ContactColumnContainer,
+    num_joints: int,
+    body_iterations: wp.array[wp.int32],
+    island_iterations: wp.array[int],
+):
+    """Raise each island's sweep count to the largest request of its dynamic bodies."""
+    slot = wp.tid()
+    if slot >= starts[num_colors[0]]:
+        return
+    key = keys[slot]
+    if key >= island_iterations.shape[0]:
+        return
+    column = columns[slot]
+    first = int(0)
+    second = int(0)
+    if column < num_joints:
+        first = constraint_get_body1(constraints, column)
+        second = constraint_get_body2(constraints, column)
+    else:
+        first = contact_get_body1(contacts, column - num_joints)
+        second = contact_get_body2(contacts, column - num_joints)
+    request = int(0)
+    if first >= 0 and bodies.motion_type[first] == MOTION_DYNAMIC:
+        request = int(body_iterations[first])
+    if second >= 0 and bodies.motion_type[second] == MOTION_DYNAMIC:
+        request = wp.max(request, int(body_iterations[second]))
+    if request > 0:
+        wp.atomic_max(island_iterations, key, request)
+
+
+@wp.kernel(enable_backward=False)
 def _index_islands(
     keys: wp.array[int],
     slots: wp.array[int],
@@ -343,9 +381,15 @@ def _get_island_iteration(axes):
         fuse_columns: int,
         barrier: wp.array[wp.int32],
         claims: wp.array[wp.int32],
+        iteration: int,
+        island_iterations: wp.array[int],
     ):
         block, lane = wp.tid()
         has_merged = ends[merged] > starts[merged]
+        # Every island runs the first sweep; ``island_iterations`` is only
+        # read for later sweeps, which islands with fewer requested ones skip.
+        if iteration > 0 and has_merged:
+            has_merged = iteration < island_iterations[merged]
         # The merged large islands would leave one block walking them long
         # after the others finish. The merged warps of the whole co-resident
         # grid share each of their wide colors, with a grid barrier between
@@ -430,6 +474,9 @@ def _get_island_iteration(axes):
             root = roots[index]
             if root == merged:
                 continue
+            if iteration > 0:
+                if iteration >= island_iterations[root]:
+                    continue
             i = starts[root]
             end_of_island = ends[root]
             while i < end_of_island:
@@ -505,6 +552,11 @@ class IslandIterationSchedule:
         #: Colors of the merged island with more columns use the whole grid;
         #: ``None`` uses the one-launch sweep's fuse threshold.
         self.fuse_columns = None
+        #: Biased sweeps of each island (merged one at ``num_bodies``) when
+        #: bodies request more than ``solver_iterations``; unread otherwise.
+        self.island_iterations = wp.empty(
+            num_bodies + 1 if world.body_solver_iterations is not None else 1, dtype=int, device=device
+        )
 
     def build(self, world: PhoenXWorld):
         partition = world._partitioner
@@ -556,6 +608,25 @@ class IslandIterationSchedule:
             [self.keys, self.sizes, self.first_color, self.last_color, num_bodies, int(self.merge_width)],
             device=world.device,
         )
+        if world.body_solver_iterations is not None:
+            self.island_iterations.fill_(world.solver_iterations)
+            wp.launch(
+                _request_island_iterations,
+                capacity,
+                [
+                    self.keys,
+                    partition.element_ids_by_color,
+                    partition.color_starts,
+                    partition.num_colors,
+                    world.bodies,
+                    world.constraints,
+                    world._contact_cols,
+                    world.num_joints,
+                    world.body_solver_iterations,
+                    self.island_iterations,
+                ],
+                device=world.device,
+            )
         # The merged island keeps no stale range when this step has none.
         self.starts[num_bodies:].zero_()
         self.ends[num_bodies:].zero_()
@@ -623,14 +694,21 @@ class IslandIterationSchedule:
             self._blocks[kernel] = blocks
         return blocks
 
-    def iterate(self, world: PhoenXWorld, kernel, idt: float):
+    def iterate(self, world: PhoenXWorld, kernel, idt: float, iteration: int = 0):
         """Advance every island through all of its colors, in their original order.
 
         The merged island needs a co-resident grid for its barrier. Its warps
         share each block with warps that walk the small islands, which share
         no body with it and need no grid barrier, so both chains of color
         steps proceed in one launch.
+
+        Islands are independent sets, so each may run its own number of
+        Gauss-Seidel sweeps: biased sweep ``iteration`` skips the islands
+        whose bodies requested fewer (see ``body_solver_iterations``). Other
+        phases pass ``0`` and sweep every island.
         """
+        if world.body_solver_iterations is None:
+            iteration = 0
         island_kernel = _get_island_iteration(kernel.phoenx_axes)
         blocks = self._grid_blocks(world, island_kernel)
         wp.launch(
@@ -662,6 +740,8 @@ class IslandIterationSchedule:
                 int(world._fuse_threshold if self.fuse_columns is None else self.fuse_columns),
                 self.barrier,
                 self.claims,
+                iteration,
+                self.island_iterations,
             ],
             block_dim=ONE_LAUNCH_BLOCK_DIM,
             device=world.device,

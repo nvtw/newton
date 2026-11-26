@@ -236,6 +236,31 @@ Rejected: loading the next row's data ahead of each row (bed: 82 vs 78 us
 per merged sweep, and not bitwise); reserving eight whole blocks for the
 deepest small islands (45.1 vs 44.6-44.7 FPS, within noise).
 
+## Per-island solver iterations (2026-11-26)
+
+Bodies may request more biased sweeps (`phoenx:solver_iterations`). The
+island schedule takes each island's count as the maximum of its dynamic
+bodies' requests and `solver_iterations`; the substep runs the largest count
+and every later sweep skips islands that are done. Islands are independent
+sets, so a stack island follows the all-high trajectory and the rest the
+all-low one bit for bit (when the contact spring matches, see below).
+
+Kapla tower (65k columns, merged island) plus four light 17-body spiders
+(`maximal_direct`), 7 substeps, RTX PRO 6000 shared with other jobs:
+
+| Schedule | FPS (two runs) | Tower | Spiders |
+| --- | --- | --- | --- |
+| All 10 | 5.9, 12.3 | reference | -- |
+| Tower 10, rest 2 | 24.6, 24.9 | bitwise = all 10 | bitwise = all 2 |
+| All 2 | 17.1, 35.6 | 7.3 mm off | reference |
+
+Most of the all-10 cost here is the mechanism-owned contacts, which run
+`solver_iterations` sweeps. The contact spring follows `solver_iterations`
+(the minimum), because the low-count islands must stay stable: at 4 substeps
+the 2-sweep spring is 0.59 pi instead of pi and the tower settles more (max
+brick drift 632 vs 24 mm, none fallen); at 7 substeps the step-rate cap
+(0.57 pi) makes both springs equal.
+
 ## Bottling plant collision passes (2026-11-26)
 
 Same factory and window; two collision passes per frame. Collision-only

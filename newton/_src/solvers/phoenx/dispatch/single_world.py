@@ -70,12 +70,13 @@ class SingleWorldDispatcher:
                 direct.solve(use_bias=False)
                 # Test drive bounds only once contact warm starts load the mechanisms.
                 direct.resolve_bounded_drives(idt, use_bias=False)
-            for iteration in range(w.solver_iterations):
+            # Islands that request fewer sweeps skip the later ones.
+            for iteration in range(w.max_solver_iterations):
                 w._temporal_enter_sweep(iteration, idt)
                 if self._island_schedule is None:
                     w._partitioner.begin_sweep()
                 w._singleworld_head_plus_tail_sweep(
-                    iterate_head, iterate_fused, idt, island_schedule=self._island_schedule
+                    iterate_head, iterate_fused, idt, island_schedule=self._island_schedule, iteration=iteration
                 )
                 if direct is not None and direct.enabled:
                     w._project_direct_after_sweep(direct, iteration, idt)

@@ -363,7 +363,31 @@ class SolverPhoenX(SolverBase):
 
     @classmethod
     def register_custom_attributes(cls, builder: newton.ModelBuilder) -> None:
-        """Register optional per-shape restitution combine modes (average, min, multiply, max)."""
+        """Register PhoenX's optional per-shape and per-body attributes.
+
+        ``phoenx:restitution_combine_mode`` (shape) selects how restitution
+        combines (average, min, multiply, max). ``phoenx:solver_iterations``
+        (body) is the minimum number of biased PGS sweeps per substep of
+        the island that contains the body; ``0`` (the default) uses the
+        solver's ``solver_iterations``. Islands are independent sets, so a
+        tall stack can sweep more often than the rest of the scene without
+        slowing it. A body requesting more sweeps than ``solver_iterations``
+        requires the island schedule (``island_parallel_iterations``) and no
+        ``temporal_iterations``. The contact spring stays the one that
+        ``solver_iterations`` sweeps keep stable, so it is stable for every
+        island; contacts solved by exact (direct) mechanisms also keep
+        ``solver_iterations`` sweeps.
+        """
+        builder.add_custom_attribute(
+            newton.ModelBuilder.CustomAttribute(
+                name="solver_iterations",
+                namespace="phoenx",
+                frequency=Model.AttributeFrequency.BODY,
+                assignment=Model.AttributeAssignment.MODEL,
+                dtype=wp.int32,
+                default=0,
+            )
+        )
         builder.add_custom_attribute(
             newton.ModelBuilder.CustomAttribute(
                 name="restitution_combine_mode",
@@ -441,7 +465,9 @@ class SolverPhoenX(SolverBase):
                 PhoenX reuses this pipeline and its contact-buffer sizing
                 instead of creating a default sticky pipeline.
             substeps: PhoenX internal substeps per :meth:`step` call.
-            solver_iterations: PGS iterations per substep.
+            solver_iterations: PGS iterations per substep. Islands with a body
+                whose ``phoenx:solver_iterations`` attribute is larger run that
+                many instead (see :meth:`register_custom_attributes`).
             solver_scheme: ``"soft"`` preserves the existing solver. Experimental
                 ``"tgs"`` uses persistent two-anchor friction patches, temporal
                 joint springs and one external-force update per outer step.
@@ -1273,6 +1299,7 @@ class SolverPhoenX(SolverBase):
             prepare_refresh_stride=prepare_refresh_stride,
             parallel_contact_prepare=parallel_contact_prepare,
             island_parallel_iterations=island_parallel_iterations,
+            body_solver_iterations=self._body_solver_iterations(model),
             contact_chunk_size=contact_chunk_size,
             device=self.device,
         )
@@ -1737,6 +1764,14 @@ class SolverPhoenX(SolverBase):
             device=self.device,
         )
         self.world.set_materials(material_data, shape_material_idx, has_restitution=bool(np.any(restitution)))
+
+    @staticmethod
+    def _body_solver_iterations(model: Model) -> np.ndarray | None:
+        """``phoenx:solver_iterations`` in PhoenX body order (slot 0 is the world), or ``None``."""
+        requested = getattr(getattr(model, "phoenx", None), "solver_iterations", None)
+        if requested is None or int(model.body_count) == 0:
+            return None
+        return np.concatenate(([0], requested.numpy())).astype(np.int32)
 
     def _rebuild_direct_contact_response(self) -> None:
         """Rebind general contact mobility after a direct factor rebuild."""
