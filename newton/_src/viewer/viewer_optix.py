@@ -596,6 +596,7 @@ class ViewerOptix(_PathTracingViewerBackend, ViewerBase):
             self._log_shapes_graphed(state)
         self._log_gaussian_shapes(state)
         self._log_non_shape_state(state)
+        self._log_picking_line()
         self.model_changed = False
 
     def should_step(self) -> bool:

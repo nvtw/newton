@@ -241,6 +241,49 @@ class TestViewerOptix(unittest.TestCase):
         finally:
             viewer.close()
 
+    def test_log_state_draws_picking_line(self):
+        """Draw the shared cyan pick line from the picked point to the target, then clear it."""
+        world = newton.ModelBuilder()
+        body = world.add_body(xform=wp.transform((0.0, 0.0, 0.5), wp.quat_identity()), mass=1.0)
+        world.add_shape_sphere(body, radius=0.1)
+        builder = newton.ModelBuilder()
+        builder.replicate(world, 2)
+        model = builder.finalize(device="cpu")
+        state = model.state()
+        offsets = wp.array([(0.0, 0.0, 0.0), (2.0, 0.0, 0.0)], dtype=wp.vec3, device="cpu")
+
+        viewer = ViewerOptix.__new__(ViewerOptix)
+        viewer.device = model.device
+        viewer.model = model
+        viewer.model_changed = False
+        viewer.world_offsets = offsets
+        viewer.picking_enabled = True
+        viewer._picking = Picking(model, world_offsets=offsets)
+        # Pick the body in the second world through its visual (offset) position.
+        viewer._picking.pick(state, wp.vec3(2.0, 0.0, 2.0), wp.vec3(0.0, 0.0, -1.0))
+        self.assertEqual(viewer.picking.pick_body, 1)
+        viewer._picking.update(wp.vec3(2.0, 0.0, 2.0) + wp.vec3(0.0, 0.3, 0.0), wp.vec3(0.0, 0.0, -1.0))
+
+        with (
+            mock.patch.object(viewer, "_log_shapes_packed", return_value=True),
+            mock.patch.object(viewer, "_log_gaussian_shapes"),
+            mock.patch.object(viewer, "_log_non_shape_state"),
+            mock.patch.object(viewer, "log_lines") as log_lines,
+        ):
+            viewer.log_state(state)
+            name, starts, ends, colors = log_lines.call_args.args
+            self.assertEqual(name, "picking_line")
+            self.assertFalse(log_lines.call_args.kwargs["hidden"])
+            offset = offsets.numpy()[1]
+            np.testing.assert_allclose(starts.numpy()[0], np.asarray(viewer.picking.pick_point) + offset, atol=1.0e-6)
+            np.testing.assert_allclose(ends.numpy()[0], np.asarray(viewer.picking.pick_target) + offset, atol=1.0e-6)
+            np.testing.assert_allclose(starts.numpy()[0], (2.0, 0.0, 0.6), atol=1.0e-5)
+            np.testing.assert_allclose(colors.numpy()[0], (0.0, 1.0, 1.0))
+
+            viewer._picking.release()
+            viewer.log_state(state)
+            log_lines.assert_called_with("picking_line", None, None, None)
+
     def test_simulation_render_overlap_capability(self):
         """Advertise overlap only when CUDA nonblocking streams are available."""
         viewer = ViewerOptix.__new__(ViewerOptix)
