@@ -1300,6 +1300,13 @@ contact accuracy are still being investigated.
   </tr>
   <tr>
     <td align="center" width="33%">
+      <img width="320" src="docs/images/examples/example_phoenx_kapla_city.jpg" alt="Kapla City skyline">
+      <br><b>Kapla City</b>
+      <br><code>python -m newton.examples phoenx_kapla_city</code>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
       <img width="320" src="docs/images/examples/example_phoenx_warehouse.jpg" alt="PhoenX warehouse robot fleet">
       <br><b>Warehouse robot fleet</b>
       <br><code>python -m newton.examples phoenx_warehouse</code>
