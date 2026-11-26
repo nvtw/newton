@@ -8,8 +8,28 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton._src.solvers.phoenx.islands.iteration_schedule import _index_colors, _key_island_order
+from newton._src.solvers.phoenx.islands.iteration_schedule import (
+    _MERGED_THREADS,
+    _index_colors,
+    _key_island_order,
+    _merged_grid_sync,
+    _sync_island_warps,
+)
+from newton._src.solvers.phoenx.simulation_kernels import ONE_LAUNCH_BLOCK_DIM
 from newton._src.solvers.phoenx.tests.test_parallel_prepare_sleeping import _build_model
+
+
+@wp.kernel(enable_backward=False, grid_stride=False, module="unique")
+def _split_block_barriers(state: wp.array[wp.int32], steps: wp.array2d[wp.int32], num_blocks: int):
+    block, lane = wp.tid()
+    if lane < _MERGED_THREADS:
+        for step in range(8):
+            if lane == 0:
+                steps[block, step] = wp.atomic_add(state, 2, 1) / num_blocks
+            _merged_grid_sync(state, wp.int32(num_blocks))
+        return
+    for _step in range(8):
+        _sync_island_warps()
 
 
 class TestIslandIterationSchedule(unittest.TestCase):
@@ -57,6 +77,28 @@ class TestIslandIterationSchedule(unittest.TestCase):
         np.testing.assert_array_equal(order.numpy()[:4], [4, 1, 3, 0])
 
     @unittest.skipUnless(wp.is_cuda_available(), "Island iteration scheduling requires CUDA")
+    def test_split_block_barriers_allow_several_blocks_per_sm(self):
+        """Pass the merged warps' grid barrier with four blocks per SM, as small kernels launch.
+
+        A register barrier id would reserve every hardware barrier of the SM
+        for one block, so the grid would not be co-resident and would hang.
+        """
+        with wp.ScopedDevice("cuda:0"):
+            blocks = 4 * wp.get_device().sm_count
+            state = wp.zeros(3, dtype=wp.int32)
+            steps = wp.full((blocks, 8), -1, dtype=wp.int32)
+            with wp.ScopedCapture() as capture:
+                wp.launch(
+                    _split_block_barriers,
+                    (blocks, ONE_LAUNCH_BLOCK_DIM),
+                    [state, steps, blocks],
+                    block_dim=ONE_LAUNCH_BLOCK_DIM,
+                )
+            wp.capture_launch(capture.graph)
+            # Every block takes its ticket of a step only after all took those of the previous step.
+            np.testing.assert_array_equal(steps.numpy(), np.broadcast_to(np.arange(8), (blocks, 8)))
+
+    @unittest.skipUnless(wp.is_cuda_available(), "Island iteration scheduling requires CUDA")
     def test_mixed_islands_in_captured_sweeps(self):
         """Preserve poses and impulses through multiple warm starts on the same island schedule."""
         # The stack and anchored pendulum share the static world body. Their
@@ -65,7 +107,7 @@ class TestIslandIterationSchedule(unittest.TestCase):
             model = _build_model()
             pipeline = newton.CollisionPipeline(model, contact_matching="sticky")
 
-            def run(independent, giant=False, temporal=False):
+            def run(independent, giant=False, temporal=False, merge_width=None):
                 solver = newton.solvers.SolverPhoenX(
                     model,
                     collision_pipeline=pipeline,
@@ -82,6 +124,11 @@ class TestIslandIterationSchedule(unittest.TestCase):
                 # Island blocks solve every color with the head kernel. Without a
                 # fused tail, the color-ordered sweep uses the same arithmetic.
                 world._fuse_threshold = 0
+                if merge_width is not None:
+                    # Only the island with wider colors joins the grid-swept merged
+                    # island; the other one is walked meanwhile by the warps
+                    # each block keeps for small islands.
+                    world._dispatcher._island_schedule.merge_width = merge_width
                 if giant:
                     # Every island is solved by the whole grid, one color at a time.
                     schedule = world._dispatcher._island_schedule
@@ -107,11 +154,18 @@ class TestIslandIterationSchedule(unittest.TestCase):
                     schedule = world._dispatcher._island_schedule
                     self.assertGreaterEqual(int(schedule.count.numpy()[0]), 2)
                     self.assertGreater(int(world._partitioner.num_colors.numpy()[0]), 1)
+                    merged = world.num_bodies
+                    merged_columns = int(schedule.ends.numpy()[merged] - schedule.starts.numpy()[merged])
+                    self.assertEqual(merged_columns > 0, merge_width is not None)
                 return history
 
             for temporal in (False, True):
                 reference = run(False, temporal=temporal)
-                for actual in (run(True, temporal=temporal), run(True, giant=True, temporal=temporal)):
+                for actual in (
+                    run(True, temporal=temporal),
+                    run(True, giant=True, temporal=temporal),
+                    run(True, temporal=temporal, merge_width=1),
+                ):
                     for expected_step, actual_step in zip(reference, actual, strict=True):
                         for expected, result in zip(expected_step, actual_step, strict=True):
                             np.testing.assert_array_equal(result.view(np.uint8), expected.view(np.uint8))

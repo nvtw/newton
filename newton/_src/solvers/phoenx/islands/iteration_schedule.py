@@ -35,7 +35,6 @@ from newton._src.solvers.phoenx.particle import ParticleContainer
 from newton._src.solvers.phoenx.simulation_kernels import (
     _PER_WORLD_FAST_FAMILIES,
     ONE_LAUNCH_BLOCK_DIM,
-    _grid_sync,
     _make_singleworld_head_color_func,
     _sync_threads,
 )
@@ -240,6 +239,72 @@ def _key_island_order(
     order[i] = root
 
 
+#: Warps of each block that sweep the merged island; the others sweep small islands.
+_MERGED_WARPS = 4
+_MERGED_THREADS = wp.constant(32 * _MERGED_WARPS)
+_ISLAND_THREADS = wp.constant(ONE_LAUNCH_BLOCK_DIM - 32 * _MERGED_WARPS)
+
+# Hardware barrier 1 joins the merged warps of a block, 2 its small-island
+# warps. The ids must be literals: a register id makes the compiler reserve
+# all sixteen barriers per block, which caps residency at one block per SM.
+_MERGED_SYNC = f'asm volatile("barrier.sync 1, {32 * _MERGED_WARPS};" ::: "memory");'
+_ISLAND_SYNC = f'asm volatile("barrier.sync 2, {ONE_LAUNCH_BLOCK_DIM - 32 * _MERGED_WARPS};" ::: "memory");'
+
+
+@wp.func_native(f"""
+#if defined(__CUDA_ARCH__)
+{_MERGED_SYNC}
+#endif
+""")
+def _sync_merged_warps(): ...
+
+
+@wp.func_native(f"""
+#if defined(__CUDA_ARCH__)
+{_ISLAND_SYNC}
+#endif
+""")
+def _sync_island_warps(): ...
+
+
+# The grid barrier of ``_grid_sync`` for the merged warps of every block,
+# which lead with thread 0; the small-island warps of the block go on.
+@wp.func_native(f"""
+#if defined(__CUDA_ARCH__)
+{_MERGED_SYNC}
+if (threadIdx.x == 0) {{
+    int* count = (int*)state.data;
+    volatile int* generation = count + 1;
+    const int seen = *generation;
+    __threadfence();
+    if (atomicAdd(count, 1) == num_blocks - 1) {{
+        atomicExch(count, 0);
+        __threadfence();
+        atomicAdd((int*)generation, 1);
+    }} else {{
+        unsigned int backoff = 8;
+        while (*generation == seen) {{
+            __nanosleep(backoff);
+            backoff = backoff < 128 ? 2 * backoff : 128;
+        }}
+    }}
+    __threadfence();
+}}
+{_MERGED_SYNC}
+#endif
+""")
+def _merged_grid_sync(state: wp.array[wp.int32], num_blocks: wp.int32): ...
+
+
+@wp.func
+def _sync_island_group(has_merged: bool):
+    """Join the warps that walk small islands: all of the block without a merged island."""
+    if has_merged:
+        _sync_island_warps()
+    else:
+        _sync_threads()
+
+
 @functools.cache
 def _get_island_iteration(axes):
     phase = dict(axes)["phase"]
@@ -277,16 +342,17 @@ def _get_island_iteration(axes):
         merged: int,
         fuse_columns: int,
         barrier: wp.array[wp.int32],
-        merged_pass: int,
+        claims: wp.array[wp.int32],
     ):
         block, lane = wp.tid()
+        has_merged = ends[merged] > starts[merged]
         # The merged large islands would leave one block walking them long
-        # after the others finish. The whole co-resident grid shares each of
-        # their wide colors, with a grid barrier between colors; block 0
-        # alone walks runs of narrow colors with block barriers, as the
-        # one-launch sweep does, while the other blocks go on to the
-        # independent small islands.
-        if merged_pass != 0 and ends[merged] > starts[merged]:
+        # after the others finish. The merged warps of the whole co-resident
+        # grid share each of their wide colors, with a grid barrier between
+        # colors; block 0 alone walks runs of narrow colors. Both are chains
+        # of latency-bound color steps, so the remaining warps of every block
+        # walk the independent small islands meanwhile.
+        if has_merged and lane < _MERGED_THREADS:
             i = starts[merged]
             # 0: nothing written, 1: block 0 wrote a narrow color, 2: the grid wrote a wide one.
             pending = int(0)
@@ -294,14 +360,14 @@ def _get_island_iteration(axes):
                 end = color_ends[i]
                 wide = end - i > fuse_columns
                 thread = lane
-                threads = wp.static(ONE_LAUNCH_BLOCK_DIM)
+                threads = int(_MERGED_THREADS)
                 if wide:
                     if pending != 0:
-                        _grid_sync(barrier, wp.int32(num_blocks))
-                    thread = block * wp.static(ONE_LAUNCH_BLOCK_DIM) + lane
-                    threads = num_blocks * wp.static(ONE_LAUNCH_BLOCK_DIM)
+                        _merged_grid_sync(barrier, wp.int32(num_blocks))
+                    thread = block * _MERGED_THREADS + lane
+                    threads = num_blocks * _MERGED_THREADS
                 elif pending == 2:
-                    _grid_sync(barrier, wp.int32(num_blocks))
+                    _merged_grid_sync(barrier, wp.int32(num_blocks))
                 if wide or block == 0:
                     solve_color(
                         constraints,
@@ -334,25 +400,38 @@ def _get_island_iteration(axes):
                 if wide:
                     pending = 2
                 else:
-                    _sync_threads()
+                    _sync_merged_warps()
                     pending = 1
                 i = end
-        if merged_pass != 0:
             return
-        # Islands are sorted longest first; dealing them out in alternating
-        # directions balances each block's serial chain of colors.
+        # Without a merged island every warp walks small islands.
+        island_lane = lane
+        island_threads = int(ONE_LAUNCH_BLOCK_DIM)
+        if has_merged:
+            island_lane = lane - _MERGED_THREADS
+            island_threads = int(_ISLAND_THREADS)
+        # Islands are sorted longest first. Each block's island warps claim
+        # the next one when they finish their last, which keeps the longest
+        # serial chains of colors on different blocks.
         total = count[0]
-        for round_index in range((total + num_blocks - 1) / num_blocks):
-            index = round_index * num_blocks + block
-            if round_index % 2 == 1:
-                index = round_index * num_blocks + num_blocks - 1 - block
+        while True:
+            if island_lane == 0:
+                claim = wp.atomic_add(barrier, 2, 1)
+                # Every block makes one claim past the last island; the final
+                # one resets the cursor for the next launch.
+                if claim == total + num_blocks - 1:
+                    barrier[2] = 0
+                claims[block] = claim
+            _sync_island_group(has_merged)
+            index = claims[block]
+            _sync_island_group(has_merged)
             if index >= total:
-                continue
+                break
             root = roots[index]
-            i = starts[root]
-            end_of_island = ends[root]
             if root == merged:
                 continue
+            i = starts[root]
+            end_of_island = ends[root]
             while i < end_of_island:
                 end = color_ends[i]
                 solve_color(
@@ -380,10 +459,10 @@ def _get_island_iteration(axes):
                     end - i,
                     i,
                     False,
-                    lane,
-                    wp.static(ONE_LAUNCH_BLOCK_DIM),
+                    island_lane,
+                    island_threads,
                 )
-                _sync_threads()
+                _sync_island_group(has_merged)
                 i = end
 
     return iterate
@@ -416,7 +495,10 @@ class IslandIterationSchedule:
         self.sizes = wp.empty(num_bodies + 1, dtype=int, device=device)
         self.first_color = wp.empty_like(self.sizes)
         self.last_color = wp.empty_like(self.sizes)
+        # Merged grid barrier (arrivals, generation) and the small-island cursor.
         self.barrier = wp.zeros(3, dtype=wp.int32, device=device)
+        #: The island each block's island warps claimed last.
+        self.claims = wp.zeros(4 * max(1, int(device.sm_count)), dtype=wp.int32, device=device)
         self._blocks = {}
         #: Islands with more columns per color are merged and swept by the grid.
         self.merge_width = ONE_LAUNCH_BLOCK_DIM
@@ -544,44 +626,43 @@ class IslandIterationSchedule:
     def iterate(self, world: PhoenXWorld, kernel, idt: float):
         """Advance every island through all of its colors, in their original order.
 
-        The merged island needs a co-resident grid for its barrier. The small
-        islands share no body with it and need no barrier: their pass runs four
-        blocks per SM, which queue and balance as earlier blocks finish.
+        The merged island needs a co-resident grid for its barrier. Its warps
+        share each block with warps that walk the small islands, which share
+        no body with it and need no grid barrier, so both chains of color
+        steps proceed in one launch.
         """
         island_kernel = _get_island_iteration(kernel.phoenx_axes)
-        grid_blocks = self._grid_blocks(world, island_kernel)
-        island_blocks = 4 * max(1, int(world.device.sm_count))
-        for merged_pass, blocks in ((1, grid_blocks), (0, island_blocks)):
-            wp.launch(
-                island_kernel,
-                (blocks, ONE_LAUNCH_BLOCK_DIM),
-                [
-                    world.constraints,
-                    world._contact_cols,
-                    world.bodies,
-                    world._particles_or_sentinel(),
-                    idt,
-                    world.sor_boost,
-                    world._contact_container,
-                    world._active_contact_views(),
-                    world.num_joints,
-                    world._joint_pgs_enabled,
-                    world.num_bodies,
-                    world._copy_state,
-                    self.order,
-                    self.count,
-                    self.starts,
-                    self.ends,
-                    self.colors,
-                    self.color_ends,
-                    self.columns,
-                    self.families,
-                    blocks,
-                    world.num_bodies,
-                    int(world._fuse_threshold if self.fuse_columns is None else self.fuse_columns),
-                    self.barrier,
-                    merged_pass,
-                ],
-                block_dim=ONE_LAUNCH_BLOCK_DIM,
-                device=world.device,
-            )
+        blocks = self._grid_blocks(world, island_kernel)
+        wp.launch(
+            island_kernel,
+            (blocks, ONE_LAUNCH_BLOCK_DIM),
+            [
+                world.constraints,
+                world._contact_cols,
+                world.bodies,
+                world._particles_or_sentinel(),
+                idt,
+                world.sor_boost,
+                world._contact_container,
+                world._active_contact_views(),
+                world.num_joints,
+                world._joint_pgs_enabled,
+                world.num_bodies,
+                world._copy_state,
+                self.order,
+                self.count,
+                self.starts,
+                self.ends,
+                self.colors,
+                self.color_ends,
+                self.columns,
+                self.families,
+                blocks,
+                world.num_bodies,
+                int(world._fuse_threshold if self.fuse_columns is None else self.fuse_columns),
+                self.barrier,
+                self.claims,
+            ],
+            block_dim=ONE_LAUNCH_BLOCK_DIM,
+            device=world.device,
+        )

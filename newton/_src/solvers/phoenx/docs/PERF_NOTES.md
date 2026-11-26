@@ -193,6 +193,49 @@ Also enabling it for prepare and relax cut the minimum bicycle rear-wheel speed
 from 16.5 to 3.5 rad/s; on the LLT/PCR modules it was neutral and widened the
 chain pin gap (0.06 -> 0.23 mm). Both were rejected.
 
+## Bottling plant island sweeps (2026-11-26)
+
+Full factory (`--filling-room-physics`, frames 600-1200, about 385k contacts,
+RTX PRO 6000 Blackwell). The merged island (pasteuriser bed, about 69k
+columns in 10 colors of 7-12k mostly five-row bottle columns) and about
+200-1,200 small islands (deepest: articulated cases with 15-19 colors) were
+swept by two launches per sweep: 102 + 86 us per biased sweep.
+
+Probes of the bed (per-column `clock64`) show each color step is the latency
+of its slowest column, not throughput: a worst column of about 10 solved rows
+takes 20-25k cycles, of which about 1.5k per row (mostly the coupled
+normal/friction projection) and 325 per sliding-friction Newton iteration;
+loading row data ahead of the chain changed nothing (latency is arithmetic,
+not memory). The small-island pass is the latency of its deepest island.
+
+Both chains now run in one launch: four warps of each 256-thread block sweep
+the merged island (grid barrier over those warps only), the other four walk
+small islands, claiming them longest first from an atomic cursor (a static
+deal over 188 blocks gave a 25- instead of 15-step critical chain). The
+hardware barrier ids must be literals; a register id reserves all sixteen
+barriers per block and caps residency at one block per SM, which hangs the
+grid barrier of kernels that fit several blocks per SM.
+
+| Per frame | Two launches | One launch |
+| --- | ---: | ---: |
+| Biased sweeps (24) | 4.52 ms | 3.27 ms |
+| Relax sweeps (6) | 1.19 ms | 0.74 ms |
+| Cached prepare (6) | 0.78 ms | 0.51 ms |
+| GPU span | 24.07 ms | 21.99 ms |
+| Physics FPS | 40.4-40.7 | 44.6-44.7 |
+
+Bitwise identical (colors are independent sets; per-island color order is
+unchanged). The default plant is neutral (68.1 vs 67.7 FPS, frames
+600-1800); the Kapla tower benchmark (`bench_phoenx_kapla --mass-splitting
+off`, 240 frames) rises from 35.4-35.5 to 46.7-46.8 FPS with identical drift,
+speed and contact diagnostics. Merged/island warp splits of 6/2 and 2/6 were equal or slower.
+The deepest small island now ends last (136 us vs 116 us for the merged
+island in a probed sweep): sharing SMs with the merged warps slows its chain.
+
+Rejected: loading the next row's data ahead of each row (bed: 82 vs 78 us
+per merged sweep, and not bitwise); reserving eight whole blocks for the
+deepest small islands (45.1 vs 44.6-44.7 FPS, within noise).
+
 ## Direct-mechanism contact sweep (2026-11-06)
 
 Contacts on non-tree `maximal_direct` mechanisms are solved through the exact
