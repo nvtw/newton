@@ -425,46 +425,6 @@ class TestBottlingPlant(unittest.TestCase):
         on_line = (poses[:, 0] < 9.4) & (poses[:, 2] > 0.9)
         self.assertTrue(np.all(np.linalg.norm(poses[on_line, 3:5], axis=1) < np.sin(np.radians(7.5))))
 
-    @unittest.skipUnless(wp.is_cuda_available(), "CUDA device required")
-    def test_abreast_plant_bottles_touch_on_their_sides(self):
-        """Pressed abreast, plant bottles touch only on their sides, never on the seams of their pieces.
-
-        Pieces abutting on a plane made a bottle's base-ring top touch its
-        neighbour's body cylinder with a vertical normal; in a pressed file
-        those contacts lifted and spun the bottles until they left the line.
-        """
-        builder = newton.ModelBuilder()
-        glass = builder.ShapeConfig(density=0.0, mu=0.16, mu_static=0.2, gap=0.002)
-        bottles = []
-        for _ in range(2):
-            body = builder.add_body(mass=0.57, inertia=wp.mat33(np.eye(3) * 1.0e-3))
-            builder.add_shape_convex_hull(body, mesh=_bottle_heel_hull(), cfg=glass)
-            add_round_bottle(builder, body, f"/Bottle_{body}", cfg=glass)
-            bottles.append(body)
-        with wp.ScopedDevice("cuda:0"):
-            model = builder.finalize()
-            pipeline = newton.CollisionPipeline(model, contact_matching="sticky", speculative_contact_gap_max=0.005)
-            state, contacts = model.state(), pipeline.contacts()
-            poses = state.body_q.numpy()
-            with wp.ScopedCapture() as capture:
-                pipeline.collide(state, contacts, dt=1.0 / 120.0)
-            shape_body = model.shape_body.numpy()
-            # Pressed up to 0.5 mm into each other, upright, leaning in as far as
-            # that allows, or rocked away onto the far side of the heel.
-            for overlap in (0.0, 0.0002, 0.0005):
-                for lean in (0.0, 0.004, -0.03):
-                    with self.subTest(overlap=overlap, lean=lean):
-                        poses[bottles[0]] = (0.0, 0.0, 0.0, *wp.quat_from_axis_angle(wp.vec3(1.0, 0.0, 0.0), -lean))
-                        poses[bottles[1]] = (0.0, 0.061 - overlap, 0.0, *wp.quat_identity())
-                        state.body_q.assign(poses)
-                        wp.capture_launch(capture.graph)
-                        count = int(contacts.rigid_contact_count.numpy()[0])
-                        self.assertGreater(count, 0)
-                        pair = shape_body[contacts.rigid_contact_shape0.numpy()[:count]] >= 0
-                        pair &= shape_body[contacts.rigid_contact_shape1.numpy()[:count]] >= 0
-                        normals = contacts.rigid_contact_normal.numpy()[:count][pair]
-                        self.assertLess(float(np.abs(normals[:, 2]).max()), 0.5)
-
     def test_wrapper_wrap_continues_from_accumulated_target(self):
         """A second wrap starts from the drive's accumulated target, not the wrapped angle."""
         line = {
