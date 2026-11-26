@@ -31,6 +31,7 @@ newton
 
    Axis
    BodyFlags
+   CameraLensType
    CollisionPipeline
    CollisionSubstepScheduler
    Contacts
@@ -50,6 +51,7 @@ newton
    Rod
    SDF
    ShapeFlags
+   ShapeFrictionMode
    State
    StateFlags
    TendonGuide

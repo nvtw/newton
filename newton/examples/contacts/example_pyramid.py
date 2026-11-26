@@ -149,7 +149,6 @@ class Example:
                 self.model.rigid_contact_max,
                 0,
                 device=self.model.device,
-                requested_attributes=self.model.get_requested_contact_attributes(),
             )
         else:
             # PhoenX needs sticky contact matching for its persistent warm-start.

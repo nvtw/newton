@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import contextlib
 import math
-from functools import wraps
+from functools import lru_cache, wraps
 from typing import Any
 
 import warp as wp
@@ -600,6 +600,9 @@ def _tetrahedra_separated(
     return wp.max(wp.max(lower_b - upper_a), wp.max(lower_a - upper_b)) > cutoff
 
 
+# Reuse Warp definitions by specialization so equivalent pipelines do not
+# repeat code generation. Launch buffers and counters belong to each pipeline.
+@lru_cache
 def create_narrow_phase_primitive_kernel(
     writer_func: Any,
     speculative: bool = False,
@@ -1296,6 +1299,7 @@ def create_narrow_phase_primitive_kernel(
     return narrow_phase_primitive_kernel
 
 
+@lru_cache
 def create_narrow_phase_kernel_gjk_mpr(
     external_aabb: bool,
     writer_func: Any,
@@ -1531,6 +1535,7 @@ def create_narrow_phase_kernel_gjk_mpr(
     return narrow_phase_kernel_gjk_mpr
 
 
+@lru_cache
 def create_narrow_phase_kernels_gjk_mpr_split(
     external_aabb: bool,
     writer_func: Any,
@@ -2025,6 +2030,7 @@ def compute_shape_interior_points_kernel(
     shape_interior_point[shape] = point
 
 
+@lru_cache
 def _create_find_mesh_triangle_overlaps_kernel(narrow_ratio: int):
     """Create the mesh/heightfield-vs-convex midphase kernel.
 
@@ -2191,6 +2197,7 @@ def _create_find_mesh_triangle_overlaps_kernel(narrow_ratio: int):
 narrow_phase_find_mesh_triangle_overlaps_kernel = _create_find_mesh_triangle_overlaps_kernel(0)
 
 
+@lru_cache
 def create_narrow_phase_process_mesh_triangle_contacts_kernel(
     writer_func: Any,
     convex_support_acceleration: bool = False,
@@ -2402,6 +2409,7 @@ def compute_mesh_plane_block_offsets_scan(
     )
 
 
+@lru_cache
 def create_narrow_phase_process_mesh_plane_contacts_kernel(
     writer_func: Any,
     reduce_contacts: bool = False,
