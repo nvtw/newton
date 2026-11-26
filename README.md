@@ -1304,6 +1304,11 @@ contact accuracy are still being investigated.
       <br><b>Kapla City</b>
       <br><code>python -m newton.examples phoenx_kapla_city</code>
     </td>
+    <td align="center" width="33%">
+      <img width="320" src="docs/images/examples/example_phoenx_tread_swarm.jpg" alt="PhoenX swarm of tracked robots">
+      <br><b>Swarm of 30 tracked robots</b>
+      <br><code>python -m newton.examples phoenx_tread_swarm</code>
+    </td>
   </tr>
   <tr>
     <td align="center" width="33%">
