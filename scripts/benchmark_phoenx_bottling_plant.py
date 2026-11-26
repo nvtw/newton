@@ -7,7 +7,9 @@ Run `uv run scripts/benchmark_phoenx_bottling_plant.py` with the local plant
 assets installed. The default run uses headless OptiX and advances 330 seconds
 of simulation. Use `--window START STOP` to select frame intervals (the run
 then stops after the last window unless `--num-frames` is given) and
-`--timing-output FILE` to save the timings and final controller report.
+`--timing-output FILE` to save the timings and final controller report, and
+`--profile` under `nsys profile --capture-range=cudaProfilerApi` to trace
+only the first window.
 Each window records contact and production counts at both ends so runs can
 be compared at the same factory workload.
 """
@@ -39,6 +41,11 @@ def main():
     parser = Example.create_parser()
     parser.set_defaults(viewer="optix", headless=True, num_frames=None)
     parser.add_argument("--window", type=int, nargs=2, action="append", metavar=("START", "STOP"))
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        help="Limit an `nsys --capture-range=cudaProfilerApi` run to the first window.",
+    )
     # Simulate only up to the last requested window; the full run is 330 s of factory time.
     requested, _ = parser.parse_known_args()
     if requested.num_frames is None:
@@ -62,6 +69,13 @@ def main():
         if frame in endpoints:
             viewer.synchronize_simulation_step()
             wp.synchronize_device(example.model.device)
+            if args.profile and frame in windows[0]:
+                from cuda.bindings import runtime  # noqa: PLC0415
+
+                toggle = runtime.cudaProfilerStart if frame == windows[0][0] else runtime.cudaProfilerStop
+                (error,) = toggle()
+                if error != runtime.cudaError_t.cudaSuccess:
+                    raise RuntimeError(f"{toggle.__name__} failed: {error}")
         now = perf_counter()
         boundaries.append(now - observation_time)
         if frame in endpoints:
