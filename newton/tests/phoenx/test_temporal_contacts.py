@@ -12,7 +12,8 @@ import numpy as np
 import warp as wp
 
 import newton
-from newton.solvers import SolverBase, SolverPhoenX
+from newton._src.solvers.phoenx.articulations.block_joint_system import BlockJointSystem
+from newton.solvers import SolverBase, SolverPhoenX, phoenx
 
 
 class TestTemporalIterationPhysics(unittest.TestCase):
@@ -213,7 +214,6 @@ class TestTemporalLayouts(unittest.TestCase):
                     force_z = observables.contact_f.numpy()[:count, 2]
                     support = [abs(float(force_z[body0 == b].sum() - force_z[body1 == b].sum())) for b in boxes]
                     np.testing.assert_allclose(support, weight, rtol=2.0e-3)
-
 
     def test_contact_substeps_sweep_in_forward_order(self):
         """Each temporal contact substep runs its single sweep in forward color order.
@@ -680,6 +680,333 @@ class TestTemporalContactObservables(unittest.TestCase):
                 self.assertAlmostEqual(reported_force, expected_force, delta=1.0e-4)
         self.assertTrue(saw_owned_intermediate, "Owned contact substeps must accumulate their impulses")
         self.assertTrue(saw_ordinary_intermediate, "Ordinary temporal contact impulses must still accumulate")
+
+
+@wp.kernel
+def _request_temporal_bridge(
+    dynamics: phoenx.DynamicsData, poses: wp.array[wp.transform], request: wp.array[int], handle: wp.array[int]
+):
+    if request[0] == 1:
+        frame = wp.transform_inverse(poses[0]) * poses[1]
+        handle[0] = phoenx.add_joint(dynamics, phoenx.joint_desc(0, 1, frame, wp.transform_identity()))
+    elif request[0] == 2 and handle[0] >= 0:
+        phoenx.remove_joint(dynamics, handle[0])
+        handle[0] = -1
+    request[0] = 0
+
+
+class TestTemporalLocalDrives(unittest.TestCase):
+    """Check spring equilibrium and reactions with local and exact contact ownership."""
+
+    def _support(self, device, *, local=True, owned=False, overflow=False):
+        with wp.ScopedDevice(device):
+            builder = newton.ModelBuilder()
+            support = builder.add_link(mass=1, inertia=wp.mat33(np.eye(3)))
+            builder.add_shape_box(support, hx=0.1, hy=0.1, hz=0.1, cfg=builder.ShapeConfig(density=0))
+            joint = builder.add_joint_prismatic(
+                -1,
+                support,
+                axis=newton.Axis.Z,
+                target_ke=1000,
+                target_kd=100,
+                effort_limit=20,
+                limit_lower=-1e6,
+                limit_upper=1e6,
+            )
+            builder.add_articulation([joint])
+            add_cargo = builder.add_link if owned else builder.add_body
+            cargo = add_cargo(xform=wp.transform((0, 0, 0.2), wp.quat_identity()), mass=1, inertia=wp.mat33(np.eye(3)))
+            builder.add_shape_sphere(cargo, radius=0.1, cfg=builder.ShapeConfig(density=0))
+            exact_body = cargo if owned else builder.add_link(mass=1, inertia=wp.mat33(np.eye(3)))
+            anchor = (0, 0, 0.2) if owned else (10, 0, 0)
+            exact_joint = builder.add_joint_prismatic(
+                -1,
+                exact_body,
+                axis=newton.Axis.Z,
+                parent_xform=wp.transform(anchor, wp.quat_identity()),
+                target_ke=0 if owned else 1000,
+                target_kd=0 if owned else 100,
+                effort_limit=20,
+            )
+            builder.add_articulation([exact_joint])
+            model = builder.finalize()
+            options = {
+                "joint_mode": "maximal_pgs",
+                "step_layout": "single_world",
+                "substeps": 1,
+                "solver_iterations": 24,
+                "temporal_iterations": True,
+                "contact_hertz": 80,
+                "direct_joint_mask": np.arange(model.joint_count) == exact_joint,
+            }
+            if overflow:
+                options.update(
+                    mass_splitting=True,
+                    mass_splitting_overflow_only=True,
+                    mass_splitting_unrolled=True,
+                    mass_splitting_batch_size=1,
+                    max_colored_partitions=0,
+                )
+            if local:
+                solver = SolverPhoenX(model, **options)
+            else:
+                # Compare two real solver schedules; preserve the exact mechanism's
+                # arithmetic and the fallback for contact-connected exact bodies.
+                with patch.object(BlockJointSystem, "configure_temporal_iterations", lambda self: None):
+                    solver = SolverPhoenX(model, **options)
+            state, control = model.state(), model.control()
+            newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+            contacts = solver._collision_pipeline.contacts()
+            observables = solver.observables({SolverBase.ObservableKind.CONTACT_F}, contacts=contacts)
+
+            def step():
+                solver.collide(state, contacts, dt=1 / 120)
+                solver.step(state, state, control, contacts, 1 / 120, observables=observables)
+
+            step()
+            graph = None
+            if model.device.is_cuda:
+                with wp.ScopedCapture() as captured:
+                    step()
+                graph = captured.graph
+
+            def advance():
+                wp.capture_launch(graph) if graph is not None else step()
+
+            for _ in range(359):
+                advance()
+            initial_q, initial_v = state.body_q.numpy().copy(), state.body_qd.numpy().copy()
+            blocks = solver._direct_equality_system.blocks
+            if overflow:
+                self.assertGreater(solver.step_report().overflow_size, 0)
+                self.assertGreater(int(solver.world._copy_state.count_per_node.numpy().max()), 1)
+            if local and not owned:
+                self.assertAlmostEqual(float(initial_q[support, 2]), -19.62 / 1000, delta=2e-5)
+                self.assertLess(abs(float(initial_v[support, 2])), 1e-4)
+                self.assertAlmostEqual(float(blocks.accumulated_impulse.numpy()[-1]) * 120, 19.62, delta=2e-4)
+                count = int(contacts.rigid_contact_count.numpy()[0])
+                body_of_shape = model.shape_body.numpy()
+                first = body_of_shape[contacts.rigid_contact_shape0.numpy()[:count]]
+                second = body_of_shape[contacts.rigid_contact_shape1.numpy()[:count]]
+                force = observables.contact_f.numpy()[:count, 2]
+                support_force = float(force[first == cargo].sum() - force[second == cargo].sum())
+                self.assertAlmostEqual(support_force, 9.81, delta=2e-4)
+            targets = control.joint_target_q.numpy()
+            targets[model.joint_q_start.numpy()[joint]] = 1
+            if not owned:
+                targets[model.joint_q_start.numpy()[exact_joint]] = 0.05
+            control.joint_target_q.assign(targets)
+            q, v, reactions = [], [], []
+            for _ in range(60):
+                before = state.body_qd.numpy().copy()
+                advance()
+                q.append(state.body_q.numpy().copy())
+                v.append(state.body_qd.numpy().copy())
+                reactions.append(solver._direct_equality_system.exact.accumulated_impulse.numpy().copy())
+                if local and not owned:
+                    force = float(blocks.accumulated_impulse.numpy()[-1]) * 120
+                    self.assertAlmostEqual(force, 20, delta=2e-4)
+                    self.assertAlmostEqual(force - 19.62, float((v[-1][:2, 2] - before[:2, 2]).sum()) * 120, delta=2e-3)
+            q, v = np.asarray(q), np.asarray(v)
+            if local and not owned:
+                time = np.arange(1, 61) / 120
+                expected = (
+                    initial_q[:2, 2].mean() + initial_v[:2, 2].mean() * time + 0.095 * time * (time + 1 / (120 * 24))
+                )
+                np.testing.assert_allclose(q[:, :2, 2].mean(axis=1), expected, atol=2e-4, rtol=0)
+                targets = control.joint_target_q.numpy()
+                targets[model.joint_q_start.numpy()[joint]] = 0.05
+                control.joint_target_q.assign(targets)
+                for _ in range(240):
+                    before_momentum = float(state.body_qd.numpy()[:2, 2].sum())
+                    advance()
+                    force = float(blocks.accumulated_impulse.numpy()[-1]) * 120
+                    self.assertLessEqual(abs(force), 20.0002)
+                    self.assertAlmostEqual(
+                        force - 19.62, (float(state.body_qd.numpy()[:2, 2].sum()) - before_momentum) * 120, delta=2e-3
+                    )
+                self.assertAlmostEqual(float(state.body_q.numpy()[support, 2]), 0.05 - 19.62 / 1000, delta=2e-5)
+                self.assertLess(abs(float(state.body_qd.numpy()[support, 2])), 1e-4)
+            return q, v, np.asarray(reactions)
+
+    def test_supported_drive_equilibrium_and_force_cap(self):
+        """Balance weight without phase-biased compression and obey the drive force cap."""
+        reference = self._support("cpu", local=False)
+        actual = self._support("cpu")
+        for before, after in zip(reference[:2], actual[:2], strict=True):
+            np.testing.assert_array_equal(before[:, -1], after[:, -1])
+        np.testing.assert_array_equal(reference[2], actual[2])
+
+    def _runtime_transition(self, device):
+        with wp.ScopedDevice(device):
+            builder = newton.ModelBuilder()
+            bodies = [builder.add_link(mass=1, inertia=wp.mat33(np.eye(3))) for _ in range(2)]
+            for body in bodies:
+                builder.add_shape_box(body, hx=0.1, hy=0.1, hz=0.1, cfg=builder.ShapeConfig(density=0))
+            joints = [
+                builder.add_joint_prismatic(
+                    -1, body, axis=newton.Axis.Z, target_ke=1000, target_kd=100, effort_limit=20
+                )
+                for body in bodies
+            ]
+            builder.add_articulation(joints)
+            builder.reserve_dynamic_capacity(joints=1)
+            model = builder.finalize()
+            solver = SolverPhoenX(
+                model,
+                joint_mode="maximal_pgs",
+                direct_joint_mask=np.array([False, True, False]),
+                step_layout="single_world",
+                solver_iterations=24,
+                temporal_iterations=True,
+                substeps=1,
+            )
+            state, control = model.state(), model.control()
+            newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+            request, handle = wp.zeros(1, dtype=int), wp.full(1, -1, dtype=int)
+
+            def step():
+                wp.launch(_request_temporal_bridge, dim=1, inputs=[solver.dynamics.data, state.body_q, request, handle])
+                solver.wake_on_external_input(state)
+                solver.step(state, state, control, None, 1 / 120)
+
+            step()
+            graph = None
+            if model.device.is_cuda:
+                with wp.ScopedCapture() as capture:
+                    step()
+                graph = capture.graph
+
+            def advance():
+                wp.capture_launch(graph) if graph is not None else step()
+
+            for _ in range(240):
+                advance()
+            trace = []
+            for operation, count, eligible in ((1, 12, False), (2, 120, True), (1, 12, False), (2, 180, True)):
+                request.fill_(operation)
+                for _ in range(count):
+                    previous_momentum = float(state.body_qd.numpy()[:, 2].sum())
+                    advance()
+                    impulse = 0.0
+                    parents = model.joint_parent.numpy()
+                    for part in solver._direct_equality_system._parts:
+                        rows, indices = part.row_joint.numpy(), part.row_local.numpy()
+                        structural, wrenches = part.joint_to_structural.numpy(), part.row_wrench1.numpy()
+                        reactions = part.accumulated_impulse.numpy()
+                        for row, joint in enumerate(rows):
+                            if parents[joint] == -1:
+                                impulse += float(wrenches[structural[joint], indices[row], 2] * reactions[row])
+                    q, v = state.body_q.numpy(), state.body_qd.numpy()
+                    self.assertAlmostEqual(
+                        impulse * 120 - 19.62, (float(v[:, 2].sum()) - previous_momentum) * 120, delta=3e-3
+                    )
+                    blocks = solver._direct_equality_system.blocks
+                    self.assertEqual(bool(blocks._microstep_joint.numpy()[0]), eligible)
+                    if not eligible:
+                        self.assertFalse(blocks._microstep_seed.numpy().any())
+                    trace.append(np.concatenate([q.ravel(), v.ravel(), blocks._microstep_joint.numpy()]))
+            self.assertAlmostEqual(float(state.body_q.numpy()[0, 2]), -0.00981, delta=2e-5)
+            self.assertLess(abs(float(state.body_qd.numpy()[0, 2])), 1e-4)
+            return np.asarray(trace)
+
+    def test_runtime_attachment_switches_schedule(self):
+        """Invalidate seeds and conserve momentum through supported runtime bridge attachment and release."""
+        self._runtime_transition("cpu")
+
+    def test_fixed_companions_retain_outer_schedule(self):
+        """Exclude fixed-only components and conservatively fall back when a fixed companion is enabled."""
+        with wp.ScopedDevice("cpu"):
+            builder = newton.ModelBuilder()
+            bodies = [builder.add_link(mass=1, inertia=wp.mat33(np.eye(3))) for _ in range(3)]
+            drive = builder.add_joint_prismatic(-1, bodies[0], axis=newton.Axis.Z, target_ke=1000, target_kd=100)
+            companion = builder.add_joint_fixed(bodies[0], bodies[1], enabled=False)
+            builder.add_articulation([drive, companion])
+            fixed = builder.add_joint_fixed(-1, bodies[2])
+            builder.add_articulation([fixed])
+            model = builder.finalize()
+            solver = TestTemporalIterationPhysics._solver(model, True, iterations=24)
+            state, control = model.state(), model.control()
+            for attached in (False, True, False):
+                enabled = model.joint_enabled.numpy().copy()
+                enabled[companion] = attached
+                model.joint_enabled.assign(enabled)
+                solver.step(state, state, control, None, 1 / 120)
+                blocks = solver._direct_equality_system
+                np.testing.assert_array_equal(blocks._microstep_joint.numpy(), [not attached, False, False])
+                fixed_rows = blocks.row_joint.numpy() != drive
+                self.assertFalse(blocks._microstep_seed.numpy()[fixed_rows].any())
+                self.assertTrue(np.isfinite(state.body_qd.numpy()).all())
+
+    def test_property_refresh_clears_and_restores_microstep_state(self):
+        """Discard stale reactions on fallback and restore eligibility after supported property edits."""
+        with wp.ScopedDevice("cpu"):
+            builder = newton.ModelBuilder()
+            body = builder.add_link(mass=1, inertia=wp.mat33(np.eye(3)))
+            joint = builder.add_joint_prismatic(-1, body, axis=newton.Axis.Z, target_ke=1000, target_kd=100)
+            builder.add_articulation([joint])
+            model = builder.finalize()
+            solver = TestTemporalIterationPhysics._solver(model, True, iterations=24)
+            state, control = model.state(), model.control()
+            for _ in range(240):
+                solver.step(state, state, control, None, 1 / 120)
+            self.assertGreater(float(np.max(np.abs(solver._direct_equality_system._microstep_seed.numpy()))), 1e-4)
+            model.joint_friction.fill_(0.2)
+            solver.notify_model_changed(newton.ModelFlags.JOINT_DOF_PROPERTIES)
+            blocks = solver._direct_equality_system
+            self.assertIsNone(solver.world._temporal_local_joints)
+            reference = TestTemporalIterationPhysics._solver(model, True, iterations=24)
+            reference_state = model.state()
+            wp.copy(reference_state.body_q, state.body_q)
+            wp.copy(reference_state.body_qd, state.body_qd)
+            for _ in range(12):
+                solver.step(state, state, control, None, 1 / 120)
+                reference.step(reference_state, reference_state, control, None, 1 / 120)
+                np.testing.assert_allclose(state.body_q.numpy(), reference_state.body_q.numpy(), atol=1e-6, rtol=0)
+                np.testing.assert_allclose(state.body_qd.numpy(), reference_state.body_qd.numpy(), atol=1e-6, rtol=0)
+                np.testing.assert_allclose(
+                    blocks.accumulated_impulse.numpy(),
+                    reference._direct_equality_system.accumulated_impulse.numpy(),
+                    atol=1e-6,
+                    rtol=0,
+                )
+            self.assertFalse(blocks._microstep_joint.numpy().any())
+            self.assertFalse(blocks._microstep_seed.numpy().any())
+            model.joint_friction.zero_()
+            model.joint_target_ke.zero_()
+            model.joint_target_kd.zero_()
+            solver.notify_model_changed(newton.ModelFlags.JOINT_DOF_PROPERTIES)
+            self.assertIsNone(solver.world._temporal_local_joints)
+            before = float(state.body_qd.numpy()[0, 2])
+            for _ in range(12):
+                solver.step(state, state, control, None, 1 / 120)
+            self.assertAlmostEqual(float(state.body_qd.numpy()[0, 2]) - before, -0.981, delta=2e-6)
+            model.joint_target_ke.fill_(1000)
+            model.joint_target_kd.fill_(100)
+            solver.notify_model_changed(newton.ModelFlags.JOINT_DOF_PROPERTIES)
+            self.assertIsNotNone(solver.world._temporal_local_joints)
+            for _ in range(360):
+                solver.step(state, state, control, None, 1 / 120)
+            self.assertAlmostEqual(float(state.body_q.numpy()[0, 2]), -0.00981, delta=2e-5)
+            self.assertLess(abs(float(state.body_qd.numpy()[0, 2])), 1e-4)
+
+    def test_exact_owned_contact_retains_outer_schedule(self):
+        """Preserve the exact-contact trajectory when local and exact bodies touch."""
+        reference = self._support("cpu", local=False, owned=True)
+        actual = self._support("cpu", owned=True)
+        for before, after in zip(reference, actual, strict=True):
+            np.testing.assert_array_equal(before, after)
+
+    @unittest.skipUnless(wp.is_cuda_available(), "CUDA is unavailable")
+    def test_supported_drive_cuda_graph_is_repeatable(self):
+        """Replay captured supported-drive physics with bitwise-identical states and reactions."""
+        np.testing.assert_array_equal(
+            self._runtime_transition(wp.get_cuda_device()), self._runtime_transition(wp.get_cuda_device())
+        )
+        first = self._support(wp.get_cuda_device(), overflow=True)
+        second = self._support(wp.get_cuda_device(), overflow=True)
+        for left, right in zip(first, second, strict=True):
+            np.testing.assert_array_equal(left, right)
 
 
 if __name__ == "__main__":
