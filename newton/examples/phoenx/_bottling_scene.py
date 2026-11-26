@@ -56,9 +56,13 @@ _BELT_TOP = 0.95
 # base ring collides as the round profile those hulls approximate: (shape,
 # radius, bottom, top) in m, from the source's Hull_01..Hull_07 rings; the
 # shoulder cone's top is its apex. The base ring hull Hull_00 is kept.
+# The body cylinder reaches 4 mm down into the base ring and the shoulder cone
+# 4 mm down into the cylinder, inside the profile, so no two pieces abut on a
+# plane: abreast bottles touched on such seams with a vertical normal, which
+# lifted and spun their neighbours in a pressed file until they fell off.
 _BOTTLE_PROFILE = (
-    ("cylinder", 0.0305, 0.016, 0.1212),
-    ("cone", 0.0304, 0.1212, 0.2016),
+    ("cylinder", 0.0305, 0.012, 0.1212),
+    ("cone", 0.0304, 0.1172, 0.2016),
     ("cylinder", 0.016, 0.1593, 0.2297),
 )
 
