@@ -589,7 +589,6 @@ class TestReducedDenseBackend(unittest.TestCase):
 
         def settle(scene: str, backend: str) -> tuple[np.ndarray, np.ndarray]:
             model = make(scene)
-            model.request_contact_attributes("force")
             pipeline = newton.CollisionPipeline(model, contact_matching="sticky")
             solver = newton.solvers.SolverPhoenX(
                 model,
@@ -607,9 +606,10 @@ class TestReducedDenseBackend(unittest.TestCase):
             state, output = model.state(), model.state()
             newton.eval_fk(model, model.joint_q, model.joint_qd, state)
             contacts = pipeline.contacts()
+            observables = solver.observables({solver.ObservableKind.CONTACT_F}, contacts=contacts)
             with wp.ScopedCapture() as capture:
                 pipeline.collide(state, contacts)
-                solver.step(state, output, None, contacts, 1.0 / 60.0)
+                solver.step(state, output, None, contacts, 1.0 / 60.0, observables=observables)
                 for name in ("body_q", "body_qd", "joint_q", "joint_qd"):
                     wp.copy(getattr(state, name), getattr(output, name))
             for _ in range(120):
@@ -617,12 +617,11 @@ class TestReducedDenseBackend(unittest.TestCase):
             owners = solver.world.bodies.reduced.external_owner.numpy()[1:]
             cross = int(solver._reduced_articulation.contact_block_system.cross_column_count.numpy()[0])
             # Reported force of the first chain on the second, summed over their contacts.
-            solver.update_contacts(contacts, state)
             count = int(contacts.rigid_contact_count.numpy()[0])
             shape_body = model.shape_body.numpy()
             body0 = shape_body[contacts.rigid_contact_shape0.numpy()[:count]]
             body1 = shape_body[contacts.rigid_contact_shape1.numpy()[:count]]
-            force = contacts.force.numpy()[:count, :3]
+            force = observables.contact_f.numpy()[:count, :3]
             first, second = (body0 >= 0) & (body0 < 2), (body1 >= 2) & (body1 < 4)
             swapped = (body1 >= 0) & (body1 < 2) & (body0 >= 2) & (body0 < 4)
             self.pair_force = force[swapped].sum(axis=0) - force[first & second].sum(axis=0)

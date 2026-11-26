@@ -85,24 +85,9 @@ class TestTemporalSolverPolicy(unittest.TestCase):
         np.testing.assert_array_equal(state.body_q.numpy(), before_q)
         np.testing.assert_array_equal(state.body_qd.numpy(), before_qd)
 
-    def test_requires_requested_contact_force(self):
-        """Require force allocation before querying temporal contact wrenches."""
-        model = make_model(40.0)
-        solver = make_solver(
-            model,
-            solver_scheme="tgs",
-            mass_splitting=True,
-            mass_splitting_color_group_size=4,
-            prepare_refresh_stride=1,
-        )
-        contacts = model.contacts()
-        with self.assertRaisesRegex(ValueError, "not allocated"):
-            solver.update_contacts(contacts)
-
     def test_empty_contact_force_output(self):
         """Return an empty wrench buffer for a mechanism without shapes."""
         model = make_model(40.0)
-        model.request_contact_attributes("force")
         pipeline = newton.CollisionPipeline(model, contact_matching="sticky")
         contacts = pipeline.contacts()
         solver = make_solver(
@@ -112,10 +97,10 @@ class TestTemporalSolverPolicy(unittest.TestCase):
             mass_splitting_color_group_size=4,
             prepare_refresh_stride=1,
         )
+        observables = solver.observables({solver.ObservableKind.CONTACT_F}, contacts=contacts)
         state = model.state()
-        solver.step(state, state, None, contacts, 0.01)
-        solver.update_contacts(contacts, state)
-        np.testing.assert_array_equal(contacts.force.numpy(), 0)
+        solver.step(state, state, None, contacts, 0.01, observables=observables)
+        np.testing.assert_array_equal(observables.contact_f.numpy(), 0)
 
     def test_rejects_incompatible_configuration(self):
         """Reject incompatible temporal solver settings and armature."""

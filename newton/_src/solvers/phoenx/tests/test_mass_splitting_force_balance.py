@@ -38,7 +38,6 @@ class TestMassSplittingForceBalance(unittest.TestCase):
                 box = builder.add_body(xform=wp.transform(wp.vec3(x, y, box_z), wp.quat_identity()))
                 builder.add_shape_box(box, hx=_BOX_HALF, hy=_BOX_HALF, hz=_BOX_HALF, cfg=cfg)
         model = builder.finalize(device="cuda:0")
-        model.request_contact_attributes("force")
 
         state_0, state_1, control = model.state(), model.state(), model.control()
         pipeline = newton.CollisionPipeline(model, contact_matching="sticky")
@@ -52,10 +51,11 @@ class TestMassSplittingForceBalance(unittest.TestCase):
             mass_splitting=True,
             max_colored_partitions=4,
         )
+        observables = solver.observables({solver.ObservableKind.CONTACT_F}, contacts=contacts)
         dt = 1.0 / 60.0
         with wp.ScopedCapture() as capture:
             pipeline.collide(state_0, contacts)
-            solver.step(state_0, state_1, control, contacts, dt)
+            solver.step(state_0, state_1, control, contacts, dt, observables=observables)
             wp.copy(state_0.body_q, state_1.body_q)
             wp.copy(state_0.body_qd, state_1.body_qd)
 
@@ -64,11 +64,10 @@ class TestMassSplittingForceBalance(unittest.TestCase):
         for frame in range(150):
             wp.capture_launch(capture.graph)
             if frame >= 120:
-                solver.update_contacts(contacts)
                 count = int(contacts.rigid_contact_count.numpy()[0])
                 body0 = shape_body[contacts.rigid_contact_shape0.numpy()[:count]]
                 body1 = shape_body[contacts.rigid_contact_shape1.numpy()[:count]]
-                force_z = contacts.force.numpy()[:count, 2]  # on shape0's body
+                force_z = observables.contact_f.numpy()[:count, 2]  # on shape0's body
                 on_plate = (body0 == plate) & (body1 < 0)
                 on_ground = (body1 == plate) & (body0 < 0)
                 ground_force.append(float(force_z[on_plate].sum() - force_z[on_ground].sum()))

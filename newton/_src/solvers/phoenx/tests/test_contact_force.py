@@ -383,7 +383,6 @@ class TestPhoenXContactForce(unittest.TestCase):
         builder.add_articulation(joints)
 
         model = builder.finalize(device=wp.get_preferred_device())
-        model.request_contact_attributes("force")
         state_0 = model.state()
         state_1 = model.state()
         newton.eval_fk(model, model.joint_q, model.joint_qd, state_0)
@@ -401,11 +400,12 @@ class TestPhoenXContactForce(unittest.TestCase):
         self.assertTrue(direct.enabled)
         self.assertEqual(direct.topology.dimensions, (10,))
         self.assertTrue(np.all(direct.joint_mask[joints]))
+        observables = solver.observables({solver.ObservableKind.CONTACT_F}, contacts=contacts)
 
         def step() -> None:
             state_0.clear_forces()
             pipeline.collide(state_0, contacts)
-            solver.step(state_0, state_1, control, contacts, 1.0 / self.FPS)
+            solver.step(state_0, state_1, control, contacts, 1.0 / self.FPS, observables=observables)
             wp.copy(state_0.body_q, state_1.body_q)
             wp.copy(state_0.body_qd, state_1.body_qd)
 
@@ -419,12 +419,11 @@ class TestPhoenXContactForce(unittest.TestCase):
         for body in bodies:
             self.assertLess(float(np.linalg.norm(body_qd[body])), 0.02)
 
-        solver.update_contacts(contacts, state_0)
         count = int(contacts.rigid_contact_count.numpy()[0])
         shape0 = contacts.rigid_contact_shape0.numpy()[:count]
         shape1 = contacts.rigid_contact_shape1.numpy()[:count]
         shape_body = model.shape_body.numpy()
-        forces = contacts.force.numpy()[:count, :3]
+        forces = observables.contact_f.numpy()[:count, :3]
 
         def contact_force_on(body: int) -> tuple[np.ndarray, int]:
             force = np.zeros(3, dtype=np.float32)

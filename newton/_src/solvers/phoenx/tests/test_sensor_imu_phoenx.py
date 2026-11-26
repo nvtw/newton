@@ -6,10 +6,10 @@
 PhoenX is a velocity-based PGS integrator and does not natively expose
 ``body_qdd``. The solver finite-differences the pre-step and post-step
 COM-frame linear / angular velocity over the outer ``dt`` and writes
-the result to ``state_out.body_qdd`` when the user has requested the
-``body_qdd`` extended state attribute (which :class:`SensorIMU` does
-automatically). The Newton convention matches what the IMU kernel
-consumes:
+the result to ``observables.body_qdd`` when the caller requests the
+``BODY_QDD`` solver observable (listed in
+:attr:`SensorIMU.solver_observable_kinds`). The Newton convention matches
+what the IMU kernel consumes:
 
 * ``spatial_top(body_qdd)`` -- linear acceleration in world frame,
   including gravity-induced terms (so an accelerometer reads
@@ -20,7 +20,7 @@ Three layers of coverage, all CUDA + graph-capture only (PhoenX is
 GPU-only and graph capture is the shipping execution mode -- a fix
 that breaks capture must surface here):
 
-* :class:`TestBodyQddBasics` -- direct readback of ``state.body_qdd``
+* :class:`TestBodyQddBasics` -- direct readback of ``observables.body_qdd``
   for analytical fixtures (free-fall, at rest, spin-up). Bypasses
   the IMU sensor and pins the FD wiring itself.
 
@@ -55,6 +55,7 @@ def _capture_step(
     state_out: newton.State,
     control: newton.Control | None,
     sensors: list[SensorIMU],
+    observables: newton.solvers.SolverBase.Observables | None,
     *,
     n_frames: int,
     use_contacts: bool = True,
@@ -68,22 +69,18 @@ def _capture_step(
     device = wp.get_device()
     assert device.is_cuda, "graph-captured IMU tests require CUDA"
 
-    contacts = model.contacts() if use_contacts else None
+    pipeline = newton.CollisionPipeline(model, contact_matching="sticky") if use_contacts else None
+    contacts = pipeline.contacts() if pipeline is not None else None
 
     def _frame() -> None:
         state_in.clear_forces()
         if contacts is not None:
-            model.collide(state_in, contacts)
-        solver.step(state_in, state_out, control, contacts, _DT)
+            pipeline.collide(state_in, contacts)
+        solver.step(state_in, state_out, control, contacts, _DT, observables=observables)
         for s in sensors:
-            s.update(state_out)
+            s.update(state_out, observables=observables)
         wp.copy(state_in.body_q, state_out.body_q)
         wp.copy(state_in.body_qd, state_out.body_qd)
-        # body_qdd is the readout target; copying it back into state_in is
-        # not strictly required (PhoenX overwrites it next step), but
-        # keeps the two-state ping-pong tidy.
-        if state_in.body_qdd is not None and state_out.body_qdd is not None:
-            wp.copy(state_in.body_qdd, state_out.body_qdd)
 
     if n_frames < 1:
         return
@@ -100,6 +97,10 @@ def _capture_step(
         wp.capture_launch(graph)
 
 
+def _body_qdd_observables(solver: newton.solvers.SolverPhoenX) -> newton.solvers.SolverBase.Observables:
+    return solver.observables({solver.ObservableKind.BODY_QDD})
+
+
 def _make_solver(model: newton.Model, *, substeps: int = 4) -> newton.solvers.SolverPhoenX:
     return newton.solvers.SolverPhoenX(
         model,
@@ -111,7 +112,7 @@ def _make_solver(model: newton.Model, *, substeps: int = 4) -> newton.solvers.So
 
 @unittest.skipUnless(wp.is_cuda_available(), "PhoenX IMU tests require CUDA")
 class TestBodyQddBasics(unittest.TestCase):
-    """Direct ``state.body_qdd`` readback. Pins the FD wiring itself
+    """Direct ``observables.body_qdd`` readback. Pins the FD wiring itself
     (without involving :class:`SensorIMU`)."""
 
     def _build_free_body(self, *, z: float = 1.0) -> newton.Model:
@@ -125,7 +126,6 @@ class TestBodyQddBasics(unittest.TestCase):
             inertia=((ixx, 0, 0), (0, ixx, 0), (0, 0, ixx)),
         )
         builder.add_shape_sphere(body, radius=radius, cfg=newton.ModelBuilder.ShapeConfig(density=0.0))
-        builder.request_state_attributes("body_qdd")
         return builder.finalize()
 
     def test_free_fall_linear_acceleration(self) -> None:
@@ -138,14 +138,14 @@ class TestBodyQddBasics(unittest.TestCase):
         """
         model = self._build_free_body(z=2.0)
         solver = _make_solver(model)
+        observables = _body_qdd_observables(solver)
         state_in = model.state()
         state_out = model.state()
-        self.assertIsNotNone(state_in.body_qdd, "body_qdd must be allocated after request_state_attributes")
-        self.assertIsNotNone(state_out.body_qdd, "body_qdd must be allocated after request_state_attributes")
+        self.assertIsNotNone(observables.body_qdd, "body_qdd must be allocated when BODY_QDD is requested")
 
-        _capture_step(model, solver, state_in, state_out, None, [], n_frames=3, use_contacts=False)
+        _capture_step(model, solver, state_in, state_out, None, [], observables, n_frames=3, use_contacts=False)
 
-        qdd = state_out.body_qdd.numpy()[0]
+        qdd = observables.body_qdd.numpy()[0]
         lin = qdd[:3]
         ang = qdd[3:]
         np.testing.assert_allclose(
@@ -177,18 +177,18 @@ class TestBodyQddBasics(unittest.TestCase):
             inertia=((ixx, 0, 0), (0, ixx, 0), (0, 0, ixx)),
         )
         builder.add_shape_sphere(body, radius=radius, cfg=newton.ModelBuilder.ShapeConfig(density=0.0))
-        builder.request_state_attributes("body_qdd")
         model = builder.finalize()
 
         solver = _make_solver(model)
+        observables = _body_qdd_observables(solver)
         state_in = model.state()
         state_out = model.state()
 
         # Let the body settle on the ground -- 120 frames at 240 Hz is
         # well past the contact-spring transient.
-        _capture_step(model, solver, state_in, state_out, None, [], n_frames=120)
+        _capture_step(model, solver, state_in, state_out, None, [], observables, n_frames=120)
 
-        qdd = state_out.body_qdd.numpy()[0]
+        qdd = observables.body_qdd.numpy()[0]
         # 5 % of g is the per-frame numerical-noise floor at this substep
         # count; well-converged sphere-on-plane contact normally lands
         # under 1 %.
@@ -200,11 +200,9 @@ class TestBodyQddBasics(unittest.TestCase):
         )
 
     def test_body_qdd_skipped_when_not_requested(self) -> None:
-        """When ``body_qdd`` is not requested on the model, ``state.body_qdd``
-        is ``None`` and the solver must not crash trying to write into
-        it. The FD launch is gated on the allocation existing on
-        ``state_out``."""
-        # Build a model WITHOUT request_state_attributes.
+        """When ``BODY_QDD`` is not requested, ``observables.body_qdd`` is
+        ``None`` and the solver must not crash trying to write into it.
+        The FD launch is gated on the observable request."""
         mass, radius = 1.0, 0.05
         builder = newton.ModelBuilder()
         body = builder.add_body(
@@ -216,16 +214,16 @@ class TestBodyQddBasics(unittest.TestCase):
         model = builder.finalize()
 
         solver = _make_solver(model)
+        observables = solver.observables(set())
         state_in = model.state()
         state_out = model.state()
-        self.assertIsNone(state_in.body_qdd, "body_qdd should be unallocated without request")
-        self.assertIsNone(state_out.body_qdd, "body_qdd should be unallocated without request")
+        self.assertIsNone(observables.body_qdd, "body_qdd should be unallocated without request")
 
         # Step must succeed end-to-end -- this is the regression guard
-        # against the ``state_out.body_qdd is not None`` check being
-        # mishandled (e.g. an unconditional launch would fault on a
-        # null array).
-        _capture_step(model, solver, state_in, state_out, None, [], n_frames=3, use_contacts=False)
+        # against the request check being mishandled (e.g. an
+        # unconditional launch would fault on a null array).
+        for request in (observables, None):
+            _capture_step(model, solver, state_in, state_out, None, [], request, n_frames=3, use_contacts=False)
 
 
 @unittest.skipUnless(wp.is_cuda_available(), "PhoenX IMU tests require CUDA")
@@ -256,10 +254,11 @@ class TestSensorIMU(unittest.TestCase):
 
         sensor = SensorIMU(model, sites="imu_rest", verbose=False)
         solver = _make_solver(model)
+        observables = solver.observables(sensor.solver_observable_kinds)
         state_in = model.state()
         state_out = model.state()
 
-        _capture_step(model, solver, state_in, state_out, None, [sensor], n_frames=180)
+        _capture_step(model, solver, state_in, state_out, None, [sensor], observables, n_frames=180)
 
         acc = sensor.accelerometer.numpy()[0]
         gyro = sensor.gyroscope.numpy()[0]
@@ -307,13 +306,14 @@ class TestSensorIMU(unittest.TestCase):
 
         sensor = SensorIMU(model, sites="imu_fall", verbose=False)
         solver = _make_solver(model)
+        observables = solver.observables(sensor.solver_observable_kinds)
         state_in = model.state()
         state_out = model.state()
 
         # Only a few frames so the body doesn't pick up enough velocity
         # to amplify numerical error. Free-fall is the cleanest possible
         # signal for the FD readout.
-        _capture_step(model, solver, state_in, state_out, None, [sensor], n_frames=4, use_contacts=False)
+        _capture_step(model, solver, state_in, state_out, None, [sensor], observables, n_frames=4, use_contacts=False)
 
         acc = sensor.accelerometer.numpy()[0]
         # Free-fall: specific force is ~0. A non-zero reading flags
@@ -347,6 +347,7 @@ class TestSensorIMU(unittest.TestCase):
 
         sensor = SensorIMU(model, sites="imu_spin", verbose=False)
         solver = _make_solver(model, substeps=2)
+        observables = solver.observables(sensor.solver_observable_kinds)
         state_in = model.state()
         state_out = model.state()
 
@@ -355,7 +356,7 @@ class TestSensorIMU(unittest.TestCase):
         qd[0] = np.array([0.0, 0.0, 0.0, 0.0, 0.0, omega_z], dtype=np.float32)
         state_in.body_qd.assign(qd)
 
-        _capture_step(model, solver, state_in, state_out, None, [sensor], n_frames=4, use_contacts=False)
+        _capture_step(model, solver, state_in, state_out, None, [sensor], observables, n_frames=4, use_contacts=False)
 
         gyro = sensor.gyroscope.numpy()[0]
         # Symmetric inertia + zero gravity -> angular velocity is conserved.

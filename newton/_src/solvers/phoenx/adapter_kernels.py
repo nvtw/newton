@@ -4,7 +4,7 @@
 
 Round-trips body state and joint control between Newton's :class:`Model` /
 :class:`State` / :class:`Control` SoA and the column-major PhoenX containers,
-plus contact-impulse readback for :meth:`SolverPhoenX.update_contacts`.
+plus contact-impulse readback for the ``CONTACT_F`` observable.
 """
 
 from __future__ import annotations
@@ -613,7 +613,7 @@ def _contact_impulse_to_force_wrapper_kernel(
     # out
     force_out: wp.array[wp.spatial_vector],
 ):
-    """Pack contact wrenches into ``Contacts.force``.
+    """Pack contact wrenches into the ``contact_f`` observable.
 
     ``impulse_sum`` and ``moment_sum`` hold each contact's impulse and
     friction-moment share summed over the step's substeps when the step

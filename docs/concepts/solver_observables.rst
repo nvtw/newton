@@ -126,8 +126,9 @@ Standard observables
      - Solvers
    * - ``BODY_QDD`` / ``observables.body_qdd``
      - Rigid-body center-of-mass spatial accelerations in the world frame
-     - :class:`~newton.solvers.SolverMuJoCo` and
-       :class:`~newton.solvers.SolverKamino`
+     - :class:`~newton.solvers.SolverMuJoCo`,
+       :class:`~newton.solvers.SolverKamino`, and
+       :class:`~newton.solvers.SolverPhoenX`
    * - ``BODY_PARENT_F`` / ``observables.body_parent_f``
      - Incoming parent-joint wrenches on rigid bodies
      - :class:`~newton.solvers.SolverMuJoCo`,
@@ -138,13 +139,14 @@ Standard observables
      - Contact spatial forces in the row layout of the step's contacts
      - :class:`~newton.solvers.SolverMuJoCo`,
        :class:`~newton.solvers.SolverXPBD`, :class:`~newton.solvers.SolverVBD`,
-       :class:`~newton.solvers.SolverKamino`, and :class:`~newton.solvers.SolverSteel`
+       :class:`~newton.solvers.SolverKamino`, :class:`~newton.solvers.SolverSteel`, and
+       :class:`~newton.solvers.SolverPhoenX`
    * - ``SOLVER_RESIDUAL`` / ``observables.solver_residual``
      - Per-world convergence residual of the step; see :ref:`solver_residual_observable`
      - :class:`~newton.solvers.SolverKamino` and :class:`~newton.solvers.SolverVBD`
 
-:class:`~newton.solvers.SolverKamino` computes acceleration as the discrete
-step-average ``(body_qd_out - body_qd_in) / dt``. Across an impact, this includes
+:class:`~newton.solvers.SolverKamino` and :class:`~newton.solvers.SolverPhoenX`
+compute acceleration as the discrete step-average ``(body_qd_out - body_qd_in) / dt``. Across an impact, this includes
 the velocity impulse divided by ``dt``. MuJoCo computes ``BODY_QDD`` and
 ``BODY_PARENT_F`` even with ``disable_sensors=True`` by enabling the
 post-constraint RNE stage independently of sensors.

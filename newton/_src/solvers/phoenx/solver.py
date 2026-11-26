@@ -351,13 +351,28 @@ class SolverPhoenX(SolverBase):
         mode. Colored contact rows/headers and other solve layouts are not
         supported for moving surfaces.
 
-    Contact force observables:
-        Request :attr:`~newton.solvers.SolverBase.ObservableKind.CONTACT_F` with
-        :meth:`observables` and pass the container to :meth:`step` to receive the
-        rigid contact wrenches described in :meth:`update_contacts`.
+    Observables:
+        Request :attr:`~newton.solvers.SolverBase.ObservableKind.CONTACT_F` or
+        :attr:`~newton.solvers.SolverBase.ObservableKind.BODY_QDD` with
+        :meth:`observables` and pass the container to :meth:`step`.
+
+        ``contact_f`` holds rigid contact wrenches on body0 in the collision
+        pipeline's contact order. Temporal forces (``solver_scheme="tgs"``) are
+        outer-step average world-frame wrenches about body0's current COM. Each
+        patch's anchor friction is assigned to its first contact row; its moment
+        includes the true anchor application points throughout the step. Thus
+        body-pair wrench sums are preserved, while the per-point friction
+        distribution is a reporting convention. The soft scheme reports each
+        point force with its torque about the body's COM at the last substep;
+        each row also carries an equal share of its column's torsional and
+        rolling friction moment.
+
+        ``body_qdd`` is the finite difference of each body's world-frame
+        center-of-mass velocity over the outer step, ``(qd_out - qd_in) / dt``,
+        so it includes impulses divided by ``dt``.
     """
 
-    SUPPORTED_OBSERVABLES = frozenset({SolverBase.ObservableKind.CONTACT_F})
+    SUPPORTED_OBSERVABLES = frozenset({SolverBase.ObservableKind.CONTACT_F, SolverBase.ObservableKind.BODY_QDD})
 
     supports_penetration_free = True
 
@@ -1018,7 +1033,7 @@ class SolverPhoenX(SolverBase):
         self._fd_pos_prev = wp.zeros(max(1, n_newton_bodies), dtype=wp.vec3f, device=self.device)
         self._fd_orient_prev = wp.zeros(max(1, n_newton_bodies), dtype=wp.quatf, device=self.device)
         # body_qdd snapshot buffers (linear + angular velocity, pre-step).
-        # Always allocated; the FD launch is gated on state.body_qdd being live.
+        # Always allocated; the FD launch runs only when BODY_QDD is requested.
         self._qdd_vel_prev = wp.zeros(max(1, n_newton_bodies), dtype=wp.vec3f, device=self.device)
         self._qdd_omega_prev = wp.zeros(max(1, n_newton_bodies), dtype=wp.vec3f, device=self.device)
 
@@ -2008,8 +2023,8 @@ class SolverPhoenX(SolverBase):
             device=self.device,
         )
 
-    def _export_body_qdd(self, state_out: State, dt: float) -> None:
-        """Pack post-step ``body_qdd`` into ``state_out`` as a finite-difference
+    def _export_body_qdd(self, body_qdd: wp.array, dt: float) -> None:
+        """Pack post-step ``body_qdd`` as a finite-difference
         of (post-step - pre-step) velocity over the outer dt. Newton convention:
         ``spatial_top`` is linear acceleration (world frame, includes
         gravity-induced terms), ``spatial_bottom`` is angular acceleration
@@ -2028,7 +2043,7 @@ class SolverPhoenX(SolverBase):
                 self._qdd_omega_prev,
                 wp.float32(inv_dt),
             ],
-            outputs=[state_out.body_qdd],
+            outputs=[body_qdd],
             device=self.device,
         )
 
@@ -2145,6 +2160,11 @@ class SolverPhoenX(SolverBase):
             if observables is not None and observables.is_requested(SolverBase.ObservableKind.CONTACT_F)
             else None
         )
+        body_qdd = (
+            observables.body_qdd
+            if observables is not None and observables.is_requested(SolverBase.ObservableKind.BODY_QDD)
+            else None
+        )
         if control is None:
             # Alias Model per-DOF arrays (no clone). Matches XPBD/Featherstone.
             control = self.model.control(clone_variables=False)
@@ -2214,11 +2234,7 @@ class SolverPhoenX(SolverBase):
             self._snapshot_pre_step_pose()
 
         # body_qdd readout: snapshot pre-step velocity so FD covers the outer dt.
-        # Gated on state_out.body_qdd allocation (stable across graph capture
-        # since the user requests the attribute on the Model before allocating
-        # State).
-        want_body_qdd = state_out.body_qdd is not None
-        if want_body_qdd:
+        if body_qdd is not None:
             self._snapshot_pre_step_velocity()
 
         # When sleeping is enabled, hand the broad-phase per-shape AABB
@@ -2239,7 +2255,7 @@ class SolverPhoenX(SolverBase):
         if penetration_free is not None:
             self.world._penetration_free.check_reference(penetration_free, state_in.body_q, self.world.bodies)
 
-        record_forces = contacts is not None and (contacts.force is not None or contact_f is not None)
+        record_forces = contacts is not None and contact_f is not None
         if self.solver_scheme == "tgs":
             self.world._temporal_contact_state.record_wrenches = int(record_forces)
         else:
@@ -2265,8 +2281,8 @@ class SolverPhoenX(SolverBase):
             self.world._penetration_free.track(penetration_free, state_out.body_q)
         self._export_particle_state(state_out)
         self._particle_state_imported = None
-        if want_body_qdd:
-            self._export_body_qdd(state_out, dt=float(dt))
+        if body_qdd is not None:
+            self._export_body_qdd(body_qdd, dt=float(dt))
         if contact_f is not None:
             self._write_contact_forces(contacts, contact_f)
         # Reduced coordinates are authoritative; maximal mode reconstructs them by IK.
@@ -2428,40 +2444,14 @@ class SolverPhoenX(SolverBase):
             if self.model.shape_material_mu is not None and self.model.shape_count > 0:
                 self._install_shape_materials()
 
-    def update_contacts(self, contacts: Contacts, state: State | None = None) -> None:
-        """Write per-contact wrenches back to
-        :attr:`Contacts.force` if the user opted in via
-        :meth:`Model.request_contact_attributes('force')`.
-
-        Temporal forces are outer-step average world-frame wrenches on body0,
-        about its current COM. Each patch's anchor friction is assigned to its
-        first contact row; its moment includes the true anchor application
-        points throughout the step. Thus body-pair wrench sums are preserved,
-        while the per-point friction distribution is a reporting convention.
-        Request forces before stepping to enable this optional accounting.
-
-        The soft scheme reports each point force with its torque about the
-        body's COM at the last substep; each row also carries an equal share
-        of its column's torsional and rolling friction moment. Both schemes
-        restore the original collision-pipeline contact ordering.
-        """
-        if contacts.force is None:
-            raise ValueError(
-                "contacts.force is not allocated. Call model.request_contact_attributes('force') "
-                "before creating the Contacts object."
-            )
-        self._write_contact_forces(contacts, contacts.force)
-
     def _write_contact_forces(self, contacts: Contacts | None, force: wp.array) -> None:
-        """Write the last step's contact wrenches into ``force`` (see :meth:`update_contacts`)."""
+        """Write the last step's contact wrenches into ``force`` (see the class docstring)."""
         if contacts is None or self._last_dt <= 0.0 or self._shape_body is None or contacts.rigid_contact_max == 0:
             force.zero_()
             return
 
         if self.solver_scheme == "tgs":
             temporal = self.world._temporal_contact_state
-            if not temporal.record_wrenches:
-                raise ValueError("Request contact force before stepping so temporal impulse wrenches are recorded")
             force.zero_()
             wp.launch(
                 export_contact_wrenches,

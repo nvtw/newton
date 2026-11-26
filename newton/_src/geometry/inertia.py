@@ -500,12 +500,12 @@ def compute_inertia_tetrahedron(
     det_abs = 6.0 * vol  # |DET(J)| in Tonon's notation
 
     # Tonon (2005) eq. (9a-f) collapse to:
-    #     a  = ρ |DET(J)| ((Sy^2 + Sy2) + (Sz^2 + Sz2)) / 120
-    #     b  = ρ |DET(J)| ((Sx^2 + Sx2) + (Sz^2 + Sz2)) / 120
-    #     c  = ρ |DET(J)| ((Sx^2 + Sx2) + (Sy^2 + Sy2)) / 120
-    #     a' = ρ |DET(J)| (Syz + Sy*Sz) / 120
-    #     b' = ρ |DET(J)| (Sxz + Sx*Sz) / 120
-    #     c' = ρ |DET(J)| (Sxy + Sx*Sy) / 120
+    #     a  = rho |DET(J)| ((Sy^2 + Sy2) + (Sz^2 + Sz2)) / 120
+    #     b  = rho |DET(J)| ((Sx^2 + Sx2) + (Sz^2 + Sz2)) / 120
+    #     c  = rho |DET(J)| ((Sx^2 + Sx2) + (Sy^2 + Sy2)) / 120
+    #     a' = rho |DET(J)| (Syz + Sy*Sz) / 120
+    #     b' = rho |DET(J)| (Sxz + Sx*Sz) / 120
+    #     c' = rho |DET(J)| (Sxy + Sx*Sy) / 120
     # where Sx  = sum_i x_i, Sx2 = sum_i x_i^2, Sxy = sum_i x_i y_i, etc.
     # (Derived from the Tonon expansion: the sum-of-pairs structure
     # ``y_i^2 + y_i y_j + y_j^2 + ...`` rearranges into

@@ -67,7 +67,6 @@ class TestCompoundContactOrientation(unittest.TestCase):
                     cfg=cfg,
                 )
         model = builder.finalize(device="cuda:0")
-        model.request_contact_attributes("force")
         results = []
         for reverse in (False, True):
             state = model.state()
@@ -93,6 +92,7 @@ class TestCompoundContactOrientation(unittest.TestCase):
                 parallel_contact_prepare=True,
             )
             self.assertTrue(solver.world._enable_body_pair_grouping)
+            observables = solver.observables({solver.ObservableKind.CONTACT_F}, contacts=contacts)
             samples = []
             for _ in range(5):
                 pipeline.collide(state, contacts, dt=0.001)
@@ -115,9 +115,8 @@ class TestCompoundContactOrientation(unittest.TestCase):
                         device=model.device,
                     )
                 state.clear_forces()
-                solver.step(state, state, model.control(), contacts, 0.001)
-                solver.update_contacts(contacts)
-                forces = contacts.force.numpy()[:count].copy()
+                solver.step(state, state, model.control(), contacts, 0.001, observables=observables)
+                forces = observables.contact_f.numpy()[:count].copy()
                 # Compare moments about a common origin before reversing endpoints.
                 bodies = model.shape_body.numpy()[contacts.rigid_contact_shape0.numpy()[:count]]
                 centers = state.body_q.numpy()[bodies, :3]

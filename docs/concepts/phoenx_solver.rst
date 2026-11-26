@@ -222,8 +222,8 @@ Per-pair resolution combines the two shapes' coefficients with the
 ``AVERAGE < MIN < MULTIPLY < MAX``.
 
 Per-contact friction scaling is supported via
-:attr:`Contacts.rigid_contact_friction` (set via
-:meth:`Model.request_contact_attributes`). Positive values multiply
+:attr:`Contacts.rigid_contact_friction` (allocated with
+``per_contact_shape_properties=True``). Positive values multiply
 the resolved material friction; zero leaves it unchanged.
 
 .. note::
@@ -480,26 +480,27 @@ Contact features:
   pass.
 - **Per-contact properties**: pass stiffness/damping overrides via
   ``Contacts.rigid_contact_stiffness`` / ``rigid_contact_damping``,
-  and a multiplicative friction scale via ``rigid_contact_friction`` (request via
-  :meth:`Model.request_contact_attributes` and
-  :meth:`CollisionPipeline.contacts(per_contact_shape_properties=True)`).
+  and a multiplicative friction scale via ``rigid_contact_friction`` (allocated
+  when the pipeline's contacts use ``per_contact_shape_properties=True``).
 - **Pairwise contact filter**: register
   ``(body_a, body_b)`` pairs whose contacts the solver will silently
   drop on ingest.
 - **Warm-started normal impulses** (see above).
 
-To read back per-contact spatial forces (``[N, N·m]`` at the contact
-point in world frame), call:
+To read back per-contact spatial forces (``[N, N·m]`` on body0 in the
+world frame, with the torque about body0's center of mass), request the
+``CONTACT_F`` observable:
 
 .. code-block:: python
 
-    model.request_contact_attributes("force")
-    contacts = model.contacts()  # now has contacts.force allocated
-    # ... step ...
-    solver.update_contacts(contacts)
+    contacts = pipeline.contacts()
+    observables = solver.observables({solver.ObservableKind.CONTACT_F}, contacts=contacts)
+    # ... each step ...
+    solver.step(state_0, state_1, control, contacts, dt, observables=observables)
+    forces = observables.contact_f
 
-The torque is always zero (a per-point force has no torque about its
-own application point).
+``BODY_QDD`` reports each body's finite-difference acceleration over the
+outer step, as consumed by :class:`~newton.sensors.SensorIMU`.
 
 
 Kinematic bodies

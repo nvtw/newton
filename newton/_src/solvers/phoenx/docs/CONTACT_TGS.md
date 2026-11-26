@@ -70,8 +70,8 @@ restitution, soft contact rows, sleeping, deformables, contact chunks, unrolled
 dispatch and partition reuse. Property refresh validates supported model
 properties before changing cached rows.
 
-Requesting the `force` contact attribute before stepping enables optional
-impulse-wrench accounting. `update_contacts` reports outer-step average force
+Requesting the `CONTACT_F` observable enables optional impulse-wrench
+accounting. The observable reports outer-step average force
 and torque on body0 about its current COM, in collision-pipeline order. Anchor
 friction is assigned to the first point in its patch. This point distribution
 is a reporting convention; body-pair sums retain both the linear impulse and

@@ -20,15 +20,15 @@ def _drop_box(substeps: int, frames: int):
     box = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.3), wp.quat_identity()))
     builder.add_shape_box(box, hx=_HALF, hy=_HALF, hz=_HALF, cfg=newton.ModelBuilder.ShapeConfig(density=1000.0))
     model = builder.finalize(device="cuda:0")
-    model.request_contact_attributes("force")
     state_0, state_1, control = model.state(), model.state(), model.control()
     pipeline = newton.CollisionPipeline(model, contact_matching="sticky")
     contacts = pipeline.contacts()
     solver = newton.solvers.SolverPhoenX(model, collision_pipeline=pipeline, substeps=substeps, solver_iterations=6)
+    observables = solver.observables({solver.ObservableKind.CONTACT_F}, contacts=contacts)
     dt = 1.0 / 60.0
     with wp.ScopedCapture() as capture:
         pipeline.collide(state_0, contacts)
-        solver.step(state_0, state_1, control, contacts, dt)
+        solver.step(state_0, state_1, control, contacts, dt, observables=observables)
         wp.copy(state_0.body_q, state_1.body_q)
         wp.copy(state_0.body_qd, state_1.body_qd)
 
@@ -36,10 +36,9 @@ def _drop_box(substeps: int, frames: int):
     forces, velocities = [], [float(state_0.body_qd.numpy()[box, 2])]
     for _ in range(frames):
         wp.capture_launch(capture.graph)
-        solver.update_contacts(contacts)
         count = int(contacts.rigid_contact_count.numpy()[0])
         body0 = shape_body[contacts.rigid_contact_shape0.numpy()[:count]]
-        force_z = contacts.force.numpy()[:count, 2]  # on shape0's body
+        force_z = observables.contact_f.numpy()[:count, 2]  # on shape0's body
         on_box = np.where(body0 == box, force_z, -force_z)
         forces.append(float(on_box.sum()))
         velocities.append(float(state_0.body_qd.numpy()[box, 2]))
