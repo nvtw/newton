@@ -82,29 +82,31 @@ class TestContactPrepareGrid(unittest.TestCase):
         """Prepare all columns and preserve momentum with fewer blocks and row lanes."""
         launch = wp.launch
 
-        def run(split, chunk, full_grid):
+        def run(split, chunk, serial):
             dimensions = []
 
             def record(kernel, *args, **kwargs):
                 if "_get_parallel_contact_prepare_kernel" in kernel.func.__qualname__:
-                    if full_grid:
-                        kwargs["dim"] = (kwargs["dim"][0], 128)
+                    if serial:
+                        # Reference: one lane walks every row of its column.
+                        kwargs["dim"] = (kwargs["dim"][0], 1)
+                        kwargs["inputs"] = [*kwargs["inputs"][:-1], wp.int32(1)]
                     else:
                         # Force multiple column visits per group in the small fixture.
                         kwargs["dim"] = (1, kwargs["dim"][1])
-                        kwargs["inputs"] = [*kwargs["inputs"][:-1], wp.int32(1)]
+                        kwargs["inputs"] = [*kwargs["inputs"][:-2], wp.int32(1), kwargs["inputs"][-1]]
                     dimensions.append(kwargs["dim"])
                 return launch(kernel, *args, **kwargs)
 
             with patch.object(wp, "launch", record):
                 states = run_scene(True, mass_splitting=split, chunk_size=chunk)
             self.assertTrue(dimensions)
-            expected = 128 if full_grid else min(128, chunk or 128)
-            self.assertTrue(all(dim[1] == expected for dim in dimensions))
+            self.assertTrue(all(dim[1] == (1 if serial else 8) for dim in dimensions))
             self.assertGreater(int(states[0]["column_count"][0]), 1)
             return states
 
         for split in (False, True):
+            # Chunks wider than the eight row lanes make one lane prepare several rows.
             for chunk in (0, 1, 3, 6, 128, 129):
                 with self.subTest(split=split, chunk=chunk):
                     before = run(split, chunk, True)

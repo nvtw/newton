@@ -1413,13 +1413,14 @@ def _get_parallel_contact_prepare_kernel(has_mass_splitting: bool, has_soft_pd: 
         contacts: ContactViews,
         copy_state: CopyStateContainer,
         column_stride: wp.int32,
+        row_lanes: wp.int32,
     ):
         first_column, lane = wp.tid()
         for cid in range(first_column, num_columns[0], column_stride):
             count = contact_get_contact_count(columns, cid)
             first = contact_get_contact_first(columns, cid)
             pair = constraint_bodies_make(contact_get_body1(columns, cid), contact_get_body2(columns, cid))
-            for offset in range(lane, count, 128):
+            for offset in range(lane, count, row_lanes):
                 prepare_point(
                     columns,
                     cid,

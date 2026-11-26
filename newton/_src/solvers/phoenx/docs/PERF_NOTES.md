@@ -289,7 +289,18 @@ subtrees (visits -2.5%); 8-16 narrow-phase blocks per SM instead of 4
 in the raycast fallback) and 72k bottle-base-hull vs deck-triangle
 contacts at about 320k cycles each (12% in the reducer writes).
 
-## Direct-mechanism contact sweep (2026-11-06)
+## Bottling plant idle lanes (2026-11-26)
+
+Same factory and window (about 385k contacts, 32k dynamic bodies).
+
+The parallel contact prepare gave each column `min(128, chunk)` lanes (64
+in the plant). Most columns hold one to five rows, so a warp prepared a few
+rows and the second warp of each column only walked the column loop. Eight
+lanes per column, as the other per-column passes use, cut the prepare from
+189 to 56 us per substep: 47.72 -> 49.42 FPS. Rows are prepared
+independently, so any lane count is bitwise identical.
+
+
 
 Contacts on non-tree `maximal_direct` mechanisms are solved through the exact
 constrained mobility (`DirectContactResponse`). The Caterpillar (three

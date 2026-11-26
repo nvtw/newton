@@ -6048,13 +6048,15 @@ class PhoenXWorld:
     ) -> None:
         if not self.max_contact_columns:
             return
-        rows_per_column = min(128, self.contact_chunk_size or 128)
+        # Most columns hold a few rows; wider lane groups would idle while their
+        # warps walk the column loop.
+        row_lanes = 8
         # The active column count lives on the device. Bound the captured grid
         # and stride over active columns instead of launching for full capacity.
-        column_stride = min(self.max_contact_columns, self.device.sm_count * 1024 // rows_per_column)
+        column_stride = min(self.max_contact_columns, self.device.sm_count * 1024 // row_lanes)
         wp.launch(
             _get_parallel_contact_prepare_kernel(mass_splitting, soft_pd),
-            dim=(column_stride, rows_per_column),
+            dim=(column_stride, row_lanes),
             inputs=[
                 self._contact_cols,
                 self._ingest_scratch.num_contact_columns,
@@ -6066,6 +6068,7 @@ class PhoenXWorld:
                 self._active_contact_views(),
                 self._copy_state,
                 wp.int32(column_stride),
+                wp.int32(row_lanes),
             ],
             device=self.device,
         )
