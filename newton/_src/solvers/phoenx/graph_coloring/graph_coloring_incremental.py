@@ -114,20 +114,20 @@ _LOCALITY_COLOR_BITS_HOST = 10  # colours stay below MAX_COLORS = 1024
 _LOCALITY_FAMILY_COUNT = wp.constant(_LOCALITY_FAMILY_COUNT_HOST)
 
 
-def _locality_compact_layout(max_num_interactions: int, max_num_nodes: int) -> tuple[int, int, int | None]:
-    """Return ``(body_bits, eid_bits, end_bit)`` of the compact locality key, or ``(0, 0, None)``.
+def _locality_compact_layout(max_num_nodes: int) -> tuple[int, int | None]:
+    """Return ``(body_bits, end_bit)`` of the compact locality key, or ``(0, None)``.
 
-    The compact key has the field order of the 64-bit layout: an element
-    without bodies maps to the all-ones body field, above every node index,
-    as the 64-bit layout's ``0x7FFFFF`` sentinel is. ``end_bit`` keeps the
-    ``INT64_MAX`` tail sentinel above every active key.
+    The compact key has the field order of the 64-bit layout without the
+    element id, which the stable sort of element-ordered input reproduces:
+    an element without bodies maps to the all-ones body field, above every
+    node index, as the 64-bit layout's ``0x7FFFFF`` sentinel is. ``end_bit``
+    keeps the ``INT64_MAX`` tail sentinel above every active key.
     """
     body_bits = max(1, int(max_num_nodes).bit_length())
-    eid_bits = max(1, int(max_num_interactions).bit_length())
-    end_bit = _LOCALITY_COLOR_BITS_HOST + _LOCALITY_FAMILY_BITS_HOST + body_bits + eid_bits + 1
-    if body_bits > 23 or eid_bits > 25 or end_bit > 63:
-        return 0, 0, None
-    return body_bits, eid_bits, end_bit
+    end_bit = _LOCALITY_COLOR_BITS_HOST + _LOCALITY_FAMILY_BITS_HOST + body_bits + 1
+    if body_bits > 23:
+        return 0, None
+    return body_bits, end_bit
 
 
 @wp.func
@@ -156,7 +156,6 @@ def _locality_unbucketed_key(color: wp.int32, family: wp.int32, body_min: wp.int
 @wp.kernel(enable_backward=False)
 def _locality_combined_keys_kernel(
     elements: wp.array[ElementInteractionData],
-    element_ids_by_color: wp.array[wp.int32],
     interaction_id_to_partition: wp.array[wp.int32],
     element_family: wp.array[wp.int32],
     family_sort_cutoff: wp.int32,
@@ -164,7 +163,6 @@ def _locality_combined_keys_kernel(
     keys: wp.array[wp.int64],
     values: wp.array[wp.int32],
     body_bits: wp.int32,
-    eid_bits: wp.int32,
 ):
     """Pack ``(colour, family, body_min, eid)`` into one int64 key so a single
     radix sort preserves colour slices while grouping same-family rows.
@@ -172,21 +170,22 @@ def _locality_combined_keys_kernel(
     ``family_sort_cutoff`` disables the family bits for overflow colours,
     preserving their original body-local solve order.
 
-    Bit layout with ``body_bits == 0``: colour (bits 53..63) | family
-    (49..52, 4b) | body_min (25..48, 24b) | eid (0..24, 25b). Otherwise
-    the body and eid fields take ``body_bits`` and ``eid_bits`` from
-    :func:`_locality_compact_layout`, which keeps the key order and
-    lets the sort stop at its ``end_bit``. Slots past ``num_elements[0]``
-    get ``INT64_MAX`` and sort to the tail.
+    Every element is coloured, so thread ``eid`` keys element ``eid``. Bit
+    layout with ``body_bits == 0``: colour (bits 53..63) | family (49..52,
+    4b) | body_min (25..48, 24b) | eid (0..24, 25b). Otherwise the body
+    field takes ``body_bits`` from :func:`_locality_compact_layout` and the
+    key omits the element id: the stable sort keeps the element order
+    within equal keys, so the result is the same and the sort stops at the
+    layout's ``end_bit``. Slots past ``num_elements[0]`` get ``INT64_MAX``
+    and sort to the tail.
     """
-    tid = wp.tid()
-    if tid >= keys.shape[0]:
+    eid = wp.tid()
+    if eid >= keys.shape[0]:
         return
-    if tid >= num_elements[0]:
-        keys[tid] = wp.int64(_LOCALITY_TAIL_KEY)
-        values[tid] = wp.int32(0)
+    if eid >= num_elements[0]:
+        keys[eid] = wp.int64(_LOCALITY_TAIL_KEY)
+        values[eid] = wp.int32(0)
         return
-    eid = element_ids_by_color[tid]
     color = interaction_id_to_partition[eid]
     family = element_family[eid]
     if family_sort_cutoff >= wp.int32(0) and color >= family_sort_cutoff:
@@ -196,21 +195,19 @@ def _locality_combined_keys_kernel(
         # Elements without bodies keep their place after every real body.
         body_min = wp.min(body_min, (wp.int32(1) << body_bits) - wp.int32(1))
         key = (
-            (wp.int64(color) << (_LOCALITY_FAMILY_BITS + wp.int64(body_bits + eid_bits)))
-            | ((wp.int64(family) & _LOCALITY_FAMILY_MASK) << wp.int64(body_bits + eid_bits))
-            | (wp.int64(body_min) << wp.int64(eid_bits))
-            | wp.int64(eid)
+            (wp.int64(color) << (_LOCALITY_FAMILY_BITS + wp.int64(body_bits)))
+            | ((wp.int64(family) & _LOCALITY_FAMILY_MASK) << wp.int64(body_bits))
+            | wp.int64(body_min)
         )
     else:
         key = _locality_unbucketed_key(color, family, body_min, eid)
-    keys[tid] = key
-    values[tid] = eid
+    keys[eid] = key
+    values[eid] = eid
 
 
 @wp.kernel(enable_backward=False)
 def _locality_contact_count_keys_kernel(
     elements: wp.array[ElementInteractionData],
-    element_ids_by_color: wp.array[wp.int32],
     interaction_id_to_partition: wp.array[wp.int32],
     element_family: wp.array[wp.int32],
     packed_priorities: wp.array[wp.int32],
@@ -226,14 +223,13 @@ def _locality_contact_count_keys_kernel(
     Regular contacts use four body-id bits for a count bucket; callers enable
     this kernel only when body ids fit in the remaining 20 bits.
     """
-    tid = wp.tid()
-    if tid >= keys.shape[0]:
+    eid = wp.tid()
+    if eid >= keys.shape[0]:
         return
-    if tid >= num_elements[0]:
-        keys[tid] = wp.int64(_LOCALITY_TAIL_KEY)
-        values[tid] = wp.int32(0)
+    if eid >= num_elements[0]:
+        keys[eid] = wp.int64(_LOCALITY_TAIL_KEY)
+        values[eid] = wp.int32(0)
         return
-    eid = element_ids_by_color[tid]
     color = interaction_id_to_partition[eid]
     family = element_family[eid]
     regular = color < family_sort_cutoff
@@ -252,8 +248,8 @@ def _locality_contact_count_keys_kernel(
         )
     else:
         key = _locality_unbucketed_key(color, family, body_min, eid)
-    keys[tid] = key
-    values[tid] = eid
+    keys[eid] = key
+    values[eid] = eid
 
 
 @wp.kernel(enable_backward=False)
@@ -510,9 +506,7 @@ class IncrementalContactPartitioner:
         # element-by-colour array in one call with a packed
         # ``(colour | body_min)`` key. Colour is the high 32 bits so
         # the CSR colour ordering is preserved.
-        self._locality_body_bits, self._locality_eid_bits, self._locality_end_bit = _locality_compact_layout(
-            max_num_interactions, max_num_nodes
-        )
+        self._locality_body_bits, self._locality_end_bit = _locality_compact_layout(max_num_nodes)
         self._locality_keys = wp.zeros(2 * max_num_interactions, dtype=wp.int64, device=device)
         self._locality_values = wp.zeros(2 * max_num_interactions, dtype=wp.int32, device=device)
         self._locality_prefix_flags = wp.zeros(
@@ -1263,7 +1257,6 @@ class IncrementalContactPartitioner:
         n = self.max_num_interactions
         locality_inputs = [
             self._elements,
-            self._element_ids_by_color,
             self._interaction_id_to_partition,
             self._locality_family,
         ]
@@ -1279,7 +1272,7 @@ class IncrementalContactPartitioner:
             ]
         )
         if not self._sort_regular_contacts_by_point_count:
-            locality_inputs.extend([wp.int32(self._locality_body_bits), wp.int32(self._locality_eid_bits)])
+            locality_inputs.append(wp.int32(self._locality_body_bits))
             end_bit = self._locality_end_bit
         wp.launch(
             _locality_contact_count_keys_kernel

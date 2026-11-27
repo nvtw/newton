@@ -1081,6 +1081,65 @@ class TestGreedyOverflowDoesNotHang(unittest.TestCase):
         )
 
 
+class TestLocalitySort(unittest.TestCase):
+    """The CSR post-sort orders each colour by ``(family, lowest body, element id)``."""
+
+    @unittest.skipUnless(
+        wp.get_device().is_cuda and wp.is_conditional_graph_supported(),
+        "Conditional graph nodes not supported",
+    )
+    def test_color_slices_sorted_by_family_body_and_element(self) -> None:
+        device = wp.get_preferred_device()
+        num_elements, num_bodies = 5_000, 2_000
+        bodies_np = _generate_stress_workload(
+            num_elements=num_elements,
+            num_bodies=num_bodies,
+            high_deg_nodes=10,
+            high_deg_refs=(20, 30),
+            bodies_per_elem=(1, 3),
+            seed=4,
+        )
+        # Elements without bodies sort after every body.
+        bodies_np[::97] = -1
+        # Spare capacity exercises the sorted tail.
+        capacity = num_elements + 700
+        padded = np.full((capacity, int(MAX_BODIES)), -1, dtype=np.int32)
+        padded[:num_elements] = bodies_np
+        elements_arr = _make_stress_elements_array(padded, device)
+        num_elements_arr = wp.array([num_elements], dtype=wp.int32, device=device)
+        family_np = np.random.default_rng(5).integers(0, 4, size=capacity).astype(np.int32)
+
+        p = IncrementalContactPartitioner(
+            max_num_interactions=capacity,
+            max_num_nodes=num_bodies,
+            device=device,
+            seed=0,
+        )
+        p.set_locality_family(wp.array(family_np, dtype=wp.int32, device=device))
+
+        def build():
+            p.reset(elements_arr, num_elements_arr)
+            p.build_csr_greedy_with_jp_fallback()
+
+        build()
+        with wp.ScopedCapture(device=device) as capture:
+            build()
+        wp.capture_launch(capture.graph)
+
+        num_colors = int(p.num_colors.numpy()[0])
+        starts = p.color_starts.numpy()[: num_colors + 1]
+        order = p.element_ids_by_color.numpy()[:num_elements]
+        color_of = p.interaction_id_to_partition.numpy()[:num_elements]
+        np.testing.assert_array_equal(np.sort(order), np.arange(num_elements))
+        self.assertEqual(int(starts[-1]), num_elements)
+        lowest = np.where(bodies_np >= 0, bodies_np, np.iinfo(np.int32).max).min(axis=1)
+        for color in range(num_colors):
+            ids = order[starts[color] : starts[color + 1]]
+            np.testing.assert_array_equal(color_of[ids], color)
+            keys = list(zip(family_np[ids], lowest[ids], ids, strict=True))
+            self.assertEqual(keys, sorted(keys), msg=f"colour {color} is not in locality order")
+
+
 if __name__ == "__main__":
     wp.init()
     unittest.main()
