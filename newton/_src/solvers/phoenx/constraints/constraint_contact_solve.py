@@ -1463,6 +1463,10 @@ def _contact_group_is_separated(bounds: wp.vec4f, v1: wp.vec3f, v2: wp.vec3f, w1
     return bounds[0] > approach
 
 
+#: Rows per column whose relaxation skip tests load ahead of the row loop.
+_RELAX_PRELOADED_ROWS = 8
+
+
 def _make_contact_iterate_at(
     cloth_support: bool,
     has_mass_splitting: bool = True,
@@ -1638,6 +1642,15 @@ def _make_contact_iterate_at(
                 group_bounds0 = cc.separation_bounds[contact_first]
                 group_bounds1 = cc.separation_bounds[wp.min(contact_first + 4, last)]
                 group_bounds2 = cc.separation_bounds[wp.min(contact_first + 8, last)]
+        if wp.static(not use_bias):
+            # Relaxation skips separated rows; test the first rows' biases
+            # with parallel loads rather than one load per row.
+            separated_rows = wp.int32(0)
+            if contact_count > 0:
+                for j in range(wp.static(_RELAX_PRELOADED_ROWS)):
+                    row = contact_first + wp.min(j, contact_count - 1)
+                    if cc_get_bias(cc, row) > wp.float32(0.0):
+                        separated_rows = separated_rows | (wp.int32(1) << wp.int32(j))
 
         next_row = wp.int32(0)
         while next_row < contact_count:
@@ -1663,7 +1676,12 @@ def _make_contact_iterate_at(
                 if wp.static(not use_bias):
                     # Velocity relaxation skips separated rows. Check before
                     # loading their geometry or computing endpoint velocities.
-                    if cc_get_bias(cc, k) > wp.float32(0.0):
+                    separated = False
+                    if i < wp.static(_RELAX_PRELOADED_ROWS):
+                        separated = (separated_rows >> i) & wp.int32(1) != wp.int32(0)
+                    else:
+                        separated = cc_get_bias(cc, k) > wp.float32(0.0)
+                    if separated:
                         continue
                 n = cc_get_normal(cc, k)
                 normal_only = False
