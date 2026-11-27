@@ -594,6 +594,203 @@ def _make_subgroup_solve_kernel(width: int, packed: bool = False):
     return solve
 
 
+#: Rows up to which one warp solves a multi-panel mechanism from shared memory.
+WARP_SOLVE_MAX_ROWS = 128
+
+
+@functools.cache
+def _make_warp_solve_kernel(block_size: int, max_tiles: int):
+    """Solve a mechanism of up to ``max_tiles`` panels per axis on one warp.
+
+    The tiled cooperative solve walks the panels with a block barrier and a
+    dependent global round trip per tile, about 1.5 us per tile and pass.
+    Here the warp stages the mechanism's lower panels in shared memory (rows
+    padded to ``block_size + 1`` words, so neither row nor column reads
+    conflict), keeps row ``lane + 32 k`` of the vector in a register, and
+    eliminates one column per step: the pivot is broadcast by a shuffle and
+    every later row subtracts its multiple. The step's latency is one
+    multiply, one shuffle and one fused multiply-add.
+    """
+    assert max_tiles * block_size <= WARP_SOLVE_MAX_ROWS and max_tiles * (max_tiles + 1) // 2 <= 64
+    snippet = f"""
+#if defined(__CUDA_ARCH__)
+    constexpr int B = {block_size};
+    constexpr int P = B * B;
+    constexpr int S = B + 1;
+    constexpr int T = {max_tiles};
+    constexpr int K = (T * B + 31) / 32;
+    constexpr unsigned FULL = 0xffffffffu;
+    __shared__ float lower[T * (T + 1) / 2 * B * S];
+    // Row lane + 32 k of the vector; padded rows hold zero and a zero inverse pivot.
+    float value[K];
+    float solved[K];
+    float inverse[K];
+    int target[K];
+    int row_base[K];
+    int column_base[K];
+#pragma unroll
+    for (int k = 0; k < K; ++k) {{
+        const int row = lane + 32 * k;
+        const int tile = row / B;
+        target[k] = row < dimension ? vector_offset + permutation.data[vector_offset + row] : 0;
+        value[k] = row < dimension ? rhs.data[target[k]] : 0.0f;
+        solved[k] = 0.0f;
+        // Rows past the last panel (when T B is not a multiple of 32) read no shared memory.
+        row_base[k] = row < T * B ? tile * (tile + 1) / 2 * B * S + row % B * S : -1;
+        column_base[k] = tile * B * S + row % B;
+    }}
+    // Lanes look up the panels of slots lane and lane + 32; slot i (i + 1) / 2 + j holds panel (i, j).
+    const int slots = tiles * (tiles + 1) / 2;
+    int panel_low = -1;
+    int panel_high = -1;
+    for (int half = 0; half < 2; ++half) {{
+        const int slot = lane + 32 * half;
+        if (slot < slots) {{
+            int i = 0;
+            while ((i + 1) * (i + 2) / 2 <= slot) ++i;
+            const int panel = panel_index.data[table_offset + i * tiles + slot - i * (i + 1) / 2];
+            if (half == 0) panel_low = panel; else panel_high = panel;
+        }}
+    }}
+    // Stage G panels per round, all loads in flight together. Absent panels and
+    // entries past the dimension are zero, so padded rows stay zero below.
+    constexpr int G = P >= 2048 ? 1 : 2048 / P;
+    int tile_i = 0;
+    int tile_j = 0;
+    for (int first = 0; first < slots; first += G) {{
+        float staged[G][P / 32];
+#pragma unroll
+        for (int g = 0; g < G; ++g) {{
+            const int slot = first + g;
+            const int low = __shfl_sync(FULL, panel_low, slot & 31);
+            const int high = __shfl_sync(FULL, panel_high, slot & 31);
+            const int panel = slot < slots ? (slot < 32 ? low : high) : -1;
+            const float* source = factor.data + (panel < 0 ? 0 : panel) * P + lane;
+#pragma unroll
+            for (int e = 0; e < P / 32; ++e) staged[g][e] = panel < 0 ? 0.0f : source[32 * e];
+        }}
+#pragma unroll
+        for (int g = 0; g < G; ++g) {{
+            if (first + g < slots) {{
+#pragma unroll
+                for (int e = 0; e < P / 32; ++e) {{
+                    const int entry = 32 * e + lane;
+                    const bool inside = tile_i * B + entry / B < dimension && tile_j * B + entry % B < dimension;
+                    lower[(first + g) * B * S + entry / B * S + entry % B] = inside ? staged[g][e] : 0.0f;
+                }}
+                if (++tile_j > tile_i) {{
+                    ++tile_i;
+                    tile_j = 0;
+                }}
+            }}
+        }}
+    }}
+    __syncwarp();
+#pragma unroll
+    for (int k = 0; k < K; ++k) {{
+        const int row = lane + 32 * k;
+        inverse[k] = row < dimension ? 1.0f / lower[row_base[k] + row / B * B * S + row % B] : 0.0f;
+    }}
+    // L y = b: column c's pivot updates the rows below it. Coefficients load
+    // before the shuffle so that only the multiply-add follows the pivot.
+#pragma unroll
+    for (int tile = 0; tile < T; ++tile) {{
+        if (tile * B >= dimension) break;
+#pragma unroll
+        for (int offset = 0; offset < B; ++offset) {{
+            const int column = tile * B + offset;
+            const int kc = column / 32;
+            const int owner = column % 32;
+            float coefficient[K];
+#pragma unroll
+            for (int k = kc; k < K; ++k)
+                coefficient[k] = (k > kc || lane > owner) && (32 * k + 32 <= T * B || row_base[k] >= 0)
+                    ? lower[row_base[k] + tile * B * S + offset] : 0.0f;
+            const float pivot = __shfl_sync(FULL, value[kc] * inverse[kc], owner);
+#pragma unroll
+            for (int k = kc; k < K; ++k) value[k] -= coefficient[k] * pivot;
+            solved[kc] = lane == owner ? pivot : solved[kc];
+        }}
+    }}
+    // L^T x = y: row c of L updates the rows above it, last column first.
+#pragma unroll
+    for (int k = 0; k < K; ++k) value[k] = solved[k];
+#pragma unroll
+    for (int reverse = 0; reverse < T; ++reverse) {{
+        const int tile = T - 1 - reverse;
+        if (tile * B >= dimension) continue;
+#pragma unroll
+        for (int back = 0; back < B; ++back) {{
+            const int offset = B - 1 - back;
+            const int column = tile * B + offset;
+            const int kc = column / 32;
+            const int owner = column % 32;
+            float coefficient[K];
+#pragma unroll
+            for (int k = 0; k <= kc; ++k)
+                coefficient[k] = k < kc || lane < owner
+                    ? lower[tile * (tile + 1) / 2 * B * S + offset * S + column_base[k]] : 0.0f;
+            const float pivot = __shfl_sync(FULL, value[kc] * inverse[kc], owner);
+#pragma unroll
+            for (int k = 0; k <= kc; ++k) value[k] -= coefficient[k] * pivot;
+            solved[kc] = lane == owner ? pivot : solved[kc];
+        }}
+    }}
+#pragma unroll
+    for (int k = 0; k < K; ++k) {{
+        if (lane + 32 * k < dimension) solution.data[target[k]] = solved[k];
+    }}
+#endif
+"""
+
+    @wp.func_native(snippet)
+    def warp_solve(
+        factor: wp.array[wp.float32],
+        panel_index: wp.array[wp.int32],
+        permutation: wp.array[wp.int32],
+        rhs: wp.array[wp.float32],
+        solution: wp.array[wp.float32],
+        table_offset: wp.int32,
+        tiles: wp.int32,
+        dimension: wp.int32,
+        vector_offset: wp.int32,
+        lane: wp.int32,
+    ): ...
+
+    @wp.kernel(enable_backward=False, module="unique")
+    def solve(
+        mechanisms: wp.array[wp.int32],
+        dimensions: wp.array[wp.int32],
+        offsets: wp.array[wp.int32],
+        panel_table_offset: wp.array[wp.int32],
+        tile_counts: wp.array[wp.int32],
+        panel_index: wp.array[wp.int32],
+        permutation: wp.array[wp.int32],
+        factor: wp.array[wp.float32],
+        rhs: wp.array[wp.float32],
+        solution: wp.array[wp.float32],
+        solve_active: wp.array[wp.int32],
+    ):
+        task, lane = wp.tid()
+        if solve_active[0] == wp.int32(0):
+            return
+        mechanism = mechanisms[task]
+        warp_solve(
+            factor,
+            panel_index,
+            permutation,
+            rhs,
+            solution,
+            panel_table_offset[mechanism],
+            tile_counts[mechanism],
+            dimensions[mechanism],
+            offsets[mechanism],
+            lane,
+        )
+
+    return solve
+
+
 def _make_cooperative_solve_kernel(block_size: int):
     tile_elements = block_size * block_size
 
@@ -1380,6 +1577,15 @@ class FixedPatternPanelLLT:
             _make_subgroup_solve_kernel(block_size, self.subgroup_packed) if subgroup_mechanisms.size else None
         )
         self.cooperative_mechanism = wp.array(cooperative_mechanisms, dtype=wp.int32, device=self.device)
+        # Multi-panel mechanisms up to WARP_SOLVE_MAX_ROWS rows solve on one warp
+        # from shared memory; one-panel ones keep the tile solve's rounding.
+        tile_counts = np.asarray(self.symbolic.tile_counts, dtype=np.int32)[cooperative_mechanisms]
+        fits_warp = (tile_counts > 1) & (tile_counts * block_size <= WARP_SOLVE_MAX_ROWS) & self.device.is_cuda
+        self._warp_solve_mechanism = wp.array(cooperative_mechanisms[fits_warp], dtype=wp.int32, device=self.device)
+        self._tiled_solve_mechanism = wp.array(cooperative_mechanisms[~fits_warp], dtype=wp.int32, device=self.device)
+        self._solve_warp = (
+            _make_warp_solve_kernel(block_size, int(tile_counts[fits_warp].max())) if fits_warp.any() else None
+        )
         self._factor_cooperative = _make_cooperative_factor_kernel(block_size, self._masked_cooperative_factor)
         self._solve_cooperative = _make_cooperative_solve_kernel(block_size)
         self._solve_grouped_rhs_batch = _make_grouped_rhs_batch_solve_kernel(block_size)
@@ -1572,13 +1778,33 @@ class FixedPatternPanelLLT:
                     block_dim=128,
                     device=self.device,
                 )
-        if self.cooperative_mechanism.size > 0:
+        if self._warp_solve_mechanism.size > 0:
+            wp.launch(
+                self._solve_warp,
+                dim=(self._warp_solve_mechanism.size, 32),
+                inputs=[
+                    self._warp_solve_mechanism,
+                    self.dimension,
+                    self.vector_offset,
+                    self.panel_table_offset,
+                    self.tile_count,
+                    self.panel_index,
+                    self.permutation,
+                    self.factor,
+                    rhs,
+                    solution,
+                    active,
+                ],
+                block_dim=32,
+                device=self.device,
+            )
+        if self._tiled_solve_mechanism.size > 0:
             wp.launch_tiled(
                 self._solve_cooperative,
-                dim=self.cooperative_mechanism.size,
+                dim=self._tiled_solve_mechanism.size,
                 block_dim=self._cooperative_solve_block_dim,
                 inputs=[
-                    self.cooperative_mechanism,
+                    self._tiled_solve_mechanism,
                     self.dimension,
                     self.vector_offset,
                     self.workspace_offset,

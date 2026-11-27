@@ -91,6 +91,90 @@ class TestFixedPanelSubgroups(unittest.TestCase):
             with self.subTest(width=width):
                 self._check_batch(width, (3, width - 1, width, width + 1, 2 * width + 3))
 
+    def _multi_panel_errors(self, width, dimensions, chain):
+        """Return the warp and tile solves' worst (backward, forward) errors over random right-hand sides."""
+        rng = np.random.default_rng(width + len(dimensions))
+        starts = np.concatenate(([0], np.cumsum(dimensions))).astype(np.int32)
+        permutation = np.concatenate([rng.permutation(d) for d in dimensions]).astype(np.int32)
+        # A chain of bodies leaves panels outside the band structurally absent.
+        rows = tuple(frozenset((r, r + 1) if chain else (0, 1)) for r in range(starts[-1]))
+        solver = FixedPatternPanelLLT(dimensions, starts, permutation, rows, block_size=width, device="cuda:0")
+        multi_panel = [m for m, d in enumerate(dimensions) if d > width]
+        np.testing.assert_array_equal(np.sort(solver._warp_solve_mechanism.numpy()), multi_panel)
+        tables = solver.panel_index.numpy()
+        offsets = solver.panel_table_offset.numpy()
+        packed = np.zeros(solver.factor.shape, dtype=np.float32)
+        factors = []
+        for m, d in enumerate(dimensions):
+            count = (d + width - 1) // width
+            table = tables[offsets[m] : offsets[m] + count * count].reshape(count, count)
+            # A random lower factor with the panel pattern; the pivots spread
+            # over two decades so that the triangular solves amplify rounding.
+            lower = np.tril(rng.normal(scale=0.3, size=(count * width, count * width)), -1)
+            lower[np.diag_indices(count * width)] = np.geomspace(0.1, 10.0, count * width)[
+                rng.permutation(count * width)
+            ]
+            for i in range(count):
+                for j in range(i + 1):
+                    block = lower[i * width : (i + 1) * width, j * width : (j + 1) * width]
+                    if table[i, j] < 0:
+                        block[:] = 0.0
+                    else:
+                        packed[table[i, j] * width * width : (table[i, j] + 1) * width * width] = block.ravel()
+            factors.append(lower[:d, :d].astype(np.float32).astype(np.float64))
+        solver.factor.assign(packed)
+        rhs = wp.zeros(int(starts[-1]), dtype=wp.float32, device="cuda:0")
+        result = wp.zeros_like(rhs)
+        # Normwise backward error |b - L L^T x| / (|L| |L^T| |x| + |b|) and
+        # forward error |x - x64| / |x64| against float64 with the same factor.
+        errors = np.zeros((2, 2))
+        for path, warp_path in enumerate((True, False)):
+            if not warp_path:
+                solver._tiled_solve_mechanism = solver.cooperative_mechanism
+                solver._warp_solve_mechanism = wp.empty(0, dtype=wp.int32, device="cuda:0")
+            with wp.ScopedCapture(device="cuda:0") as capture:
+                solver.solve(rhs, result)
+            sample_rng = np.random.default_rng(7)
+            for _ in range(8):
+                rhs_host = sample_rng.normal(size=starts[-1]).astype(np.float32)
+                rhs.assign(rhs_host)
+                wp.capture_launch(capture.graph)
+                host = result.numpy()
+                for m in multi_panel:
+                    begin, end = starts[m : m + 2]
+                    order = permutation[begin:end]
+                    lower = factors[m]
+                    b = rhs_host[begin:end][order].astype(float)
+                    x = host[begin:end][order].astype(float)
+                    expected = np.linalg.solve(lower.T, np.linalg.solve(lower, b))
+                    norm = np.linalg.norm(lower, np.inf) * np.linalg.norm(lower.T, np.inf)
+                    backward = np.max(np.abs(b - lower @ (lower.T @ x))) / (
+                        norm * np.max(np.abs(x)) + np.max(np.abs(b))
+                    )
+                    forward = np.max(np.abs(x - expected)) / np.max(np.abs(expected))
+                    errors[path] = np.maximum(errors[path], (backward, forward))
+        return errors
+
+    def test_warp_multi_panel_solves(self):
+        """Multi-panel mechanisms solve on one warp as accurately as the tile solve."""
+        cases = (
+            (16, (17, 40, 54, 66, 81, 96, 128), False),
+            (16, (20, 47, 64, 99, 112), True),
+            (32, (33, 64, 75, 128), False),
+            (32, (40, 96, 127), True),
+        )
+        for width, dimensions, chain in cases:
+            with self.subTest(width=width, chain=chain):
+                (warp_backward, warp_forward), (tile_backward, tile_forward) = self._multi_panel_errors(
+                    width, dimensions, chain
+                )
+                # Both are backward stable far below float32 epsilon (about
+                # 1e-9 here); forward errors of these ill-conditioned factors
+                # (a few 1e-6) differ by rounding order only.
+                self.assertLess(warp_backward, 1.0e-8)
+                self.assertLess(tile_backward, 1.0e-8)
+                self.assertLess(warp_forward, 2.0 * tile_forward)
+
 
 if __name__ == "__main__":
     unittest.main()
