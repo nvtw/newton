@@ -359,6 +359,74 @@ measured 59.61/59.53 against 59.59/59.35 FPS, within noise; not kept. The
 in-factory trace overstates that path: its sorts share the SMs with the
 sleeping pass.
 
+## Bottling plant color-step latency (2026-11-28)
+
+`bench_bottle_bed.py` builds the plant's filling transport alone: a packed
+pasteuriser bed of plant bottles on belts (4.9k bodies, 126k contacts at
+`--bed 6`), solved by the island sweep as one merged island of 17.8k
+columns in 10 colors of 6-9 rows. Nsight Compute on its
+`phoenx_iterate_islands` (`profile_bottle_bed_iterate_ncu.sh`, run as
+`sudo PYTHON=<venv python> bash ...`; eager frames, since graph-node replay
+is unreliable):
+
+- 3.4 of 32 lanes active, 8.8% of warps active, SM and memory throughput
+  about 5%, fp64 pipe 0%.
+- Stalls: 38% barrier (warps waiting for the slowest lane of a color), 35%
+  long scoreboard, 10% wait. Stall samples outside barriers: column prologue
+  (owner, sleep guard, body and row headers) 26%, four-row separation tests
+  18%, row loads 17%, friction-disk solve 11%.
+- Occupancy is not the limit: 150 registers allow one 256-thread block per
+  SM, but removing the fp64 friction fallback (117 registers, two blocks per
+  SM) left the sweep time bit-for-bit equal.
+
+A color step lasts as long as its slowest lane's chain of dependent loads
+and arithmetic, plus the grid barrier. Same grid, no work: one
+`_merged_grid_sync` costs 1.3 us; one dependent global-load level costs
+about 0.3 us, because the barrier's fence invalidates L1. A bed-6 color step
+is about 8 us. Work hardly matters (nsys, one sweep):
+
+| `--bed` | Bodies | Merged columns | Colors | Columns per color | Sweep | Per column |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 6 m | 4.9k | 17.8k | 10 | 1.8k | 83.5 us | 4.7 ns |
+| 12 m | 8.8k | 33.2k | 9 | 3.7k | 88.1 us | 2.7 ns |
+| 24 m | 16.6k | 64.0k | 9 | 7.1k | 95.8 us | 1.5 ns |
+| 48 m | 32.3k | 125.6k | 10 | 12.6k | 112.6 us | 0.9 ns |
+
+In the plant the iterate time is set instead by eight identical articulated
+islands of about 30 columns in 19 colors: a hub body carries about 15
+contact columns of 4-27 rows, about 169 rows in series per sweep. There row
+arithmetic dominates: a 24-row column alone on one lane (L1-hot, fast math)
+takes 1024 cycles per sticking row and 1551 per sliding row, of which the
+friction-disk solve took about 460 and 990.
+
+Kept:
+
+| Commit | Change | Effect |
+| --- | --- | --- |
+| `161866377` | Column owners and the sleep guard's body fields load together; the moving-surface sweep tests owner and guard behind one branch; the first three separation groups' bounds load with the column | Bed iterate -8.4%, plant 60.12 -> 60.44 FPS, bitwise |
+| `8072a8d01` | Relaxation tests the first eight rows' separating biases from loads issued together (bit mask) | Bed relax -6%, plant within noise, bitwise |
+| `6490fa87d` | Sticking rows try `lambda_old - K^-1 v` with one reciprocal before the disk solve; the float32 solve uses the same cancellation-free form | Sticking row 1024 -> 842 cycles, sliding 1551 -> 1614; error against a float64 minimizer 2.3e-6 -> 5.0e-7 (random blocks), 9.3e-6 -> 6.1e-6 (cone boundary); deterministic, not bitwise |
+
+Measured and not kept:
+
+| Change | Result |
+| --- | --- |
+| Row loads issued before the separation and relaxation skip tests | Bed iterate +14% (228 -> 259 ms per 120 frames), relax +13% |
+| Owner, guard and empty-column skips folded into the sweep without an early return | Bed iterate +13% (229 -> 258 ms), relax -3% |
+| Empty-column test added to the single skip branch | Bed iterate +5% (228 -> 241 ms) |
+| Sticking shortcut normalized by the block scale (`_fast_div`) | Sticking row -2%, sliding +12% (non-fast-math probe) |
+| fp64 friction fallback removed | Equal time; the fp64 path never ran in the bed |
+
+Estimated and not built: dense color packing (a color step is the slowest
+lane's chain; packing diverged columns serializes them); a partitioned
+(domain-decomposed) Gauss-Seidel with block-local syncs, bounded by the
+barrier share of about 16% at bed 6 and with a tiny interior fraction at 26
+bodies per block (see the Kapla census below), and order-changing.
+
+Next lever: the hub columns' per-row arithmetic chain (sliding Newton steps
+of the friction-disk solve, the impulse application), which bounds the
+plant's deepest islands.
+
 
 
 Contacts on non-tree `maximal_direct` mechanisms are solved through the exact
