@@ -2662,6 +2662,12 @@ def create_narrow_phase_process_mesh_plane_contacts_kernel(
 # =============================================================================
 
 
+@wp.func
+def _suggested_capacity(count: wp.int32) -> wp.int32:
+    """Observed count plus a quarter, as a capacity hint for an overflowed buffer."""
+    return count + count // 4
+
+
 @wp.kernel(enable_backward=False)
 def verify_narrow_phase_buffers(
     broad_phase_count: wp.array[int],
@@ -2686,6 +2692,7 @@ def verify_narrow_phase_buffers(
     max_sdf_sdf: int,
     contact_count: wp.array[int],
     max_contacts: int,
+    estimated_neighbors: int,
     reducer_count: wp.array[int],
     max_reducer: int,
     reduction_ht_active_slots: wp.array[int],
@@ -2694,24 +2701,35 @@ def verify_narrow_phase_buffers(
     reduction_buffer_overflows: wp.array[int],
     reduction_ht_warn_load_percent: int,
 ):
-    """Check for buffer overflows in the collision pipeline."""
+    """Report each overflowed collision buffer, its consequence and the setting that raises it.
+
+    A buffer past capacity drops whichever items arrive last, so the run loses
+    contacts and becomes nondeterministic. Each line suggests the observed
+    count plus a quarter as the new capacity.
+    """
     if broad_phase_count[0] > max_broad_phase:
         wp.printf(
-            "Warning: Broad phase pair buffer overflowed %d > %d.\n",
+            "Warning: broad-phase pair buffer overflowed (%d > %d); shape pairs were dropped, so contacts are "
+            "missing and the run is nondeterministic. Raise CollisionPipeline(shape_pairs_max=) to about %d.\n",
             broad_phase_count[0],
             max_broad_phase,
+            _suggested_capacity(broad_phase_count[0]),
         )
     if max_split_query >= 0 and split_query_count[0] > max_split_query:
         wp.printf(
-            "Warning: Split query-result buffer overflowed %d > %d.\n",
+            "Warning: split GJK query buffer overflowed (%d > %d); shape pairs were dropped, so contacts are "
+            "missing and the run is nondeterministic. Raise CollisionPipeline(shape_pairs_max=) to about %d.\n",
             split_query_count[0],
             max_split_query,
+            _suggested_capacity(split_query_count[0]),
         )
     if gjk_count[0] > max_gjk:
         wp.printf(
-            "Warning: GJK candidate pair buffer overflowed %d > %d.\n",
+            "Warning: GJK candidate pair buffer overflowed (%d > %d); shape pairs were dropped, so contacts are "
+            "missing and the run is nondeterministic. Raise CollisionPipeline(shape_pairs_max=) to about %d.\n",
             gjk_count[0],
             max_gjk,
+            _suggested_capacity(gjk_count[0]),
         )
     if max_split_gjk >= 0:
         split_count = split_gjk_count[0]
@@ -2719,68 +2737,95 @@ def verify_narrow_phase_buffers(
             split_count += split_gjk_count[1]
         if split_count > max_split_gjk:
             wp.printf(
-                "Warning: Split GJK work-item buffer overflowed %d > %d.\n",
+                "Warning: split GJK work buffer overflowed (%d > %d); shape pairs were dropped, so contacts are "
+                "missing and the run is nondeterministic. Raise CollisionPipeline(shape_pairs_max=) to about %d.\n",
                 split_count,
                 max_split_gjk,
+                _suggested_capacity(split_count),
             )
     if max_split_manifold >= 0 and split_manifold_count[0] > max_split_manifold:
         wp.printf(
-            "Warning: Split manifold work-item buffer overflowed %d > %d.\n",
+            "Warning: split manifold work buffer overflowed (%d > %d); shape pairs were dropped, so contacts are "
+            "missing and the run is nondeterministic. Raise CollisionPipeline(shape_pairs_max=) to about %d.\n",
             split_manifold_count[0],
             max_split_manifold,
+            _suggested_capacity(split_manifold_count[0]),
         )
     if mesh_count:
         if mesh_count[0] > max_mesh:
             wp.printf(
-                "Warning: Mesh-convex shape pair buffer overflowed %d > %d.\n",
+                "Warning: mesh-convex pair buffer overflowed (%d > %d); shape pairs were dropped, so contacts are "
+                "missing and the run is nondeterministic. Raise CollisionPipeline(shape_pairs_max=) to about %d.\n",
                 mesh_count[0],
                 max_mesh,
+                _suggested_capacity(mesh_count[0]),
             )
     if triangle_count:
         if triangle_count[0] > max_triangle:
             wp.printf(
-                "Warning: Triangle pair buffer overflowed %d > %d.\n",
+                "Warning: mesh triangle pair buffer overflowed (%d > %d); triangle pairs were dropped, so contacts "
+                "are missing and the run is nondeterministic. Raise CollisionPipeline(max_triangle_pairs=) to "
+                "about %d.\n",
                 triangle_count[0],
                 max_triangle,
+                _suggested_capacity(triangle_count[0]),
             )
     if mesh_plane_count:
         if mesh_plane_count[0] > max_mesh_plane:
             wp.printf(
-                "Warning: Mesh-plane shape pair buffer overflowed %d > %d.\n",
+                "Warning: mesh-plane pair buffer overflowed (%d > %d); shape pairs were dropped, so contacts are "
+                "missing and the run is nondeterministic. Raise CollisionPipeline(shape_pairs_max=) to about %d.\n",
                 mesh_plane_count[0],
                 max_mesh_plane,
+                _suggested_capacity(mesh_plane_count[0]),
             )
     if mesh_mesh_count:
         if mesh_mesh_count[0] > max_mesh_mesh:
             wp.printf(
-                "Warning: Mesh-mesh shape pair buffer overflowed %d > %d.\n",
+                "Warning: mesh-mesh pair buffer overflowed (%d > %d); shape pairs were dropped, so contacts are "
+                "missing and the run is nondeterministic. Raise CollisionPipeline(shape_pairs_max=) to about %d.\n",
                 mesh_mesh_count[0],
                 max_mesh_mesh,
+                _suggested_capacity(mesh_mesh_count[0]),
             )
     if sdf_sdf_count:
         if sdf_sdf_count[0] > max_sdf_sdf:
             wp.printf(
-                "Warning: SDF-SDF shape pair buffer overflowed %d > %d.\n",
+                "Warning: hydroelastic pair buffer overflowed (%d > %d); shape pairs were dropped, so contacts are "
+                "missing and the run is nondeterministic. The buffer holds the model's hydroelastic shape pairs.\n",
                 sdf_sdf_count[0],
                 max_sdf_sdf,
             )
     if contact_count[0] > max_contacts:
-        wp.printf(
-            "Warning: Contact buffer overflowed %d > %d.\n",
-            contact_count[0],
-            max_contacts,
-        )
+        if estimated_neighbors > 0:
+            wp.printf(
+                "Warning: rigid contact buffer overflowed (%d > %d); contacts were dropped, so bodies can lose "
+                "support and the run is nondeterministic. The automatic capacity sums per-pair contact caps but "
+                "budgets only %d touching neighbors per shape; pass rigid_contact_max of about %d to the "
+                "CollisionPipeline or solver.\n",
+                contact_count[0],
+                max_contacts,
+                estimated_neighbors,
+                _suggested_capacity(contact_count[0]),
+            )
+        else:
+            wp.printf(
+                "Warning: rigid contact buffer overflowed (%d > %d); contacts were dropped, so bodies can lose "
+                "support and the run is nondeterministic. Raise rigid_contact_max of the CollisionPipeline or "
+                "solver to about %d.\n",
+                contact_count[0],
+                max_contacts,
+                _suggested_capacity(contact_count[0]),
+            )
     if max_reducer > 0:
         if reducer_count[0] > max_reducer:
-            # GlobalContactReducer's pre-reduction edge-test buffer
-            # (sized by ``max_triangle_pairs``). Edge tests past the
-            # capacity are silently dropped by ``atomic_add``; which
-            # ones get kept depends on thread scheduling, so dense
-            # mesh-mesh scenes can diverge non-deterministically.
             wp.printf(
-                "Warning: SDF reducer buffer overflowed %d > %d (raise max_triangle_pairs).\n",
+                "Warning: SDF contact reducer buffer overflowed (%d > %d); edge tests were dropped, so contacts are "
+                "missing and the run is nondeterministic. Raise CollisionPipeline(max_triangle_pairs=) to about "
+                "%d.\n",
                 reducer_count[0],
                 max_reducer,
+                _suggested_capacity(reducer_count[0]),
             )
     if reduction_ht_capacity > 0:
         reduction_ht_active_count = reduction_ht_active_slots[reduction_ht_capacity]
@@ -2797,14 +2842,15 @@ def verify_narrow_phase_buffers(
             )
         if reduction_ht_insert_failures[0] > 0:
             wp.printf(
-                "Warning: Contact reduction hashtable insert failures %d. "
-                "Increase contact_reduction_hashtable_size_factor or max_triangle_pairs.\n",
+                "Warning: contact reduction hashtable insert failures %d; contact candidates were dropped, so the "
+                "run is nondeterministic. Raise CollisionPipeline(contact_reduction_hashtable_size_factor=) or "
+                "max_triangle_pairs.\n",
                 reduction_ht_insert_failures[0],
             )
         if reduction_buffer_overflows[0] > 0:
             wp.printf(
-                "Warning: Contact reduction buffer overflowed; %d contact candidates were dropped. "
-                "Increase max_triangle_pairs.\n",
+                "Warning: contact reduction buffer overflowed; %d contact candidates were dropped, so the run is "
+                "nondeterministic. Raise CollisionPipeline(max_triangle_pairs=).\n",
                 reduction_buffer_overflows[0],
             )
 
@@ -3001,6 +3047,9 @@ class NarrowPhase:
         self.mesh_sdf_identity_scale_only = mesh_sdf_identity_scale_only
         self.deterministic = deterministic
         self.verify_buffers = verify_buffers
+        #: Neighbors per shape that an automatic rigid-contact capacity budgets, or 0 for an
+        #: explicit capacity; the overflow warning explains the estimate with it.
+        self.contact_max_estimated_neighbors = 0
         self.speculative = speculative
         if not isinstance(speculative_contact_velocity_filter, bool):
             raise ValueError("speculative_contact_velocity_filter must be a bool")
@@ -4614,6 +4663,7 @@ class NarrowPhase:
                     self.shape_pairs_sdf_sdf.shape[0] if self.shape_pairs_sdf_sdf is not None else 0,
                     writer_data.contact_count,
                     writer_data.contact_max,
+                    self.contact_max_estimated_neighbors,
                     reducer_count_arr,
                     reducer_capacity,
                     reduction_ht_active_slots,

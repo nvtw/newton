@@ -117,7 +117,7 @@ class TestNarrowPhaseBufferWarnings(unittest.TestCase):
                     wp.launch(
                         verify_narrow_phase_buffers,
                         dim=1,
-                        inputs=[zero, 0] * 12 + [active_slots, capacity, zero, zero, 80],
+                        inputs=[zero, 0] * 11 + [0, zero, 0] + [active_slots, capacity, zero, zero, 80],
                         device=device,
                     )
                 finally:
@@ -139,14 +139,39 @@ class TestNarrowPhaseBufferWarnings(unittest.TestCase):
                     wp.launch(
                         verify_narrow_phase_buffers,
                         dim=1,
-                        inputs=[zero, 0] * 12 + [active_slots, 100, zero, buffer_overflows, 80],
+                        inputs=[zero, 0] * 11 + [0, zero, 0] + [active_slots, 100, zero, buffer_overflows, 80],
                         device=device,
                     )
                 finally:
                     output = capture.end()
-                self.assertEqual("Contact reduction buffer overflowed" in output, expected_warning, output)
+                self.assertEqual("contact reduction buffer overflowed" in output, expected_warning, output)
                 if expected_warning:
                     self.assertIn("3 contact candidates", output)
+
+    @unittest.skipIf(sys.platform == "win32", "Warp CPU printf capture is unreliable on Windows")
+    def test_contact_buffer_overflow_warning(self):
+        """Name the consequence, the capacity setting, a suggested value and the estimate's neighbor budget."""
+        device = "cpu"
+        zero = wp.zeros(1, dtype=int, device=device)
+        count = wp.array([5884], dtype=int, device=device)
+        for neighbors in (0, 20):
+            with self.subTest(neighbors=neighbors):
+                capture = StdOutCapture()
+                capture.begin()
+                try:
+                    wp.launch(
+                        verify_narrow_phase_buffers,
+                        dim=1,
+                        inputs=[zero, 0] * 10 + [count, 4950, neighbors] + [zero, 0, zero, 0, zero, zero, 80],
+                        device=device,
+                    )
+                finally:
+                    output = capture.end()
+                self.assertIn("rigid contact buffer overflowed (5884 > 4950)", output)
+                self.assertIn("nondeterministic", output)
+                self.assertIn("rigid_contact_max", output)
+                self.assertIn("7355", output)
+                self.assertEqual("budgets only 20 touching neighbors" in output, neighbors > 0, output)
 
 
 def check_normal_direction(pos_a, pos_b, normal, tolerance=1e-5):

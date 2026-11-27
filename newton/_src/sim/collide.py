@@ -2396,6 +2396,7 @@ class CollisionPipeline:
         self._dynamic_rows = dynamic_rows
 
         # Resolve rigid contact capacity with explicit > model > estimated precedence.
+        rigid_contact_max_estimated = False
         if rigid_contact_max is None:
             model_rigid_contact_max = model.rigid_contact_max
             if model_rigid_contact_max is not None:
@@ -2403,6 +2404,7 @@ class CollisionPipeline:
             else:
                 rigid_contact_estimate = _estimate_rigid_contact_details(model)
                 rigid_contact_max = rigid_contact_estimate.capacity
+                rigid_contact_max_estimated = True
                 _warn_large_rigid_contact_estimate(rigid_contact_estimate)
         self._rigid_contact_max = rigid_contact_max
         if soft_contact_gap is None:
@@ -3028,6 +3030,8 @@ class CollisionPipeline:
                 _group_reduction=group_reduction,
             )
             self.hydroelastic_sdf = self.narrow_phase.hydroelastic_sdf
+        if rigid_contact_max_estimated:
+            self.narrow_phase.contact_max_estimated_neighbors = _RIGID_CONTACT_MAX_NEIGHBORS_PER_SHAPE
 
         # Marks shapes whose texture SDF queries assume the unit scale they had at construction.
         shape_unit_scale_sdf = np.zeros(shape_count if unit_scale_sdf_shapes is not None else 0, dtype=np.int32)
