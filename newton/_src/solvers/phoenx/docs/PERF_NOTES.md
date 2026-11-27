@@ -427,6 +427,45 @@ Next lever: the hub columns' per-row arithmetic chain (sliding Newton steps
 of the friction-disk solve, the impulse application), which bounds the
 plant's deepest islands.
 
+## Bottling plant direct-solve chain (2026-11-28)
+
+Same factory and window. Each solver iteration is the island sweep
+(about 108 us) followed by about 100 us of other kernels on the main
+stream: the direct-equality solves, direct-contact columns, drive
+activation, the temporal gap pass (13-15 us) and the sweep entry
+(12 us). The direct-equality solve forks the one-panel mechanisms (87,
+subgroup solve, 5 us) from the 64 multi-panel ones (54-96 rows, four to
+six 16-row panels), whose tiled cooperative solve took 18.8 us: a block
+barrier and a dependent global round trip per panel and pass. The main
+stream waited for it 46 times per frame.
+
+`44fcb42f3` solves mechanisms of two or more panels and up to 128 rows on
+one warp: the lower panels stage in shared memory (rows padded to 17
+words), the vector stays in registers, and each column step is a
+multiply, a shuffle of the pivot and a multiply-add, with the coefficients
+loaded before the shuffle. The plant solve takes 7.2-7.4 us; plant
+60.72-60.88 -> 62.46-62.76 FPS, scale 2 44.63 -> 45.76 FPS. Normwise
+backward errors are about 1e-9 for both solves; forward errors of
+ill-conditioned test factors are the same rounding level
+(`test_warp_multi_panel_solves`).
+
+Measured and not kept:
+
+| Change | Result |
+| --- | --- |
+| Same solve in Warp (dense-tree shared helpers, no native snippet) | 173 instead of 229 lines; 8.9 us alone, 12.4 us beside the subgroup solve; plant 61.80 FPS |
+| Per-panel partial sums (tile-solve error structure) | No accuracy gain, 7.4 -> 8.6 us |
+| Native staging per element (two shuffles per load) | 10 us of staging alone; one round of warp-uniform panels per group fixes it |
+| Warp version with a dynamic panel loop (smaller code) | 11.2 us |
+| Temporal gap pass on a 4x larger grid (one column per thread pass) | 13.3 -> 15.2 us per launch |
+
+A probe of one biased sweep (`globaltimer` per island) shows three chains
+of nearly equal length: the eight 15-color articulated packer islands
+(45-48 columns) end at 104-113 us, the merged pasteuriser bed at 105 us,
+and the next two islands (555-639 columns, 9-10 colors) at 82-93 us.
+Shortening only the hub columns therefore buys at most about 8 us per
+sweep; a per-row cut of the contact solve shortens all three chains.
+
 
 
 Contacts on non-tree `maximal_direct` mechanisms are solved through the exact
