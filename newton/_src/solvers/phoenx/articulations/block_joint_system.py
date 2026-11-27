@@ -789,9 +789,9 @@ class MixedJointSystem:
         """Whether the exact projection can replace the standalone copy average."""
         return bool(self.exact.enabled and self.exact.fuses_copy_average)
 
-    def resolve_bounded_drives(self, idt, *, use_bias):
+    def resolve_bounded_drives(self, idt, *, use_bias, after_change=None):
         if not self._joint_bound_scan:
-            self._forward("resolve_bounded_drives", idt, use_bias=use_bias)
+            self._forward("resolve_bounded_drives", idt, use_bias=use_bias, after_change=after_change)
             return
         # Like the scan flags of both parts, the shared flag is zero between scans.
         self.blocks._find_new_bounds(idt, self._any_bound_flag)
@@ -801,5 +801,7 @@ class MixedJointSystem:
             self._any_bound_flag.zero_()
             self.blocks._correct_new_bounds(idt, use_bias=use_bias)
             self.exact._correct_new_bounds(idt, use_bias=use_bias)
+            if after_change is not None:
+                after_change()
 
         wp.capture_if(self._any_bound_flag, on_true=correct, on_false=None)

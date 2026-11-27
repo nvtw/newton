@@ -2951,7 +2951,24 @@ class PhoenXWorld:
         """
         use_bias = self.temporal_iterations or iteration == self.max_solver_iterations - 1
         direct.solve(use_bias=use_bias)
-        direct.resolve_bounded_drives(idt, use_bias=use_bias)
+        if not self._owned_contacts_resolve_bounds():
+            direct.resolve_bounded_drives(idt, use_bias=use_bias)
+
+    def _owned_contacts_resolve_bounds(self) -> bool:
+        """Whether each temporal sweep's owned contact pass tests the motor caps.
+
+        That pass follows the sweep's projection and tests them against the
+        joint and contact loads together, so the projection skips its own test
+        (one scan and graph conditional less per sweep). A cap that changes
+        then also sweeps the owned contacts again; see :meth:`_solve_direct_contacts`.
+        """
+        response = self._direct_contact_response
+        return bool(
+            self.temporal_iterations
+            and self._temporal_owned_contacts()
+            and self._contact_input_active_this_step
+            and response.direct is not None
+        )
 
     def _solve_owned_contacts_after_sweeps(self) -> None:
         """Solve owned contacts once per substep unless the temporal sweeps solved them."""
@@ -5405,12 +5422,13 @@ class PhoenXWorld:
                 response.apply_bias_velocity(1.0)
 
         sweep()
-        if use_bias and direct is not None and direct.has_bounded_drives:
+        system = self._direct_equality_system
+        if use_bias and direct is not None and system.has_bounded_drives:
             # Owned contacts load their mechanisms only here, so test the motor
-            # caps against that load. A cap that changes removes or adds motor
-            # impulse the contacts already answered: sweep them again against the
-            # corrected motor before the substep integrates.
-            direct.resolve_bounded_drives(1.0 / self.substep_dt, use_bias=True, after_change=sweep)
+            # caps of all joints against that load. A cap that changes removes or
+            # adds motor impulse the contacts already answered: sweep them again
+            # against the corrected motor before the substep integrates.
+            system.resolve_bounded_drives(1.0 / self.substep_dt, use_bias=True, after_change=sweep)
 
     def _solve_maximal_articulated_contacts(self, *, use_bias: bool, refresh_mobility: bool) -> None:
         """Run one exact articulation-response contact correction sweep."""

@@ -399,6 +399,47 @@ class TestPhoenXAutoPerformancePolicy(unittest.TestCase):
                 response.compute.assert_called_once()
                 self.assertEqual(direct.compute_bias_velocity.call_count, int(use_bias))
 
+    def test_temporal_sweep_tests_motor_caps_once(self):
+        """A temporal sweep with owned contacts tests the caps of all joints once, after those contacts."""
+        response = SimpleNamespace(compute=Mock(), apply_bias_velocity=Mock(), direct=SimpleNamespace())
+        schedule = SimpleNamespace(solve=Mock())
+        system = SimpleNamespace(has_bounded_drives=True, solve=Mock(), resolve_bounded_drives=Mock())
+        for temporal, owned in ((True, True), (True, False), (False, True)):
+            with self.subTest(temporal=temporal, owned=owned):
+                system.solve.reset_mock()
+                system.resolve_bounded_drives.reset_mock()
+                world = SimpleNamespace(
+                    temporal_iterations=temporal,
+                    max_solver_iterations=4,
+                    _temporal_owned_contacts=lambda owned=owned: owned,
+                    _contact_input_active_this_step=True,
+                    _direct_contact_response=response,
+                )
+                world._owned_contacts_resolve_bounds = lambda world=world: PhoenXWorld._owned_contacts_resolve_bounds(
+                    world
+                )
+                PhoenXWorld._project_direct_after_sweep(world, system, 1, 240.0)
+                system.solve.assert_called_once()
+                self.assertEqual(system.resolve_bounded_drives.call_count, int(not (temporal and owned)))
+        # The owned contact pass tests the whole joint system, not only the exact mechanisms.
+        system.resolve_bounded_drives.reset_mock()
+        world = SimpleNamespace(
+            _contact_input_active_this_step=True,
+            _direct_contact_response=response,
+            _direct_contact_schedule=schedule,
+            _direct_equality_system=system,
+            _direct_contact_response_current=True,
+            _contact_container=object(),
+            bodies=object(),
+            solver_iterations=4,
+            _active_velocity_iterations=1,
+            substep_dt=1.0 / 240.0,
+            sor_boost=1.0,
+        )
+        PhoenXWorld._solve_direct_contacts(world, use_bias=True, refresh_mobility=False, iterations=1)
+        system.resolve_bounded_drives.assert_called_once()
+        self.assertIn("after_change", system.resolve_bounded_drives.call_args.kwargs)
+
     def test_contact_columns_use_shape_pair_capacity(self) -> None:
         """Size contact columns from shape pairs instead of contact points."""
         model = SimpleNamespace(shape_contact_pair_count=38_000)
