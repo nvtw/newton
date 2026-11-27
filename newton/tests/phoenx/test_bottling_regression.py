@@ -26,6 +26,8 @@ from newton.examples.phoenx._bottling_process import (
     add_filling_transport,
 )
 from newton.tests.phoenx.plant_scenes import (
+    BOTTLE_INERTIA,
+    BOTTLE_MASS,
     PlantPhysics,
     add_belt,
     add_plant_bottle,
@@ -233,14 +235,19 @@ class TestBottlingRegression(unittest.TestCase):
         self.assertLess(rocking, 1.0e-5, f"the pressed field keeps {1e3 * rocking:.3f} mJ of rocking energy")
 
     def test_pasteuriser_infeed_spin_is_bounded(self):
-        """A single file jams into the blocked pasteuriser infeed without spinning faster than it can roll.
+        """A single file jams into the blocked pasteuriser infeed without gaining energy.
 
-        The driven guides of the single file run past the stalled bottles of
-        the jam. A bottle rolling on a guide spins at most at the belt speed
-        over its radius, 16.5 rad/s; transients may exceed that briefly.
-        Bottles whose collider pieces met on planes at full radius touched
-        with vertical normals and spun at 40-120 rad/s until they left the
-        line.
+        The belts carry the file at most at belt speed and the bed stands
+        against its stop, so the bottles never hold more kinetic energy than
+        the file at belt speed. Where the file buckles against the jam its
+        bottles roll on each other like gears, and a bottle between two
+        neighbours that both move and spin turns faster than belt speed over
+        its radius (16.5 rad/s): the third bottle reaches 17.6 rad/s while
+        the file's energy falls. One bottle cannot spin faster than when all
+        of its translation at belt speed turns into spin, ``v sqrt(m / I)`` or
+        23.5 rad/s. Bottles whose collider pieces met on planes at full
+        radius touched with vertical normals and spun at 40-120 rad/s until
+        they left the line.
         """
         scene = _scene()
         builder = scene.builder
@@ -284,14 +291,24 @@ class TestBottlingRegression(unittest.TestCase):
         ]
         bottles = np.r_[bed, file]
         sim = _physics(scene)
-        spin, low = [], []
+        spin, low, energy = [], [], []
 
         def sample(_, q, qd):
             spin.append(float(np.linalg.norm(qd[bottles, 3:], axis=1).max()))
             low.append(float(q[bottles, 2].min()) - _DECK)
+            energy.append(kinetic_energy(qd[bottles]))
 
         sim.run(480, 2, sample)
-        self.assertLess(max(spin), 1.25 * _BELT_SPEED / 0.0305, f"a bottle spun at {max(spin):.1f} rad/s")
+        carried = 0.5 * BOTTLE_MASS * _BELT_SPEED**2 * len(file)
+        # The file peaks at 99 % of its belt-speed energy as it reaches belt speed.
+        self.assertLess(
+            max(energy), 1.02 * carried, f"the bottles hold {max(energy) / carried:.3f} of the belts' energy"
+        )
+        self.assertLess(
+            max(spin),
+            _BELT_SPEED * math.sqrt(BOTTLE_MASS / BOTTLE_INERTIA[2]),
+            f"a bottle spun at {max(spin):.1f} rad/s",
+        )
         self.assertGreater(min(low), -0.002)
 
     def test_cased_bottles_ride_a_conveyor(self):
