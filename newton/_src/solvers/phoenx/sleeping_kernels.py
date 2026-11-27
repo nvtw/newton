@@ -778,22 +778,33 @@ def _phoenx_collapse_sleeping_elements_kernel(
     num_bodies: wp.int32,
     elements: wp.array[ElementInteractionData],
 ):
-    """Compact writable, awake endpoints after building the sleeping islands.
+    """Compact the endpoints the solve writes after building the sleeping islands.
 
-    Kinematic endpoints connect islands for waking, but their read-only state
-    must not serialize independent contacts during graph coloring.
+    A row whose endpoints are all asleep or not dynamic is skipped by the solve
+    and keeps none. A row with an awake endpoint is solved and also writes its
+    sleeping endpoints, so it keeps them: two such rows sharing a sleeping body
+    must not share a color, or they race on its velocity. Kinematic endpoints
+    connect islands for waking, but their read-only state must not serialize
+    independent contacts during graph coloring.
     """
     tid = wp.tid()
     if tid >= num_active_constraints[0]:
         return
     el = elements[tid]
+    awake = wp.bool(False)
+    for j in range(MAX_BODIES):
+        b = el.bodies[j]
+        if b >= num_bodies or (
+            b >= 0 and bodies.island_root[b] < wp.int32(0) and bodies.motion_type[b] == MOTION_DYNAMIC
+        ):
+            awake = True
     count = wp.int32(0)
     for j in range(MAX_BODIES):
         b = el.bodies[j]
         if b < 0:
             continue
         if b < num_bodies:
-            if bodies.island_root[b] >= wp.int32(0) or bodies.motion_type[b] == MOTION_KINEMATIC:
+            if bodies.motion_type[b] == MOTION_KINEMATIC or (bodies.island_root[b] >= wp.int32(0) and not awake):
                 continue
         el.bodies[count] = b
         count += wp.int32(1)

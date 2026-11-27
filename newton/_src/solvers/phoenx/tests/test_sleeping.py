@@ -478,6 +478,49 @@ class TestSleepingPipeline(unittest.TestCase):
         )
         self.assertEqual(_is_sleeping(solver, 1), 1)
 
+    def test_sleeping_support_stays_colored_under_awake_loads(self) -> None:
+        """Keep a sleeping support in the coloring of each awake row that the solve applies to it.
+
+        The solve writes both endpoints of a row with one awake body, so two
+        such rows on one sleeping body must not share a color.
+        """
+        mb = newton.ModelBuilder()
+        mb.add_ground_plane()
+        slab = mb.add_body(xform=wp.transform(p=wp.vec3(0.0, 0.0, 0.02), q=wp.quat_identity()))
+        mb.add_shape_box(slab, hx=0.3, hy=0.3, hz=0.02, cfg=newton.ModelBuilder.ShapeConfig(density=1000.0, mu=0.6))
+        for x in (-0.15, 0.15):
+            box = mb.add_body(xform=wp.transform(p=wp.vec3(x, 0.0, 0.0905), q=wp.quat_identity()))
+            mb.add_shape_box(box, hx=0.05, hy=0.05, hz=0.05, cfg=newton.ModelBuilder.ShapeConfig(density=1000.0))
+        model = mb.finalize()
+        solver = newton.solvers.SolverPhoenX(model, substeps=4, solver_iterations=8, sleeping_velocity_threshold=0.05)
+        state_0, state_1 = model.state(), model.state()
+        control = model.control()
+        contacts = model.contacts()
+        dt = 1.0 / 60.0
+        state_0, state_1 = _run_frames(solver, state_0, state_1, control, contacts, model, n=30, dt=dt)
+
+        # The slab (slot 1) sleeps alone while both boxes resting on it are awake.
+        bodies = solver.world.bodies
+        bodies.island_root.assign([-1, 1, -1, -1])
+        bodies.frames_below_threshold.assign([0, 10, 0, 0])
+        bodies.velocity.zero_()
+        bodies.angular_velocity.zero_()
+
+        def step():
+            model.collide(state_0, contacts)
+            solver.step(state_0, state_1, control, contacts, dt)
+            state_0.assign(state_1)
+
+        with wp.ScopedCapture() as capture:
+            step()
+        wp.capture_launch(capture.graph)
+
+        self.assertEqual(_sleep_flags(solver).tolist(), [0, 1, 0, 0])
+        count = int(solver.world._num_active_constraints.numpy()[0])
+        rows = [set(row["bodies"].tolist()) - {-1} for row in solver.world._elements.numpy()[:count]]
+        for box in (2, 3):
+            self.assertIn({1, box}, rows, f"the row of box slot {box} on the sleeping slab dropped the slab: {rows}")
+
     def test_independent_stacks_sleep_independently(self) -> None:
         """Two separated boxes form two islands; both end up sleeping but
         each is its own island (max-velocity check applies per-island)."""
