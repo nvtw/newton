@@ -331,6 +331,25 @@ noise of this nondeterministic scene):
 | Bounded closest-point query for mesh surface velocities | 47.8 -> 42.0 us per pass | not run |
 | Active-prefix sorts in the owned contact schedule | fails: `capture_if` on the schedule's side stream | -- |
 
+Round 7 removed serial launches without changing the trajectory (state
+hashes equal on the mechanism and sleeping check scenes):
+
+- The sleeping pass reads island ids only as buckets of atomic
+  reductions, so its union-find stops at the component representatives
+  instead of canonicalizing them (compaction, a sort by lowest body, id
+  rewrite, a sort of bodies by island). Seven fills fold into one reset
+  kernel, the island root and forced activity share one launch, and the
+  propagate kernel tests the island score directly.
+- The CSR locality sort keys elements in id order, so the stable radix
+  sort reproduces the element-id tiebreak without its bits: 7 -> 4 passes.
+- Smaller folds: island-schedule fills into the root reset, island order
+  sort bounded by the color table (3 -> 2 passes), chunk counts in the
+  column snapshot, temporal jointed forces in the substep-entry kernel.
+
+The setup window (contact gather to first sweep) shrinks from 1,716 to
+1,548 us per collision pass and its main-stream launches from 174 to 127:
+58.19/58.74/58.82 -> 59.37/59.56/59.60/59.72 FPS (+1.7%).
+
 
 
 Contacts on non-tree `maximal_direct` mechanisms are solved through the exact
@@ -791,6 +810,28 @@ uv run python -m newton._src.solvers.phoenx.benchmarks.profile_phoenx
 Use `nsys` for phase attribution and privileged `ncu` counters for dependency,
 cache, and sector analysis. Record hardware, clocks, Warp/CUDA versions, command,
 scene, contacts, and capture mode with every retained result.
+
+Bottling plant, one captured window (nsys 2026.2.1):
+
+```bash
+env -u DEBUGINFOD_URLS PYTHONUNBUFFERED=1 timeout -k 30 1200 nsys profile --capture-range=cudaProfilerApi \
+  --cuda-graph-trace=node -f true -o plant python scripts/benchmark_phoenx_bottling_plant.py \
+  --viewer null --filling-room-physics --profile --window 600 660
+nsys stats -q --report cuda_gpu_trace --format csv -o plant plant.nsys-rep
+```
+
+nsys stops the application when the capture range ends (its default
+`stop-shutdown`), so the run prints no FPS line and exits with 143; that is
+the normal end. With Ubuntu's `DEBUGINFOD_URLS` set, nsys then downloads
+symbol files ("Press Ctrl-C to stop symbol files downloading") and can wait
+on that indefinitely: on 2026-11-27 one profile sat there for nine minutes
+holding the GPU lock with the application long gone, and its `.qdstrm` was
+unusable; the same commit and options finished in about two minutes without
+the variable. The round-6 hangs ("Connection to Agent lost", then an
+incomplete `.qdstrm`) showed the same pattern, and the code, options, disk
+and graph trace mode were ruled out by profiling the failing commit
+unchanged. The `timeout` bounds any remaining hang; check `ps` for
+leftover `nsys` processes before profiling.
 
 ## Detailed evidence and coverage
 
