@@ -318,7 +318,9 @@ def contact_column_container_zeros(
 @wp.func
 def contact_owned_elsewhere(c: ContactColumnContainer, cid: wp.int32) -> wp.bool:
     """Whether another solver than the colored sweeps solves column ``cid``."""
-    return c.articulation_owner[cid] >= wp.int32(0) or c.static_owner[cid] >= wp.int32(0)
+    # Both owners load unconditionally: this check heads the dependent load
+    # chain of every colored contact solve.
+    return wp.max(c.articulation_owner[cid], c.static_owner[cid]) >= wp.int32(0)
 
 
 # Column-local int/float read+write helpers, keyed by ``local_cid``.

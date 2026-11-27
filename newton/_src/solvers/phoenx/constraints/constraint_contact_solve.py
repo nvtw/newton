@@ -52,6 +52,7 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     contact_get_side1_slots_extra,
     contact_get_slot1,
     contact_get_slot2,
+    contact_owned_elsewhere,
     contact_pd_coefficients,
     contact_set_packed_body_properties,
     contact_side_witness,
@@ -1477,6 +1478,15 @@ def _make_contact_iterate_at(
     tangent_mobility_layout: bool = False,
 ):
     has_surface_target = has_soft_contact_pd or moving_surface_only
+    # Moving-surface sweeps skip four-row groups that cannot touch this substep.
+    separation_tests = (
+        moving_surface_only
+        and use_bias
+        and not has_mass_splitting
+        and not cloth_support
+        and not patch_friction
+        and cooperative_lanes == 1
+    )
     if tangent_mobility_layout and normal_first:
         raise ValueError("The normal-first projector requires inverse tangent effective masses")
     if tangent_mobility_layout:
@@ -1616,20 +1626,33 @@ def _make_contact_iterate_at(
             if cc.sweep_relaxation.shape[0] > contact_first:
                 row_sor = sor_boost * cc.sweep_relaxation[contact_first]
 
+        if wp.static(separation_tests):
+            # Load the bounds of the first three four-row groups together
+            # with the column: tested one by one, each load would add its
+            # latency to the column's chain.
+            group_bounds0 = wp.vec4f(0.0)
+            group_bounds1 = wp.vec4f(0.0)
+            group_bounds2 = wp.vec4f(0.0)
+            if cc.separation_bounds.shape[0] > 0 and contact_count > 0:
+                last = contact_first + contact_count - 1
+                group_bounds0 = cc.separation_bounds[contact_first]
+                group_bounds1 = cc.separation_bounds[wp.min(contact_first + 4, last)]
+                group_bounds2 = cc.separation_bounds[wp.min(contact_first + 8, last)]
+
         next_row = wp.int32(0)
         while next_row < contact_count:
             i = next_row
             next_row += 1
-            if wp.static(
-                moving_surface_only
-                and use_bias
-                and not has_mass_splitting
-                and not cloth_support
-                and not patch_friction
-                and cooperative_lanes == 1
-            ):
+            if wp.static(separation_tests):
                 if cc.separation_bounds.shape[0] > 0 and (i & 3) == 0 and row_sor >= 0.0:
-                    if _contact_group_is_separated(cc.separation_bounds[contact_first + i], v1, v2, w1, w2):
+                    bounds = group_bounds0
+                    if i == 4:
+                        bounds = group_bounds1
+                    elif i == 8:
+                        bounds = group_bounds2
+                    elif i > 8:
+                        bounds = cc.separation_bounds[contact_first + i]
+                    if _contact_group_is_separated(bounds, v1, v2, w1, w2):
                         next_row = i + 4
                         continue
             active_point = True
@@ -2760,12 +2783,16 @@ def _contact_iterate_guard_allows(
     num_bodies: wp.int32,
 ) -> wp.bool:
     # Contacts produced before a sleep transition can survive for one step.
-    if b1 >= 0 and b1 < num_bodies and b2 >= 0 and b2 < num_bodies:
-        frozen1 = (bodies.motion_type[b1] != MOTION_DYNAMIC) or (bodies.island_root[b1] >= wp.int32(0))
-        frozen2 = (bodies.motion_type[b2] != MOTION_DYNAMIC) or (bodies.island_root[b2] >= wp.int32(0))
-        if frozen1 and frozen2:
-            return False
-    return True
+    # The four body fields load together from clamped indices instead of in
+    # a chain of short-circuit branches; out-of-range endpoints ignore them.
+    last = wp.max(num_bodies - 1, 0)
+    i1 = wp.clamp(b1, 0, last)
+    i2 = wp.clamp(b2, 0, last)
+    # A body is frozen when it is not dynamic or its island sleeps (root >= 0).
+    frozen1 = wp.max(bodies.island_root[i1], wp.where(bodies.motion_type[i1] != MOTION_DYNAMIC, 0, -1))
+    frozen2 = wp.max(bodies.island_root[i2], wp.where(bodies.motion_type[i2] != MOTION_DYNAMIC, 0, -1))
+    in_range = b1 >= 0 and b1 < num_bodies and b2 >= 0 and b2 < num_bodies
+    return not (in_range and wp.min(frozen1, frozen2) >= 0)
 
 
 def _make_contact_iterate_entry(*, has_sleeping: bool, has_soft_contact_pd: bool, staged_body_properties: bool):
@@ -3193,8 +3220,19 @@ def contact_iterate_lean_no_sleep(
 
 @functools.cache
 def _make_contact_iterate_lean(
-    *, has_sleeping: bool, has_soft_contact_pd: bool, tangent_mobility_layout: bool, moving_surface_only: bool = False
+    *,
+    has_sleeping: bool,
+    has_soft_contact_pd: bool,
+    tangent_mobility_layout: bool,
+    moving_surface_only: bool = False,
+    check_owner: bool = False,
 ):
+    """Build a rigid column sweep that skips frozen columns behind one branch.
+
+    With ``check_owner`` the same branch also skips columns that another
+    solver owns, so the column fields and then the body fields of both tests
+    load as two batches instead of a chain.
+    """
     if moving_surface_only:
         options = {
             "cloth_support": False,
@@ -3235,9 +3273,14 @@ def _make_contact_iterate_lean(
     ):
         b1 = contact_get_body1(constraints, cid)
         b2 = contact_get_body2(constraints, cid)
+        owned = False
+        if wp.static(check_owner):
+            owned = contact_owned_elsewhere(constraints, cid)
+        allowed = True
         if wp.static(has_sleeping):
-            if not _contact_iterate_guard_allows(bodies, b1, b2, num_bodies):
-                return
+            allowed = _contact_iterate_guard_allows(bodies, b1, b2, num_bodies)
+        if owned or not allowed:
+            return
         body_pair = constraint_bodies_make(b1, b2)
         if use_bias:
             iterate_at(

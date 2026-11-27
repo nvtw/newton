@@ -3480,6 +3480,8 @@ def _make_singleworld_rigid_contact_dispatch_func(
             )
 
     else:
+        # The iterate function checks the column owner with its other loads.
+        owner_checked = False
         if patch_friction:
             iterate_func = (
                 contact_iterate_patch_lean_no_sleep
@@ -3506,7 +3508,9 @@ def _make_singleworld_rigid_contact_dispatch_func(
                 has_soft_contact_pd=False,
                 moving_surface_only=True,
                 tangent_mobility_layout=packed_contact_headers,
+                check_owner=not packed_contact_headers,
             )
+            owner_checked = not packed_contact_headers
         elif has_sleeping:
             if packed_contact_headers:
                 iterate_func = (
@@ -3544,8 +3548,9 @@ def _make_singleworld_rigid_contact_dispatch_func(
             solve_cid = local_cid
             if wp.static(packed_contact_headers):
                 solve_cid = colored_slot
-            if contact_owned_elsewhere(contact_cols, local_cid):
-                return
+            if wp.static(not owner_checked):
+                if contact_owned_elsewhere(contact_cols, local_cid):
+                    return
             iterate_func(
                 contact_cols,
                 solve_cid,
