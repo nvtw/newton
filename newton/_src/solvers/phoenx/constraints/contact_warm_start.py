@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import warp as wp
 
-from newton._src.geometry.active_prefix_sort import active_prefix_sort_levels, radix_sort_active_prefix
 from newton._src.solvers.phoenx.body import (
     BodyContainer,
     body_load_inv_inertia_sym6,
@@ -235,7 +234,6 @@ class ContactBodyEntries:
         self.keys = wp.zeros(2 * entry_capacity, dtype=wp.int32, device=device)
         self.values = wp.zeros(2 * entry_capacity, dtype=wp.int32, device=device)
         self.entry_count = wp.zeros(1, dtype=wp.int32, device=device)
-        self.prefix_flags = wp.zeros(active_prefix_sort_levels(entry_capacity), dtype=wp.int32, device=device)
         self.counts = wp.zeros(self.num_nodes + 1, dtype=wp.int32, device=device)
         self.starts = wp.zeros(self.num_nodes + 1, dtype=wp.int32, device=device)
         # Per-row warm-start impulse and torques, written by the row prepare.
@@ -272,7 +270,8 @@ class ContactBodyEntries:
             ],
             device=self.device,
         )
-        radix_sort_active_prefix(self.keys, self.values, self.entry_count, self.prefix_flags, end_bit=self.node_bits)
+        # Two passes over the whole capacity cost as much as choosing a prefix in the graph.
+        wp.utils.radix_sort_pairs(self.keys, self.values, self.keys.shape[0] // 2, end_bit=self.node_bits)
         self.counts.zero_()
         wp.launch(
             _contact_body_entry_counts_kernel,

@@ -170,16 +170,23 @@ class TestContactWarmStart(unittest.TestCase):
                                 np.testing.assert_array_equal(result.numpy(), reference.numpy())
 
     def test_canonical_entries_preserve_order_and_reset(self):
-        """Exclude owned and inactive columns while retaining endpoint order."""
-        with wp.ScopedDevice("cpu"):
-            columns, _, ids, active, entries = self._fixture()
-            starts, values = entries.starts.numpy(), entries.values.numpy()
-            expected = ([0], [2, 7], [4, 1], [3, 6], [5])
-            for body, codes in enumerate(expected):
-                np.testing.assert_array_equal(values[starts[body] : starts[body + 1]], codes)
-            active.zero_()
-            entries.build(columns, ids, active, 2, columns.articulation_owner, packed_columns=False)
-            np.testing.assert_array_equal(entries.starts.numpy(), 0)
+        """Exclude owned and inactive columns while retaining endpoint order, also in a captured graph."""
+        devices = ["cpu"] + (["cuda:0"] if wp.is_cuda_available() else [])
+        for device in devices:
+            with self.subTest(device=device), wp.ScopedDevice(device):
+                columns, _, ids, active, entries = self._fixture()
+                if wp.get_device().is_cuda:
+                    with wp.ScopedCapture() as capture:
+                        entries.build(columns, ids, active, 2, columns.articulation_owner, packed_columns=False)
+                    entries.starts.zero_()
+                    wp.capture_launch(capture.graph)
+                starts, values = entries.starts.numpy(), entries.values.numpy()
+                expected = ([0], [2, 7], [4, 1], [3, 6], [5])
+                for body, codes in enumerate(expected):
+                    np.testing.assert_array_equal(values[starts[body] : starts[body + 1]], codes)
+                active.zero_()
+                entries.build(columns, ids, active, 2, columns.articulation_owner, packed_columns=False)
+                np.testing.assert_array_equal(entries.starts.numpy(), 0)
 
     @unittest.skipUnless(wp.is_cuda_available(), "CUDA subgroup gather required")
     def test_cached_gather_matches_colored_impulses_cuda(self):
