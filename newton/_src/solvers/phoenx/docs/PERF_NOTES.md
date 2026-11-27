@@ -466,6 +466,63 @@ and the next two islands (555-639 columns, 9-10 colors) at 82-93 us.
 Shortening only the hub columns therefore buys at most about 8 us per
 sweep; a per-row cut of the contact solve shortens all three chains.
 
+## Bottling plant per-sweep chain (2026-11-28)
+
+Same factory and window. One steady temporal sweep (nsys, frame 30 of the
+captured window): the island sweep (108-116 us), then a serial chain on
+the main stream. Gaps are about 0.2 us unless listed.
+
+| Kernel (per sweep) | Before | After |
+| --- | ---: | ---: |
+| Joint-system flag fill | 0.5 | -- |
+| Equality right-hand side | 2.8 | 2.6 |
+| Subgroup solve beside the warp solve (8.5 us), then the join | 5.2 + 3.7 | 5.2 + 3.7 |
+| Impulse accumulate | 1.0 | in apply |
+| Equality apply | 2.9 | 3.2 |
+| Contact bias removal, memset node (3.3 us gap) | 1.1 + 3.3 | in solve |
+| Owned-contact solve | 11.3 | 16.0 |
+| Row reactions, bias restore | 4.6 + 0.8 | in solve |
+| Bounded-drive scans (block, exact) | 3.0 + 2.8 | 2.9 + 2.8 |
+| Graph conditional (handle kernel, node gap) | 0.7 + 4.9 | 0.7 + 5-6 |
+| Temporal gap pass | 14.9 | 12.2 (frame mean) |
+| Local-drive microstep snapshot | 4.6 | 4.7 |
+| Fused sweep entry | 12.2 | 11.7 |
+| Owned warm start: memset node (1.8 us gap), wrench, targets, push, row reactions | 1.8 + 1.7 + 1.8 + 3.2 + 3.7 | 2.2 + 1.8 + 3.5 |
+| Chain from sweep end to next sweep | 96 | 84 |
+
+Kept:
+
+| Commit | Change | Effect |
+| --- | --- | --- |
+| `0e4311193` | With one basis slot per mechanism body, each owned-contact solve block clears its slots, removes and restores the joint bias velocity on its bodies, and adds its rows' joint reactions; the warm-start wrench pass clears the slots and the push pass adds the row reactions; the equality apply pass accumulates the impulses | Plant 62.68/62.61 -> 63.95 FPS, scale 2 45.70 -> 46.40; bitwise (state hashes at frames 100-300); a fused-versus-separate test |
+| `004e574a4` | Four lanes per column instead of eight in the temporal gap pass and the relax lever rebase; biased equality solves read a constant activity flag instead of filling one | Gap 13.7 -> 12.2 us, rebase 14.0 -> 11.0 us per launch; plant 64.09, scale 2 46.76 FPS; bitwise |
+
+A false graph conditional costs about 6.5 us: a captured chain of two
+1024-thread kernels measures 1.66 us per pair and 8.2 us with a
+`wp.capture_if` (always false) between them (`set_conditional_if_handle`
+kernel plus about 5 us of node latency). The plant takes 46 per frame, 36 of
+them the bounded-drive test after each sweep's owned contacts; only a
+schedule change (testing caps less often) removes them.
+
+Measured and not kept:
+
+| Change | Result |
+| --- | --- |
+| Both bound scans in one launch (a struct per system, rows split by thread) | 5.4 us against 3.0 + 2.8: the two 35-array structs make the launch slow |
+| Bound scan over a compact list of bounded rows (2.5k of 36.6k) | 3.2 us per scan, unchanged: the scan is its own load chain |
+| Eight lanes per body for the local-drive warm start (bodies carry up to 72 rows) | Standalone pass 8.0 -> 3.7 us, fused entry 11.9 -> 11.6 us; about 0.2%, not bitwise |
+| Per-column warm-start sums (gap pass reduces each column, entry gathers one value per column) | Entry 11.6 -> 8.7 us, but the gap pass rose from 12.2 to 20.2 us (eight-lane: 13.7 -> 33.5) |
+| Owned-contact row reactions from slot wrenches staged in shared memory | Solve 14.6 -> 13.1 us, 0.3% for 30 duplicated lines |
+| Gap pass with two lanes per column; four lanes on a doubled grid | 16.5 us; 12.2 us (no change) |
+| Contact prepare with four lanes per column | 38.5 -> 39.6 us |
+
+Without the contact gather the sweep entry takes 6.0 instead of 11.6 us
+(timing only); the gather is a dependent chain (entry, column header, rows).
+The remaining chain is single-kernel latency: the warp solve (8.5 us), the
+owned-contact solve (16 us for about 10 manifolds, mostly its prologue,
+epilogue and launch), the conditional, and the gap pass, which moves
+about 100 bytes per row.
+
 
 
 Contacts on non-tree `maximal_direct` mechanisms are solved through the exact
