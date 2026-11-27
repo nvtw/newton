@@ -2776,7 +2776,9 @@ class PhoenXWorld:
         rows_per_column = 1
         column_stride = self.max_contact_columns
         if self.device.is_cuda:
-            rows_per_column = TEMPORAL_SURFACE_GAP_LANES if use_bounds else 8
+            # Most columns hold one to five rows: four lanes per column keep twice
+            # as many columns' loads in flight as eight.
+            rows_per_column = TEMPORAL_SURFACE_GAP_LANES if use_bounds else 4
             column_stride = min(column_stride, self.device.sm_count * 1024 // rows_per_column)
         if use_bounds:
             self._contact_container.separation_bounds = self._temporal_separation_bounds
@@ -5265,8 +5267,9 @@ class PhoenXWorld:
         fused_rows = reduced is not None and reduced.fused_substep is not None
         if self._contact_input_active_this_step and (rebase_levers or advance_gap) and not fused_rows:
             # Color-packed rigid manifolds are short. A lane per column avoids
-            # loading both bodies' state once for every mostly idle row lane.
-            rows_per_column = 1 if self._colored_contact_headers else (8 if self.device.is_cuda else 1)
+            # loading both bodies' state once for every mostly idle row lane;
+            # other columns hold one to five rows, which four lanes cover.
+            rows_per_column = 1 if self._colored_contact_headers else (4 if self.device.is_cuda else 1)
             column_stride = self._constraint_capacity if self._colored_contact_headers else self.max_contact_columns
             if self.device.is_cuda:
                 # A bounded grid strides over live columns rather than visiting unused capacity.

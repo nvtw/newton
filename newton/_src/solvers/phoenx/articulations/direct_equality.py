@@ -3445,7 +3445,10 @@ class DirectEqualitySystem:
                 device=self.model.device,
             )
             return
-        self.solve_active.fill_(int(use_bias))
+        # Biased right-hand sides are always solved; only relaxation passes test their size.
+        flag = self._always_active if use_bias else self.solve_active
+        if not use_bias:
+            self.solve_active.fill_(0)
         wp.launch(
             _build_direct_equality_rhs_kernel,
             dim=len(self.topology.row_joint),
@@ -3466,7 +3469,7 @@ class DirectEqualitySystem:
                 wp.bool(use_bias),
                 self.row_scale,
                 self.rhs,
-                self.solve_active,
+                flag,
                 self.row_limit_state,
             ],
             device=self.model.device,
@@ -3476,13 +3479,13 @@ class DirectEqualitySystem:
         # side vanished; that replaces a graph conditional where the factor's
         # solve kernels support the flag.
         gate = self.solver.supports_active_flag
-        active = self.solve_active if gate else self._always_active
+        active = flag if gate else self._always_active
 
         def solve_active_system() -> None:
             self.solver.solve(self.rhs, self.delta, refine=refine, active=active if gate else None)
             self._apply_delta(active)
 
-        if gate:
+        if gate or use_bias:
             solve_active_system()
         else:
             wp.capture_if(self.solve_active, on_true=solve_active_system)

@@ -88,7 +88,8 @@ class TestDirectFusedProjection(unittest.TestCase):
                     exact._fused_relax_tolerance = -1.0
                     exact.solve(use_bias=use_bias)
                     wp.synchronize()
-                    if not fused:
+                    if not fused and not use_bias:
+                        # Biased solves always run; relaxation tests its residual.
                         self.assertEqual(int(exact.solve_active.numpy()[0]), 1)
                     results.append([array.numpy().copy() for array in state])
                 for name, reference, candidate in zip(
