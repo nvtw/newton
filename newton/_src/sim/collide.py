@@ -4747,6 +4747,7 @@ class CollisionPipeline:
                 self.broad_phase_pair_count,
                 contacts.contact_counters.shape[0],
                 self._empty_mesh_recovery,
+                None,  # shape_subset: always update the whole rigid prefix
             ],
             outputs=[
                 self.narrow_phase.shape_aabb_lower,
