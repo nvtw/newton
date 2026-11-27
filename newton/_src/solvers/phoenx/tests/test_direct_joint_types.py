@@ -512,6 +512,47 @@ class TestDirectJointTypes(unittest.TestCase):
                 self.assertTrue(np.isfinite(poses).all())
                 self.assertGreater(float(poses[:, 2].min()), 0.09)
 
+    def test_owned_contact_warm_start_strides_over_every_manifold(self) -> None:
+        """Warm-start passes with fewer threads than manifolds reproduce the trajectory bit for bit."""
+        trajectories = []
+        for threads in (None, 1):
+            model, _ = _build_two_grounded_mechanisms()
+            solver = newton.solvers.SolverPhoenX(
+                model,
+                joint_mode="maximal_pgs",
+                step_layout="single_world",
+                temporal_iterations=True,
+                direct_joint_mask=np.ones(model.joint_count, dtype=bool),
+                direct_contact_mask=np.array([True, True, True, True]),
+                substeps=2,
+                solver_iterations=4,
+            )
+            schedule = solver._direct_contact_schedule
+            if threads is not None:
+                schedule.warm_start_threads = threads
+            state_0, state_1 = model.state(), model.state()
+            newton.eval_fk(model, model.joint_q, model.joint_qd, state_0)
+            control = model.control()
+            pipeline = model._collision_pipeline
+            contacts = pipeline.contacts()
+
+            def step(
+                state_0=state_0, state_1=state_1, solver=solver, control=control, contacts=contacts, pipeline=pipeline
+            ):
+                pipeline.collide(state_0, contacts)
+                solver.step(state_0, state_1, control, contacts, 1.0 / 120.0)
+                state_0.assign(state_1)
+
+            step()
+            with wp.ScopedCapture(model.device) as capture:
+                step()
+            for _ in range(30):
+                wp.capture_launch(capture.graph)
+            self.assertGreater(int(schedule.section_end.numpy()[-1]), 1)
+            trajectories.append((state_0.body_q.numpy(), state_0.body_qd.numpy()))
+        np.testing.assert_array_equal(trajectories[0][0], trajectories[1][0])
+        np.testing.assert_array_equal(trajectories[0][1], trajectories[1][1])
+
     def test_batched_transform_composition_matches_scalar(self) -> None:
         """Match batched setup transforms to the scalar composition contract."""
         rng = np.random.default_rng(20260804)

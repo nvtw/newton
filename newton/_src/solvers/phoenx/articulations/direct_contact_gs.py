@@ -564,34 +564,33 @@ def _warm_start_direct_contact_wrench_kernel(
     section_end: wp.array[wp.int32],
     records: wp.array[_record_t],
     endpoint_wrench: wp.array[wp.spatial_vector],
+    threads: wp.int32,
 ):
-    """Cached manifold impulses as endpoint wrenches."""
-    scheduled = wp.tid()
-    if scheduled >= section_end[section_end.shape[0] - 1]:
-        return
-    record = records[scheduled]
-    first = record[_RECORD_FIRST]
-    wrench0 = wp.spatial_vectorf(0.0)
-    wrench1 = wp.spatial_vectorf(0.0)
-    for offset in range(record[_RECORD_COUNT]):
-        contact = first + offset
-        normal = cc_get_normal(contacts, contact)
-        tangent = cc_get_tangent1(contacts, contact)
-        normal_lambda = cc_get_normal_lambda(contacts, contact)
-        if response.mobility[0, contact] <= wp.float32(1.0e-12):
-            normal_lambda = wp.float32(0.0)
-            cc_set_normal_lambda(contacts, contact, normal_lambda)
-        impulse = (
-            normal_lambda * normal
-            + cc_get_tangent1_lambda(contacts, contact) * tangent
-            + cc_get_tangent2_lambda(contacts, contact) * wp.cross(normal, tangent)
-        )
-        r0 = cc_get_r0(contacts, contact)
-        r1 = cc_get_r1(contacts, contact)
-        wrench0 += _make_spatial_wrench(-impulse, -wp.cross(r0, impulse))
-        wrench1 += _make_spatial_wrench(impulse, wp.cross(r1, impulse))
-    endpoint_wrench[wp.int32(2) * scheduled] = wrench0
-    endpoint_wrench[wp.int32(2) * scheduled + wp.int32(1)] = wrench1
+    """Cached manifold impulses as endpoint wrenches, ``threads`` lanes striding over the schedule."""
+    for scheduled in range(wp.tid(), section_end[section_end.shape[0] - 1], threads):
+        record = records[scheduled]
+        first = record[_RECORD_FIRST]
+        wrench0 = wp.spatial_vectorf(0.0)
+        wrench1 = wp.spatial_vectorf(0.0)
+        for offset in range(record[_RECORD_COUNT]):
+            contact = first + offset
+            normal = cc_get_normal(contacts, contact)
+            tangent = cc_get_tangent1(contacts, contact)
+            normal_lambda = cc_get_normal_lambda(contacts, contact)
+            if response.mobility[0, contact] <= wp.float32(1.0e-12):
+                normal_lambda = wp.float32(0.0)
+                cc_set_normal_lambda(contacts, contact, normal_lambda)
+            impulse = (
+                normal_lambda * normal
+                + cc_get_tangent1_lambda(contacts, contact) * tangent
+                + cc_get_tangent2_lambda(contacts, contact) * wp.cross(normal, tangent)
+            )
+            r0 = cc_get_r0(contacts, contact)
+            r1 = cc_get_r1(contacts, contact)
+            wrench0 += _make_spatial_wrench(-impulse, -wp.cross(r0, impulse))
+            wrench1 += _make_spatial_wrench(impulse, wp.cross(r1, impulse))
+        endpoint_wrench[wp.int32(2) * scheduled] = wrench0
+        endpoint_wrench[wp.int32(2) * scheduled + wp.int32(1)] = wrench1
 
 
 @wp.kernel(enable_backward=False)
@@ -603,24 +602,22 @@ def _warm_start_direct_contact_targets_kernel(
     entry_count: wp.array[wp.int32],
     endpoint_wrench: wp.array[wp.spatial_vector],
     basis_wrench: wp.array[wp.spatial_vector],
+    threads: wp.int32,
 ):
     """Sum each slot's or free body's endpoint wrenches in schedule order."""
-    index = wp.tid()
     count = entry_count[0]
-    if index >= count or keys[index] == wp.int64(_INT64_MAX):
-        return
-    target = keys[index]
-    if index > 0 and keys[index - 1] == target:
-        return
-    wrench = wp.spatial_vectorf(0.0)
-    cursor = index
-    while cursor < count and keys[cursor] == target:
-        wrench += endpoint_wrench[entries[cursor]]
-        cursor += 1
-    if target < wp.int64(slot_capacity):
-        basis_wrench[wp.int32(target)] = wrench
-    else:
-        _apply_raw_contact_wrench(bodies, wp.int32(target - wp.int64(slot_capacity)), wrench)
+    for index in range(wp.tid(), count, threads):
+        target = keys[index]
+        if target != wp.int64(_INT64_MAX) and (index == 0 or keys[index - 1] != target):
+            wrench = wp.spatial_vectorf(0.0)
+            cursor = index
+            while cursor < count and keys[cursor] == target:
+                wrench += endpoint_wrench[entries[cursor]]
+                cursor += 1
+            if target < wp.int64(slot_capacity):
+                basis_wrench[wp.int32(target)] = wrench
+            else:
+                _apply_raw_contact_wrench(bodies, wp.int32(target - wp.int64(slot_capacity)), wrench)
 
 
 @wp.kernel(enable_backward=False)
@@ -969,6 +966,9 @@ class DirectContactRunSchedule:
             response.body_capacity, response.max_mechanism_bodies, is_cuda=device.is_cuda
         )
         self._lanes = _component_lanes(response.max_mechanism_bodies, device.is_cuda)
+        #: Threads of the warm-start passes, which stride over the scheduled manifolds.
+        #: Few are in use; a launch over the whole capacity costs more than their work.
+        self.warm_start_threads = min(self.capacity, 1 << 15)
         # Sort keys hold the component and, when they fit, the ordered body pair.
         self._component_bits = self.section_end.size.bit_length()
         self._body_bits = max(1, (response.direct.bodies.position.shape[0] - 1).bit_length())
@@ -990,13 +990,20 @@ class DirectContactRunSchedule:
         self.basis_wrench.zero_()
         wp.launch(
             _warm_start_direct_contact_wrench_kernel,
-            dim=self.capacity,
-            inputs=[response.data, contacts, self.section_end, self.records, self.endpoint_wrench],
+            dim=self.warm_start_threads,
+            inputs=[
+                response.data,
+                contacts,
+                self.section_end,
+                self.records,
+                self.endpoint_wrench,
+                wp.int32(self.warm_start_threads),
+            ],
             device=device,
         )
         wp.launch(
             _warm_start_direct_contact_targets_kernel,
-            dim=2 * self.capacity,
+            dim=self.warm_start_threads,
             inputs=[
                 bodies,
                 wp.int32(self.basis_wrench.shape[0]),
@@ -1005,6 +1012,7 @@ class DirectContactRunSchedule:
                 self.endpoint_count,
                 self.endpoint_wrench,
                 self.basis_wrench,
+                wp.int32(self.warm_start_threads),
             ],
             device=device,
         )
