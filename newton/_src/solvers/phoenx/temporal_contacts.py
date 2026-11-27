@@ -59,6 +59,7 @@ from newton._src.solvers.phoenx.constraints.contact_restitution import accumulat
 from newton._src.solvers.phoenx.constraints.contact_warm_start import (
     apply_gathered_contact_impulse,
     gathered_contact_impulse,
+    store_row_warm_start,
 )
 from newton._src.solvers.phoenx.islands.island_builder import _find, _pack_entry, _unite
 
@@ -166,12 +167,17 @@ def temporal_contact_gap_kernel(
     native_dt: float,
     sweep: int,
     sweeps: int,
+    warm_start_linear: wp.array[wp.vec3f],
+    warm_start_angular0: wp.array[wp.vec3f],
+    warm_start_angular1: wp.array[wp.vec3f],
 ):
     """Advance each ordinary contact row's gap by ``advance_dt`` of relative normal motion; refresh its bias.
 
     ``idt`` and ``bias_rate`` belong to the contact substep: a separated row admits
     the approach that closes its gap within one contact substep. Authored material
-    coefficients use that same timestep and the updated penetration depth.
+    coefficients use that same timestep and the updated penetration depth. Non-empty
+    ``warm_start_*`` arrays also receive the rows' impulses for the next sweep's
+    warm start (see :func:`store_row_warm_start`), which the gap update leaves unchanged.
     """
     previous_start = native_dt * float(wp.max(0, sweep - 1)) / float(sweeps)
     first_column, lane = wp.tid()
@@ -186,7 +192,10 @@ def temporal_contact_gap_kernel(
         w2 = bodies.angular_velocity[b2]
         first = contact_get_contact_first(columns, cid)
         count = contact_get_contact_count(columns, cid)
+        refresh = warm_start_linear.shape[0] > 0 and columns.static_owner[cid] < wp.int32(0)
         for k in range(first + lane, first + count, rows_per_column):
+            if refresh:
+                store_row_warm_start(cc, k, warm_start_linear, warm_start_angular0, warm_start_angular1)
             gap, _bias = _advance_temporal_gap(cc, k, v1, w1, v2, w2, advance_dt, idt, bias_rate)
 
             # Contact views and uncolored rows share canonical ordering, also

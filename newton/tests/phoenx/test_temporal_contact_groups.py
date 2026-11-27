@@ -18,10 +18,12 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
 )
 from newton._src.solvers.phoenx.constraints.constraint_contact_solve import _contact_group_is_separated
 from newton._src.solvers.phoenx.constraints.contact_container import (
+    ContactContainer,
     contact_container_zeros,
     contact_tile_rows_numpy,
     pack_contact_tiles,
 )
+from newton._src.solvers.phoenx.constraints.contact_warm_start import store_row_warm_start
 from newton._src.solvers.phoenx.temporal_contacts import (
     TEMPORAL_SURFACE_GAP_LANES,
     temporal_contact_gap_kernel,
@@ -35,6 +37,13 @@ def _check_bound(
 ):
     i = wp.tid()
     result[i] = wp.int32(_contact_group_is_separated(bounds[i], linear[i], linear[i], wp.vec3f(0.0), angular[i]))
+
+
+@wp.kernel
+def _store_rows(
+    cc: ContactContainer, linear: wp.array[wp.vec3f], angular0: wp.array[wp.vec3f], angular1: wp.array[wp.vec3f]
+):
+    store_row_warm_start(cc, wp.tid(), linear, angular0, angular1)
 
 
 class TestTemporalContactGroups(unittest.TestCase):
@@ -80,12 +89,21 @@ class TestTemporalContactGroups(unittest.TestCase):
             count = wp.array([3], dtype=int)
             inputs = [columns, cc, bodies, count, columns.articulation_owner]
             cc.gap.assign(gaps)
-            wp.launch(
-                temporal_contact_gap_kernel,
-                (2, 8),
-                inputs=[*inputs, 8, 0.001, 1000.0, 5.0, 2, ContactViews(), None, 0.002, 1, 2],
-            )
+            empty = wp.empty(0, dtype=wp.vec3f)
+            gap_inputs = [*inputs, 8, 0.001, 1000.0, 5.0, 2, ContactViews(), None, 0.002, 1, 2]
+            wp.launch(temporal_contact_gap_kernel, (2, 8), inputs=[*gap_inputs, empty, empty, empty])
             reference_gaps, reference_biases = cc.gap.numpy(), contact_tile_rows_numpy(cc, "derived")[3].copy()
+            # The same pass can store the rows' warm-start impulses; the gap update keeps them.
+            columns.static_owner.assign(np.array([-1, 0, -1], dtype=np.int32))
+            stored = [wp.full(41, wp.vec3(-7.0), dtype=wp.vec3f) for _ in range(3)]
+            expected = [wp.full(41, wp.vec3(-7.0), dtype=wp.vec3f) for _ in range(3)]
+            wp.launch(_store_rows, 37, inputs=[cc, *expected])
+            cc.gap.assign(gaps)
+            wp.launch(temporal_contact_gap_kernel, (2, 8), inputs=[*gap_inputs, *stored])
+            np.testing.assert_array_equal(cc.gap.numpy(), reference_gaps)
+            for result, reference in zip(stored, expected, strict=True):
+                # Column 0 is refreshed; column 1 is static-owned and column 2 articulation-owned.
+                np.testing.assert_array_equal(result.numpy(), reference.numpy())
             cc.gap.assign(gaps)
             cc.derived.zero_()
             cc.separation_bounds = wp.zeros(41, dtype=wp.vec4f)

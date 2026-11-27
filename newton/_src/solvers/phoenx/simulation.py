@@ -767,6 +767,7 @@ class PhoenXWorld:
         self._temporal_sweep_index = 0
         #: Velocity-sum reset flag of a sweep close deferred into the next sweep's fused entry.
         self._temporal_deferred_accumulate = None
+        self._temporal_rows_refreshed = False
         self._temporal_record_contacts = None
         self._temporal_joint_enabled = None
         if contact_hertz is not None and not (math.isfinite(contact_hertz) and contact_hertz > 0.0):
@@ -2768,8 +2769,12 @@ class PhoenXWorld:
     def _temporal_contacts_active(self) -> bool:
         return bool(self.temporal_iterations and self.max_contact_columns > 0 and self._contact_input_active_this_step)
 
-    def _temporal_contact_rows(self, advance_dt: float) -> None:
-        """Advance contact gaps by ``advance_dt`` of the current motion and refresh the sweep biases."""
+    def _temporal_contact_rows(self, advance_dt: float, *, refresh_warm_start: bool = False) -> bool:
+        """Advance contact gaps by ``advance_dt`` of the current motion and refresh the sweep biases.
+
+        With ``refresh_warm_start`` the same pass stores the rows' impulses for the
+        fused sweep entry; returns whether it did.
+        """
         _, _, bias_rate, sweep_idt = self._temporal_contact_coefficients
         use_bounds = self._moving_surface_only and self._temporal_separation_bounds is not None
         rows_per_column = 1
@@ -2795,7 +2800,9 @@ class PhoenXWorld:
                 ],
                 device=self.device,
             )
-            return
+            return False
+        entries = self._temporal_contact_body_entries if refresh_warm_start else None
+        empty = wp.empty(0, dtype=wp.vec3f, device=self.device)
         wp.launch(
             temporal_contact_gap_kernel,
             dim=(column_stride, rows_per_column),
@@ -2815,9 +2822,13 @@ class PhoenXWorld:
                 self.substep_dt,
                 self._temporal_sweep_index + int(advance_dt > 0.0),
                 self.solver_iterations,
+                entries.row_linear if entries is not None else empty,
+                entries.row_angular0 if entries is not None else empty,
+                entries.row_angular1 if entries is not None else empty,
             ],
             device=self.device,
         )
+        return entries is not None
 
     def _temporal_sweep_relaxation(self) -> None:
         """Relax the sweep update of strongly coupled contact columns; see :func:`temporal_sweep_relaxation_kernel`."""
@@ -3024,12 +3035,14 @@ class PhoenXWorld:
         ``begin_sweep`` resets the colour cursor.
         """
         entries = self._temporal_contact_body_entries
-        entries.refresh_cached_warm_start(
-            self._contact_cols,
-            self._contact_container,
-            *self._colored_elements,
-            self._contact_offset,
-        )
+        if not self._temporal_rows_refreshed:
+            entries.refresh_cached_warm_start(
+                self._contact_cols,
+                self._contact_container,
+                *self._colored_elements,
+                self._contact_offset,
+            )
+        self._temporal_rows_refreshed = False
         apply_forces = self.num_bodies > 0 and self._has_maximal_dynamic_bodies
         local = self._temporal_local_joints
         if local is not None:
@@ -3112,7 +3125,11 @@ class PhoenXWorld:
         if self._temporal_contacts_active():
             # Every contact substep advances the gaps, the last included: they then follow
             # the substep's integrated motion into the rows a following substep reuses.
-            self._temporal_contact_rows(float(self.substep_dt) / self.solver_iterations)
+            # A following fused sweep entry replays these rows' impulses.
+            self._temporal_rows_refreshed = self._temporal_contact_rows(
+                float(self.substep_dt) / self.solver_iterations,
+                refresh_warm_start=not last and self._temporal_fused_sweep_entry(),
+            )
             if last:
                 self._contact_container.separation_bounds = None
                 self._apply_contact_coefficients(self._temporal_contact_coefficients[0])
