@@ -348,6 +348,66 @@ class TestPhoenXDeterminism(unittest.TestCase):
             frames=60,
         )
 
+    def test_bouncing_boxes_with_sleeping(self) -> None:
+        """Replay a captured landing of boxes with restitution and sleeping twice, bit-identically.
+
+        A grid of boxes lands at once on a free slab, so the slab sums the
+        restitution pose corrections of many contacts in one substep. Each
+        run rebuilds the model and solver; the replay must reproduce the body
+        state and sleep labels exactly.
+        """
+        first = _run_bouncing_boxes()
+        second = _run_bouncing_boxes()
+        self.assertGreater(int((first["island_root"] >= 0).sum()), 0, "no island fell asleep")
+        for field, value in first.items():
+            np.testing.assert_array_equal(value, second[field], err_msg=f"bouncing boxes: {field} diverged")
+
+
+def _run_bouncing_boxes(frames: int = 180) -> dict[str, np.ndarray]:
+    """Drop a grid of boxes with restitution onto a free slab; return the final body state and sleep labels."""
+    builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+    builder.add_ground_plane()
+    cfg = newton.ModelBuilder.ShapeConfig(density=500.0, mu=0.5, restitution=0.4)
+    slab = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.02), wp.quat_identity()))
+    builder.add_shape_box(slab, hx=0.6, hy=0.6, hz=0.02, cfg=cfg)
+    for i in range(8):
+        for j in range(8):
+            position = wp.vec3(-0.525 + 0.15 * i, -0.525 + 0.15 * j, 0.2)
+            body = builder.add_body(xform=wp.transform(position, wp.quat_identity()))
+            builder.add_shape_box(body, hx=0.04, hy=0.04, hz=0.04, cfg=cfg)
+    model = builder.finalize()
+    solver = newton.solvers.SolverPhoenX(
+        model,
+        step_layout="single_world",
+        temporal_iterations=True,
+        substeps=3,
+        solver_iterations=4,
+        velocity_iterations=1,
+        sleeping_velocity_threshold=0.01,
+        rigid_contact_max=8192,
+    )
+    state_0, state_1 = model.state(), model.state()
+    control = model.control()
+    pipeline = model._collision_pipeline
+    contacts = pipeline.contacts()
+    dt = 1.0 / 120.0
+
+    def step():
+        pipeline.collide(state_0, contacts)
+        solver.step(state_0, state_1, control, contacts, dt)
+        state_0.assign(state_1)
+
+    step()
+    with wp.ScopedCapture() as capture:
+        step()
+    for _ in range(frames):
+        wp.capture_launch(capture.graph)
+    return {
+        "body_q": state_0.body_q.numpy(),
+        "body_qd": state_0.body_qd.numpy(),
+        "island_root": solver.world.bodies.island_root.numpy(),
+    }
+
 
 if __name__ == "__main__":
     wp.init()

@@ -114,12 +114,32 @@ def prepare_restitution_targets(
     targets[k] = wp.vec2f(-gap / dt, 0.0)
 
 
+#: Fixed-point scale of the summed pose corrections [1/m, 1/rad]: 2^-40 resolution, 8e6 range.
+_CORRECTION_SCALE = wp.constant(wp.float64(2.0**40))
+
+
+@wp.func
+def _add_fixed_point(corrections: wp.array2d[wp.int64], body: int, first: int, value: wp.vec3f):
+    """Accumulate ``value`` in fixed point, so the sum is independent of the arrival order."""
+    for axis in range(3):
+        wp.atomic_add(corrections, body, first + axis, wp.int64(wp.round(wp.float64(value[axis]) * _CORRECTION_SCALE)))
+
+
+@wp.func
+def _fixed_point_vec3(corrections: wp.array2d[wp.int64], body: int, first: int) -> wp.vec3f:
+    return wp.vec3f(
+        wp.float32(wp.float64(corrections[body, first]) / _CORRECTION_SCALE),
+        wp.float32(wp.float64(corrections[body, first + 1]) / _CORRECTION_SCALE),
+        wp.float32(wp.float64(corrections[body, first + 2]) / _CORRECTION_SCALE),
+    )
+
+
 @wp.func
 def accumulate_impact_delay(
     contacts: ContactViews,
     bodies: BodyContainer,
     points: ContactContainer,
-    corrections: wp.array[wp.spatial_vector],
+    corrections: wp.array2d[wp.int64],
     k: int,
     arrival: float,
 ):
@@ -138,7 +158,8 @@ def accumulate_impact_delay(
             arm = wp.quat_rotate(bodies.orientation[body], point - bodies.body_com[body])
             linear = bodies.inverse_mass[body] * correction
             angular = mat33_from_sym6(bodies.inverse_inertia_world[body]) * wp.cross(arm, correction)
-            wp.atomic_add(corrections, body, wp.spatial_vector(linear, angular))
+            _add_fixed_point(corrections, body, 0, linear)
+            _add_fixed_point(corrections, body, 3, angular)
 
 
 @wp.kernel(enable_backward=False)
@@ -147,7 +168,7 @@ def accumulate_impact_pose_corrections(
     bodies: BodyContainer,
     points: ContactContainer,
     point_constraint: wp.array[wp.int32],
-    corrections: wp.array[wp.spatial_vector],
+    corrections: wp.array2d[wp.int64],
     owner: wp.array[int],
     offset: int,
     temporal: bool,
@@ -171,14 +192,14 @@ def accumulate_impact_pose_corrections(
 
 
 @wp.kernel(enable_backward=False)
-def apply_impact_pose_corrections(bodies: BodyContainer, corrections: wp.array[wp.spatial_vector]):
+def apply_impact_pose_corrections(bodies: BodyContainer, corrections: wp.array2d[wp.int64]):
     body = wp.tid()
-    delta = corrections[body]
-    linear = wp.spatial_top(delta)
-    angular = wp.spatial_bottom(delta)
+    linear = _fixed_point_vec3(corrections, body, 0)
+    angular = _fixed_point_vec3(corrections, body, 3)
     if wp.length_sq(linear) == 0.0 and wp.length_sq(angular) == 0.0:
         return
-    corrections[body] = wp.spatial_vector()
+    for axis in range(6):
+        corrections[body, axis] = wp.int64(0)
     bodies.position[body] += linear
     if wp.length_sq(angular) > 0.0:
         momentum = wp.inverse(mat33_from_sym6(bodies.inverse_inertia_world[body])) * bodies.angular_velocity[body]

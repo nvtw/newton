@@ -163,7 +163,7 @@ def temporal_contact_gap_kernel(
     bias_rate: wp.float32,
     column_stride: wp.int32,
     views: ContactViews,
-    correction: wp.array[wp.spatial_vector],
+    correction: wp.array2d[wp.int64],
     native_dt: float,
     sweep: int,
     sweeps: int,

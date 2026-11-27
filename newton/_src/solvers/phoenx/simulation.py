@@ -1768,7 +1768,7 @@ class PhoenXWorld:
             has_restitution = materials is not None and np.any(materials.numpy()["restitution"])
         if has_restitution and shape_material is not None:
             self._restitution_targets = wp.empty(self.rigid_contact_max, dtype=wp.vec2f, device=self.device)
-            self._restitution_pose_corrections = wp.zeros(self.num_bodies, dtype=wp.spatial_vector, device=self.device)
+            self._restitution_pose_corrections = wp.zeros((self.num_bodies, 6), dtype=wp.int64, device=self.device)
         else:
             self._restitution_targets = None
             self._restitution_pose_corrections = None
