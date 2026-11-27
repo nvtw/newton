@@ -1,0 +1,1 @@
+Return a handle from PhoenX `add_joint` and assign the joints added in one step to rows in descriptor order, so runtime joints added from parallel threads simulate deterministically. Use `joint_index()` for the model joint index, for example to address drive targets.

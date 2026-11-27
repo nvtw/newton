@@ -61,6 +61,7 @@ __all__ = [
     "is_articulation_active",
     "is_body_active",
     "joint_desc",
+    "joint_index",
     "joint_wrench",
     "remove_articulation",
     "remove_body",
@@ -306,6 +307,8 @@ class DynamicsData:
     staged_shapes: wp.array[ShapeDesc]
     staged_shape_body: wp.array[wp.int32]
     staged_joints: wp.array[JointDesc]
+    #: Reserved joint row of each joint handle slot; see :func:`joint_index`.
+    joint_row: wp.array[wp.int32]
 
     #: Constraint column of each model joint and the wrench it applied; see :func:`joint_wrench`.
     joint_cid: wp.array[wp.int32]
@@ -477,10 +480,13 @@ def _axes_valid(axes: wp.mat33, count: wp.int32) -> wp.bool:
 
 @wp.func
 def add_joint(dyn: DynamicsData, desc: JointDesc) -> wp.int32:
-    """Add a joint; returns its model joint index, or ``-1`` when rows are used up or ``desc`` is invalid.
+    """Add a joint; returns its handle, or ``-1`` when rows are used up or ``desc`` is invalid.
 
-    The joint is solved from the next :meth:`~newton.solvers.SolverPhoenX.step` on and requires ``joint_mode="maximal_pgs"``. Drive
-    targets come from :class:`~newton.Control` at the joint's rows. Effort limits are not enforced.
+    The joint is solved from the next :meth:`~newton.solvers.SolverPhoenX.step` on and requires ``joint_mode="maximal_pgs"``. Pass
+    the handle to :func:`remove_joint` and :func:`joint_wrench`. It is not a model joint index: the next step assigns the
+    joints added since the previous step to reserved rows in an order given by their descriptors, so the simulation does
+    not depend on the order in which threads add them. :func:`joint_index` returns the row from then on; drive targets
+    come from :class:`~newton.Control` at that row. Effort limits are not enforced.
     """
     n_free = desc.linear_count + desc.angular_count
     valid = _axes_valid(desc.linear_axes, desc.linear_count) and _axes_valid(desc.angular_axes, desc.angular_count)
@@ -524,13 +530,25 @@ def remove_joint(dyn: DynamicsData, joint: wp.int32) -> wp.bool:
 
 
 @wp.func
+def joint_index(dyn: DynamicsData, joint: wp.int32) -> wp.int32:
+    """Model joint index of a joint handle from :func:`add_joint`, valid from the step after the joint was added.
+
+    Joint indices outside the reserved rows map to themselves.
+    """
+    slot = joint - dyn.joint_pool.start
+    if slot >= 0 and slot < dyn.joint_row.shape[0]:
+        return dyn.joint_pool.start + dyn.joint_row[slot]
+    return joint
+
+
+@wp.func
 def joint_wrench(dyn: DynamicsData, joint: wp.int32) -> wp.spatial_vector:
     """World-frame force and torque [N, N·m] that ``joint`` applies to its child body.
 
     Valid for any model joint, as of the latest :meth:`Dynamics.update_joint_wrenches`; it averages
     the last substep of the step before.
     """
-    return dyn.constraint_wrench[dyn.joint_cid[joint]]
+    return dyn.constraint_wrench[dyn.joint_cid[joint_index(dyn, joint)]]
 
 
 @wp.func
@@ -747,8 +765,14 @@ def articulation_body(dyn: DynamicsData, instance: wp.int32, index: wp.int32) ->
 
 @wp.func
 def articulation_joint(dyn: DynamicsData, instance: wp.int32, index: wp.int32) -> wp.int32:
-    """Model joint of ``instance`` that template joint ``index`` became, or ``-1``; free root joints are not counted."""
-    return dyn.articulation_joints[instance, index]
+    """Model joint of ``instance`` that template joint ``index`` became, or ``-1``; free root joints are not counted.
+
+    Valid from the step after the instance was added, like :func:`joint_index`.
+    """
+    joint = dyn.articulation_joints[instance, index]
+    if joint < 0:
+        return joint
+    return joint_index(dyn, joint)
 
 
 # ---------------------------------------------------------------------------
@@ -1304,8 +1328,9 @@ def _cascade_joints_kernel(dyn: DynamicsData, joint_parent: wp.array[wp.int32], 
     """Remove the joints of removed bodies."""
     slot = wp.tid()
     joint = dyn.joint_pool.start + slot
-    parent = joint_parent[joint]
-    child = joint_child[joint]
+    row = joint_index(dyn, joint)
+    parent = joint_parent[row]
+    child = joint_child[row]
     if dyn.joint_pool.state[slot] == _ADDED:
         parent = dyn.staged_joints[slot].parent
         child = dyn.staged_joints[slot].child
@@ -1335,6 +1360,66 @@ def _self_wake_with_joint_edits(
             wp.atomic_max(wake_flag, bodies.island_root[b], 1)
 
 
+@wp.func
+def _joint_desc_less(a: JointDesc, b: JointDesc) -> wp.bool:
+    """Order joints by their bodies, then their frames."""
+    if a.parent != b.parent:
+        return a.parent < b.parent
+    if a.child != b.child:
+        return a.child < b.child
+    for k in range(7):
+        if a.parent_xform[k] != b.parent_xform[k]:
+            return a.parent_xform[k] < b.parent_xform[k]
+        if a.child_xform[k] != b.child_xform[k]:
+            return a.child_xform[k] < b.child_xform[k]
+    return False
+
+
+@wp.func
+def _popped_joint_count(pool: SlotPool) -> wp.int32:
+    """Handles popped from the free list since the last commit."""
+    return wp.min(pool.counts[2], pool.counts[1])
+
+
+@wp.kernel(enable_backward=False)
+def _read_popped_joint_rows_kernel(dyn: DynamicsData, prior_row: wp.array[wp.int32]):
+    i = wp.tid()
+    if i < _popped_joint_count(dyn.joint_pool):
+        prior_row[i] = dyn.joint_row[dyn.joint_pool.free_list[i]]
+
+
+@wp.kernel(enable_backward=False)
+def _sort_added_joint_rows_kernel(dyn: DynamicsData, prior_row: wp.array[wp.int32]):
+    """Give the handles popped since the last commit their rows in descriptor order.
+
+    Handles and rows stay a permutation, so the popped handles hold free rows. Concurrent
+    :func:`add_joint` calls pop the handles in thread order; reassigning their rows by
+    descriptor (by handle only among equal ones) makes the solve independent of it.
+    """
+    i = wp.tid()
+    pool = dyn.joint_pool
+    count = _popped_joint_count(pool)
+    if i >= count:
+        return
+    slot = pool.free_list[i]
+    desc = dyn.staged_joints[slot]
+    rank = wp.int32(0)
+    for j in range(count):
+        other = pool.free_list[j]
+        if _joint_desc_less(dyn.staged_joints[other], desc) or (
+            other < slot and not _joint_desc_less(desc, dyn.staged_joints[other])
+        ):
+            rank += 1
+    for j in range(count):
+        row = prior_row[j]
+        below = wp.int32(0)
+        for k in range(count):
+            if prior_row[k] < row:
+                below += 1
+        if below == rank:
+            dyn.joint_row[slot] = row
+
+
 @wp.kernel(enable_backward=False)
 def _commit_joints_kernel(
     dyn: DynamicsData,
@@ -1348,7 +1433,7 @@ def _commit_joints_kernel(
     old = _resolve(dyn.joint_pool, slot, active, free)
     if slot < resolved.shape[0]:
         resolved[slot] = old
-    joint = dyn.joint_pool.start + slot
+    joint = joint_index(dyn, dyn.joint_pool.start + slot)
     if old == _ADDED:
         _write_joint(rows, block, joint, dyn.staged_joints[slot])
     elif old == _REMOVED:
@@ -1382,7 +1467,7 @@ def _layout_trees_kernel(dyn: DynamicsData, trees: _TreeTemplates, tree: General
         body = dyn.articulation_bodies[instance, dyn.template_tree_body[template, lane]] + 1  # PhoenX slot
         local_joint = dyn.template_tree_joint[template, lane]
         if local_joint >= 0:
-            joint = dyn.articulation_joints[instance, local_joint]
+            joint = joint_index(dyn, dyn.articulation_joints[instance, local_joint])
     tree.body_slot[instance, lane] = body
     tree.joint_index[instance, lane] = joint
     tree.depth[instance, lane] = trees.depth[template, lane]
@@ -1844,6 +1929,8 @@ class Dynamics:
         d.staged_shapes = wp.empty(max(1, capacity.shape_count), dtype=ShapeDesc, device=device)
         d.staged_shape_body = wp.zeros(max(1, capacity.shape_count), dtype=wp.int32, device=device)
         d.staged_joints = wp.empty(max(1, capacity.joint_count), dtype=JointDesc, device=device)
+        d.joint_row = wp.array(np.arange(max(1, capacity.joint_count), dtype=np.int32), device=device)
+        self._prior_joint_row = wp.empty_like(d.joint_row)
         d.joint_cid = solver._joint_constraints.joint_idx_to_cid
         d.constraint_wrench = wp.zeros(max(1, world.num_constraints), dtype=wp.spatial_vector, device=device)
 
@@ -2191,6 +2278,10 @@ class Dynamics:
         """Write staged additions and apply removals at the start of a step, one thread per slot."""
         d = self.data
         device = d.error_count.device
+        if self.joints.capacity:
+            # Tree layouts and the joint commit read the rows of this step's added joints.
+            for kernel in (_read_popped_joint_rows_kernel, _sort_added_joint_rows_kernel):
+                wp.launch(kernel, dim=self.joints.capacity, inputs=[d, self._prior_joint_row], device=device)
         count = self.articulations.capacity
         if count:
             # Instances are laid out while still marked added; the state commit follows.

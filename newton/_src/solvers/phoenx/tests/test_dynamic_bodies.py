@@ -146,6 +146,67 @@ def _add_slider_drive_kernel(dyn: phoenx.DynamicsData, body: int, x: float, join
     joints[0] = phoenx.add_joint(dyn, desc)
 
 
+_CHAIN_SPACING = 0.15
+
+
+@wp.kernel
+def _link_chain_kernel(dyn: phoenx.DynamicsData, bodies: wp.array[int], order: wp.array[int], handles: wp.array[int]):
+    """Join a row of boxes into a hanging ball-joint chain, one link per thread in ``order``."""
+    link = order[wp.tid()]
+    parent = -1
+    parent_xform = wp.transform(wp.vec3(0.0, 0.0, 2.0), wp.quat_identity())
+    if link > 0:
+        parent = bodies[link - 1]
+        parent_xform = wp.transform(wp.vec3(_CHAIN_SPACING, 0.0, 0.0), wp.quat_identity())
+    desc = phoenx.joint_desc(parent, bodies[link], parent_xform, wp.transform_identity())
+    desc.angular_axes = wp.identity(3, dtype=float)
+    desc.angular_count = 3
+    handles[link] = phoenx.add_joint(dyn, desc)
+
+
+@wp.kernel
+def _joint_rows_kernel(dyn: phoenx.DynamicsData, handles: wp.array[int], rows: wp.array[int]):
+    rows[wp.tid()] = phoenx.joint_index(dyn, handles[wp.tid()])
+
+
+def _run_chain(order: list[int], remove_last: bool = False) -> tuple[np.ndarray, np.ndarray]:
+    """Link a chain in the given thread order; return its joint rows and final poses."""
+    links = len(order)
+    builder = newton.ModelBuilder()
+    bodies = []
+    for link in range(links):
+        body = builder.add_body(xform=wp.transform(wp.vec3(_CHAIN_SPACING * link, 0.0, 2.0), wp.quat_identity()))
+        builder.add_shape_box(body, hx=0.04, hy=0.04, hz=0.04)
+        bodies.append(body)
+    builder.reserve_dynamic_capacity(joints=links)
+    model = builder.finalize()
+    solver = newton.solvers.SolverPhoenX(model, joint_mode="maximal_pgs", step_layout="single_world", substeps=4)
+    state_0, state_1 = model.state(), model.state()
+    control = model.control()
+    handles = wp.zeros(links, dtype=int)
+    wp.launch(
+        _link_chain_kernel,
+        dim=links,
+        inputs=[solver.dynamics.data, wp.array(bodies, dtype=int), wp.array(order, dtype=int), handles],
+    )
+
+    def step():
+        solver.step(state_0, state_1, control, None, _DT)
+        state_0.assign(state_1)
+
+    with wp.ScopedCapture() as capture:
+        step()
+    for _ in range(30):
+        wp.capture_launch(capture.graph)
+    rows = wp.zeros(links, dtype=int)
+    wp.launch(_joint_rows_kernel, dim=links, inputs=[solver.dynamics.data, handles, rows])
+    if remove_last:
+        wp.launch(_remove_joint_kernel, dim=1, inputs=[solver.dynamics.data, handles[links - 1 :]])
+        for _ in range(30):
+            wp.capture_launch(capture.graph)
+    return rows.numpy(), state_0.body_q.numpy()
+
+
 class _Scene:
     """Ground plane plus reserved rows, stepped by one captured collide + step graph."""
 
@@ -291,6 +352,23 @@ class TestDynamicBodies(unittest.TestCase):
         wp.launch(_remove_joint_kernel, dim=1, inputs=[driven.dyn.data, ids[1:]])
         driven.run(30)
         self.assertLess(float(driven.body_q([ids.numpy()[0]])[0, 2]), 1.7)
+
+    def test_joints_added_in_one_step_ignore_thread_order(self):
+        """Solve joints added by concurrent threads in descriptor order, independent of thread order.
+
+        Handles keep addressing their joints after the step assigns the rows.
+        """
+        forward_rows, forward_q = _run_chain(list(range(8)))
+        reverse_rows, reverse_q = _run_chain(list(reversed(range(8))))
+        np.testing.assert_array_equal(forward_rows, reverse_rows)
+        np.testing.assert_array_equal(forward_q, reverse_q)
+        self.assertLess(float(forward_q[-1, 2]), 1.95, "the chain did not swing")
+
+        # Removing the last link's handle detaches only that box.
+        _, released_q = _run_chain(list(reversed(range(8))), remove_last=True)
+        gaps = np.linalg.norm(np.diff(released_q[:, :3], axis=0), axis=1)
+        self.assertGreater(float(gaps[-1]), 2.0 * _CHAIN_SPACING)
+        np.testing.assert_allclose(gaps[:-1], _CHAIN_SPACING, atol=0.01)
 
     def test_body_removal_cascades_to_shapes_and_joints(self):
         scene = _Scene(bodies=1, shapes=1, joints=1)

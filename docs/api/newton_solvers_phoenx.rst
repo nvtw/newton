@@ -61,6 +61,8 @@ returns ``-1`` or ``False`` when a request cannot be met and counts it in
 
 .. autofunction:: joint_desc
 
+.. autofunction:: joint_index
+
 .. autofunction:: joint_wrench
 
 .. autofunction:: remove_articulation
