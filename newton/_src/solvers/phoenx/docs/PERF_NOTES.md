@@ -306,6 +306,31 @@ that the mobility kernel read once. Forming them in the mobility kernel
 removes 15 launches of 24 us per frame (the mobility kernel grows from 5.3
 to 8.9 us) and a 207 MB array: 49.36-49.42 -> 50.32 FPS, bitwise identical.
 
+## Bottling plant step setup (2026-11-27)
+
+Same factory and window (about 286k contacts). Each collision pass spends
+about 2.1 ms between the contact sort and the first iterate sweep, a serial
+chain of about 250 small kernels plus a side stream that builds the owned
+contact schedule. Kernel times in that window are inflated by the side
+stream's radix sorts, which share the SMs: the body AABB fan-in measures
+33 us there but 2.3 us alone. Microbenchmark a kernel before optimizing it.
+
+Temporal local-drive selection (two union-find passes over joints and all
+contact columns) ran every substep, although its inputs change only between
+steps. Selecting once per step saves about 44 us per later substep:
+58.17-58.34 -> 58.73-59.23 FPS, bitwise identical.
+
+Measured and not kept (bitwise, but frame gains within the 0.5-1% run
+noise of this nondeterministic scene):
+
+| Change | Kernel effect | FPS |
+| --- | --- | --- |
+| Warp-aggregated island census atomics (`_key_columns`, merged island) | 46.8 -> 6.3 us per pass | +0.3% with the next change |
+| Candidate pass writes the column resets instead of three capacity fills | -28 us per pass | neutral |
+| Skip jointless islands in `joint_project` (merged island has none) | 49 -> 40 us per substep | +0.4% |
+| Bounded closest-point query for mesh surface velocities | 47.8 -> 42.0 us per pass | not run |
+| Active-prefix sorts in the owned contact schedule | fails: `capture_if` on the schedule's side stream | -- |
+
 
 
 Contacts on non-tree `maximal_direct` mechanisms are solved through the exact
