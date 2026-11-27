@@ -5415,8 +5415,7 @@ class PhoenXWorld:
             return
 
         def sweep() -> None:
-            if use_bias and direct is not None:
-                response.apply_bias_velocity(-1.0)
+            # Contacts answer the joints' velocity, not their positional recovery.
             schedule.solve(
                 self.bodies,
                 self._contact_container,
@@ -5424,9 +5423,8 @@ class PhoenXWorld:
                 self.sor_boost,
                 iterations=iterations,
                 use_bias=use_bias,
+                bias_velocity=direct.bias_velocity if use_bias and direct is not None else None,
             )
-            if use_bias and direct is not None:
-                response.apply_bias_velocity(1.0)
 
         sweep()
         system = self._direct_equality_system

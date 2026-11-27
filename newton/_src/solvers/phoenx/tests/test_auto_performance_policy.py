@@ -357,7 +357,7 @@ class TestPhoenXAutoPerformancePolicy(unittest.TestCase):
         """A motor cap that refactors the joint system refreshes the contact mobility it changed."""
         for use_bias in (True, False):
             with self.subTest(use_bias=use_bias):
-                response = SimpleNamespace(compute=Mock(), apply_bias_velocity=Mock())
+                response = SimpleNamespace(compute=Mock())
                 schedule = SimpleNamespace(solve=Mock())
                 direct = SimpleNamespace(
                     has_bounded_drives=True,
@@ -401,7 +401,7 @@ class TestPhoenXAutoPerformancePolicy(unittest.TestCase):
 
     def test_temporal_sweep_tests_motor_caps_once(self):
         """A temporal sweep with owned contacts tests the caps of all joints once, after those contacts."""
-        response = SimpleNamespace(compute=Mock(), apply_bias_velocity=Mock(), direct=SimpleNamespace())
+        response = SimpleNamespace(compute=Mock(), direct=SimpleNamespace(bias_velocity=None))
         schedule = SimpleNamespace(solve=Mock())
         system = SimpleNamespace(has_bounded_drives=True, solve=Mock(), resolve_bounded_drives=Mock())
         for temporal, owned in ((True, True), (True, False), (False, True)):

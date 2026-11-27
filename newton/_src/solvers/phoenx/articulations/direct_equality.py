@@ -1976,19 +1976,6 @@ def _activate_bounded_direct_drives_kernel(
 
 
 @wp.kernel(enable_backward=False)
-def _accumulate_direct_impulse_kernel(
-    delta: wp.array[wp.float32],
-    row_scale: wp.array[wp.float32],
-    accumulated_impulse: wp.array[wp.float32],
-    active: wp.array[wp.int32],
-):
-    row = wp.tid()
-    if active[0] == wp.int32(0):
-        return
-    accumulated_impulse[row] += row_scale[row] * delta[row]
-
-
-@wp.kernel(enable_backward=False)
 def _gather_direct_reaction_wrenches_kernel(
     structural_joints: wp.array[wp.int32],
     joint_row_start: wp.array[wp.int32],
@@ -2103,17 +2090,23 @@ def _apply_direct_equality_descriptor_tiled_kernel(
     row_scale: wp.array[wp.float32],
     bodies: BodyContainer,
     active: wp.array[wp.int32],
+    accumulated_impulse: wp.array[wp.float32],
 ):
     """Apply :func:`_apply_direct_equality_body` with one warp per body.
 
     Mechanism mounts carry dozens of rows; a serial gather on one thread
     bounded the whole launch. Lanes stride over the incidence list and a
-    fixed-order tile reduction keeps the result deterministic.
+    fixed-order tile reduction keeps the result deterministic. The threads
+    also add the scaled impulses to ``accumulated_impulse``, one row each.
     """
     slot, lane = wp.tid()
     # Uniform per block: skip before the tile reduction.
     if active[0] == wp.int32(0):
         return
+    # CPU tile launches run one lane per block.
+    lanes = wp.block_dim()
+    for row in range(slot * lanes + lane, accumulated_impulse.shape[0], row_bodies.shape[0] * lanes):
+        accumulated_impulse[row] += row_scale[row] * delta[row]
     body = row_bodies[slot]
     wrench = _gather_body_wrench_tiled(
         body, lane, body_row_start, descriptor, row_wrench0, row_wrench1, delta, row_scale
@@ -3366,7 +3359,7 @@ class DirectEqualitySystem:
         )
 
     def _apply_delta(self, active: wp.array[wp.int32]) -> None:
-        """Apply the scaled solution impulses in :attr:`delta` to their bodies."""
+        """Apply the scaled solution impulses in :attr:`delta` to their bodies and :attr:`accumulated_impulse`."""
         wp.launch_tiled(
             _apply_direct_equality_descriptor_tiled_kernel,
             dim=[self._apply_bodies.size],
@@ -3380,6 +3373,7 @@ class DirectEqualitySystem:
                 self.row_scale,
                 self.bodies,
                 active,
+                self.accumulated_impulse,
             ],
             block_dim=_APPLY_LANES,
             device=self.model.device,
@@ -3486,12 +3480,6 @@ class DirectEqualitySystem:
 
         def solve_active_system() -> None:
             self.solver.solve(self.rhs, self.delta, refine=refine, active=active if gate else None)
-            wp.launch(
-                _accumulate_direct_impulse_kernel,
-                dim=len(self.topology.row_joint),
-                inputs=[self.delta, self.row_scale, self.accumulated_impulse, active],
-                device=self.model.device,
-            )
             self._apply_delta(active)
 
         if gate:

@@ -417,6 +417,12 @@ def _shared_wrench(index: wp.int32, value: wp.spatial_vector, mode: wp.int32) ->
 
 
 @wp.func
+def _add_body_twist(bodies: BodyContainer, body: wp.int32, twist: wp.spatial_vector):
+    bodies.velocity[body] += wp.spatial_top(twist)
+    bodies.angular_velocity[body] += wp.spatial_bottom(twist)
+
+
+@wp.func
 def _body_twist(bodies: BodyContainer, body: wp.int32) -> wp.spatial_vector:
     linear = bodies.velocity[body]
     angular = bodies.angular_velocity[body]
@@ -482,19 +488,15 @@ def _build_direct_contact_records_kernel(
     records[scheduled] = record
 
 
-@wp.kernel(enable_backward=False)
-def _accumulate_direct_contact_row_impulses_kernel(
+@wp.func
+def _accumulate_direct_contact_row_impulse(
     response: DirectContactResponseData,
     basis_wrench: wp.array[wp.spatial_vector],
     slot_count: wp.int32,
+    row: wp.int32,
+    mechanism: wp.int32,
 ):
-    """Add the joint reactions of all pushed manifold wrenches to the equality impulses."""
-    row = wp.tid()
-    if row >= response.accumulated_impulse.shape[0]:
-        return
-    mechanism = response.row_mechanism[row]
-    if mechanism < wp.int32(0):
-        return
+    """Add the joint reaction of ``mechanism``'s pushed wrenches to equality ``row``."""
     local_row = row - response.mechanism_row_start[mechanism]
     slot_begin = wp.int32(0)
     slot_end = slot_count
@@ -516,6 +518,22 @@ def _accumulate_direct_contact_row_impulses_kernel(
                 correction += response.solution[base + wp.int32(1)] * wrench[4]
                 correction += response.solution[base + wp.int32(2)] * wrench[5]
     response.accumulated_impulse[row] -= response.row_scale[row] * correction
+
+
+@wp.kernel(enable_backward=False)
+def _accumulate_direct_contact_row_impulses_kernel(
+    response: DirectContactResponseData,
+    basis_wrench: wp.array[wp.spatial_vector],
+    slot_count: wp.int32,
+):
+    """Add the joint reactions of all pushed manifold wrenches to the equality impulses."""
+    row = wp.tid()
+    if row >= response.accumulated_impulse.shape[0]:
+        return
+    mechanism = response.row_mechanism[row]
+    if mechanism < wp.int32(0):
+        return
+    _accumulate_direct_contact_row_impulse(response, basis_wrench, slot_count, row, mechanism)
 
 
 @wp.kernel(enable_backward=False)
@@ -564,9 +582,15 @@ def _warm_start_direct_contact_wrench_kernel(
     section_end: wp.array[wp.int32],
     records: wp.array[_record_t],
     endpoint_wrench: wp.array[wp.spatial_vector],
+    basis_wrench: wp.array[wp.spatial_vector],
     threads: wp.int32,
 ):
-    """Cached manifold impulses as endpoint wrenches, ``threads`` lanes striding over the schedule."""
+    """Cached manifold impulses as endpoint wrenches, ``threads`` lanes striding over the schedule.
+
+    Also clears the basis wrenches, which the following pass sums only for loaded slots.
+    """
+    for slot in range(wp.tid(), basis_wrench.shape[0], threads):
+        basis_wrench[slot] = wp.spatial_vectorf(0.0)
     for scheduled in range(wp.tid(), section_end[section_end.shape[0] - 1], threads):
         record = records[scheduled]
         first = record[_RECORD_FIRST]
@@ -629,9 +653,20 @@ def _warm_start_direct_contact_push_kernel(
     records: wp.array[_record_t],
     basis_wrench: wp.array[wp.spatial_vector],
 ):
-    """Apply all warm-start wrenches through the exact mechanism responses."""
+    """Apply all warm-start wrenches through the exact mechanism responses.
+
+    Threads past the mechanism bodies add the wrenches' joint reactions to the
+    equality rows instead.
+    """
     flat = wp.tid()
     if flat >= response.mechanism_body.shape[0]:
+        row = flat - response.mechanism_body.shape[0]
+        if row < response.accumulated_impulse.shape[0]:
+            mechanism = response.row_mechanism[row]
+            if mechanism >= wp.int32(0):
+                _accumulate_direct_contact_row_impulse(
+                    response, basis_wrench, wp.int32(basis_wrench.shape[0]), row, mechanism
+                )
         return
     body = response.mechanism_body[flat]
     mechanism = response.body_mechanism[body]
@@ -717,8 +752,14 @@ def _component_lanes(max_mechanism_bodies: int, is_cuda: bool) -> int:
     return min(_COLUMN_LANES, 32 * max(1, (int(max_mechanism_bodies) + 31) // 32))
 
 
-def make_solve_direct_contact_columns_kernel(body_capacity: int, max_mechanism_bodies: int, *, is_cuda: bool = True):
-    """Build the ordered manifold sweep for a response's body capacity."""
+def make_solve_direct_contact_columns_kernel(
+    body_capacity: int, max_mechanism_bodies: int, *, is_cuda: bool = True, own_slots: bool = False
+):
+    """Build the ordered manifold sweep for a response's body capacity.
+
+    With ``own_slots`` (basis slots per mechanism body), each block clears its
+    mechanisms' basis wrenches and adds their joint reactions itself.
+    """
     capacity = max(1, int(body_capacity))
     # CPU native warp operations are scalar: visit every point and endpoint
     # serially, using body arrays instead of CUDA-only shared twist storage.
@@ -773,6 +814,7 @@ def make_solve_direct_contact_columns_kernel(body_capacity: int, max_mechanism_b
         basis_wrench: wp.array[wp.spatial_vector],
         iteration_count: wp.int32,
         use_bias: wp.bool,
+        bias_velocity: wp.array[wp.spatial_vector],
     ):
         """Sweep manifolds in order through the exact mechanism response.
 
@@ -787,6 +829,9 @@ def make_solve_direct_contact_columns_kernel(body_capacity: int, max_mechanism_b
         response blocks. Only then does the whole block push the run's
         wrenches to the other mechanism bodies, which no manifold of the run
         reads.
+
+        A non-empty ``bias_velocity`` is removed from the mechanism bodies for
+        the sweep and restored after it.
         """
         component, lane = wp.tid()
         if component >= num_components[0]:
@@ -799,13 +844,22 @@ def make_solve_direct_contact_columns_kernel(body_capacity: int, max_mechanism_b
         mechanism_end = component_end[component]
         section_stop = section_end[component]
 
-        if wp.static(shared):
-            for item in range(mechanism_begin, mechanism_end):
-                mechanism = component_mechanism[item]
-                body_end = response.mechanism_body_start[mechanism + wp.int32(1)]
-                for index in range(response.mechanism_body_start[mechanism] + lane, body_end, wp.int32(lanes)):
-                    twist_state(index, _body_twist(bodies, response.mechanism_body[index]), _TWIST_WRITE)
-            _sync_block()
+        remove_bias = bias_velocity.shape[0] > wp.int32(0)
+        for item in range(mechanism_begin, mechanism_end):
+            mechanism = component_mechanism[item]
+            body_end = response.mechanism_body_start[mechanism + wp.int32(1)]
+            for index in range(response.mechanism_body_start[mechanism] + lane, body_end, wp.int32(lanes)):
+                if wp.static(own_slots):
+                    basis_wrench[index] = wp.spatial_vectorf(0.0)
+                body = response.mechanism_body[index]
+                if wp.static(shared):
+                    twist = _body_twist(bodies, body)
+                    if remove_bias:
+                        twist += wp.float32(-1.0) * bias_velocity[body]
+                    twist_state(index, twist, _TWIST_WRITE)
+                elif remove_bias:
+                    _add_body_twist(bodies, body, wp.float32(-1.0) * bias_velocity[body])
+        _sync_block()
 
         dt = wp.float32(1.0) / inverse_dt
         _, mass_coeff, impulse_coeff = soft_constraint_coefficients(DEFAULT_HERTZ_CONTACT, DEFAULT_DAMPING_RATIO, dt)
@@ -928,15 +982,26 @@ def make_solve_direct_contact_columns_kernel(body_capacity: int, max_mechanism_b
                 _sync_block()
                 run_begin = run_end
 
-        if wp.static(shared):
-            for item in range(mechanism_begin, mechanism_end):
-                mechanism = component_mechanism[item]
-                body_end = response.mechanism_body_start[mechanism + wp.int32(1)]
-                for index in range(response.mechanism_body_start[mechanism] + lane, body_end, wp.int32(lanes)):
-                    body = response.mechanism_body[index]
+        for item in range(mechanism_begin, mechanism_end):
+            mechanism = component_mechanism[item]
+            body_begin = response.mechanism_body_start[mechanism]
+            body_end = response.mechanism_body_start[mechanism + wp.int32(1)]
+            for index in range(body_begin + lane, body_end, wp.int32(lanes)):
+                body = response.mechanism_body[index]
+                if wp.static(shared):
                     twist = twist_state(index, wp.spatial_vectorf(0.0), _TWIST_READ)
                     bodies.velocity[body] = wp.spatial_top(twist)
                     bodies.angular_velocity[body] = wp.spatial_bottom(twist)
+                if remove_bias:
+                    _add_body_twist(bodies, body, wp.float32(1.0) * bias_velocity[body])
+            if wp.static(own_slots):
+                # The last run's barrier published this block's slot wrenches.
+                if body_end > body_begin:
+                    row_end = response.mechanism_row_start[mechanism + wp.int32(1)]
+                    for row in range(response.mechanism_row_start[mechanism] + lane, row_end, wp.int32(lanes)):
+                        _accumulate_direct_contact_row_impulse(
+                            response, basis_wrench, wp.int32(basis_wrench.shape[0]), row, mechanism
+                        )
 
     return solve_direct_contact_columns_kernel
 
@@ -962,9 +1027,12 @@ class DirectContactRunSchedule:
         self.endpoint_count = wp.zeros(1, dtype=wp.int32, device=device)
         self.endpoint_wrench = wp.zeros(2 * self.capacity, dtype=wp.spatial_vector, device=device)
         self.record_friction = wp.zeros(self.capacity, dtype=wp.vec2, device=device)
+        # With one basis slot per mechanism body, every slot belongs to one solve block.
+        self._own_slots = bool(response.shared_body_basis)
         self.solve_kernel = make_solve_direct_contact_columns_kernel(
-            response.body_capacity, response.max_mechanism_bodies, is_cuda=device.is_cuda
+            response.body_capacity, response.max_mechanism_bodies, is_cuda=device.is_cuda, own_slots=self._own_slots
         )
+        self._no_bias = wp.empty(0, dtype=wp.spatial_vector, device=device)
         self._lanes = _component_lanes(response.max_mechanism_bodies, device.is_cuda)
         #: Threads of the warm-start passes, which stride over the scheduled manifolds.
         #: Few are in use; a launch over the whole capacity costs more than their work.
@@ -987,7 +1055,6 @@ class DirectContactRunSchedule:
         """
         device = self.response.direct.model.device
         response = self.response
-        self.basis_wrench.zero_()
         wp.launch(
             _warm_start_direct_contact_wrench_kernel,
             dim=self.warm_start_threads,
@@ -997,6 +1064,7 @@ class DirectContactRunSchedule:
                 self.section_end,
                 self.records,
                 self.endpoint_wrench,
+                self.basis_wrench,
                 wp.int32(self.warm_start_threads),
             ],
             device=device,
@@ -1018,11 +1086,10 @@ class DirectContactRunSchedule:
         )
         wp.launch(
             _warm_start_direct_contact_push_kernel,
-            dim=max(1, response.body_capacity),
+            dim=response.body_capacity + response.data.accumulated_impulse.shape[0],
             inputs=[response.data, bodies, self.islands.set_nr, self.section_end, self.records, self.basis_wrench],
             device=device,
         )
-        self._accumulate_row_impulses()
 
     def _accumulate_row_impulses(self) -> None:
         wp.launch(
@@ -1041,10 +1108,16 @@ class DirectContactRunSchedule:
         *,
         iterations: int,
         use_bias: bool,
+        bias_velocity: wp.array | None = None,
     ) -> None:
-        """Run ordered manifold sweeps for every contact-connected component."""
+        """Run ordered manifold sweeps for every contact-connected component.
+
+        ``bias_velocity`` (per body) is removed from the mechanism bodies for
+        the sweeps and restored after them.
+        """
         device = self.response.direct.model.device
-        self.basis_wrench.zero_()
+        if not self._own_slots:
+            self.basis_wrench.zero_()
         wp.launch_tiled(
             self.solve_kernel,
             dim=self.section_end.size,
@@ -1064,10 +1137,12 @@ class DirectContactRunSchedule:
                 self.basis_wrench,
                 wp.int32(iterations),
                 wp.bool(use_bias),
+                self._no_bias if bias_velocity is None else bias_velocity,
             ],
             device=device,
         )
-        self._accumulate_row_impulses()
+        if not self._own_slots:
+            self._accumulate_row_impulses()
 
     def build(
         self,

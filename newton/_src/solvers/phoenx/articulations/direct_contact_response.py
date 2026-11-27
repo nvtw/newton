@@ -32,18 +32,6 @@ if TYPE_CHECKING:
 _CONTACT_RHS_BLOCK_DIM = 64
 
 
-@wp.kernel(enable_backward=False)
-def _apply_contact_bias_velocity_kernel(
-    indices: wp.array[wp.int32],
-    bias: wp.array[wp.spatial_vector],
-    bodies: BodyContainer,
-    scale: float,
-):
-    body = indices[wp.tid()]
-    bodies.velocity[body] += scale * wp.spatial_top(bias[body])
-    bodies.angular_velocity[body] += scale * wp.spatial_bottom(bias[body])
-
-
 @wp.struct
 class DirectContactResponseData:
     """Device view of packed contact-space Schur-complement work."""
@@ -646,15 +634,6 @@ class DirectContactResponse:
                     mechanism
                 )
         self.data.row_mechanism = wp.array(row_mechanism, dtype=wp.int32, device=device)
-
-    def apply_bias_velocity(self, scale: float) -> None:
-        """Remove or restore positional recovery only on selected mechanisms."""
-        wp.launch(
-            _apply_contact_bias_velocity_kernel,
-            dim=self.data.mechanism_body.size,
-            inputs=[self.data.mechanism_body, self.direct.bias_velocity, self.direct.bodies, scale],
-            device=self.direct.model.device,
-        )
 
     def reset_rhs_tasks(self) -> None:
         """Clear contact activation while retaining immutable shared item IDs."""

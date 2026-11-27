@@ -12,6 +12,7 @@ import warp as wp
 
 import newton
 from newton._src.solvers.phoenx import model_adapter
+from newton._src.solvers.phoenx.articulations.direct_contact_gs import make_solve_direct_contact_columns_kernel
 from newton._src.solvers.phoenx.articulations.fixed_pattern_llt import (
     GROUPED_RHS_ITEM_WIDTH,
     GROUPED_RHS_ITEMS_PER_TASK,
@@ -552,6 +553,56 @@ class TestDirectJointTypes(unittest.TestCase):
             trajectories.append((state_0.body_q.numpy(), state_0.body_qd.numpy()))
         np.testing.assert_array_equal(trajectories[0][0], trajectories[1][0])
         np.testing.assert_array_equal(trajectories[0][1], trajectories[1][1])
+
+    def test_owned_contact_blocks_own_their_slots(self) -> None:
+        """Solve blocks that clear their basis slots and add their row reactions match the separate passes."""
+        trajectories = []
+        for own_slots in (True, False):
+            model, bodies = _build_two_grounded_mechanisms()
+            solver = newton.solvers.SolverPhoenX(
+                model,
+                joint_mode="maximal_pgs",
+                step_layout="single_world",
+                temporal_iterations=True,
+                direct_joint_mask=np.ones(model.joint_count, dtype=bool),
+                direct_contact_mask=np.array([True, True, False, False]),
+                substeps=2,
+                solver_iterations=4,
+            )
+            schedule = solver._direct_contact_schedule
+            self.assertTrue(schedule._own_slots)
+            if not own_slots:
+                response = schedule.response
+                schedule._own_slots = False
+                schedule.solve_kernel = make_solve_direct_contact_columns_kernel(
+                    response.body_capacity, response.max_mechanism_bodies, is_cuda=model.device.is_cuda
+                )
+            state_0, state_1 = model.state(), model.state()
+            newton.eval_fk(model, model.joint_q, model.joint_qd, state_0)
+            control = model.control()
+            pipeline = model._collision_pipeline
+            contacts = pipeline.contacts()
+
+            def step(
+                state_0=state_0, state_1=state_1, solver=solver, control=control, contacts=contacts, pipeline=pipeline
+            ):
+                pipeline.collide(state_0, contacts)
+                solver.step(state_0, state_1, control, contacts, 1.0 / 120.0)
+                state_0.assign(state_1)
+
+            step()
+            with wp.ScopedCapture(model.device) as capture:
+                step()
+            for _ in range(30):
+                wp.capture_launch(capture.graph)
+            self.assertGreater(int(schedule.section_end.numpy()[-1]), 0)
+            system = solver.world._direct_equality_system
+            impulses = getattr(system, "exact", system).accumulated_impulse.numpy()
+            trajectories.append((state_0.body_q.numpy(), state_0.body_qd.numpy(), impulses))
+            self.assertTrue(np.isfinite(trajectories[-1][0]).all())
+            self.assertGreater(float(state_0.body_q.numpy()[list(bodies), 2].min()), 0.09)
+        for fused, separate in zip(*trajectories, strict=True):
+            np.testing.assert_array_equal(fused, separate)
 
     def test_batched_transform_composition_matches_scalar(self) -> None:
         """Match batched setup transforms to the scalar composition contract."""
