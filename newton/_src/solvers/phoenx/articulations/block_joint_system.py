@@ -472,7 +472,10 @@ class BlockJointSystem(DirectEqualitySystem):
 
     def begin_substep(self, idt, *, reuse_geometry=False):
         if self._microstep_count > 1:
-            self._block_world.update_temporal_jointed_bodies(self.model, local=True)
+            # Joints, contacts, motion types and sleep only change between steps,
+            # so the step's first substep selects the local joints for all.
+            if self._block_world._current_substep_index == 0:
+                self._block_world.update_temporal_jointed_bodies(self.model, local=True)
             self._microstep_sum.zero_()
         super().begin_substep(idt, reuse_geometry=reuse_geometry)
 

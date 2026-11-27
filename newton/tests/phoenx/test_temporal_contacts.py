@@ -990,6 +990,60 @@ class TestTemporalLocalDrives(unittest.TestCase):
             self.assertAlmostEqual(float(state.body_q.numpy()[0, 2]), -0.00981, delta=2e-5)
             self.assertLess(abs(float(state.body_qd.numpy()[0, 2])), 1e-4)
 
+    @unittest.skipUnless(wp.is_cuda_available(), "CUDA is unavailable")
+    def test_local_schedule_holds_for_every_substep(self):
+        """Select local drives once per step and balance weight with the selection in every substep.
+
+        A loose box rests on a driven support; the step selects the drive at
+        its first substep. Reselecting after the step must change nothing, and
+        the support must settle at the spring's static compression.
+        """
+        with wp.ScopedDevice("cuda:0"):
+            builder = newton.ModelBuilder()
+            support = builder.add_link(mass=1, inertia=wp.mat33(np.eye(3)))
+            builder.add_shape_box(support, hx=0.1, hy=0.1, hz=0.1, cfg=builder.ShapeConfig(density=0))
+            joint = builder.add_joint_prismatic(
+                -1, support, axis=newton.Axis.Z, target_ke=1000, target_kd=100, limit_lower=-1e6, limit_upper=1e6
+            )
+            builder.add_articulation([joint])
+            cargo = builder.add_body(
+                xform=wp.transform((0, 0, 0.2), wp.quat_identity()), mass=1, inertia=wp.mat33(np.eye(3))
+            )
+            builder.add_shape_box(cargo, hx=0.1, hy=0.1, hz=0.1, cfg=builder.ShapeConfig(density=0))
+            model = builder.finalize()
+            solver = SolverPhoenX(
+                model,
+                joint_mode="maximal_pgs",
+                step_layout="single_world",
+                substeps=3,
+                solver_iterations=8,
+                temporal_iterations=True,
+                contact_hertz=80,
+            )
+            state, control = model.state(), model.control()
+            newton.eval_fk(model, model.joint_q, model.joint_qd, state)
+            contacts = solver._collision_pipeline.contacts()
+
+            def step():
+                solver.collide(state, contacts, dt=1 / 120)
+                solver.step(state, state, control, contacts, 1 / 120)
+
+            step()
+            with wp.ScopedCapture() as capture:
+                step()
+            for _ in range(360):
+                wp.capture_launch(capture.graph)
+            blocks = solver._direct_equality_system
+            selected = blocks._microstep_joint.numpy().copy()
+            jointed = solver.world._temporal_jointed.numpy().copy()
+            self.assertTrue(selected[joint])
+            solver.world.update_temporal_jointed_bodies(model, local=True)
+            np.testing.assert_array_equal(blocks._microstep_joint.numpy(), selected)
+            np.testing.assert_array_equal(solver.world._temporal_jointed.numpy(), jointed)
+            # Support and cargo weigh 2 kg on a 1000 N/m spring.
+            self.assertAlmostEqual(float(state.body_q.numpy()[support, 2]), -19.62 / 1000, delta=2e-5)
+            self.assertLess(abs(float(state.body_qd.numpy()[support, 2])), 1e-4)
+
     def test_exact_owned_contact_retains_outer_schedule(self):
         """Preserve the exact-contact trajectory when local and exact bodies touch."""
         reference = self._support("cpu", local=False, owned=True)
