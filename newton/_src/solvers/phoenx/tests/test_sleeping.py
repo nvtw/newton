@@ -394,7 +394,6 @@ class TestSleepingPipeline(unittest.TestCase):
         self.assertFalse(solver.world._sleeping_enabled)
         self.assertIsNone(solver.world._island_builder)
         self.assertIsNone(solver.world._island_max_velocity)
-        self.assertIsNone(solver.world._island_is_sleeping)
         self.assertIsNone(solver.world._body_aabb_diagonal)
 
     def test_enabled_allocates_scratch(self) -> None:
@@ -409,7 +408,6 @@ class TestSleepingPipeline(unittest.TestCase):
         self.assertTrue(solver.world._sleeping_enabled)
         self.assertIsNotNone(solver.world._island_builder)
         self.assertIsNotNone(solver.world._island_max_velocity)
-        self.assertIsNotNone(solver.world._island_is_sleeping)
         self.assertIsNotNone(solver.world._body_aabb_diagonal)
         # Body 0 (newton index) = slot 1 in PhoenX.
         self.assertEqual(_is_sleeping(solver, 1), 0)

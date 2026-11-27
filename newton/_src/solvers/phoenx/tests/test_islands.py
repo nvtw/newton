@@ -188,6 +188,29 @@ class TestIslandBuilder(unittest.TestCase):
         self.assertEqual(builder.get_island(1), [2, 3, 4])
         self.assertEqual(builder.get_island(2), [5, 6])
 
+    def test_labels_only_matches_partition(self):
+        """Group bodies exactly as the canonical build when only labels are requested."""
+        rng = np.random.default_rng(7)
+        num_bodies = 512
+        # Sparse random edges leave many components, including singletons.
+        elements = [[int(a), int(b)] for a, b in rng.integers(0, num_bodies, size=(300, 2)) if a != b]
+        elements += [[10, 11, 12, 13], [13, 400]]
+        _builder, snap = _run_builder(elements, num_bodies=num_bodies)
+
+        interaction_bodies = _build_interaction_bodies_array(elements, len(elements))
+        num_elements = wp.array([len(elements)], dtype=wp.int32)
+        num_bodies_arr = wp.array([num_bodies], dtype=wp.int32)
+        builder = UnionFindIslandBuilder(num_bodies_capacity=num_bodies)
+        builder.build_islands(interaction_bodies, num_elements, num_bodies_arr, labels_only=True)
+        with wp.ScopedCapture() as capture:
+            builder.build_islands(interaction_bodies, num_elements, num_bodies_arr, labels_only=True)
+        wp.capture_launch(capture.graph)
+        labels = builder.set_nr.numpy()[:num_bodies]
+
+        self.assertCountEqual(_islands_as_sets(labels, num_bodies), _islands_as_sets(snap["set_nr"], num_bodies))
+        # Each label is its island's representative body.
+        np.testing.assert_array_equal(labels[labels], labels)
+
 
 class TestIslandBuilderDeterminism(unittest.TestCase):
     """A single large stress workload run multiple times must produce

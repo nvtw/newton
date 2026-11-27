@@ -72,22 +72,20 @@ from newton._src.solvers.phoenx.graph_coloring.graph_coloring_common import (
 from newton._src.solvers.phoenx.islands.island_builder import MAX_BODIES_PER_INTERACTION
 
 __all__ = [
-    "_phoenx_activity_score_kernel",
     "_phoenx_activity_wake_kernel",
     "_phoenx_apply_island_wake_kernel",
     "_phoenx_apply_wake_flag_kernel",
+    "_phoenx_begin_sleeping_pass_kernel",
     "_phoenx_clear_quiet_contact_warmstart_kernel",
     "_phoenx_collapse_sleeping_elements_kernel",
-    "_phoenx_compute_island_root_per_compact_kernel",
     "_phoenx_copy_elements_to_int2d_kernel",
     "_phoenx_detect_active_islands_kernel",
     "_phoenx_finalize_body_aabb_diagonal_kernel",
-    "_phoenx_init_body_aabb_kernel",
     "_phoenx_inject_chain_edges_kernel",
     "_phoenx_island_max_velocity_kernel",
+    "_phoenx_island_root_and_activity_kernel",
     "_phoenx_joint_activity_kernel",
     "_phoenx_kinematic_contact_wake_kernel",
-    "_phoenx_mark_sleeping_islands_kernel",
     "_phoenx_propagate_sleep_to_bodies_kernel",
     "_phoenx_seed_uf_num_interactions_kernel",
     "_phoenx_self_wake_fanin_kernel",
@@ -148,19 +146,36 @@ def _phoenx_clear_quiet_contact_warmstart_kernel(
 
 
 @wp.kernel(enable_backward=False)
-def _phoenx_init_body_aabb_kernel(
+def _phoenx_begin_sleeping_pass_kernel(
+    forced_awake: wp.array[wp.int32],
+    num_bodies: wp.int32,
+    # out
+    activity: wp.array[wp.int32],
+    island_max_velocity: wp.array[wp.float32],
+    wake_flag: wp.array[wp.int32],
+    island_active: wp.array[wp.int32],
+    island_root_per_compact: wp.array[wp.int32],
+    belt_island: wp.array[wp.int32],
     body_aabb_lower: wp.array2d[wp.float32],
     body_aabb_upper: wp.array2d[wp.float32],
 ):
-    """Per-body, per-axis reset to ±large so the fanin's atomic min/max
-    converges to the union AABB of every attached shape."""
+    """Reset every per-body accumulator of the sleeping pass.
+
+    Activity restarts from the forced-awake bodies, the AABB bounds from
+    ±large so the fan-in's atomic min/max converges to the union AABB of
+    every attached shape, and the per-island lowest root from
+    ``num_bodies``, above every body id.
+    """
     b = wp.tid()
-    body_aabb_lower[b, 0] = _AABB_INIT_LARGE
-    body_aabb_lower[b, 1] = _AABB_INIT_LARGE
-    body_aabb_lower[b, 2] = _AABB_INIT_LARGE
-    body_aabb_upper[b, 0] = -_AABB_INIT_LARGE
-    body_aabb_upper[b, 1] = -_AABB_INIT_LARGE
-    body_aabb_upper[b, 2] = -_AABB_INIT_LARGE
+    activity[b] = forced_awake[b]
+    island_max_velocity[b] = wp.float32(0.0)
+    wake_flag[b] = wp.int32(0)
+    island_active[b] = wp.int32(0)
+    island_root_per_compact[b] = num_bodies
+    belt_island[b] = wp.int32(0)
+    for axis in range(3):
+        body_aabb_lower[b, axis] = _AABB_INIT_LARGE
+        body_aabb_upper[b, axis] = -_AABB_INIT_LARGE
 
 
 @wp.kernel(enable_backward=False)
@@ -549,39 +564,30 @@ def _phoenx_island_max_velocity_kernel(
 
 
 @wp.kernel(enable_backward=False)
-def _phoenx_mark_sleeping_islands_kernel(
-    island_max_velocity: wp.array[wp.float32],
-    num_islands: wp.array[wp.int32],
-    threshold: wp.float32,
-    island_is_sleeping: wp.array[wp.int32],
-):
-    """``island_is_sleeping[i] = 1 iff island_max_velocity[i] < threshold``."""
-    i = wp.tid()
-    if i >= num_islands[0]:
-        island_is_sleeping[i] = wp.int32(0)
-        return
-    if island_max_velocity[i] < threshold:
-        island_is_sleeping[i] = wp.int32(1)
-    else:
-        island_is_sleeping[i] = wp.int32(0)
-
-
-@wp.kernel(enable_backward=False)
-def _phoenx_compute_island_root_per_compact_kernel(
+def _phoenx_island_root_and_activity_kernel(
     bodies: BodyContainer,
     set_nr: wp.array[wp.int32],
+    activity: wp.array[wp.int32],
+    threshold: wp.float32,
     island_root_per_compact: wp.array[wp.int32],
+    island_max_velocity: wp.array[wp.float32],
 ):
-    """``atomic_min(island_root_per_compact[set_nr[b]], b)`` for every
-    awake dynamic body. Consumed by the propagate kernel to stamp a
-    stable body-id label when a body's hysteresis saturates."""
+    """Per-island lowest awake dynamic body and forced activity.
+
+    ``atomic_min(island_root_per_compact[set_nr[b]], b)`` for every awake
+    dynamic body; the propagate kernel stamps it as a stable body-id label
+    when a body's hysteresis saturates. An active body (driven mechanism or
+    moving surface contact) lifts its island's score to twice the threshold.
+    """
     b = wp.tid()
+    nr = set_nr[b]
+    if nr < 0:
+        return
+    if activity[b] != 0:
+        wp.atomic_max(island_max_velocity, nr, threshold * 2.0)
     if bodies.motion_type[b] != MOTION_DYNAMIC:
         return
     if bodies.island_root[b] >= wp.int32(0):
-        return
-    nr = set_nr[b]
-    if nr < 0:
         return
     wp.atomic_min(island_root_per_compact, nr, b)
 
@@ -590,7 +596,8 @@ def _phoenx_compute_island_root_per_compact_kernel(
 def _phoenx_propagate_sleep_to_bodies_kernel(
     bodies: BodyContainer,
     island_of_body: wp.array[wp.int32],
-    island_is_sleeping: wp.array[wp.int32],
+    island_max_velocity: wp.array[wp.float32],
+    threshold: wp.float32,
     island_root_per_compact: wp.array[wp.int32],
     sleeping_frames_required: wp.int32,
 ):
@@ -626,7 +633,7 @@ def _phoenx_propagate_sleep_to_bodies_kernel(
         else:
             bodies.frames_below_threshold[b] = wp.int32(0)
         return
-    island_awake = island_is_sleeping[island] == wp.int32(0)
+    island_awake = not (island_max_velocity[island] < threshold)
     if island_awake:
         # The compact island contains a moving body. Wake everyone in
         # it atomically.
@@ -903,13 +910,3 @@ def _phoenx_activity_wake_kernel(bodies: BodyContainer, activity: wp.array[wp.in
     root = bodies.island_root[body]
     if activity[body] != 0 and root >= 0:
         wp.atomic_max(wake, root, 1)
-
-
-@wp.kernel(enable_backward=False)
-def _phoenx_activity_score_kernel(
-    activity: wp.array[wp.int32], sets: wp.array[wp.int32], threshold: wp.float32, score: wp.array[wp.float32]
-):
-    body = wp.tid()
-    island = sets[body]
-    if activity[body] != 0 and island >= 0:
-        wp.atomic_max(score, island, threshold * 2.0)

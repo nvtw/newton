@@ -360,11 +360,18 @@ class UnionFindIslandBuilder:
         num_bodies: wp.array[wp.int32],
         extra_edges: wp.array2d[wp.int32] | None = None,
         num_extra_edges: wp.array[wp.int32] | None = None,
+        labels_only: bool = False,
     ) -> None:
         """Full pipeline: init -> atomic union-find -> compact -> sort by min-index
         -> invert map -> rewrite per-body ids -> scan -> group bodies per island.
 
         ``interaction_bodies`` is ``(>= num_interactions[0], 8)`` with -1 padding.
+
+        ``labels_only`` stops after the union-find: ``set_nr`` then holds each
+        body's component representative, a body id below ``num_bodies`` that
+        depends on the union race. Use it when island ids only select
+        per-island buckets; ``num_sets``, ``set_sizes`` and
+        ``set_sizes_compact`` are not updated.
 
         ``extra_edges`` is an optional second interaction array unioned
         in alongside the regular elements (same row layout, ``-1``-padded).
@@ -415,6 +422,8 @@ class UnionFindIslandBuilder:
             outputs=[self.set_nr, self.set_sizes, self.min_index_per_set],
             device=self._device,
         )
+        if labels_only:
+            return
 
         # Bitmap of occupied reps -> exclusive scan -> num_sets.
         wp.launch(
