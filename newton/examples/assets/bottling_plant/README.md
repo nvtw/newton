@@ -112,6 +112,66 @@ example's other tables. Stops use the plant's standing-queue eyes: a queue at
 the conveyor's entrance stops the pasteuriser bed, and a queue at the
 accumulation table's entrance stops the conveyor.
 
+`--pasteuriser-scale N` is a benchmark and visualization option, not source
+data. It enables filling-room physics and widens the pasteuriser bed N times,
+leaving the default factory unchanged. The source bed is 2.3 m wide and 24.6 m
+long from funnel to funnel, about 60 m² holding 16,900 bottles. The building
+wall behind the infeed and the dryer, accumulation table and IFM downstream fix
+its length, so only its width grows. The chutes keep their 0.24 m width,
+matching the single file and the outfeed rails. The funnels keep their source
+angle, lengthening with the bed's width; a steeper outfeed funnel let the
+packed bed arch across the chute and stop the line. The infeed and outfeed
+tables and the tunnel housing are widened across the line by the width added to
+the bed, so the housing keeps its source clearance; the hot-water pipes from
+the heat-exchanger station end at its widened wall. Like a built tunnel
+pasteuriser, the housing hides most of the bed; `--no-pasteuriser-housing`
+leaves it out to show the bed. The packed bed fills the wider deck from the
+start. As in the source, the belt speed carries `PASTEURISER_CAPACITY` times
+the rated 425 bottles/min as a packed bed of the bed's width, so a wider bed
+runs slower and holds the product longer:
+
+| N | Bed width | Bed area | Bed bottles | Belt speed | Residence |
+|---|-----------|----------|-------------|------------|-----------|
+| 1 | 2.3 m     | 60 m²    | 16,871      | 0.70 m/min | 36 min    |
+| 2 | 4.6 m     | 114 m²   | 32,801      | 0.35 m/min | 64 min    |
+| 3 | 6.9 m     | 163 m²   | 46,683      | 0.23 m/min | 85 min    |
+| 4 | 9.2 m     | 206 m²   | 59,283      | 0.17 m/min | 100 min   |
+
+The residence time is the packed bed's transit between the funnels. The widened
+table visuals keep the source funnel shape, so their funnels are steeper than
+the physical ones, which run inside them.
+
+Built tunnel pasteurisers run 2 to 7 m wide and 11 to 30 m long
+([Sidel](https://www.directindustry.com/prod/sidel/product-8751-1527545.html);
+KHS Innopas: 2.6 to 7.2 m processing widths,
+[datasheet](https://www.khs.com/fileadmin/user_upload/Datenblaetter-Produkte/Einzelmaschinen/Downloads__PDFs_/Innopas_PI-IISC_tunnel_pasteurizer.pdf)).
+A KHS Innopas P II SG 30-200, rated 24,000 to 25,000 bottles/h like this
+line, has a 113.5 m² treatment area and treats 0.7 l bottles for 48.6 min
+([listing](https://www.exapro.com/khs-innopas-p-ii-sg-30-200-p260827141/));
+total treatment cycles of about 40 to 80 min are common. N = 2 thus matches
+a built machine of this rating; its 6.3 m housing clears the heat-exchanger
+station to the south but touches the filler's control cabinet to the north.
+N = 3 reaches the widest built beds but holds the product longer than usual,
+and its housing overlaps the heat-exchanger station. N = 4 exceeds built
+widths, and its housing reaches the building columns. Only visuals overlap:
+the machine colliders there end below the deck, and the bed's guards stay
+clear of all equipment.
+
+Headless measurements on one RTX PRO 6000 Blackwell, 120 frames after 30
+simulated seconds, with the OptiX viewer at 1920 by 1080 (one sample, three
+bounces):
+
+| N | Line bottles | Contacts | Physics      | With OptiX   |
+|---|--------------|----------|--------------|--------------|
+| 1 | 21,020       | 288,000  | 57.0 FPS     | 44.7 FPS     |
+| 2 | 36,950       | 520,000  | 42.8 FPS     | 35.7 FPS     |
+| 4 | 63,432       | 918,000  | 26.0 FPS     | 23.0 FPS     |
+
+Over these 34 seconds every scale drained 244 to 291 bottles from the bed
+onto the outfeed conveyor (280 at N = 1), the infeed kept feeding the bed, no
+wet-end bottle tipped or dropped below the deck, and the per-second product
+containment checks passed.
+
 Cases retain their physical contents. After all four flaps close and slow down,
 fixed tape bonds form a rigid sealed assembly; the source instead swaps in a
 sealed-case proxy. Both use rigid-body approximations of cardboard and tape.

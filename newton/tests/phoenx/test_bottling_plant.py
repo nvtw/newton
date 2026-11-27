@@ -3,6 +3,8 @@
 
 """Check the example's USD adapter without requiring the private plant assets."""
 
+import contextlib
+import io
 import json
 import tempfile
 import unittest
@@ -1684,6 +1686,12 @@ def Xform "Plant" {
             ["--optix-max-instances", "123", "--filling-room-physics"],
         ):
             self.assertEqual(parser().parse_args(argv).optix_max_instances, 123)
+        # A wider pasteuriser bed needs the filling room and scales its capacity with the beds.
+        args = parser().parse_args(["--pasteuriser-scale", "4"])
+        self.assertTrue(args.filling_room_physics)
+        self.assertGreaterEqual(args.optix_max_instances, 4.0 * 1.2 * logged[True])
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            parser().parse_args(["--pasteuriser-scale", "0.5"])
 
         with tempfile.TemporaryDirectory() as directory, wp.ScopedDevice("cpu"):
             root = Path(directory)

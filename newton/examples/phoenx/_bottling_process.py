@@ -197,7 +197,7 @@ def _outline(points, center):
     return x, half
 
 
-def wet_end_layout(stage, cache, path):
+def wet_end_layout(stage, cache, path, pasteuriser_scale=1.0):
     """Read the mass-flow tables on the route's final straight from the source mat tops.
 
     Returns the outlines (stations and half-widths) of the pasteuriser infeed
@@ -205,9 +205,27 @@ def wet_end_layout(stage, cache, path):
     table with its railed neck; the start of the dryer on the outfeed
     conveyor; and that conveyor's rails, as the half-width of their inner
     faces and their band above the deck.
+
+    ``pasteuriser_scale`` widens the pasteuriser bed by that factor; see
+    :func:`widen_pasteuriser`.
     """
     center, deck = path[-1, 1:]
     layout = {name: _outline(_deck_points(stage, cache, prim), center) for name, prim in _TABLES.items()}
+    if pasteuriser_scale != 1.0:
+        # The chutes keep the width of the single file and the outfeed rails.
+        # The funnels keep their source angle and lengthen with the bed's
+        # width: a steeper outfeed funnel lets the packed bed arch across it.
+        chute, bed = layout["infeed"][1].min(), layout["infeed"][1].max()
+        stretch = (pasteuriser_scale * bed - chute) / (bed - chute)
+        for name, sign in (("infeed", 1.0), ("outfeed", -1.0)):
+            x, half = layout[name]
+            narrow = half == chute
+            neck = sign * (sign * x[narrow]).max()
+            end = neck + stretch * (sign * (sign * x[~narrow]).min() - neck)
+            layout[name] = (
+                np.where(narrow, x, sign * np.maximum(sign * x, sign * end)),
+                np.where(narrow, half, pasteuriser_scale * bed),
+            )
     # A straight conveyor continues the outfeed table through the dryer to
     # the accumulation table; its first mat top ends at the dryer.
     start = layout["outfeed"][0][-1]
@@ -218,6 +236,61 @@ def wet_end_layout(stage, cache, path):
     rails = rails[(np.abs(rails[:, 1] - center) < 0.5) & (rails[:, 0] > start - 1.0e-3)]
     layout["rails"] = (np.abs(rails[:, 1] - center).min(), (rails[:, 2].min() - deck, rails[:, 2].max() - deck))
     return layout
+
+
+def widen_pasteuriser(stage, cache, layout, center, pasteuriser_scale):
+    """Widen the pasteuriser's visual housing and tables to a bed widened by :func:`wet_end_layout`.
+
+    Each machine grows across the line by the width added to the bed, so the
+    housing keeps its source clearance around the bed. The source authors the
+    machines as instances; their shared prototypes stay unchanged. Utility
+    colliders that end at the housing's side walls, such as its hot-water
+    pipes, end at the widened walls.
+    """
+    from pxr import Gf, Usd, UsdGeom, UsdPhysics  # noqa: PLC0415 - USD is optional.
+
+    added = 2.0 * layout["infeed"][1].max() * (1.0 - 1.0 / pasteuriser_scale)
+    bounds = UsdGeom.BBoxCache(Usd.TimeCode.Default(), [UsdGeom.Tokens.default_], useExtentsHint=False)
+    housing = stage.GetPrimAtPath(f"{_MACHINES}/L1_pasteuriser")
+    walls = bounds.ComputeWorldBound(housing).ComputeAlignedRange()
+    for root in (_MACHINES, _MACHINES.replace("/Machines/", "/Detail/Machines/")):
+        for name in ("pasteuriser", "pasteuriser_table_in", "pasteuriser_table_out"):
+            prim = stage.GetPrimAtPath(f"{root}/L1_{name}")
+            if not prim:
+                continue
+            extent = bounds.ComputeWorldBound(prim).ComputeAlignedRange().GetSize()[1]
+            # Scale across the line about its centre, in world coordinates.
+            widen = Gf.Matrix4d().SetScale(Gf.Vec3d(1.0, (extent + added) / extent, 1.0))
+            about = Gf.Matrix4d().SetTranslate(Gf.Vec3d(0.0, center, 0.0))
+            world = cache.GetLocalToWorldTransform(prim) * about.GetInverse() * widen * about
+            xform = UsdGeom.Xformable(prim)
+            xform.ClearXformOpOrder()
+            xform.AddTransformOp().Set(world * cache.GetParentToWorldTransform(prim).GetInverse())
+    cache.Clear()
+    bounds.Clear()
+    widened = bounds.ComputeWorldBound(housing).ComputeAlignedRange()
+    low, high = np.asarray(widened.GetMin()), np.asarray(widened.GetMax())
+    walls = (walls.GetMin()[1], walls.GetMax()[1])
+    nav = stage.GetPrimAtPath("/Plant/Physics/NavProxies")
+    for prim in nav.GetChildren() if nav else ():
+        translate, scale = prim.GetAttribute("xformOp:translate"), prim.GetAttribute("xformOp:scale")
+        if not (translate and scale):
+            continue
+        center_point, size = np.asarray(translate.Get()), np.asarray(scale.Get())
+        lo, hi = center_point - 0.5 * size, center_point + 0.5 * size
+        if not (low[0] < lo[0] and hi[0] < high[0] and lo[2] < high[2]):
+            continue
+        if abs(hi[1] - walls[0]) < 0.1:
+            hi[1] = min(hi[1], low[1])
+        elif abs(lo[1] - walls[1]) < 0.1:
+            lo[1] = max(lo[1], high[1])
+        else:
+            continue
+        if hi[1] <= lo[1]:
+            UsdPhysics.CollisionAPI(prim).CreateCollisionEnabledAttr(False)
+            continue
+        translate.Set(tuple(0.5 * (lo + hi)))
+        scale.Set(tuple(hi - lo))
 
 
 def _mass_flow_speed(width):

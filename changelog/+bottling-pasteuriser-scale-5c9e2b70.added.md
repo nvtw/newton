@@ -1,0 +1,1 @@
+Add `--pasteuriser-scale` to the PhoenX bottling plant example, which widens the pasteuriser bed, its tables and housing for benchmarking and visualizing larger bottle beds, and `--no-pasteuriser-housing` to show the bed.

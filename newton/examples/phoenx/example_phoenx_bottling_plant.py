@@ -11,6 +11,8 @@ carousel route through the filling room and retain their source mass. The
 line starts in production at its rated 425 bottles/min: a packed bed fills the
 pasteuriser from its infeed table through the tunnel to its outfeed table, and
 a packed field waits on the accumulation table before the IFM.
+``--pasteuriser-scale N`` widens the pasteuriser bed N times for benchmarking
+and visualization; it departs from the source data.
 The source assets remain outside the repository and require NVIDIA Storage
 access; see ``newton/examples/assets/bottling_plant/README.md``.
 
@@ -39,6 +41,7 @@ Success criteria:
 Runs:
 - `python -m newton.examples phoenx_bottling_plant`
 - `python -m newton.examples phoenx_bottling_plant --filling-room-physics`
+- `python -m newton.examples phoenx_bottling_plant --pasteuriser-scale 2`
 - `python -m newton.examples phoenx_bottling_plant --viewer null --test --num-frames 600`
 - `python -m newton.examples phoenx_bottling_plant --viewer null --timing-frames 600`
 """
@@ -91,6 +94,19 @@ class _FillingRoomAction(argparse.BooleanOptionalAction):
         # Keep a capacity the caller chose; replace only the other mode's default.
         if getattr(namespace, "optix_max_instances", None) == OPTIX_INSTANCES[not enabled]:
             namespace.optix_max_instances = OPTIX_INSTANCES[enabled]
+
+
+class _PasteuriserScaleAction(argparse.Action):
+    """Widen the pasteuriser bed, which enables filling-room physics, and size the OptiX capacity for it."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        setattr(namespace, self.dest, values)
+        if not math.isfinite(values) or values < 1.0:
+            parser.error(f"{option_string} must be at least 1")
+        namespace.filling_room_physics = True
+        # The beds dominate the filling room's instances and grow with the scale.
+        if namespace.optix_max_instances in OPTIX_INSTANCES.values():
+            namespace.optix_max_instances = math.ceil(values * OPTIX_INSTANCES[True])
 
 
 def _fleet_direct_contact_mask(joint_labels: list[str], exact: np.ndarray) -> np.ndarray | None:
@@ -212,6 +228,8 @@ class Example:
             raise ValueError("--cartons-per-packer must be positive")
         if args.extra_bottles is not None and args.extra_bottles < 0:
             raise ValueError("--extra-bottles must be nonnegative")
+        if args.pasteuriser_scale != 1.0 and not args.filling_room_physics:
+            raise ValueError("--pasteuriser-scale requires --filling-room-physics")
         if args.max_colored_partitions < 1:
             raise ValueError("--max-colored-partitions must be positive")
         if not np.isfinite(args.sleeping_velocity_threshold) or args.sleeping_velocity_threshold < 0.0:
@@ -232,6 +250,8 @@ class Example:
             motor_off=args.motor_off,
             cartons_per_packer=cartons,
             filling_room_physics=args.filling_room_physics,
+            pasteuriser_scale=args.pasteuriser_scale,
+            pasteuriser_housing=args.pasteuriser_housing,
         )
         self.supply = None
         if args.controllers and not args.motor_off:
@@ -418,6 +438,9 @@ class Example:
         self.bottle_bodies = np.asarray(self.scene.bottle_bodies, dtype=np.int32)
         viewer.set_model(self.model)
         viewer.set_camera(wp.vec3(49.0, 48.0, 3.4), pitch=-12.0, yaw=10.0)
+        if args.pasteuriser_scale != 1.0 and hasattr(viewer, "set_camera_look_at"):
+            # Look along the widened pasteuriser from beyond its outfeed table.
+            viewer.set_camera_look_at((34.0, 32.0, 5.0), (25.0, 38.4, 1.0))
         if self.controller is not None:
             # Seed the first frame's sensors and host snapshot.
             self.controller.sense()
@@ -769,6 +792,21 @@ class Example:
             action=_FillingRoomAction,
             default=False,
             help="Enable physical bottle transport from the depalletiser through the filling room to the IFM.",
+        )
+        parser.add_argument(
+            "--pasteuriser-scale",
+            type=float,
+            action=_PasteuriserScaleAction,
+            default=1.0,
+            help="Benchmark and visualization option, not source data: widen the pasteuriser bed by this factor "
+            "and start it full. Enables --filling-room-physics. The plant fixes the bed's length. Scale 2 matches "
+            "a built pasteuriser of the line's rating; up to about 3 the width stays within built ones (7 m).",
+        )
+        parser.add_argument(
+            "--pasteuriser-housing",
+            action=argparse.BooleanOptionalAction,
+            default=True,
+            help="Show the pasteuriser's tunnel housing. --no-pasteuriser-housing opens the view onto its bed.",
         )
         parser.add_argument(
             "--correct-inertia", action="store_true", help="Balance source actuator inertia approximations."

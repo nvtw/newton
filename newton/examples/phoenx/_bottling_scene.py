@@ -33,6 +33,7 @@ from newton.examples.phoenx._bottling_process import (
     open_pool_passage,
     replace_process_proxies,
     wet_end_layout,
+    widen_pasteuriser,
 )
 from newton.examples.phoenx._bottling_wrap import build_wrapper, correct_wrapper_frame, mesh_components
 from newton.solvers import SolverPhoenX
@@ -545,8 +546,16 @@ def load_plant(
     motor_off=False,
     cartons_per_packer=None,
     filling_room_physics=False,
+    pasteuriser_scale=1.0,
+    pasteuriser_housing=True,
 ) -> PlantScene:
-    """Build the full line from local USD, retaining its authored SI properties."""
+    """Build the full line from local USD, retaining its authored SI properties.
+
+    ``pasteuriser_scale`` widens the filling room's pasteuriser bed by that
+    factor, a benchmark and visualization option that departs from the source.
+    Without ``pasteuriser_housing``, the pasteuriser's tunnel housing is left
+    out to show its bed.
+    """
     from pxr import Gf, Usd, UsdGeom, UsdPhysics, UsdShade  # noqa: PLC0415 - OpenUSD is optional.
 
     started = time.perf_counter()
@@ -574,8 +583,14 @@ def load_plant(
     process_path = filling_route(stage, cache) if filling_room_physics else None
     if process_path is not None:
         replace_process_proxies(stage, cache, process_path[0, 2])
-        layout = wet_end_layout(stage, cache, process_path)
+        layout = wet_end_layout(stage, cache, process_path, pasteuriser_scale)
+        if pasteuriser_scale != 1.0:
+            widen_pasteuriser(stage, cache, layout, process_path[-1, 1], pasteuriser_scale)
         open_pool_passage(stage, process_path, layout["pool"][1][-1])
+    if not pasteuriser_housing:
+        # The housing is visual; its collision proxy is a separate prim.
+        for root in ("/Plant/Process/Machines/L1", "/Plant/Process/Detail/Machines/L1"):
+            stage.GetPrimAtPath(f"{root}/L1_pasteuriser").SetActive(False)
     prims = list(Usd.PrimRange.Stage(stage, Usd.TraverseInstanceProxies()))
     scene = PlantScene(newton.ModelBuilder())
     builder = scene.builder
