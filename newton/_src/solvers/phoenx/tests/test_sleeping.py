@@ -521,6 +521,66 @@ class TestSleepingPipeline(unittest.TestCase):
         for box in (2, 3):
             self.assertIn({1, box}, rows, f"the row of box slot {box} on the sleeping slab dropped the slab: {rows}")
 
+    def test_bound_correction_leaves_sleeping_mechanism_at_rest(self) -> None:
+        """Keep a sleeping drive-bounded hinge at rest while another hinge's drive bound activates.
+
+        A newly saturated drive anywhere triggers the local-block correction
+        sweep, which must not write the bodies of a sleeping mechanism.
+        """
+        mb = newton.ModelBuilder()
+        hinges = []
+        for x in (0.0, 1.0):
+            box = mb.add_link(xform=wp.transform(p=wp.vec3(x, 0.0, 0.5), q=wp.quat_identity()))
+            mb.add_shape_box(box, hx=0.1, hy=0.05, hz=0.05, cfg=newton.ModelBuilder.ShapeConfig(density=1000.0))
+            hinges.append(
+                mb.add_joint_revolute(
+                    parent=-1,
+                    child=box,
+                    parent_xform=wp.transform(p=wp.vec3(x, 0.0, 0.5), q=wp.quat_identity()),
+                    axis=newton.Axis.Z,
+                    target_ke=1000.0,
+                    target_kd=10.0,
+                    effort_limit=0.5,
+                )
+            )
+            mb.add_articulation([hinges[-1]])
+        model = mb.finalize()
+        model.joint_target_mode.fill_(int(newton.JointTargetMode.POSITION))
+        solver = newton.solvers.SolverPhoenX(model, joint_mode="maximal_pgs", sleeping_velocity_threshold=0.05)
+        state_0, state_1 = model.state(), model.state()
+        control = model.control()
+        # The first hinge has a drive error; the second starts at its target.
+        control.joint_target_q.assign([0.5, 0.0])
+        bodies = solver.world.bodies
+
+        def step():
+            solver.step(state_0, state_1, control, None, 1.0 / 60.0)
+            state_0.assign(state_1)
+
+        step()
+        # Put the first hinge to sleep with its drive error pending, then
+        # saturate the second hinge's drive in the captured step.
+        bodies.island_root.assign([-1, 1, -1])
+        bodies.frames_below_threshold.assign([0, 10, 0])
+        velocity = bodies.velocity.numpy()
+        velocity[1] = 0.0
+        bodies.velocity.assign(velocity)
+        angular_velocity = bodies.angular_velocity.numpy()
+        angular_velocity[1] = 0.0
+        bodies.angular_velocity.assign(angular_velocity)
+        body_qd = state_0.body_qd.numpy()
+        body_qd[0] = 0.0
+        state_0.body_qd.assign(body_qd)
+        control.joint_target_q.assign([0.5, 2.0])
+        with wp.ScopedCapture() as capture:
+            step()
+        wp.capture_launch(capture.graph)
+
+        self.assertEqual(_is_sleeping(solver, 1), 1)
+        self.assertGreater(abs(float(bodies.angular_velocity.numpy()[2, 2])), 0.0, "the second hinge did not move")
+        np.testing.assert_array_equal(bodies.velocity.numpy()[1], 0.0)
+        np.testing.assert_array_equal(bodies.angular_velocity.numpy()[1], 0.0)
+
     def test_independent_stacks_sleep_independently(self) -> None:
         """Two separated boxes form two islands; both end up sleeping but
         each is its own island (max-velocity check applies per-island)."""

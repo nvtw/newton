@@ -7,7 +7,7 @@ import warp as wp
 
 from newton._src.sim import JointType
 
-from ..body import BodyContainer, mat33_from_sym6
+from ..body import MOTION_DYNAMIC, BodyContainer, mat33_from_sym6
 from ..constraints.bilateral_joint import (
     _prepare_bilateral_joint_blocks_cooperative,
     prepare_bilateral_joint_blocks,
@@ -84,6 +84,12 @@ def _update_local_joint_enabled(
             bodies.frames_below_threshold[body] = 0
 
 
+@wp.func
+def _body_frozen(bodies: BodyContainer, body: wp.int32) -> wp.bool:
+    """Whether ``body`` is asleep or not dynamic, so a joint solve must leave it unchanged."""
+    return bodies.motion_type[body] != MOTION_DYNAMIC or bodies.island_root[body] >= wp.int32(0)
+
+
 @wp.kernel(enable_backward=False)
 def _block_sweep(
     bodies: BodyContainer,
@@ -123,6 +129,9 @@ def _block_sweep(
         structural = joint_to_structural[joint]
         b0 = parent[joint] + wp.int32(1)
         b1 = child[joint] + wp.int32(1)
+        if _body_frozen(bodies, b0) and _body_frozen(bodies, b1):
+            # Like a PGS row, a block between sleeping or prescribed bodies must not move them.
+            continue
         inertia0 = mat33_from_sym6(bodies.inverse_inertia_world[b0])
         inertia1 = mat33_from_sym6(bodies.inverse_inertia_world[b1])
         twist0 = _body_com_twist(bodies, b0)
