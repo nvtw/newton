@@ -377,6 +377,8 @@ class TestBottlingPlant(unittest.TestCase):
                         carried.update(np.flatnonzero(on_line & (poses[:, 0] > 6.6) & (poses[:, 0] < 6.8)))
                     emptied.update(np.flatnonzero(poses[:, 0] > path[-1, 0]))
             poses = state.body_q.numpy()[bottles]
+            # A bottle that left over the open outlet since the last sample tips off its edge.
+            emptied.update(np.flatnonzero(poses[:, 0] > path[-1, 0]))
 
         # The pasteuriser starts full and its bed advances at its rated speed.
         tunnel = (start[:, 0] > 2.0) & (start[:, 0] < 4.0)
