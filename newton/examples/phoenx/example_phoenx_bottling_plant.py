@@ -489,7 +489,9 @@ class Example:
         self.viewer.apply_forces(self.state_0)
         self.solver.wake_on_external_input(self.state_0)
         dt = self.frame_dt / self.args.substeps
-        for _ in range(self.args.substeps):
+        for index in range(self.args.substeps):
+            if self.controller is not None:
+                self.controller.before_pass(index, self.args.substeps)
             # Refresh contacts at the physics rate: sealed cases have thin
             # floors that must keep supporting bottles while being lifted.
             self.pipeline.collide(self.state_0, self.contacts, dt=dt)

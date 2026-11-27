@@ -11,6 +11,7 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton._src.utils.joint_trajectory import sample_joint_trajectories
 from newton.examples.phoenx._bottling_case_plc import (
     ACTUATOR_NAMES,
     CASE_STATIONS,
@@ -266,13 +267,8 @@ def _robots(
     hull_mesh: wp.array[wp.uint64],
     hull_xform: wp.array[wp.transform],
     hull_scale: wp.array[wp.vec3],
-    arm_dof: wp.array2d[int],
-    arm_coordinate: wp.array2d[int],
     gripper: wp.array[int],
-    targets: wp.array[float],
-    target_velocity: wp.array[float],
-    motion_q: wp.array2d[float],
-    motion_qd: wp.array2d[float],
+    motion_rows: wp.array2d[int],
     offsets: wp.array[int],
     lengths: wp.array[int],
     descent: wp.array[int],
@@ -355,13 +351,17 @@ def _robots(
     index = last
     if not hold:
         index = wp.min(int(age[cell] * 60.0 + 0.0001), last)
+    following = wp.min(index + 1, last)
+    if hold:
+        following = index
     if state == _ROBOT_EMPTY and group_ready[cell] == 0 and index >= descent[placed_row]:
         # The gripper drops below the hover height over the nest only onto a ready group.
         index = descent[placed_row]
+        following = index
         age[cell] = float(index - 1) / 60.0
-    for j in range(6):
-        targets[arm_coordinate[cell, j]] = motion_q[offsets[motion] + index, j]
-        target_velocity[arm_dof[cell, j]] = motion_qd[offsets[motion] + index, j]
+    # The frame's collision passes sample the motion between these rows.
+    motion_rows[cell, 0] = offsets[motion] + index
+    motion_rows[cell, 1] = offsets[motion] + following
 
     finished = not hold and index == last
     if state == _ROBOT_GRIP and picking and complete:
@@ -810,6 +810,7 @@ class PlantController:
         self.motion_qd = wp.array(qd, dtype=float)
         self.offsets = wp.array(offsets, dtype=int)
         self.lengths = wp.array(lengths, dtype=int)
+        self.motion_rows = wp.zeros((8, 2), dtype=int)
         # Frames into each row's straight return at which the gripper drops over the nest.
         moves = library["meta"]["moves"]
         self.descent = wp.array(
@@ -1179,6 +1180,20 @@ class PlantController:
         link.write(self.multipliers, speed)
         link.write(self.outfeed_ok, [self.transport.can_accept(name) for name in self.names])
 
+    def before_pass(self, index: int, passes: int):
+        """Sample the arm motions at collision pass ``index`` of the frame's ``passes``."""
+        sample_joint_trajectories(
+            self.motion_rows,
+            index / passes,
+            1.0 / 60.0,
+            self.motion_q,
+            self.motion_qd,
+            self.arm_coordinate,
+            self.arm_dof,
+            self.control.joint_target_q,
+            self.control.joint_target_qd,
+        )
+
     def simulate(self):
         """Update belt friction, valve drives, arm targets, and grasp constraints."""
         lines = self.case_lines_plc
@@ -1305,13 +1320,8 @@ class PlantController:
                 self.hull_mesh,
                 self.hull_xform,
                 self.hull_scale,
-                self.arm_dof,
-                self.arm_coordinate,
                 self.grippers,
-                self.control.joint_target_q,
-                self.control.joint_target_qd,
-                self.motion_q,
-                self.motion_qd,
+                self.motion_rows,
                 self.offsets,
                 self.lengths,
                 self.descent,
