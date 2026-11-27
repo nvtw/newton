@@ -222,22 +222,26 @@ def _make_contact_project_friction_metric(scalar_type):
         scale = wp.max(mobility_t1, mobility_t2)
         result = wp.vec2f(0.0)
         if scale > wp.float32(0.0) and static_radius > wp.float32(0.0):
-            a = div(scalar_type(mobility_t1), scalar_type(scale))
-            c = div(scalar_type(mobility_t2), scalar_type(scale))
-            b = div(scalar_type(mobility_t1t2), scalar_type(scale))
-            v1 = div(scalar_type(rhs_t1), scalar_type(scale))
-            v2 = div(scalar_type(rhs_t2), scalar_type(scale))
-            target1 = a * scalar_type(lambda_t1_old) + b * scalar_type(lambda_t2_old) - v1
-            target2 = b * scalar_type(lambda_t1_old) + c * scalar_type(lambda_t2_old) - v2
-            determinant = scalar_type(a) * scalar_type(c) - scalar_type(b) * scalar_type(b)
+            # Every row of the contact sweep runs this solve on its latency
+            # chain: one reciprocal normalizes the block, one more solves it.
+            inverse_scale = div(scalar_type(1.0), scalar_type(scale))
+            a = scalar_type(mobility_t1) * inverse_scale
+            c = scalar_type(mobility_t2) * inverse_scale
+            b = scalar_type(mobility_t1t2) * inverse_scale
+            v1 = scalar_type(rhs_t1) * inverse_scale
+            v2 = scalar_type(rhs_t2) * inverse_scale
+            old1 = scalar_type(lambda_t1_old)
+            old2 = scalar_type(lambda_t2_old)
+            target1 = a * old1 + b * old2 - v1
+            target2 = b * old1 + c * old2 - v2
+            determinant = a * c - b * b
             if determinant > scalar_type(0.0):
+                # K^-1 (K lambda_old - v) = lambda_old - K^-1 v, which
+                # avoids the cancellation of K lambda_old against v.
+                inverse_det = div(scalar_type(1.0), determinant)
                 result = wp.vec2f(
-                    wp.float32(
-                        (scalar_type(c) * scalar_type(target1) - scalar_type(b) * scalar_type(target2)) / determinant
-                    ),
-                    wp.float32(
-                        (scalar_type(a) * scalar_type(target2) - scalar_type(b) * scalar_type(target1)) / determinant
-                    ),
+                    wp.float32(old1 - (c * v1 - b * v2) * inverse_det),
+                    wp.float32(old2 - (a * v2 - b * v1) * inverse_det),
                 )
             else:
                 # A rank-one mobility has one movable tangent direction.
@@ -345,12 +349,27 @@ def contact_project_friction_metric(
     dynamic_radius: wp.float32,
 ) -> wp.vec2f:
     """Use float64 only when the tangent mobility is ill-conditioned."""
+    # Most rows stick. Solve them first, unnormalized, with one reciprocal:
+    # this solve sits on the latency chain of every contact row. Blocks whose
+    # products leave the float32 range fail the test and take the paths below.
+    determinant = mobility_t1 * mobility_t2 - mobility_t1t2 * mobility_t1t2
+    trace = mobility_t1 + mobility_t2
+    if determinant > wp.float32(0.01) * trace * trace and static_radius > wp.float32(0.0):
+        # lambda_old - K^-1 v, the unconstrained minimizer of the float32 solve.
+        inverse_det = wp.float32(1.0) / determinant
+        stick = wp.vec2f(
+            lambda_t1_old - (mobility_t2 * rhs_t1 - mobility_t1t2 * rhs_t2) * inverse_det,
+            lambda_t2_old - (mobility_t1 * rhs_t2 - mobility_t1t2 * rhs_t1) * inverse_det,
+        )
+        if wp.length_sq(stick) <= static_radius * static_radius:
+            return stick
     scale = wp.max(mobility_t1, mobility_t2)
     well_conditioned = wp.bool(False)
     if scale > wp.float32(0.0):
-        a = mobility_t1 / scale
-        b = mobility_t1t2 / scale
-        c = mobility_t2 / scale
+        inverse_scale = _fast_div(wp.float32(1.0), scale)
+        a = mobility_t1 * inverse_scale
+        b = mobility_t1t2 * inverse_scale
+        c = mobility_t2 * inverse_scale
         # Bound the determinant cancellation before choosing float32.
         # Tiny positive eigenvalues retain the precise physical solve.
         well_conditioned = a * c - b * b > wp.float32(0.01) * (a + c) * (a + c)

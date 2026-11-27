@@ -281,6 +281,45 @@ def _make_tiny_radius_kernel(fast_math: bool):
     return solve
 
 
+def _make_metric_kernel(fast_math: bool):
+    @wp.kernel(enable_backward=False, module="unique", module_options={"fast_math": fast_math})
+    def solve(
+        mobility: wp.array[wp.vec3],
+        velocity: wp.array[wp.vec2],
+        old_impulse: wp.array[wp.vec2],
+        radii: wp.array[wp.vec2],
+        result: wp.array[wp.vec2],
+    ):
+        i = wp.tid()
+        k = mobility[i]
+        v = velocity[i]
+        old = old_impulse[i]
+        r = radii[i]
+        result[i] = contact_project_friction_metric(k[0], k[1], k[2], v[0], v[1], old[0], old[1], r[0], r[1])
+
+    return solve
+
+
+def _metric_reference(matrix, velocity, old, static_radius, dynamic_radius):
+    """Float64 minimizers of the tangent kinetic energy within the Coulomb disk, for a batch of blocks."""
+    stick = old - np.linalg.solve(matrix, velocity[..., None])[..., 0]
+    # On the disk boundary (K + alpha I) lambda = K lambda_old - v; the
+    # impulse norm decreases monotonically in alpha >= 0.
+    target = np.einsum("nij,nj->ni", matrix, old) - velocity
+    lower = np.zeros(len(matrix))
+    upper = np.linalg.norm(target, axis=1) / dynamic_radius
+    identity = np.eye(2)
+    for _ in range(200):
+        alpha = 0.5 * (lower + upper)
+        boundary = np.linalg.solve(matrix + alpha[:, None, None] * identity, target[..., None])[..., 0]
+        outside = np.linalg.norm(boundary, axis=1) > dynamic_radius
+        lower = np.where(outside, alpha, lower)
+        upper = np.where(outside, upper, alpha)
+    sliding = np.linalg.solve(matrix + upper[:, None, None] * identity, target[..., None])[..., 0]
+    sticks = np.linalg.norm(stick, axis=1) <= static_radius
+    return np.where(sticks[:, None], stick, sliding), sticks
+
+
 @wp.kernel(enable_backward=False)
 def _fast_div_batch(numerator: wp.array[wp.float32], denominator: wp.array[wp.float32], out: wp.array[wp.float32]):
     i = wp.tid()
@@ -452,6 +491,81 @@ class TestContactCoupling(unittest.TestCase):
                 before = 0.5 * velocity @ np.linalg.solve(matrix, velocity)
                 after = 0.5 * after_velocity @ np.linalg.solve(matrix, after_velocity)
                 self.assertLessEqual(after, before + 1.0e-6 * max(before, 1.0e-12))
+
+    def _assert_metric_matches_reference(self, matrices, velocity, old, radii, minimum_each=0):
+        """Solve float32 blocks on every device and compare with the float64 minimizer of the same inputs."""
+        packed = np.stack([matrices[:, 0, 0], matrices[:, 0, 1], matrices[:, 1, 1]], axis=1).astype(np.float32)
+        inputs32 = [packed, velocity.astype(np.float32), old.astype(np.float32), radii.astype(np.float32)]
+        exact = np.stack([packed[:, [0, 1]], packed[:, [1, 2]]], axis=1).astype(np.float64)
+        f64 = [x.astype(np.float64) for x in inputs32]
+        reference, sticks = _metric_reference(exact, f64[1], f64[2], f64[3][:, 0], f64[3][:, 1])
+        eigen = np.linalg.eigvalsh(exact)
+        condition = eigen[:, 1] / np.maximum(eigen[:, 0], 1.0e-300)
+        relative = 1.0e-6 + np.where(condition < 100.0, 4.0 * np.finfo(np.float32).eps * condition, 0.0)
+        self.assertGreaterEqual(int(sticks.sum()), minimum_each)
+        self.assertGreaterEqual(int((~sticks).sum()), minimum_each)
+        devices = ["cpu"] + (["cuda:0"] if wp.is_cuda_available() else [])
+        for device in devices:
+            for fast_math in (False, True):
+                result = wp.zeros(len(packed), dtype=wp.vec2, device=device)
+                wp.launch(
+                    _make_metric_kernel(fast_math),
+                    len(packed),
+                    [wp.array(x, dtype=wp.vec3 if x.shape[1] == 3 else wp.vec2, device=device) for x in inputs32],
+                    [result],
+                    device=device,
+                )
+                error = np.linalg.norm(result.numpy().astype(np.float64) - reference, axis=1)
+                # Relative to the impulse scale. Blocks conditioned below
+                # about 100 solve in float32, whose rounding the condition
+                # amplifies; the others solve in float64.
+                bound = relative * np.maximum(np.linalg.norm(reference, axis=1), radii[:, 0])
+                worst = int(np.argmax(error / bound))
+                self.assertLessEqual(
+                    float(error[worst]), float(bound[worst]), msg=f"{device} fast_math={fast_math} case {worst}"
+                )
+
+    @staticmethod
+    def _random_blocks(rng, count, max_condition_exponent):
+        angle = rng.uniform(0.0, np.pi, count)
+        rotation = np.stack([np.cos(angle), -np.sin(angle), np.sin(angle), np.cos(angle)], axis=1).reshape(-1, 2, 2)
+        scale = 10.0 ** rng.uniform(-4.0, 4.0, count)
+        condition = 10.0 ** rng.uniform(0.0, max_condition_exponent, count)
+        eigen = np.stack([scale, scale / condition], axis=1)
+        return np.einsum("nij,nj,nkj->nik", rotation, eigen, rotation), eigen
+
+    def test_metric_friction_matches_float64_minimizer(self):
+        """Sticking and sliding impulses match the exact minimizer for random tangent blocks."""
+        rng = np.random.default_rng(7)
+        count = 4096
+        # Eigenvalues span scales and conditions on both sides of the float64 switch.
+        matrices, eigen = self._random_blocks(rng, count, 4.0)
+        old = rng.normal(size=(count, 2)) * rng.uniform(0.0, 1.0, (count, 1))
+        # Velocities from sticking (small slips) to fast sliding.
+        velocity = rng.normal(size=(count, 2)) * eigen[:, 1:] * 10.0 ** rng.uniform(-2.0, 1.0, (count, 1))
+        static_radius = rng.uniform(0.2, 1.0, count)
+        radii = np.stack([static_radius, static_radius * rng.uniform(0.5, 1.0, count)], axis=1)
+        self._assert_metric_matches_reference(matrices, velocity, old, radii, minimum_each=count // 8)
+
+    def test_metric_friction_at_the_cone_boundary(self):
+        """Impulses whose unconstrained minimizer lies just inside or outside the static disk."""
+        rng = np.random.default_rng(11)
+        count = 2048
+        matrices, _ = self._random_blocks(rng, count, 2.0)
+        static_radius = 10.0 ** rng.uniform(-6.0, 1.0, count)
+        # Previous impulses lie within about the previous disk.
+        old = rng.normal(size=(count, 2)) * (static_radius * rng.uniform(0.0, 1.0, count))[:, None]
+        old[: count // 8] = 0.0
+        # Equal static and kinetic radii, a kinetic drop, and a vanishing kinetic disk.
+        kinetic = np.choose(rng.integers(0, 3, count), [np.ones(count), rng.uniform(0.5, 1.0, count), 1.0e-6])
+        radii = np.stack([static_radius, static_radius * kinetic], axis=1)
+        # Place the unconstrained minimizer lambda_old - K^-1 v at 1 -+ 1e-3 static radii.
+        direction = rng.normal(size=(count, 2))
+        direction /= np.linalg.norm(direction, axis=1, keepdims=True)
+        margin = np.where(np.arange(count) % 2 == 0, 1.0 - 1.0e-3, 1.0 + 1.0e-3)
+        stick = direction * (static_radius * margin)[:, None]
+        velocity = np.einsum("nij,nj->ni", matrices, old - stick)
+        self._assert_metric_matches_reference(matrices, velocity, old, radii, minimum_each=count // 4)
 
     def test_anisotropic_sliding_friction_dissipates_energy(self):
         """Keep sliding friction dissipative as the normal load shrinks."""
