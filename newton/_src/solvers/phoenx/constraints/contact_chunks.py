@@ -19,11 +19,15 @@ def _snapshot_active_columns(
     columns: ContactColumnContainer,
     pair: wp.array[wp.int32],
     active: wp.array[wp.int32],
+    chunk_size: int,
     source: ContactColumnContainer,
     source_pair: wp.array[wp.int32],
+    counts: wp.array[wp.int32],
 ):
+    """Copy the active columns aside and count each column's chunks (zero past the active ones)."""
     i = wp.tid()
     if i >= active[0]:
+        counts[i] = 0
         return
     for row in range(columns.data.shape[0]):
         source.data[row, i] = columns.data[row, i]
@@ -31,20 +35,7 @@ def _snapshot_active_columns(
     if columns.angular_friction.shape[0] > 0:
         source.angular_friction[i] = columns.angular_friction[i]
     source_pair[i] = pair[i]
-
-
-@wp.kernel(enable_backward=False)
-def _count_chunks(
-    columns: ContactColumnContainer,
-    active: wp.array[wp.int32],
-    chunk_size: int,
-    counts: wp.array[wp.int32],
-):
-    i = wp.tid()
-    value = int(0)
-    if i < active[0]:
-        value = (contact_get_contact_count(columns, i) + chunk_size - 1) // chunk_size
-    counts[i] = value
+    counts[i] = (contact_get_contact_count(columns, i) + chunk_size - 1) // chunk_size
 
 
 @wp.kernel(enable_backward=False)
@@ -146,10 +137,9 @@ def split_contact_columns(
     wp.launch(
         _snapshot_active_columns,
         scratch.capacity,
-        [columns, source_pair, active, scratch.source, scratch.source_pair],
+        [columns, source_pair, active, chunk_size, scratch.source, scratch.source_pair, scratch.counts],
         device=device,
     )
-    wp.launch(_count_chunks, scratch.capacity, [scratch.source, active, chunk_size, scratch.counts], device=device)
     wp.utils.array_scan(scratch.counts, scratch.offsets, inclusive=False)
     wp.launch(
         _split_columns,

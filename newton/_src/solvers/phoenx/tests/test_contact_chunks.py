@@ -20,11 +20,7 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
     contact_set_contact_count,
     contact_set_contact_first,
 )
-from newton._src.solvers.phoenx.constraints.contact_chunks import (
-    _count_chunks,
-    _publish_chunks,
-    _split_columns,
-)
+from newton._src.solvers.phoenx.constraints.contact_chunks import ContactChunkScratch, split_contact_columns
 from newton._src.solvers.phoenx.tests.test_contact_coupling import _total_momentum
 
 
@@ -72,13 +68,10 @@ class TestContactChunks(unittest.TestCase):
         """Retain pair metadata and exact point ownership while columns shrink."""
         device = "cpu"
         capacity = 32
-        source = contact_column_container_zeros(capacity, device=device)
         target = contact_column_container_zeros(capacity, device=device)
-        source_pair = wp.array([4, 8, 2] + [0] * 29, dtype=wp.int32, device=device)
-        target_pair = wp.full(capacity, -1, dtype=wp.int32, device=device)
+        scratch = ContactChunkScratch(capacity, target, device)
+        target_pair = wp.array([4, 8, 2] + [0] * 29, dtype=wp.int32, device=device)
         active = wp.array([3], dtype=wp.int32, device=device)
-        counts = wp.zeros(capacity, dtype=wp.int32, device=device)
-        offsets = wp.zeros_like(counts)
         cid = wp.full(capacity, -1, dtype=wp.int32, device=device)
         total_active = wp.zeros(1, dtype=wp.int32, device=device)
         for ranges, expected_starts, expected_counts, expected_pairs in (
@@ -87,16 +80,8 @@ class TestContactChunks(unittest.TestCase):
         ):
             active.assign([len(ranges)])
             initial = wp.array(ranges, dtype=wp.int32, device=device)
-            wp.launch(_seed_ranges, len(ranges), [source, initial], device=device)
-            wp.launch(_count_chunks, capacity, [source, active, 6, counts], device=device)
-            wp.utils.array_scan(counts, offsets, inclusive=False)
-            wp.launch(
-                _split_columns,
-                capacity,
-                [source, target, active, counts, offsets, 6, source_pair, target_pair, 7, cid],
-                device=device,
-            )
-            wp.launch(_publish_chunks, 1, [counts, offsets, active, 7, total_active], device=device)
+            wp.launch(_seed_ranges, len(ranges), [target, initial], device=device)
+            split_contact_columns(scratch, target, active, target_pair, 6, 7, cid, total_active, device=device)
             actual = wp.zeros((capacity, 2), dtype=wp.int32, device=device)
             wp.launch(_read_ranges, capacity, [target, active, actual], device=device)
             size = len(expected_starts)

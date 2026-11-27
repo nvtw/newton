@@ -5164,15 +5164,21 @@ class PhoenXWorld:
             # External force impulse is applied once per outer collision step.
             force_dt = self.step_dt if self._current_substep_index == 0 else 0.0
         if self.num_bodies > 0 and self._has_maximal_dynamic_bodies:
+            # Temporal bodies on joints with free axes receive the whole substep's forces now.
+            jointed = self._temporal_jointed if temporal else None
+            jointed_dt = force_dt * (self.solver_iterations - 1) if temporal else 0.0
             wp.launch(
                 _phoenx_apply_forces_and_gravity_kernel,
                 dim=self.num_bodies,
-                inputs=[self.bodies, self.gravity, wp.float32(force_dt)],
+                inputs=[
+                    self.bodies,
+                    self.gravity,
+                    wp.float32(force_dt),
+                    jointed if jointed is not None else wp.empty(0, dtype=wp.int32, device=self.device),
+                    wp.float32(jointed_dt if jointed is not None else 0.0),
+                ],
                 device=self.device,
             )
-            if temporal:
-                # Bodies on joints with free axes receive the whole substep's forces now.
-                self._temporal_apply_forces(0, jointed_dt=force_dt * (self.solver_iterations - 1))
         if self.num_particles > 0 and self.particles is not None:
             wp.launch(
                 cloth_predict_kernel,

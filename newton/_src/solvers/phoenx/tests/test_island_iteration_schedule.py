@@ -66,13 +66,16 @@ class TestIslandIterationSchedule(unittest.TestCase):
         last_color = wp.array([1, 9, 0, 6, 9], dtype=int, device=device)
         keys = wp.empty(2 * len(roots), dtype=int, device=device)
         order = wp.empty(2 * len(roots), dtype=int, device=device)
+        # A color table of ten colors bounds every span.
+        color_capacity = 11
         wp.launch(
             _key_island_order,
             dim=len(roots),
-            inputs=[roots, count, first_color, last_color, keys, order],
+            inputs=[roots, count, first_color, last_color, color_capacity, keys, order],
             device=device,
         )
-        wp.utils.radix_sort_pairs(keys, order, len(roots), end_bit=17)
+        # Only the bits below the color capacity are sorted.
+        wp.utils.radix_sort_pairs(keys, order, len(roots), end_bit=color_capacity.bit_length())
         # Spans: island 4 -> 9, 1 -> 8, 3 -> 2, 0 -> 2 (ties keep their index order).
         np.testing.assert_array_equal(order.numpy()[:4], [4, 1, 3, 0])
 

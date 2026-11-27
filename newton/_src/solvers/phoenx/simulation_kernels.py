@@ -3181,6 +3181,8 @@ def _phoenx_apply_forces_and_gravity_kernel(
     bodies: BodyContainer,
     gravity: wp.array[wp.vec3f],
     substep_dt: wp.float32,
+    jointed: wp.array[wp.int32],
+    jointed_dt: wp.float32,
 ):
     """Per-body substep entry: snapshot pose into ``*_prev_substep``,
     set :attr:`access_mode`, then apply external forces + gravity to
@@ -3192,6 +3194,9 @@ def _phoenx_apply_forces_and_gravity_kernel(
     flips a body between velocity- and position-level. It must run
     once per substep regardless of motion type so non-dynamic bodies
     also have a valid anchor.
+
+    Bodies flagged in ``jointed`` then receive ``jointed_dt`` more of their
+    forces and gravity, as :func:`temporal_apply_forces_kernel` would apply.
     """
     i = wp.tid()
     bodies.position_prev_substep[i] = bodies.position[i]
@@ -3224,6 +3229,11 @@ def _phoenx_apply_forces_and_gravity_kernel(
     w = w + (inv_inertia_world * bodies.torque[i]) * substep_dt
     if bodies.affected_by_gravity[i] != 0:
         v = v + gravity[bodies.world_id[i]] * substep_dt
+    if jointed_dt != wp.float32(0.0) and jointed[i] != wp.int32(0):
+        v = v + bodies.force[i] * (inv_mass * jointed_dt)
+        w = w + (inv_inertia_world * bodies.torque[i]) * jointed_dt
+        if bodies.affected_by_gravity[i] != 0:
+            v = v + gravity[bodies.world_id[i]] * jointed_dt
     bodies.velocity[i] = v
     bodies.angular_velocity[i] = w
 
