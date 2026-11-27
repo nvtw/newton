@@ -350,6 +350,15 @@ The setup window (contact gather to first sweep) shrinks from 1,716 to
 1,548 us per collision pass and its main-stream launches from 174 to 127:
 58.19/58.74/58.82 -> 59.37/59.56/59.60/59.72 FPS (+1.7%).
 
+After the trims the main stream idles about 90 us per pass at the join of
+the owned contact schedule, whose side stream sorts the whole column
+capacity (a 38-bit (component, body pair) key in 5 radix passes, then 2
+endpoint passes). Keying by component alone (2 passes; column order
+already groups each body pair, but the order within a component changes)
+measured 59.61/59.53 against 59.59/59.35 FPS, within noise; not kept. The
+in-factory trace overstates that path: its sorts share the SMs with the
+sleeping pass.
+
 
 
 Contacts on non-tree `maximal_direct` mechanisms are solved through the exact
