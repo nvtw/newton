@@ -3,11 +3,12 @@
 """Check that bit-limited int64 sorts reproduce the full-width permutation."""
 
 import unittest
+from unittest import mock
 
 import numpy as np
 import warp as wp
 
-from newton._src.geometry.active_prefix_sort import active_prefix_sort_levels
+from newton._src.geometry.active_prefix_sort import active_prefix_sort_levels, radix_sort_active_prefix
 from newton._src.solvers.phoenx.helpers.scan_and_sort import sort_variable_length_int64
 
 
@@ -97,6 +98,61 @@ class TestSortEndBit(unittest.TestCase):
                 np.testing.assert_array_equal(sorted_keys[:active], source[:active][order])
                 np.testing.assert_array_equal(values.numpy()[:active], order.astype(np.int32))
                 np.testing.assert_array_equal(sorted_keys[active:], sentinel)
+
+    def test_active_prefix_sort_takes_one_branch_per_tree_level(self):
+        """Ranking few keys is a leaf of the prefix-size tree, not a conditional in front of it."""
+        capacity = 1 << 20
+        levels = active_prefix_sort_levels(capacity)
+        device = "cuda:0"
+        keys = wp.zeros(2 * capacity, dtype=wp.int64, device=device)
+        values = wp.zeros(2 * capacity, dtype=wp.int32, device=device)
+        count = wp.zeros(1, dtype=wp.int32, device=device)
+        flags = wp.zeros(levels, dtype=wp.int32, device=device)
+        depth = [0, 0]
+        capture_if = wp.capture_if
+
+        def nested(condition, **kwargs):
+            depth[0] += 1
+            depth[1] = max(depth)
+            capture_if(condition, **kwargs)
+            depth[0] -= 1
+
+        with mock.patch.object(wp, "capture_if", nested):
+            with wp.ScopedCapture(device=device):
+                radix_sort_active_prefix(keys, values, count, flags)
+        # A replay passes one conditional node per level of a balanced tree over the five
+        # prefix sizes and the ranked leaf.
+        self.assertEqual(levels, 5)
+        self.assertEqual(depth[1], 3)
+
+    def test_prefix_sort_inside_a_dispatch_ranks_few_keys(self):
+        """A sort over a dispatched prefix ranks few keys and radix-sorts the others."""
+        capacity = 1 << 20
+        prefix = capacity >> 2
+        device = "cuda:0"
+        rng = np.random.default_rng(5)
+        source = rng.integers(0, 1 << 40, prefix, dtype=np.int64)
+        sentinel = np.iinfo(np.int64).max
+        keys = wp.zeros(2 * capacity, dtype=wp.int64, device=device)
+        values = wp.zeros(2 * capacity, dtype=wp.int32, device=device)
+        staged = wp.zeros(prefix, dtype=wp.int64, device=device)
+        count = wp.zeros(1, dtype=wp.int32, device=device)
+        flags = wp.zeros(active_prefix_sort_levels(capacity), dtype=wp.int32, device=device)
+        source_values = wp.array(np.arange(prefix, dtype=np.int32), dtype=wp.int32, device=device)
+        with wp.ScopedCapture(device=device) as capture:
+            wp.copy(keys, staged, count=prefix)
+            wp.copy(values, source_values, count=prefix)
+            radix_sort_active_prefix(keys, values, count, flags, prefix=prefix)
+        for active in (3, 1024, 1025, 70000):
+            with self.subTest(active=active):
+                padded = source.copy()
+                padded[active:] = sentinel
+                staged.assign(padded)
+                count.fill_(active)
+                wp.capture_launch(capture.graph)
+                order = np.argsort(source[:active], kind="stable")
+                np.testing.assert_array_equal(keys.numpy()[:active], source[:active][order])
+                np.testing.assert_array_equal(values.numpy()[:active], order.astype(np.int32))
 
 
 if __name__ == "__main__":
