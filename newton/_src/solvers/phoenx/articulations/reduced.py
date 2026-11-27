@@ -22,6 +22,7 @@ from newton._src.solvers.featherstone.kernels import (
     spatial_cross_dual,
 )
 from newton._src.solvers.phoenx.articulations.dense_tree import DenseTreeOperator, dense_tree_solve
+from newton._src.solvers.phoenx.articulations.direct_equality import drive_target_position
 from newton._src.solvers.phoenx.articulations.reduced_contact import (
     flush_deferred_articulation,
     reduced_contact_iterate,
@@ -1047,6 +1048,30 @@ def saturate_joint_drive(
     if bound == wp.float32(0.0):
         return stiffness, drive_damping, wp.float32(0.0), bound
     return wp.float32(0.0), wp.float32(0.0), bound * limit, bound
+
+
+@wp.kernel(enable_backward=False)
+def _advance_drive_targets_kernel(
+    joint_type: wp.array[wp.int32],
+    joint_qd_start: wp.array[wp.int32],
+    joint_target_q_start: wp.array[wp.int32],
+    joint_target_mode: wp.array[wp.int32],
+    commanded_target_q: wp.array[wp.float32],
+    target_qd: wp.array[wp.float32],
+    elapsed: wp.float32,
+    target_q: wp.array[wp.float32],
+):
+    """Move each drive's position target to ``elapsed`` after the control write."""
+    joint = wp.tid()
+    kind = joint_type[joint]
+    if kind != JointType.REVOLUTE and kind != JointType.PRISMATIC and kind != JointType.D6:
+        return
+    dof_start = joint_qd_start[joint]
+    for dof in range(dof_start, joint_qd_start[joint + wp.int32(1)]):
+        index = joint_target_q_start[joint] + dof - dof_start
+        target_q[index] = drive_target_position(
+            joint_target_mode[dof], commanded_target_q[index], target_qd[dof], elapsed, wp.float32(0.0)
+        )
 
 
 @wp.func
@@ -4745,6 +4770,13 @@ class ReducedPhoenXArticulation:
             raise ValueError("runtime reduced articulations require CUDA")
         self.state = model.state()
         self.control = model.control(clone_variables=True)
+        # Position-velocity drives follow a moving setpoint from the commanded one.
+        self._commanded_target_q = (
+            wp.clone(self.control.joint_target_q)
+            if model.joint_dof_count
+            and np.any(model.joint_target_mode.numpy() == int(JointTargetMode.POSITION_VELOCITY))
+            else None
+        )
         self._kinematics_current = False
         # Rows imported from the caller's state; runtime instance slots, if any, follow them.
         capacity = getattr(model, "_dynamic_capacity", None)
@@ -4960,6 +4992,8 @@ class ReducedPhoenXArticulation:
         wp.copy(self.control.joint_f, control.joint_f)
         wp.copy(self.control.joint_target_q, control.joint_target_q)
         wp.copy(self.control.joint_target_qd, control.joint_target_qd)
+        if self._commanded_target_q is not None:
+            wp.copy(self._commanded_target_q, control.joint_target_q)
 
     def begin_substep(
         self,
@@ -4968,12 +5002,30 @@ class ReducedPhoenXArticulation:
         split_dynamics: bool,
         compute_impulse_response: bool = True,
         world=None,
+        target_time: float = 0.0,
     ) -> None:
         """Apply pre-PGS reduced dynamics at the current configuration.
 
         With a fused substep, see :attr:`fused_substep`, this runs the whole biased
-        substep through publication and needs the owning ``world``.
+        substep through publication and needs the owning ``world``. Moving drive
+        setpoints are evaluated ``target_time`` after the step start, the substep's end.
         """
+        if self._commanded_target_q is not None:
+            wp.launch(
+                _advance_drive_targets_kernel,
+                dim=self.model.joint_count,
+                inputs=[
+                    self.model.joint_type,
+                    self.model.joint_qd_start,
+                    self.model.joint_target_q_start,
+                    self.model.joint_target_mode,
+                    self._commanded_target_q,
+                    self.control.joint_target_qd,
+                    wp.float32(target_time),
+                ],
+                outputs=[self.control.joint_target_q],
+                device=self.model.device,
+            )
         if self.fused_substep is not None:
             self.fused_substep.biased(world, dt, reuse_factor=self._relaxed_pose_factored)
             self._relaxed_pose_factored = False

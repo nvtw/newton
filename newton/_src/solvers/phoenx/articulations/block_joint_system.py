@@ -738,6 +738,9 @@ class MixedJointSystem:
         self.blocks.set_temporal_substeps(substeps)
         self.exact.set_temporal_substeps(substeps)
 
+    def set_drive_target_start(self, start):
+        self._forward("set_drive_target_start", start)
+
     def set_control_targets(self, target_q, target_qd):
         self.blocks.set_control_targets(target_q, target_qd)
         self.exact.set_control_targets(target_q, target_qd)

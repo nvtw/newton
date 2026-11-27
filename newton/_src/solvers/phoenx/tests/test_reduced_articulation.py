@@ -1194,9 +1194,11 @@ class TestReducedArticulation(unittest.TestCase):
                     + substep_dt * (active_drive_damping + passive_damping)
                     + substep_dt * substep_dt * active_stiffness
                 )
-                for _ in range(substeps):
+                # A position-velocity drive's target moves to each substep's end.
+                moving = target_qd if target_mode == newton.JointTargetMode.POSITION_VELOCITY else 0.0
+                for substep in range(substeps):
                     implicit_force = (
-                        active_stiffness * (target_q - expected_q)
+                        active_stiffness * (target_q + moving * (substep + 1) * substep_dt - expected_q)
                         + active_drive_damping * (active_target_velocity - expected_qd)
                         - passive_damping * expected_qd
                         - substep_dt * active_stiffness * expected_qd

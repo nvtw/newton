@@ -340,6 +340,15 @@ class SolverPhoenX(SolverBase):
     friction for maximal-coordinate joints. Reduced-coordinate ownership is
     available independently.
 
+    Moving drive setpoints:
+        A ``POSITION_VELOCITY`` drive of a maximal-coordinate joint follows a
+        moving setpoint, as a servo does: each substep evaluates the position
+        target as ``joint_target_q + joint_target_qd * t``, where ``t`` is the
+        time from the start of :meth:`step` to the end of that substep. A
+        controller that writes a trajectory sample and its velocity before
+        each step therefore drives without a lag of one step of motion. Drives
+        with a zero target velocity hold their position target as before.
+
     Newton :class:`Picking` works out of the box: pick force/torque is
     added to ``state.body_f``, which :meth:`step` imports into PhoenX's
     force accumulators before integrating.

@@ -147,7 +147,8 @@ def _implicit_velocity(
     kd: float,
 ) -> float:
     numerator = (physical_inertia + armature) * qd
-    numerator += dt * (kp * (target_q - q) + kd * target_qd)
+    # The position target moves with the target velocity to the end of the step.
+    numerator += dt * (kp * (target_q + dt * target_qd - q) + kd * target_qd)
     denominator = physical_inertia + armature + dt * (passive_damping + kd) + dt * dt * kp
     return numerator / denominator
 
@@ -345,7 +346,7 @@ class TestDirectDriveAnalytical(unittest.TestCase):
                 mass[row, column] = np.sum(inertia[max(row, column) :])
         impedance = armature + dt * (passive_damping + kd) + dt * dt * kp
         rhs = mass @ qd + armature * qd
-        rhs += dt * (kp * (target_q - q) + kd * target_qd)
+        rhs += dt * (kp * (target_q + dt * target_qd - q) + kd * target_qd)
         expected_qd = np.linalg.solve(mass + np.diag(impedance), rhs)
 
         np.testing.assert_allclose(result_qd.numpy(), expected_qd, rtol=2.0e-5, atol=2.0e-5)
@@ -644,6 +645,64 @@ class TestDirectDriveAnalytical(unittest.TestCase):
         self.assertTrue(bool(np.all(solver._direct_equality_system.drive_saturated.numpy()[dynamic_rows])))
         self.assertAlmostEqual(qd_after, expected_qd, delta=2.0e-5)
         self.assertAlmostEqual(q_after, q + dt * expected_qd, delta=2.0e-5)
+
+    def test_moving_setpoint_tracks_ramp_without_saturating(self) -> None:
+        """A position-velocity drive follows its commanded position advanced by the commanded velocity.
+
+        The controller writes the setpoint of a constant-speed ramp once per step.
+        A held setpoint would lag the moving joint by up to one step of motion and
+        drive this stiff, capped servo into its effort cap at every substep.
+        """
+        speed = 1.0
+        dt = 1.0 / 60.0
+        for joint_mode in ("maximal_direct", "maximal_pgs", "reduced"):
+            with self.subTest(joint_mode=joint_mode):
+                model = _make_revolute(
+                    two_body=False,
+                    inertia=1.0,
+                    armature=0.0,
+                    gear=1.0,
+                    passive_damping=0.0,
+                    kp=1.0e4,
+                    kd=200.0,
+                    target_mode=newton.JointTargetMode.POSITION_VELOCITY,
+                )
+                model.joint_effort_limit.assign(np.asarray([50.0], dtype=np.float32))
+                state_0, state_1 = model.state(), model.state()
+                state_0.joint_qd.assign(np.asarray([speed], dtype=np.float32))
+                newton.eval_fk(model, state_0.joint_q, state_0.joint_qd, state_0)
+                control = model.control()
+                control.joint_target_qd.assign(np.asarray([speed], dtype=np.float32))
+                solver = newton.solvers.SolverPhoenX(
+                    model,
+                    substeps=4,
+                    solver_iterations=2,
+                    joint_mode=joint_mode,
+                    direct_joint_mask=np.ones(model.joint_count, dtype=bool) if joint_mode == "maximal_pgs" else None,
+                    step_layout="single_world",
+                )
+                if joint_mode == "reduced":
+                    saturated = solver._reduced_articulation.system.joint_drive_bound
+                else:
+                    direct = solver._direct_equality_system
+                    saturated = getattr(direct, "exact", direct).drive_saturated
+
+                def step(state_0=state_0, state_1=state_1, solver=solver, control=control) -> None:
+                    state_0.clear_forces()
+                    solver.step(state_0, state_1, control, None, dt)
+                    state_0.assign(state_1)
+
+                with wp.ScopedCapture(device=model.device) as capture:
+                    step()
+                joint_q = wp.zeros(1, dtype=wp.float32, device=model.device)
+                joint_qd = wp.zeros(1, dtype=wp.float32, device=model.device)
+                for frame in range(30):
+                    control.joint_target_q.assign(np.asarray([speed * frame * dt], dtype=np.float32))
+                    wp.capture_launch(capture.graph)
+                    self.assertFalse(bool(saturated.numpy().any()), f"saturated at step {frame}")
+                newton.eval_ik(model, state_0, joint_q, joint_qd)
+                self.assertAlmostEqual(float(joint_q.numpy()[0]), speed * 30 * dt, delta=1.0e-4)
+                self.assertAlmostEqual(float(joint_qd.numpy()[0]), speed, delta=1.0e-3)
 
 
 if __name__ == "__main__":

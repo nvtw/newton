@@ -1636,6 +1636,20 @@ def _direct_drive_response(
 
 
 @wp.func
+def drive_target_position(
+    mode: wp.int32, target_q: wp.float32, target_qd: wp.float32, target_start: wp.float32, elapsed: wp.float32
+) -> wp.float32:
+    """Position target at the end of a step that ends ``target_start + elapsed`` after the control write.
+
+    A drive with both targets follows a moving setpoint, as a servo does: the
+    commanded position advances with the commanded velocity until the next write.
+    """
+    if mode == JointTargetMode.POSITION_VELOCITY:
+        return target_q + target_qd * (target_start + elapsed)
+    return target_q
+
+
+@wp.func
 def _limit_stop_reference(
     state: wp.int32, coordinate: wp.float32, lower: wp.float32, upper: wp.float32, dt: wp.float32
 ):
@@ -1702,6 +1716,8 @@ def _snapshot_direct_dynamic_velocity_kernel(
     row_limit_state: wp.array[wp.int32],
     row_limit_lower: wp.array[wp.float32],
     row_limit_upper: wp.array[wp.float32],
+    target_start: wp.float32,
+    microstep: wp.int32,
 ):
     row = wp.tid()
     selected = microstep_joint.shape[0] > row_joint[row] and microstep_joint[row_joint[row]]
@@ -1791,12 +1807,22 @@ def _snapshot_direct_dynamic_velocity_kernel(
             cap = wp.abs(gear * effort_limit[dof])
             momentum += dt * wp.where(bound >= wp.float32(0.0), cap, -cap)
         else:
+            elapsed = dt
+            if selected:
+                elapsed = dt * wp.float32(microstep)
+            target = drive_target_position(
+                joint_target_mode[dof],
+                control_target_q[row_target_q[row]],
+                control_target_qd[dof],
+                target_start,
+                elapsed,
+            )
             response = _direct_drive_response(
                 dt,
                 joint_target_mode[dof],
                 joint_target_ke[dof],
                 joint_target_kd[dof],
-                control_target_q[row_target_q[row]] - dynamic_coordinate[row],
+                target - dynamic_coordinate[row],
                 control_target_qd[dof],
             )
             mass += response[0]
@@ -1863,14 +1889,18 @@ def _activate_bounded_direct_drives_kernel(
     changed_mechanism: wp.array[wp.int32],
     any_active_flag: wp.array[wp.int32],
     row_limit_state: wp.array[wp.int32],
+    target_start: wp.float32,
+    microstep: wp.int32,
 ):
     row = wp.tid()
     if not row_bounded_drive[row]:
         return
 
     joint = row_joint[row]
+    elapsed = dt
     if microstep_joint.shape[0] > joint and microstep_joint[joint]:
         dt /= wp.float32(microstep_count)
+        elapsed = dt * wp.float32(microstep)
     structural_index = joint_to_structural[joint]
     local_row = row_local[row]
     body0 = joint_parent[joint] + wp.int32(1)
@@ -1889,8 +1919,10 @@ def _activate_bounded_direct_drives_kernel(
     target_mode = joint_target_mode[dof]
     stiffness = joint_target_ke[dof]
     drive_damping = joint_target_kd[dof]
-    target_position = control_target_q[row_target_q[row]]
     target_velocity = control_target_qd[dof]
+    target_position = drive_target_position(
+        target_mode, control_target_q[row_target_q[row]], target_velocity, target_start, elapsed
+    )
     if target_mode == JointTargetMode.POSITION:
         target_velocity = wp.float32(0.0)
     elif target_mode == JointTargetMode.VELOCITY:
@@ -2349,6 +2381,10 @@ class DirectEqualitySystem:
         self.model = model
         self._microstep_joint = wp.empty(0, dtype=wp.bool, device=model.device)
         self._microstep_count = 1
+        #: Microsteps of the current substep a local drive has entered, 1-based.
+        self._microstep_index = 1
+        #: Time [s] from the control write (the step start) to the current substep's start.
+        self.drive_target_start = 0.0
         self._microstep_sum = wp.empty(0, dtype=wp.float32, device=model.device)
         self._microstep_seed = wp.empty(0, dtype=wp.float32, device=model.device)
         self._microstep_previous = wp.empty(0, dtype=wp.bool, device=model.device)
@@ -2881,6 +2917,10 @@ class DirectEqualitySystem:
                 device=self.model.device,
             )
 
+    def set_drive_target_start(self, start: float) -> None:
+        """Set the time [s] from the control write to the next substep, for moving drive setpoints."""
+        self.drive_target_start = float(start)
+
     def set_control_targets(
         self,
         target_q: wp.array[wp.float32],
@@ -2993,6 +3033,7 @@ class DirectEqualitySystem:
 
     def _snapshot_dynamic_rows(self, idt, *, advance=False):
         """Snapshot an outer step or advance selected local drive coordinates by one microstep."""
+        self._microstep_index = self._microstep_index + 1 if advance else 1
         wp.launch(
             _snapshot_direct_dynamic_velocity_kernel,
             dim=len(self.topology.row_joint),
@@ -3043,6 +3084,8 @@ class DirectEqualitySystem:
                 self.row_limit_state,
                 self.row_limit_lower,
                 self.row_limit_upper,
+                wp.float32(self.drive_target_start),
+                wp.int32(self._microstep_index),
             ],
             device=self.model.device,
         )
@@ -3104,6 +3147,8 @@ class DirectEqualitySystem:
                 self._bound_changed_mechanism,
                 any_flag,
                 self.row_limit_state,
+                wp.float32(self.drive_target_start),
+                wp.int32(self._microstep_index),
             ],
             device=self.model.device,
         )

@@ -3532,6 +3532,8 @@ class PhoenXWorld:
         # precedes colouring's graph conditionals.
         direct = getattr(self, "_direct_equality_system", None)
         prefactor = getattr(direct, "prefactor_async", None)
+        if direct is not None:
+            direct.set_drive_target_start(0.0)
         prefactored = bool(
             prefactor is not None
             and self._constraint_capacity > 0
@@ -3623,6 +3625,8 @@ class PhoenXWorld:
             )
             self._reuse_direct_relax_factor_this_substep = reuse_direct_factor
             if direct is not None and direct.enabled:
+                # Moving drive setpoints advance from the step start, when the controls were written.
+                direct.set_drive_target_start(k * self.substep_dt)
                 direct.begin_substep(wp.float32(1.0 / self.substep_dt), reuse_geometry=reuse_direct_factor)
             self._integrate_forces_and_gravity()
             if self._temporal_local_joints is not None:
@@ -5138,6 +5142,7 @@ class PhoenXWorld:
     def _begin_reduced_substep(self) -> None:
         self._reduced_articulation.begin_substep(
             self.substep_dt,
+            target_time=(self._current_substep_index + 1) * self.substep_dt,
             split_dynamics=True,
             compute_impulse_response=(
                 self._reduced_contacts_active_this_step

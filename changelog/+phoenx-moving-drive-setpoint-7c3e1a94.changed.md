@@ -1,0 +1,1 @@
+Advance the position target of PhoenX `POSITION_VELOCITY` joint drives by the target velocity within each step, so a controller that writes a trajectory sample and its velocity drives without lagging one step behind.
