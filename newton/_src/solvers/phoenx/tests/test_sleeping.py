@@ -977,6 +977,11 @@ class TestSleepingPipeline(unittest.TestCase):
         self.assertEqual(_is_sleeping(solver, 1), 1)
         np.testing.assert_array_equal(state.body_q.numpy(), initial_pose)
         np.testing.assert_array_equal(state.body_qd.numpy(), 0.0)
+        # The residual twist is dropped, so it can neither wake the body nor launch it on wake.
+        np.testing.assert_array_equal(solver.world.bodies.velocity.numpy()[1], 0.0)
+        np.testing.assert_array_equal(solver.world.bodies.angular_velocity.numpy()[1], 0.0)
+        state, next_state = _run_frames(solver, state, next_state, control, contacts, model, n=1, dt=dt)
+        self.assertEqual(_is_sleeping(solver, 1), 1)
 
         # An externally written velocity still wakes the body and reaches the output.
         state.body_qd.assign([[0, 0, 0.5, 0, 0, 0]])

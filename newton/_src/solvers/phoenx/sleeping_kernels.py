@@ -607,7 +607,7 @@ def _phoenx_propagate_sleep_to_bodies_kernel(
     * Awake body, island below threshold: counter++ saturating; on
       saturation stamp ``island_root`` with
       ``island_root_per_compact[set_nr]`` (lowest awake body id in
-      the compact island).
+      the compact island) and zero the body's velocity.
     * Sleeping body, island awake: clear ``island_root`` -- the
       external bridge + chain edges merged this island with a moving
       body, so every member wakes atomically.
@@ -652,6 +652,10 @@ def _phoenx_propagate_sleep_to_bodies_kernel(
     bodies.frames_below_threshold[b] = c
     if c >= sleeping_frames_required:
         bodies.island_root[b] = island_root_per_compact[island]
+        # A dormant body is at rest: its residual twist must not wake it next
+        # frame or launch it when its island wakes.
+        bodies.velocity[b] = wp.vec3f(0.0)
+        bodies.angular_velocity[b] = wp.vec3f(0.0)
 
 
 # ---------------------------------------------------------------------------
