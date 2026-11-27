@@ -72,6 +72,87 @@ class TestContactRestStability(unittest.TestCase):
         self.assertLess(float(np.max(speeds)), 5.0e-3)
         self.assertLess(float(np.max(np.linalg.norm(final - initial, axis=1))), 1.0e-3)
 
+    def test_pressed_cylinder_field_comes_to_rest(self) -> None:
+        """A packed field of standing bottles pressed into a corner must settle.
+
+        Constant sideways gravity presses 144 bottle-sized cylinders into the
+        corner of a pen. They touch along their sides, so every contact must
+        support them against rocking along the whole side. Contacts collapsing
+        to single points that move along the sides kept the field rocking.
+        """
+        radius, half_height, mass = 0.0305, 0.0606, 0.57
+        builder = newton.ModelBuilder()
+        glass = builder.ShapeConfig(density=0.0, mu=0.16, mu_static=0.2, gap=0.002)
+        steel = builder.ShapeConfig(density=0.0, mu=0.18, mu_static=0.2, gap=0.001)
+        pitch, count = 2.0 * radius, 12
+        width = (count + 0.5) * pitch
+        builder.add_shape_box(
+            -1, xform=wp.transform((0.0, 0.0, -0.05), wp.quat_identity()), hx=1.0, hy=1.0, hz=0.05, cfg=steel
+        )
+        builder.add_shape_box(
+            -1, xform=wp.transform((0.01, 0.0, 0.06), wp.quat_identity()), hx=0.01, hy=1.0, hz=0.06, cfg=steel
+        )
+        for side in (-1.0, 1.0):
+            builder.add_shape_box(
+                -1,
+                xform=wp.transform((-0.5, side * (0.5 * width + 0.01), 0.06), wp.quat_identity()),
+                hx=0.5,
+                hy=0.01,
+                hz=0.06,
+                cfg=steel,
+            )
+        bodies = []
+        for row in range(count):
+            for column in range(count):
+                x = -radius - 0.001 - row * pitch * math.sqrt(0.75)
+                y = -0.5 * width + radius + 0.001 + (column + 0.5 * (row % 2)) * pitch
+                body = builder.add_body(
+                    xform=wp.transform((x, y, 0.0005), wp.quat_identity()),
+                    mass=mass,
+                    com=wp.vec3(0.0, 0.0, 0.0834),
+                    inertia=wp.mat33(np.diag((0.00184, 0.00184, 0.000261))),
+                    lock_inertia=True,
+                )
+                builder.add_shape_cylinder(
+                    body,
+                    xform=wp.transform((0.0, 0.0, half_height), wp.quat_identity()),
+                    radius=radius,
+                    half_height=half_height,
+                    cfg=glass,
+                )
+                bodies.append(body)
+        model = builder.finalize("cuda:0")
+        # Press the field into the pen's corner, below the bottles' tipping ratio.
+        model.gravity.assign(np.array([[0.3 * 9.81, 0.0, -9.81]], dtype=np.float32))
+        pipeline = newton.CollisionPipeline(model, contact_matching="sticky", speculative_contact_gap_max=0.005)
+        solver = SolverPhoenX(
+            model,
+            collision_pipeline=pipeline,
+            substeps=3,
+            solver_iterations=4,
+            temporal_iterations=True,
+            contact_hertz=80.0,
+            velocity_iterations=1,
+            step_layout="single_world",
+        )
+        state, contacts = model.state(), pipeline.contacts()
+        dt = 1.0 / 120.0
+        with wp.ScopedCapture() as capture:
+            pipeline.collide(state, contacts, dt=dt)
+            solver.step(state, state, None, contacts, dt)
+        energies = []
+        for frame in range(720):
+            wp.capture_launch(capture.graph)
+            if frame >= 360 and frame % 6 == 0:
+                qd = state.body_qd.numpy()[bodies]
+                energies.append(
+                    0.5 * mass * np.sum(qd[:, :3] ** 2)
+                    + 0.5 * 0.00184 * np.sum(qd[:, 3:5] ** 2)
+                    + 0.5 * 0.000261 * np.sum(qd[:, 5] ** 2)
+                )
+        # A settled field keeps about 1 uJ; the rocking field kept 0.1 mJ.
+        self.assertLess(float(np.mean(energies)), 2.0e-5)
+
 
 class TestPackedContainerRest(unittest.TestCase):
     def test_heavy_contents_settle_in_light_container(self):
