@@ -52,7 +52,7 @@ __all__ = [
 _PHOENX_CLOTH_STIFFNESS_FLOOR = wp.constant(wp.float32(1.0e-6))
 
 
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def cloth_predict_kernel(
     particles: ParticleContainer,
     particle_world_id: wp.array[wp.int32],
@@ -87,7 +87,7 @@ def cloth_predict_kernel(
     particles.position[i] = p + substep_dt * v
 
 
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def cloth_recover_kernel(
     particles: ParticleContainer,
     inv_dt: wp.float32,
@@ -113,7 +113,7 @@ def cloth_recover_kernel(
     particles.access_mode[i] = mode_new
 
 
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def cloth_init_triangle_rows_kernel(
     constraints: ConstraintContainer,
     cid_offset: wp.int32,

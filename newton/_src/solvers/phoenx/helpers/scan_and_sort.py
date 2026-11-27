@@ -10,14 +10,14 @@ from newton._src.geometry.active_prefix_sort import radix_sort_active_prefix
 # lives on the device.
 
 
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def _mask_tail_int(array: wp.array[int], active_length: wp.array[int]):
     tid = wp.tid()
     if tid >= active_length[0]:
         array[tid] = 2147483647  # INT32_MAX
 
 
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def _mask_tail_int64(array: wp.array[wp.int64], active_length: wp.array[int]):
     tid = wp.tid()
     if tid >= active_length[0]:

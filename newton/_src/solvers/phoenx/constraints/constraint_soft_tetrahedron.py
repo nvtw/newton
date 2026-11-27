@@ -614,7 +614,7 @@ def soft_tetrahedron_iterate_at(
     _write_lambda_sum_mu(constraints, cid, lambda_sum_mu)
 
 
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def soft_tet_init_rows_kernel(
     constraints: ConstraintContainer,
     cid_offset: wp.int32,

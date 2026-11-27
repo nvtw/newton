@@ -14,7 +14,7 @@ from newton._src.solvers.phoenx.constraints.constraint_contact import (
 )
 
 
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def _snapshot_active_columns(
     columns: ContactColumnContainer,
     pair: wp.array[wp.int32],
@@ -33,7 +33,7 @@ def _snapshot_active_columns(
     source_pair[i] = pair[i]
 
 
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def _count_chunks(
     columns: ContactColumnContainer,
     active: wp.array[wp.int32],
@@ -47,7 +47,7 @@ def _count_chunks(
     counts[i] = value
 
 
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def _split_columns(
     source: ContactColumnContainer,
     target: ContactColumnContainer,
@@ -83,7 +83,7 @@ def _split_columns(
             cid_of_contact[chunk_first + point] = cid_base + out
 
 
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def _publish_chunks(
     counts: wp.array[wp.int32],
     offsets: wp.array[wp.int32],
@@ -97,7 +97,7 @@ def _publish_chunks(
     total_active[0] = cid_base + total
 
 
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def _restamp_chunk_owners(
     columns: ContactColumnContainer,
     active: wp.array[wp.int32],

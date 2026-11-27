@@ -1098,7 +1098,7 @@ def soft_hexahedron_iterate_at(
 # ---------------------------------------------------------------------------
 
 
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def soft_hex_init_rows_from_arrays_kernel(
     constraints: ConstraintContainer,
     cid_offset: wp.int32,

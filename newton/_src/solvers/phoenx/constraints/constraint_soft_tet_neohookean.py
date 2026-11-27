@@ -517,7 +517,7 @@ def soft_tet_neohookean_iterate_at(
 # ---------------------------------------------------------------------------
 
 
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def soft_tet_neohookean_init_rows_kernel(
     constraints: ConstraintContainer,
     cid_offset: wp.int32,

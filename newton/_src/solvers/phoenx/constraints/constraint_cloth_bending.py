@@ -394,7 +394,7 @@ def cloth_bending_iterate_at(
 # ---------------------------------------------------------------------------
 
 
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def cloth_bending_init_rows_kernel(
     constraints: ConstraintContainer,
     cid_offset: wp.int32,

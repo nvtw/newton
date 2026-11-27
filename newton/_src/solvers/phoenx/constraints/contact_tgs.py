@@ -137,7 +137,7 @@ def snapshot_contact_tgs(state: ContactTGS) -> None:
         state.wrenches.zero_()
 
 
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def advance_contact_tgs_generation(state: ContactTGS):
     state.generation[0] += 1
 
@@ -478,7 +478,7 @@ def get_solve_contact_pair_tgs(record_wrenches: bool = False):
     return solve_contact_pair_tgs
 
 
-@wp.kernel
+@wp.kernel(enable_backward=False)
 def export_contact_wrenches(
     count: wp.array[int],
     cid_of_contact: wp.array[int],
