@@ -98,7 +98,8 @@ class TestSleepingWarmstart(unittest.TestCase):
             bodies.island_root.assign([-1, -1, -1, 3, -1])
             bodies.frames_below_threshold.assign([0, 0, 0, 5, 99])
             islands = wp.array([-1, 0, 1, -1, 0], dtype=wp.int32)
-            quiet = wp.array([0, 1], dtype=wp.int32)
+            # Island 0 moves above the 0.5 threshold, island 1 is quiet.
+            scores = wp.array([1.0, 0.0], dtype=wp.float32)
             roots = wp.array([1, 2], dtype=wp.int32)
             body0 = wp.array([0, 0, 0, 4, 2, 0], dtype=wp.int32)
             body1 = wp.array([1, 2, 3, 1, 1, 2], dtype=wp.int32)
@@ -127,7 +128,7 @@ class TestSleepingWarmstart(unittest.TestCase):
                 wp.launch(
                     _phoenx_propagate_sleep_to_bodies_kernel,
                     5,
-                    inputs=[bodies, islands, quiet, roots, 5],
+                    inputs=[bodies, islands, scores, 0.5, roots, 5],
                 )
                 wp.launch(
                     _phoenx_clear_quiet_contact_warmstart_kernel,
