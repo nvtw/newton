@@ -169,6 +169,9 @@ def _carton_support_quadrants(
     stride: int,
 ):
     """Mark the quadrants of each held carton supported by a pallet or a lower carton."""
+    # Returning at once costs less than a graph conditional around the launch.
+    if armed[0] == 0:
+        return
     for k in range(wp.tid(), wp.min(contact_count[0], shape0.shape[0]), stride):
         sa = shape0[k]
         sb = shape1[k]
@@ -482,34 +485,30 @@ class TransportController:
 
     def sense_pallet_support(self, contacts):
         """Sample the last substep before the next vacuum actuation."""
-
-        def sample():
-            threads = min(4096, contacts.rigid_contact_max)
-            if threads:
-                wp.launch(
-                    _carton_support_quadrants,
+        threads = min(4096, contacts.rigid_contact_max)
+        if threads:
+            wp.launch(
+                _carton_support_quadrants,
+                threads,
+                inputs=[
+                    contacts.rigid_contact_count,
+                    contacts.rigid_contact_shape0,
+                    contacts.rigid_contact_shape1,
+                    self.plant.model.shape_body,
+                    self.support_owner,
+                    self.held,
+                    self.release_armed,
+                    self.plant.state.body_q,
+                    self.plant.state.body_qd,
+                    contacts.rigid_contact_point0,
+                    contacts.rigid_contact_point1,
+                    contacts.rigid_contact_normal,
+                    contacts.rigid_contact_margin0,
+                    contacts.rigid_contact_margin1,
+                    self.support_quadrants,
                     threads,
-                    inputs=[
-                        contacts.rigid_contact_count,
-                        contacts.rigid_contact_shape0,
-                        contacts.rigid_contact_shape1,
-                        self.plant.model.shape_body,
-                        self.support_owner,
-                        self.held,
-                        self.release_armed,
-                        self.plant.state.body_q,
-                        self.plant.state.body_qd,
-                        contacts.rigid_contact_point0,
-                        contacts.rigid_contact_point1,
-                        contacts.rigid_contact_normal,
-                        contacts.rigid_contact_margin0,
-                        contacts.rigid_contact_margin1,
-                        self.support_quadrants,
-                        threads,
-                    ],
-                )
-
-        wp.capture_if(self.release_armed, sample)
+                ],
+            )
 
     def before_step(self, time, multipliers, data):
         """Step the source conveyor and palletizer PLCs on a host snapshot."""
