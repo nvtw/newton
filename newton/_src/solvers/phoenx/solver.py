@@ -22,7 +22,11 @@ import newton
 from newton._src.geometry.broad_phase_implicit_tree import BroadPhaseImplicitTree
 from newton._src.geometry.types import GeoType
 from newton._src.sim import BodyFlags, CollisionPipeline, Contacts, Control, JointType, Model, ModelFlags, State
-from newton._src.sim.collide import _HYDRO_PAIR_MAX_CONTACTS, _estimate_rigid_contact_max
+from newton._src.sim.collide import (
+    _HYDRO_PAIR_MAX_CONTACTS,
+    _RIGID_CONTACT_MAX_NEIGHBORS_PER_SHAPE,
+    _estimate_rigid_contact_max,
+)
 from newton._src.sim.shape_contact_pairs import _shape_contact_pair_count_for_mask
 from newton._src.solvers.phoenx.adapter_kernels import (
     _apply_joint_drive_control_kernel,
@@ -1157,6 +1161,11 @@ class SolverPhoenX(SolverBase):
                     cp_kwargs["broad_phase"] = "sap"
                     cp_kwargs["shape_pairs_max"] = max(4096, _DENSE_WORLD_PAIRS_PER_SHAPE * int(model.shape_count))
                 model._collision_pipeline = newton.CollisionPipeline(model, **cp_kwargs)
+                if rigid_contact_max is None and tight_rcm is not None:
+                    # The overflow warning explains the estimate's neighbor budget.
+                    model._collision_pipeline.narrow_phase.contact_max_estimated_neighbors = (
+                        _RIGID_CONTACT_MAX_NEIGHBORS_PER_SHAPE
+                    )
                 if cp_kwargs.get("broad_phase") == "sap" and int(model.shape_count) >= _IMPLICIT_TREE_MIN_SHAPES:
                     # The implicit tree finds the pairs of a very large world faster (70k
                     # shapes: 3.69 against 3.87 ms per step; at 17k shapes sweep and prune
