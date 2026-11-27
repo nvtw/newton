@@ -60,6 +60,10 @@ from newton.tests.test_convex_refinement_regressions import _bottle_heel_hull
 from newton.tests.unittest_utils import requires
 from newton.viewer import ViewerNull
 
+# Half-width of the inner faces and band above the deck of the source's
+# wet-end rails (rail_green) on the pasteuriser outfeed conveyor.
+_SOURCE_RAILS = (0.227, (0.105, 0.135))
+
 
 @requires("pxr.Usd")
 @wp.kernel
@@ -330,12 +334,13 @@ class TestBottlingPlant(unittest.TestCase):
 
     @unittest.skipUnless(wp.is_cuda_available(), "CUDA device required")
     def test_wet_end_tables_carry_packed_beds(self):
-        """Carry a packed bed through the pasteuriser, its single filer and the accumulation table."""
+        """Carry a packed bed through the pasteuriser and its outfeed conveyor onto the accumulation table."""
         # The source's chute, funnel and table outlines, scaled down in width and length.
         layout = {
             "infeed": (np.array([1.0, 1.3, 1.6, 2.0]), np.array([0.12, 0.12, 0.35, 0.35])),
             "outfeed": (np.array([4.0, 4.4, 4.7, 5.0]), np.array([0.35, 0.35, 0.12, 0.12])),
-            "combiner_end": 6.4,
+            "dryer": 6.4,
+            "rails": _SOURCE_RAILS,
             "pool": (np.array([6.8, 7.8, 7.85, 8.4]), np.array([0.35, 0.35, 0.15, 0.15])),
         }
         path = np.array([[0.0, 0.0, 0.95], [8.4, 0.0, 0.95]])
@@ -360,7 +365,7 @@ class TestBottlingPlant(unittest.TestCase):
                 last = max(belts[label][:, 0].max() for label in labels)
                 self.assertTrue(0.0 < start_point[0] - last < 0.3, f"{name} eye {start_point[0]} past {last}")
         with wp.ScopedDevice("cuda:0"):
-            filed, emptied, tilt = set(), set(), 0.0
+            carried, emptied, tilt = set(), set(), 0.0
             for frame in range(1, 3000):
                 wp.capture_launch(graph)
                 if frame % 30 == 0:
@@ -369,7 +374,7 @@ class TestBottlingPlant(unittest.TestCase):
                     on_line = (poses[:, 0] < path[-1, 0] - 0.1) & (poses[:, 2] > 0.9)
                     tilt = max(tilt, float(np.linalg.norm(poses[on_line, 3:5], axis=1).max()))
                     if frame * dt > 10.0:
-                        filed.update(np.flatnonzero(on_line & (poses[:, 0] > 6.6) & (poses[:, 0] < 6.8)))
+                        carried.update(np.flatnonzero(on_line & (poses[:, 0] > 6.6) & (poses[:, 0] < 6.8)))
                     emptied.update(np.flatnonzero(poses[:, 0] > path[-1, 0]))
             poses = state.body_q.numpy()[bottles]
 
@@ -379,9 +384,9 @@ class TestBottlingPlant(unittest.TestCase):
         speed = PASTEURISER_CAPACITY * 425.0 / 60.0 * 0.5 * np.sqrt(3.0) * 0.063**2 / 0.7
         advance = poses[tunnel, 0] - start[tunnel, 0]
         self.assertGreater(float(np.median(advance)), 0.9 * speed * 3000 * dt)
-        # The bed feeds the single filer, which files it for the accumulation
-        # table at the rated output or above.
-        self.assertGreater(len(filed), 0.9 * 425.0 / 60.0 * 15.0)
+        # The bed feeds the outfeed conveyor, which carries it onto the
+        # accumulation table at the rated output or above.
+        self.assertGreater(len(carried), 0.9 * 425.0 / 60.0 * 15.0)
         # The accumulation table discharges its packed field through the neck.
         self.assertGreater(len(emptied), 100)
         # Bottles on every table and conveyor stay upright, and none leaves the line.
@@ -391,39 +396,53 @@ class TestBottlingPlant(unittest.TestCase):
         self.assertTrue(np.all(poses[kept, 2] > 0.94))
 
     @unittest.skipUnless(wp.is_cuda_available(), "CUDA device required")
-    def test_single_filer_files_plant_bottles(self):
-        """File the source-scale pasteuriser outfeed with the plant's bottle colliders at the rated output."""
+    def test_outfeed_conveyor_carries_plant_bottles(self):
+        """Carry the source-scale pasteuriser outfeed with the plant's bottle colliders at the rated output."""
+
+        ring = seal_base_ring(_bottle_heel_hull())
 
         def plant_bottle(builder, body, cfg):
-            # The base ring, then the plant's collider above it.
-            ring = wp.transform((0.0, 0.0, 0.008), wp.quat_identity())
-            builder.add_shape_cylinder(body, xform=ring, radius=0.0305, half_height=0.008, cfg=cfg)
+            # The plant's sealed base ring, then its round collider above it.
+            builder.add_shape_convex_hull(body, mesh=ring, cfg=cfg)
             add_round_bottle(builder, body, "/Bottle/Collision", cfg=cfg)
 
-        # The source's outfeed table and funnel to the 0.24 m chute, behind a short bed.
+        # The source's outfeed table and funnel to the 0.24 m chute, behind a
+        # short bed, and its straight railed conveyor to a table that drains
+        # off its open end, so that nothing downstream holds the stream back.
         layout = {
             "infeed": (np.array([1.0, 1.3, 2.4, 3.0]), np.array([0.12, 0.12, 1.15, 1.15])),
             "outfeed": (np.array([3.0, 4.6, 5.7, 6.0]), np.array([1.15, 1.15, 0.12, 0.12])),
-            "combiner_end": 9.2,
-            "pool": (np.array([9.6, 10.6, 10.65, 11.2]), np.array([0.35, 0.35, 0.15, 0.15])),
+            "dryer": 9.2,
+            "rails": _SOURCE_RAILS,
+            "pool": (np.array([9.6, 11.2]), np.array([0.35, 0.35])),
         }
         path = np.array([[0.0, 0.0, 0.95], [11.2, 0.0, 0.95]])
+        dt, gate = 1.0 / 120.0, 9.0
         with wp.ScopedDevice("cuda:0"):
             _, state, bottles, graph = self._bottle_line(path, layout, plant_bottle)
-            filed, counts = np.zeros(len(bottles), dtype=bool), {}
-            for frame in range(1, 40 * 120 + 1):
+            passed, crossings = np.zeros(len(bottles), dtype=bool), []
+            left, tilt, low = np.zeros(len(bottles), dtype=bool), 0.0, np.inf
+            for frame in range(1, 36 * 120 + 1):
                 wp.capture_launch(graph)
-                if frame % 120 == 0:
-                    poses = state.body_q.numpy()[bottles]
-                    filed |= poses[:, 0] > 9.4
-                    counts[frame // 120] = int(filed.sum())
+                if frame % 12:
+                    continue
+                poses = state.body_q.numpy()[bottles]
+                crossed = (poses[:, 0] > gate) & ~passed
+                crossings.extend([frame * dt] * int(crossed.sum()))
+                passed |= crossed
+                # Judge every bottle until it reaches the open line end and drops off.
+                left |= poses[:, 0] > path[-1, 0] - 0.1
+                tilt = max(tilt, float(np.linalg.norm(poses[~left, 3:5], axis=1).max()))
+                low = min(low, float(poses[~left, 2].min()))
 
-        # Faceted hulls lock arches where the filer steps in and stop it for
-        # good; round bottles roll apart and keep filing.
-        self.assertGreaterEqual(counts[40] - counts[18], 6.5 * 22.0)
-        # Bottles short of the open line end stand upright.
-        on_line = (poses[:, 0] < 9.4) & (poses[:, 2] > 0.9)
-        self.assertTrue(np.all(np.linalg.norm(poses[on_line, 3:5], axis=1) < np.sin(np.radians(7.5))))
+        # Once the stream reaches the gate, the conveyor carries at least the
+        # plant's rated 425 bottles/min; a narrowing would arch abreast bottles.
+        crossings = np.asarray(crossings)
+        steady = crossings[crossings > 20.0]
+        self.assertGreater(len(steady), 0.95 * 425.0 / 60.0 * 16.0)
+        # Every bottle stays upright on its deck throughout.
+        self.assertLess(tilt, np.sin(np.radians(7.5)))
+        self.assertGreater(low, 0.945)
 
     @unittest.skipUnless(wp.is_cuda_available(), "CUDA device required")
     def test_abreast_plant_bottles_touch_on_their_sides(self):

@@ -1,1 +1,1 @@
-Simulate the bottling plant's pasteuriser as a physical packed bed from its infeed table through the tunnel to its outfeed table, with a staged-lane single filer to the dryer.
+Simulate the bottling plant's pasteuriser as a physical packed bed from its infeed table through the tunnel to its outfeed table, which discharges onto the source's straight railed conveyor through the dryer to the accumulation table.

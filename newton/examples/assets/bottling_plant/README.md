@@ -98,6 +98,20 @@ remaining carton demand, whichever is smaller. `--extra-bottles 0` runs the
 original stock without allocating reserve geometry. Operator jam recovery
 remains manual, and inlet faults fail validation.
 
+With `--filling-room-physics`, the pasteuriser outfeed follows the source.
+Its 0.24 m chute opens onto one straight conveyor through the dryer to the
+accumulation table. The source authors this conveyor as 0.415 m mat tops from
+x 30.6 to 37.3 m. Its green rails are parallel, 0.454 m apart, in one band
+105-135 mm above the deck. The example reads the conveyor's ends and rails from
+the source. The source has no single filer and no narrowing before the
+accumulation table, which feeds the IFM as a mass. It places a single file in
+the dryer only as stock. The source authors no belt speeds. The conveyor runs
+on at the chute's speed, a modelling choice, so the stream stays loose and
+widens without a speed step. Its deck extends under the rails, like the
+example's other tables. Stops use the plant's standing-queue eyes: a queue at
+the conveyor's entrance stops the pasteuriser bed, and a queue at the
+accumulation table's entrance stops the conveyor.
+
 Cases retain their physical contents. After all four flaps close and slow down,
 fixed tape bonds form a rigid sealed assembly; the source instead swaps in a
 sealed-case proxy. Both use rigid-body approximations of cardboard and tape.
