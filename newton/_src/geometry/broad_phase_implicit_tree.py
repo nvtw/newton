@@ -462,7 +462,8 @@ class BroadPhaseImplicitTree:
                 apply the exact pair test to the kept pairs; shapes that left their bound,
                 started colliding, or became active query their own pairs, and too many
                 of them rebuild the tree. The candidate pairs equal those of a rebuild on
-                every launch, in a different order.
+                every launch, in a different order. Up to ``queue_capacity_factor`` kept
+                pairs per shape are stored; a pass with more reports a pair overflow.
             passive_shape: Optional Warp predicate taking a shape index and the pair filter's data.
                 Passive shapes are visible to active queries. The pair filter must reject all
                 pairs of passive shapes.
@@ -491,8 +492,7 @@ class BroadPhaseImplicitTree:
             self._flags = shape_flags
         self.shape_index = wp.array(valid, dtype=wp.int32, device=device)
         self.shape_count = len(valid)
-        # Retain the constructor argument for API compatibility. Stackless
-        # traversal allocates no per-level pair queues or overflow fallback.
+        # Stackless traversal allocates no per-level pair queues; only pair reuse stores pairs.
         self.capacity = max(1, queue_capacity_factor * self.shape_count)
         # The leaf kernel below places sorted shapes by slot, which needs all
         # leaves at one depth.
@@ -517,7 +517,8 @@ class BroadPhaseImplicitTree:
         self._pair_reuse_slack = pair_reuse_slack
         # [0]: rebuild before the next query, [1]: builds so far.
         self._rebuild = wp.array([1, 0], dtype=wp.int32, device=device)
-        self._kept_pairs = None
+        # Allocated here, as a buffer allocated during graph capture is valid only in graph launches.
+        self._kept_pairs = wp.empty(self.capacity if pair_reuse_slack else 0, dtype=wp.vec2i, device=device)
         self._kept_pair_count = wp.zeros(1, dtype=wp.int32, device=device)
         # Per shape, whether it left its kept bound; the listed leaves' pairs come from ``reuse_pairs``.
         self._escaped = wp.zeros(int(valid.max()) + 1 if len(valid) else 1, dtype=wp.int32, device=device)
@@ -605,8 +606,6 @@ class BroadPhaseImplicitTree:
         if not reuse:
             self._build_and_query(pair_inputs, candidate_pair, candidate_pair_count, device)
             return
-        if self._kept_pairs is None or self._kept_pairs.shape[0] != candidate_pair.shape[0]:
-            self._kept_pairs = wp.empty(candidate_pair.shape[0], dtype=wp.vec2i, device=device)
         kept = (self._kept_pairs, self._kept_pair_count)
         escape = (self._escaped, self._escapers, self._escaper_count)
         self._escaper_count.zero_()
