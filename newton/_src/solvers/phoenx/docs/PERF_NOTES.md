@@ -640,6 +640,66 @@ mechanism is a serial chain; a point-by-point shuffle chain measured
 uniform splitting 1 or 2 diverged; splitting by manifolds per mechanism
 sank through parts.
 
+## Bottling plant joint load chains (2026-11-28)
+
+Same factory, frames 600-1200 (about 285k contacts). A per-island
+`globaltimer` probe of each island kernel put the eight packer-cell
+islands (45-48 columns, 15 colors) last in all four:
+
+| Kernel | Packer islands | Next chain |
+| --- | ---: | ---: |
+| Iterate | 105-112 us | merged bed 103 us |
+| Relax | 98-107 us | merged bed 87 us |
+| Joint projection | 52-60 us | 9-color islands 42 us |
+| Cached prepare | 72-86 us | merged bed 59 us |
+
+Their chain is joints, not contact rows: 13 of 15 colors hold one D6
+joint of the gripper (eight children of one body) or of the carton
+flaps (four), at 4-7 us per color; the contact columns there have 1-14
+rows and take 1-5 us. `clock64` probes of one hub joint (cycles): frozen
+and enable tests 0.7-2k, bilateral block 7-13k (body load 0.6k,
+residual 2.1k, forward solve 1.0k, gather 1.2k, leader backward and
+scatter 2.6-5.5k), one inequality row with its header 3.5-5.4k. The
+first color of each island costs about 2.5x per joint (cold data at
+launch).
+
+`d1501b932` (bitwise; plant state hashes at frames 100-300):
+
+- Bilateral blocks load count, valid flag, structural index, bodies and
+  the lane's row index together instead of behind the early returns.
+- The tile shuffles stay outside the row-count branches. A shuffle under
+  a lane-uniform branch still cost about 170 cycles of reconvergence;
+  forward solve 1.0k -> 0.57k, gather 1.2k -> 0.55k cycles.
+- Every lane substitutes backward on the gathered solution and the
+  leader sums the row wrenches shuffled from the lanes that loaded them,
+  in the scalar order. The leader used to reload each row (row index,
+  local index, wrenches) behind the previous row's `accumulated` store,
+  which orders them: 2.6-5.5k -> 1.9k cycles.
+- D6 inequality rows load every field before their impulse stores (one
+  row 2.8-3.2k -> 1.9k cycles); the headers load the row count with the
+  bodies; the frozen test, enable flag, projection owner test and cached
+  contact warm start no longer chain through short-circuit tests.
+
+| Per launch | Before | After |
+| --- | ---: | ---: |
+| Iterate | 114.4 us | 102.8 us |
+| Relax | 101.7 us | 89.1 us |
+| Joint projection | 56.0 us | 41.3 us |
+| Cached prepare | 85.1 us | 77.6 us |
+| Physics FPS (A/B/A/B) | 67.03, 66.90 | 68.46, 68.28 |
+| Scale 2 FPS | 49.12, 49.10 | 49.96, 49.96 |
+
+Register counts (166-168, projection 96 -> 125) leave the residency at
+one block per SM (two for the projection) unchanged.
+
+Measured and not kept: `prefetch.global.L1` of the inequality rows from
+the tile lanes at joint start (inequality unchanged, 4-5.5k cycles);
+loading the joint's row index ahead alone (residual unchanged at 2.1k).
+
+Iterate and relax are now bound by the merged bed; cached prepare stays
+packer-bound (joint geometry 1-4k cycles per D6 prepare, 18 us above the
+bed per launch).
+
 ## Batched humanoid comparison
 
 Measured 2026-08-04 on an RTX PRO 6000 Blackwell with 20,000 worlds,
