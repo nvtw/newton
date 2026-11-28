@@ -17,7 +17,14 @@ from typing import Any
 import numpy as np
 import warp as wp
 
-from .broad_phase_common import EmptyFilterData, PairExclusionIndex, keep_all_filter, precompute_world_map
+from .broad_phase_common import (
+    EmptyFilterData,
+    PairExclusionIndex,
+    is_shape_pair_same_body_filtered,
+    keep_all_filter,
+    precompute_world_map,
+    write_pair,
+)
 from .broad_phase_sap import _make_sap_process_pair_func
 from .flags import ShapeFlags
 from .implicit_bvh import (
@@ -33,6 +40,8 @@ wp.set_module_options({"enable_backward": False})
 
 # Query lanes loop over the (active leaf, ancestor level) work items.
 _QUERY_MAX_THREADS = 1 << 21
+# Threads of the kept-pair compaction, which loops over the kept pairs.
+_COMPACT_THREADS = 1 << 18
 
 
 @wp.func
@@ -71,12 +80,51 @@ def _tree_keys(
     values[leaf] = leaf
 
 
-def _make_pair_kernels(filter_func: Any, filter_data_type: Any, passive_shape: Any = None):
+@wp.func
+def _leaf_bounds(
+    shape: int,
+    lower: wp.array[wp.vec3],
+    upper: wp.array[wp.vec3],
+    gap: wp.array[float],
+    displacement: wp.array[wp.vec3],
+    reuse_slack: float,
+) -> tuple[wp.vec3, wp.vec3]:
+    """Return a leaf's swept bound; a positive ``reuse_slack`` [m] also covers the next pass's sweep."""
+    margin = wp.float32(0.0)
+    if gap.shape[0] > 0:
+        margin = gap[shape]
+    shift = wp.vec3(0.0, 0.0, 0.0)
+    if displacement.shape[0] > 0:
+        shift = displacement[shape]
+    expand = wp.vec3(margin, margin, margin)
+    low = wp.min(lower[shape], lower[shape] + shift) - expand
+    high = wp.max(upper[shape], upper[shape] + shift) + expand
+    if reuse_slack > 0.0:
+        # The next pass sweeps from about ``lower + shift`` by about ``shift`` again;
+        # the slack absorbs the change of motion over one pass.
+        pad = wp.vec3(reuse_slack + 0.25 * wp.max(wp.abs(shift[0]), wp.max(wp.abs(shift[1]), wp.abs(shift[2]))))
+        low = wp.min(low, lower[shape] + 2.0 * shift - expand) - pad
+        high = wp.max(high, upper[shape] + 2.0 * shift + expand) + pad
+    # At distant world coordinates, float32 rounding can make a swept bound
+    # narrower than the equivalent moving-AABB test (which combines the two
+    # gaps before subtraction). Expand by a few ulps of the coordinate scale;
+    # the shared exact pair filter still decides which contacts are accepted.
+    rounding = wp.vec3(
+        wp.max(wp.abs(low[0]), wp.abs(high[0])) * wp.float32(4.76837158e-7) + wp.float32(1.0e-6),
+        wp.max(wp.abs(low[1]), wp.abs(high[1])) * wp.float32(4.76837158e-7) + wp.float32(1.0e-6),
+        wp.max(wp.abs(low[2]), wp.abs(high[2])) * wp.float32(4.76837158e-7) + wp.float32(1.0e-6),
+    )
+    return low - rounding, high + rounding
+
+
+def _make_pair_kernels(filter_func: Any, filter_data_type: Any, passive_shape: Any = None, reuse: bool = False):
     process_pair = _make_sap_process_pair_func(filter_func)
     module = f"implicit_tree_{filter_func.__name__}_{filter_data_type.__name__}"
 
     if passive_shape is not None:
         module += f"_{passive_shape.__name__}"
+    if reuse:
+        module += "_reuse"
 
     @wp.kernel(enable_backward=False, module=module)
     def leaves(
@@ -94,9 +142,15 @@ def _make_pair_kernels(filter_func: Any, filter_data_type: Any, passive_shape: A
         filter_data: Any,
         active_slots: wp.array[wp.int32],
         active_count: wp.array[wp.int32],
+        reuse_slack: float,
+        rebuild: wp.array[wp.int32],
     ):
         slot = wp.tid()
         node = leaf_base + slot
+        if wp.static(reuse):
+            if slot == 0:
+                rebuild[0] = 0
+                rebuild[1] += 1
         record = ImplicitBvhNode()
         record.lower = wp.vec3(1.0e30, 1.0e30, 1.0e30)
         record.upper = wp.vec3(-1.0e30, -1.0e30, -1.0e30)
@@ -113,26 +167,9 @@ def _make_pair_kernels(filter_func: Any, filter_data_type: Any, passive_shape: A
             # A row for a runtime shape that holds none: a leaf that overlaps nothing.
             nodes[node] = record
             return
-        margin = wp.float32(0.0)
-        if gap.shape[0] > 0:
-            margin = gap[shape]
-        shift = wp.vec3(0.0, 0.0, 0.0)
-        if displacement.shape[0] > 0:
-            shift = displacement[shape]
-        expand = wp.vec3(margin, margin, margin)
-        low = wp.min(lower[shape], lower[shape] + shift) - expand
-        high = wp.max(upper[shape], upper[shape] + shift) + expand
-        # At distant world coordinates, float32 rounding can make a swept bound
-        # narrower than the equivalent moving-AABB test (which combines the two
-        # gaps before subtraction). Expand by a few ulps of the coordinate scale;
-        # the shared exact pair filter still decides which contacts are accepted.
-        rounding = wp.vec3(
-            wp.max(wp.abs(low[0]), wp.abs(high[0])) * wp.float32(4.76837158e-7) + wp.float32(1.0e-6),
-            wp.max(wp.abs(low[1]), wp.abs(high[1])) * wp.float32(4.76837158e-7) + wp.float32(1.0e-6),
-            wp.max(wp.abs(low[2]), wp.abs(high[2])) * wp.float32(4.76837158e-7) + wp.float32(1.0e-6),
-        )
-        record.lower = low - rounding
-        record.upper = high + rounding
+        low, high = _leaf_bounds(shape, lower, upper, gap, displacement, reuse_slack)
+        record.lower = low
+        record.upper = high
         span = record.upper - record.lower
         record.max_span = wp.max(span[0], wp.max(span[1], span[2]))
         active = True
@@ -198,6 +235,17 @@ def _make_pair_kernels(filter_func: Any, filter_data_type: Any, passive_shape: A
                     node = implicit_bvh_next_subtree(node)
                 elif node < tree.leaf_base:
                     node = node * wp.int32(2)
+                elif wp.static(reuse):
+                    # Keep every pair of overlapping reuse bounds; ``compact`` filters them on each pass.
+                    shape2 = tree.leaf_item[node - tree.leaf_base]
+                    if not is_shape_pair_same_body_filtered(shape1, shape2, shape_body):
+                        write_pair(
+                            wp.vec2i(wp.min(shape1, shape2), wp.max(shape1, shape2)),
+                            candidate_pair,
+                            candidate_pair_count,
+                            max_candidate_pair,
+                        )
+                    node = implicit_bvh_next_subtree(node)
                 else:
                     shape2 = tree.leaf_item[node - tree.leaf_base]
                     pair_world_id = wp.int32(0)
@@ -226,7 +274,110 @@ def _make_pair_kernels(filter_func: Any, filter_data_type: Any, passive_shape: A
                     )
                     node = implicit_bvh_next_subtree(node)
 
-    return leaves, query
+    @wp.kernel(enable_backward=False, module=module)
+    def check(
+        tree: ImplicitBvhData,
+        lower: wp.array[wp.vec3],
+        upper: wp.array[wp.vec3],
+        gap: wp.array[float],
+        displacement: wp.array[wp.vec3],
+        flags: wp.array[wp.int32],
+        shape_count: int,
+        filter_data: Any,
+        kept_pair_count: wp.array[int],
+        kept_pair_capacity: int,
+        rebuild: wp.array[wp.int32],
+    ):
+        """Request a rebuild once a leaf leaves its reuse bound, starts colliding, or becomes active."""
+        slot = wp.tid()
+        if slot >= shape_count or rebuild[0] != 0:
+            return
+        if slot == 0 and kept_pair_count[0] > kept_pair_capacity:
+            rebuild[0] = 1
+            return
+        shape = tree.leaf_item[slot]
+        if flags.shape[0] > 0 and (flags[shape] & wp.static(int(ShapeFlags.COLLIDE_SHAPES))) == 0:
+            return
+        kept_lower, kept_upper, kept_span, _last = _node_load(tree, tree.leaf_base + slot)
+        escaped = kept_span < 0.0
+        if wp.static(passive_shape is not None):
+            if kept_span == wp.inf and not passive_shape(shape, filter_data):
+                escaped = True
+        if not escaped:
+            low, high = _leaf_bounds(shape, lower, upper, gap, displacement, 0.0)
+            escaped = (
+                low[0] < kept_lower[0]
+                or low[1] < kept_lower[1]
+                or low[2] < kept_lower[2]
+                or high[0] > kept_upper[0]
+                or high[1] > kept_upper[1]
+                or high[2] > kept_upper[2]
+            )
+        if escaped:
+            rebuild[0] = 1
+
+    @wp.kernel(enable_backward=False, module=module)
+    def compact(
+        kept_pair: wp.array[wp.vec2i],
+        kept_pair_count: wp.array[int],
+        flags: wp.array[wp.int32],
+        shape_lower: wp.array[wp.vec3],
+        shape_upper: wp.array[wp.vec3],
+        shape_gap: wp.array[float],
+        shape_displacement: wp.array[wp.vec3],
+        collision_group: wp.array[int],
+        shape_world: wp.array[int],
+        filter_pairs: Any,
+        num_filter_pairs: int,
+        shape_body: wp.array[int],
+        body_flags: wp.array[int],
+        include_static_kinematic_pairs: bool,
+        filter_data: Any,
+        candidate_pair: wp.array[wp.vec2i],
+        candidate_pair_count: wp.array[int],
+        max_candidate_pair: int,
+        thread_count: int,
+    ):
+        """Apply the exact pair test of ``query`` to the kept pairs."""
+        kept = kept_pair_count[0]
+        count = wp.min(kept, kept_pair.shape[0])
+        if wp.tid() == 0 and kept > count:
+            # Truncated kept pairs may miss candidates: report the overflow as the full query would.
+            wp.atomic_add(candidate_pair_count, 0, max_candidate_pair + 1)
+        for i in range(wp.tid(), count, thread_count):
+            pair = kept_pair[i]
+            shape1 = pair[0]
+            shape2 = pair[1]
+            if flags.shape[0] > 0:
+                collide = wp.static(int(ShapeFlags.COLLIDE_SHAPES))
+                if (flags[shape1] & collide) == 0 or (flags[shape2] & collide) == 0:
+                    continue
+            pair_world_id = wp.int32(0)
+            if shape_world[shape1] == wp.int32(-1) and shape_world[shape2] == wp.int32(-1):
+                pair_world_id = wp.int32(1)
+            process_pair(
+                shape1,
+                shape2,
+                pair_world_id,
+                wp.int32(1),
+                shape_lower,
+                shape_upper,
+                shape_gap,
+                shape_displacement,
+                collision_group,
+                shape_world,
+                filter_pairs,
+                num_filter_pairs,
+                shape_body,
+                body_flags,
+                include_static_kinematic_pairs,
+                filter_data,
+                candidate_pair,
+                candidate_pair_count,
+                max_candidate_pair,
+            )
+
+    return leaves, query, check, compact
 
 
 _DEFAULT_KERNELS = _make_pair_kernels(keep_all_filter, EmptyFilterData)
@@ -246,9 +397,16 @@ class BroadPhaseImplicitTree:
         filter_data_type: Any | None = None,
         dynamic_rows: np.ndarray | None = None,
         passive_shape: Any | None = None,
+        pair_reuse_slack: float | None = None,
     ) -> None:
         """
         Args:
+            pair_reuse_slack: Enables pair reuse when not ``None``. Each tree build
+                then bounds every shape's sweep over this pass and the next one, widened
+                by this slack [m], and keeps the pairs of overlapping bounds. Later launches
+                apply the exact pair test to the kept pairs, and rebuild only once a shape
+                leaves its bound, starts colliding, or becomes active. The candidate pairs
+                equal those of a rebuild on every launch, in a different order.
             passive_shape: Optional Warp predicate taking a shape index and the pair filter's data.
                 Passive shapes are visible to active queries. The pair filter must reject all
                 pairs of passive shapes.
@@ -298,6 +456,13 @@ class BroadPhaseImplicitTree:
         self._active_slots = wp.empty(self.shape_count, dtype=wp.int32, device=device)
         self._active_count = wp.zeros(1, dtype=wp.int32, device=device)
         self._empty_filter_data = EmptyFilterData()
+        if pair_reuse_slack is not None and not (np.isfinite(pair_reuse_slack) and pair_reuse_slack > 0.0):
+            raise ValueError("pair_reuse_slack must be a positive finite number or None")
+        self._pair_reuse_slack = pair_reuse_slack
+        # [0]: rebuild before the next query, [1]: builds so far.
+        self._rebuild = wp.array([1, 0], dtype=wp.int32, device=device)
+        self._kept_pairs = None
+        self._kept_pair_count = wp.zeros(1, dtype=wp.int32, device=device)
         self._set_filter_kernels(filter_func, filter_data_type, passive_shape=passive_shape)
 
     def _set_filter_kernels(
@@ -306,10 +471,11 @@ class BroadPhaseImplicitTree:
         if passive_shape is not None and filter_func is None:
             raise ValueError("passive_shape requires a pair filter")
         self._has_custom_filter = filter_func is not None
+        reuse = self._pair_reuse_slack is not None
         self._kernels = (
-            _make_pair_kernels(filter_func, filter_data_type, passive_shape)
+            _make_pair_kernels(filter_func, filter_data_type, passive_shape, reuse)
             if self._has_custom_filter
-            else _DEFAULT_KERNELS
+            else (_make_pair_kernels(keep_all_filter, EmptyFilterData, reuse=True) if reuse else _DEFAULT_KERNELS)
         )
 
     def update_world_map(
@@ -361,6 +527,101 @@ class BroadPhaseImplicitTree:
             else:
                 n_filter = filter_pairs.partners.shape[0]
         pair_data = filter_data if self._has_custom_filter else self._empty_filter_data
+        reuse = self._pair_reuse_slack is not None
+        pair_inputs = [
+            shape_lower,
+            shape_upper,
+            shape_gap,
+            shape_displacement,
+            shape_collision_group,
+            shape_world,
+            filter_pairs,
+            n_filter,
+            shape_body,
+            body_flags,
+            include_static_kinematic_pairs,
+            pair_data,
+        ]
+        if reuse:
+            if self._kept_pairs is None or self._kept_pairs.shape[0] != candidate_pair.shape[0]:
+                self._kept_pairs = wp.empty(candidate_pair.shape[0], dtype=wp.vec2i, device=device)
+            wp.launch(
+                self._kernels[2],
+                dim=self.shape_count,
+                inputs=[
+                    self.tree.data,
+                    shape_lower,
+                    shape_upper,
+                    shape_gap,
+                    shape_displacement,
+                    self._flags,
+                    self.shape_count,
+                    pair_data,
+                    self._kept_pair_count,
+                    self._kept_pairs.shape[0],
+                    self._rebuild,
+                ],
+                device=device,
+                record_tape=False,
+            )
+            wp.capture_if(
+                self._rebuild,
+                on_true=lambda: self._build_and_query(
+                    shape_lower,
+                    shape_upper,
+                    shape_gap,
+                    shape_displacement,
+                    pair_data,
+                    pair_inputs,
+                    self._kept_pairs,
+                    self._kept_pair_count,
+                    device,
+                ),
+            )
+            wp.launch(
+                self._kernels[3],
+                dim=_COMPACT_THREADS,
+                inputs=[
+                    self._kept_pairs,
+                    self._kept_pair_count,
+                    self._flags,
+                    *pair_inputs,
+                    candidate_pair,
+                    candidate_pair_count,
+                    candidate_pair.shape[0],
+                    _COMPACT_THREADS,
+                ],
+                device=device,
+                record_tape=False,
+            )
+        else:
+            self._build_and_query(
+                shape_lower,
+                shape_upper,
+                shape_gap,
+                shape_displacement,
+                pair_data,
+                pair_inputs,
+                candidate_pair,
+                candidate_pair_count,
+                device,
+            )
+
+    def _build_and_query(
+        self,
+        shape_lower,
+        shape_upper,
+        shape_gap,
+        shape_displacement,
+        pair_data,
+        pair_inputs,
+        candidate_pair,
+        candidate_pair_count,
+        device,
+    ) -> None:
+        reuse = self._pair_reuse_slack is not None
+        if reuse:
+            candidate_pair_count.zero_()
         wp.launch(
             _tree_keys,
             dim=self.shape_count,
@@ -396,37 +657,27 @@ class BroadPhaseImplicitTree:
                 pair_data,
                 self._active_slots,
                 self._active_count,
+                self._pair_reuse_slack if reuse else 0.0,
+                self._rebuild,
             ],
             device=device,
             record_tape=False,
         )
         self.tree.update_internal_nodes()
-        query = self._kernels[1]
-        pair_inputs = [
-            shape_lower,
-            shape_upper,
-            shape_gap,
-            shape_displacement,
-            shape_collision_group,
-            shape_world,
-            filter_pairs,
-            n_filter,
-            shape_body,
-            body_flags,
-            include_static_kinematic_pairs,
-            pair_data,
-            candidate_pair,
-            candidate_pair_count,
-            candidate_pair.shape[0],
-            self._active_slots,
-            self._active_count,
-            self._depth,
-            self._query_threads,
-        ]
         wp.launch(
-            query,
+            self._kernels[1],
             dim=self._query_threads,
-            inputs=[self.tree.data, *pair_inputs],
+            inputs=[
+                self.tree.data,
+                *pair_inputs,
+                candidate_pair,
+                candidate_pair_count,
+                candidate_pair.shape[0],
+                self._active_slots,
+                self._active_count,
+                self._depth,
+                self._query_threads,
+            ],
             device=device,
             record_tape=False,
         )

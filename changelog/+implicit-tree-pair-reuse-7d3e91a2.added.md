@@ -1,0 +1,1 @@
+Add `pair_reuse_slack` to `BroadPhaseImplicitTree` to keep the candidate pairs of a tree build while shapes stay within bounds that cover their next pass, which skips most tree rebuilds and queries without changing the pairs.

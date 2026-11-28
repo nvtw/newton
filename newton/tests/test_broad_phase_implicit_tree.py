@@ -265,6 +265,99 @@ class TestBroadPhaseImplicitTree(unittest.TestCase):
             self.assertEqual(len(found), size)
             self.assertEqual(found, expected)
 
+    def test_reused_pairs_match_all_pairs_on_every_launch(self):
+        """Kept pairs give the exact candidates while shapes move, change flags, wake, and fall asleep."""
+        if not wp.is_cuda_available():
+            self.skipTest("CUDA graph capture requires a CUDA device")
+        device = wp.get_device("cuda:0")
+        rng = np.random.default_rng(3)
+        n = 600
+        world = wp.zeros(n, dtype=wp.int32, device=device)
+        group = wp.ones(n, dtype=wp.int32, device=device)
+        flags_np = np.full(n, int(ShapeFlags.COLLIDE_SHAPES), dtype=np.int32)
+        flags_np[::17] = 0
+        flags = wp.array(flags_np, dtype=wp.int32, device=device)
+        centers = rng.uniform(-1.0, 1.0, (n, 3)).astype(np.float32)
+        half = rng.uniform(0.02, 0.12, (n, 3)).astype(np.float32)
+        velocity = rng.uniform(-0.5, 0.5, (n, 3)).astype(np.float32)
+        lower = wp.empty(n, dtype=wp.vec3, device=device)
+        upper = wp.empty(n, dtype=wp.vec3, device=device)
+        displacement = wp.empty(n, dtype=wp.vec3, device=device)
+        gap = wp.array(rng.uniform(0.0, 0.01, n).astype(np.float32), dtype=wp.float32, device=device)
+        active = (rng.uniform(size=n) < 0.7).astype(np.int32)
+        passive_at_build = np.flatnonzero(active == 0)
+        data = _ShapeActivity()
+        data.active = wp.array(active, dtype=wp.int32, device=device)
+        tree = BroadPhaseImplicitTree(
+            world,
+            shape_flags=flags,
+            dynamic_rows=np.ones(n, dtype=bool),
+            device=device,
+            filter_func=_has_active_endpoint,
+            filter_data_type=_ShapeActivity,
+            passive_shape=_passive,
+            pair_reuse_slack=0.001,
+        )
+        oracle = BroadPhaseAllPairs(world, device=device)
+        pairs = wp.empty(n * 64, dtype=wp.vec2i, device=device)
+        count = wp.zeros(1, dtype=wp.int32, device=device)
+        oracle_pairs = wp.empty(n * 64, dtype=wp.vec2i, device=device)
+        oracle_count = wp.zeros(1, dtype=wp.int32, device=device)
+        dt = 0.01
+
+        def launch(bp, out, size, **kwargs):
+            bp.launch(
+                lower, upper, gap, group, world, n, out, size, device=device, shape_displacement=displacement, **kwargs
+            )
+
+        with wp.ScopedCapture(device=device) as capture:
+            launch(tree, pairs, count, filter_data=data)
+
+        def step(expect_rebuild):
+            builds = int(tree._rebuild.numpy()[1])
+            lower.assign(centers - half)
+            upper.assign(centers + half)
+            displacement.assign(velocity * dt)
+            flags.assign(flags_np)
+            data.active.assign(active)
+            wp.capture_launch(capture.graph)
+            launch(oracle, oracle_pairs, oracle_count)
+            # The oracle read the flags once; apply the current ones.
+            expected = {
+                tuple(p)
+                for p in oracle_pairs.numpy()[: int(oracle_count.numpy()[0])]
+                if (active[p[0]] or active[p[1]]) and flags_np[p[0]] and flags_np[p[1]]
+            }
+            size = int(count.numpy()[0])
+            found = {tuple(p) for p in pairs.numpy()[:size]}
+            self.assertEqual(len(found), size)
+            self.assertEqual(found, expected)
+            self.assertEqual(int(tree._rebuild.numpy()[1]) - builds, int(expect_rebuild))
+            return len(expected)
+
+        self.assertGreater(step(True), 200)
+        for _ in range(3):
+            # Steady motion stays within the bounds that cover the next pass.
+            centers += velocity * dt
+            step(False)
+            centers += velocity * dt
+            step(True)
+        # A shape that falls asleep only loses pairs; one that stops colliding too.
+        active[np.flatnonzero(active)[:50]] = 0
+        flags_np[1::19] = 0
+        centers += velocity * dt
+        step(False)
+        # A shape that wakes up, starts colliding, or jumps needs a rebuild.
+        for change in ("wake", "collide", "jump"):
+            if change == "wake":
+                active[next(i for i in passive_at_build if flags_np[i])] = 1
+            elif change == "collide":
+                flags_np[0] = int(ShapeFlags.COLLIDE_SHAPES)
+            else:
+                centers[5] += 0.05
+            step(True)
+            step(False)
+
     def test_indexed_exclusions_match_sorted_prefix(self):
         model_shapes, shapes = 12, 15
         # Include sparse rows, a missing first shape, and extra runtime shape ids.
