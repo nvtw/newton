@@ -700,6 +700,55 @@ Iterate and relax are now bound by the merged bed; cached prepare stays
 packer-bound (joint geometry 1-4k cycles per D6 prepare, 18 us above the
 bed per launch).
 
+## Bottling plant merged-bed colour steps and sorts (2026-11-28)
+
+Same factory, frame 620 (merged bed: 69.5k columns, 11 colours; colour 0
+holds 16.6k mostly five-row bottle-deck columns). A per-colour probe
+(`globaltimer` per block at each grid barrier, `clock64` per column)
+shows the colour-to-colour times 24-26, 13-15, 13.6, 10.5-12, 8.7, 8.2,
+7.4, 6.0, 5.0, 3.4 us. Each step is set by a few slow blocks, about twice
+the median block (colour 0: 61-66k against 31-33k cycles). The slow blocks
+change from run to run and are always the ones whose island warps sweep
+one of the 418-639-column small islands (8-10 colours, about 46-64
+columns per colour) on the same SM. Rotating the bed's block mapping per
+colour does not move the slow spot; it follows the SM. Within a block
+the bed columns are throughput-bound, not latency-bound: 8 instead of 4
+merged warps cut a colour-0 block only from 47k to 36k cycles (L1 holds
+fewer rows' sectors per warp).
+
+Measured and not kept (frames 600-1200, solo GPU, alternating runs;
+base 68.40/68.23/68.46/68.33 FPS):
+
+| Change | Kernel effect (nsys, frames 600-630) | FPS |
+| --- | --- | --- |
+| Islands whose colours lie inside the wide islands' span join the merged island (no extra colour steps; only the 8 packer islands stay on island warps) | Iterate 103.8 -> 95.1 us (bed 105 -> 95 us, packers then end at 96 us), relax +3.3, cached prepare +6.5, joint projection +7.4 us per launch; span 14.57 -> 14.41 ms | 67.73, 67.69 (worse over the full window) |
+| 384-thread island blocks: 8 merged + 4 island warps (`launch_bounds` keeps 168 registers) | Bed colour 0 16.9 instead of 20.7 us with the merge above | 68.43, 68.32 (neutral) |
+| Both | Bed sweep 90.6 us, packers 92 us | 67.94, 67.86 |
+
+The merge's loss over frames 630-1200 is not explained by the 30-frame
+trace; the island-versus-merged balance was tuned in `a79901909`.
+
+Sorts on the critical (setup) stream per collision pass: contact sort
+120 us (8 passes of a 59-bit key, behind a 3-level active-prefix ladder),
+locality sort 74 us and warm-start pair sort 100 us (each about 25-30 us
+of conditional ladder before the first pass), contact-body entry sort
+53 us and island key sort 33 us (2 passes each over the column capacity),
+island order sort 20 us. The owned-contact schedule sorts (5 + 2 passes
+over the capacity, 167 us) run on their side stream beside the sleeping
+and partitioning chain and end before it. Not built:
+
+- A narrower contact sub-key: the plant's largest mesh has 298,784
+  triangles, so mesh-triangle sub-keys (`((tri << 1) | 1) << 3 | point`)
+  need all 23 bits; a capacity-derived width saves no pass here.
+- Warm-start pair key `end_bit = 2 * body_bits` (the plant's node count
+  needs 16 bits, so 33 bits take 5 passes): saves one pass, about 10 us
+  per collision pass, but an uncoloured active slot's `INT64_MAX` key then
+  ties with a bodiless slot's all-ones key and can split equal keys in
+  the boundary scan.
+- One active-prefix dispatch around both the locality and the warm-start
+  sort (same count, same flags): saves one ladder, about 10 us per pass
+  after the per-sort rank conditionals.
+
 ## Batched humanoid comparison
 
 Measured 2026-08-04 on an RTX PRO 6000 Blackwell with 20,000 worlds,
