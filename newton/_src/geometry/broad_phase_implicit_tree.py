@@ -159,7 +159,7 @@ def _make_pair_kernels(filter_func: Any, filter_data_type: Any, passive_shape: A
         if wp.static(reuse):
             if slot == 0:
                 rebuild[0] = 0
-                rebuild[1] += 1
+                rebuild[2] += 1
                 escaper_count[0] = 0
         record = ImplicitBvhNode()
         record.lower = wp.vec3(1.0e30, 1.0e30, 1.0e30)
@@ -220,6 +220,7 @@ def _make_pair_kernels(filter_func: Any, filter_data_type: Any, passive_shape: A
         active_count: wp.array[wp.int32],
         depth: int,
         thread_count: int,
+        keep: int,
     ):
         # An ancestor always contains the query leaf, so its bound cannot
         # reject it. Visit only the sibling subtrees along the leaf-to-root
@@ -247,7 +248,7 @@ def _make_pair_kernels(filter_func: Any, filter_data_type: Any, passive_shape: A
                     node = implicit_bvh_next_subtree(node)
                 elif node < tree.leaf_base:
                     node = node * wp.int32(2)
-                elif wp.static(reuse):
+                elif wp.static(reuse) and keep != 0:
                     # Keep every pair of overlapping reuse bounds; ``reuse_pairs`` tests them on each pass.
                     shape2 = tree.leaf_item[node - tree.leaf_base]
                     if not is_shape_pair_same_body_filtered(shape1, shape2, shape_body):
@@ -349,6 +350,8 @@ def _make_pair_kernels(filter_func: Any, filter_data_type: Any, passive_shape: A
         escaped: wp.array[wp.int32],
         escapers: wp.array[wp.int32],
         escaper_count: wp.array[wp.int32],
+        rebuild: wp.array[wp.int32],
+        leaf_count: int,
         depth: int,
         thread_count: int,
     ):
@@ -359,10 +362,21 @@ def _make_pair_kernels(filter_func: Any, filter_data_type: Any, passive_shape: A
         ``query``, and directly against the other listed leaves.
         """
         kept = kept_pair_count[0]
-        kept_count = wp.min(kept, kept_pair.shape[0])
-        if wp.tid() == 0 and kept > kept_count:
-            # Truncated kept pairs may miss candidates: report the overflow as the full query would.
-            wp.atomic_add(candidate_pair_count, 0, max_candidate_pair + 1)
+        kept_count = kept
+        if kept > kept_pair.shape[0]:
+            # Truncated kept pairs could miss candidates: the full query runs instead.
+            kept_count = 0
+            if wp.tid() == 0:
+                wp.printf(
+                    "Warning: implicit-tree kept pair buffer overflowed (%d > %d); each pass runs the full tree "
+                    "query instead, which is slower. Raise BroadPhaseImplicitTree(queue_capacity_factor=) to "
+                    "about %d.\n",
+                    kept,
+                    kept_pair.shape[0],
+                    (kept + kept // 4) // leaf_count + 1,
+                )
+        if wp.tid() == 0:
+            rebuild[1] = wp.int32(kept_count != kept)
         count = wp.min(escaper_count[0], escapers.shape[0])
         collide = wp.static(int(ShapeFlags.COLLIDE_SHAPES))
         for work in range(wp.tid(), kept_count + count * count + count * depth, thread_count):
@@ -515,8 +529,8 @@ class BroadPhaseImplicitTree:
         if pair_reuse_slack is not None and not (np.isfinite(pair_reuse_slack) and pair_reuse_slack > 0.0):
             raise ValueError("pair_reuse_slack must be a positive finite number or None")
         self._pair_reuse_slack = pair_reuse_slack
-        # [0]: rebuild before the next query, [1]: builds so far.
-        self._rebuild = wp.array([1, 0], dtype=wp.int32, device=device)
+        # [0]: rebuild the tree, [1]: run the full query (kept pairs overflowed), [2]: builds so far.
+        self._rebuild = wp.array([1, 0, 0], dtype=wp.int32, device=device)
         # Allocated here, as a buffer allocated during graph capture is valid only in graph launches.
         self._kept_pairs = wp.empty(self.capacity if pair_reuse_slack else 0, dtype=wp.vec2i, device=device)
         self._kept_pair_count = wp.zeros(1, dtype=wp.int32, device=device)
@@ -604,7 +618,8 @@ class BroadPhaseImplicitTree:
             pair_data,
         ]
         if not reuse:
-            self._build_and_query(pair_inputs, candidate_pair, candidate_pair_count, device)
+            self._build(pair_inputs, device)
+            self._query(pair_inputs, candidate_pair, candidate_pair_count, 0, device)
             return
         kept = (self._kept_pairs, self._kept_pair_count)
         escape = (self._escaped, self._escapers, self._escaper_count)
@@ -625,7 +640,13 @@ class BroadPhaseImplicitTree:
             device=device,
             record_tape=False,
         )
-        wp.capture_if(self._rebuild[:1], on_true=lambda: self._build_and_query(pair_inputs, *kept, device))
+
+        def build_and_keep():
+            self._build(pair_inputs, device)
+            self._kept_pair_count.zero_()
+            self._query(pair_inputs, *kept, 1, device)
+
+        wp.capture_if(self._rebuild[0:1], on_true=build_and_keep)
         wp.launch(
             self._kernels[3],
             dim=_REUSE_THREADS,
@@ -638,18 +659,22 @@ class BroadPhaseImplicitTree:
                 self._flags,
                 *kept,
                 *escape,
+                self._rebuild,
+                self.shape_count,
                 self._depth,
                 _REUSE_THREADS,
             ],
             device=device,
             record_tape=False,
         )
+        wp.capture_if(
+            self._rebuild[1:2],
+            on_true=lambda: self._query(pair_inputs, candidate_pair, candidate_pair_count, 0, device),
+        )
 
-    def _build_and_query(self, pair_inputs, candidate_pair, candidate_pair_count, device) -> None:
+    def _build(self, pair_inputs, device) -> None:
         shape_lower, shape_upper, shape_gap, shape_displacement = pair_inputs[:4]
         reuse = self._pair_reuse_slack is not None
-        if reuse:
-            candidate_pair_count.zero_()
         wp.launch(
             _tree_keys,
             dim=self.shape_count,
@@ -694,6 +719,8 @@ class BroadPhaseImplicitTree:
             record_tape=False,
         )
         self.tree.update_internal_nodes()
+
+    def _query(self, pair_inputs, candidate_pair, candidate_pair_count, keep: int, device) -> None:
         wp.launch(
             self._kernels[1],
             dim=self._query_threads,
@@ -707,6 +734,7 @@ class BroadPhaseImplicitTree:
                 self._active_count,
                 self._depth,
                 self._query_threads,
+                keep,
             ],
             device=device,
             record_tape=False,

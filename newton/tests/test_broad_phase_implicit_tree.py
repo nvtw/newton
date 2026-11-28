@@ -314,7 +314,7 @@ class TestBroadPhaseImplicitTree(unittest.TestCase):
             launch(tree, pairs, count, filter_data=data)
 
         def step(expect_rebuild: bool | None, eager: bool = False):
-            builds = int(tree._rebuild.numpy()[1])
+            builds = int(tree._rebuild.numpy()[2])
             lower.assign(centers - half)
             upper.assign(centers + half)
             displacement.assign(velocity * dt)
@@ -336,7 +336,7 @@ class TestBroadPhaseImplicitTree(unittest.TestCase):
             self.assertEqual(len(found), size)
             self.assertEqual(found, expected)
             if expect_rebuild is not None:
-                self.assertEqual(int(tree._rebuild.numpy()[1]) - builds, int(expect_rebuild))
+                self.assertEqual(int(tree._rebuild.numpy()[2]) - builds, int(expect_rebuild))
             return len(expected)
 
         self.assertGreater(step(True), 200)
@@ -367,6 +367,39 @@ class TestBroadPhaseImplicitTree(unittest.TestCase):
                 centers[neighbor] = centers[5] + 0.01
             step(False)
             step(False, eager=True)
+
+    def test_kept_pair_overflow_runs_the_full_query(self):
+        """Kept pairs past their capacity fall back to the full query and lose no pair."""
+        if not wp.is_cuda_available():
+            self.skipTest("CUDA graph capture requires a CUDA device")
+        device = wp.get_device("cuda:0")
+        rng = np.random.default_rng(5)
+        n = 300
+        world = wp.zeros(n, dtype=wp.int32, device=device)
+        group = wp.ones(n, dtype=wp.int32, device=device)
+        centers = rng.uniform(-0.5, 0.5, (n, 3)).astype(np.float32)
+        lower = wp.array(centers - 0.1, dtype=wp.vec3, device=device)
+        upper = wp.array(centers + 0.1, dtype=wp.vec3, device=device)
+        # One kept pair per shape cannot hold this dense pile's pairs.
+        tree = BroadPhaseImplicitTree(world, queue_capacity_factor=1, device=device, pair_reuse_slack=0.001)
+        oracle = BroadPhaseAllPairs(world, device=device)
+        pairs = [wp.empty(n * n, dtype=wp.vec2i, device=device) for _ in range(2)]
+        counts = [wp.zeros(1, dtype=wp.int32, device=device) for _ in range(2)]
+        oracle.launch(lower, upper, None, group, world, n, pairs[1], counts[1], device=device)
+        expected = {tuple(p) for p in pairs[1].numpy()[: int(counts[1].numpy()[0])]}
+        self.assertGreater(len(expected), 2 * n)
+        with wp.ScopedCapture(device=device) as capture:
+            tree.launch(lower, upper, None, group, world, n, pairs[0], counts[0], device=device)
+        for captured in (True, True, False):
+            if captured:
+                wp.capture_launch(capture.graph)
+            else:
+                tree.launch(lower, upper, None, group, world, n, pairs[0], counts[0], device=device)
+            size = int(counts[0].numpy()[0])
+            found = {tuple(p) for p in pairs[0].numpy()[:size]}
+            self.assertEqual(len(found), size)
+            self.assertEqual(found, expected)
+            self.assertEqual(int(tree._rebuild.numpy()[1]), 1)
 
     def test_indexed_exclusions_match_sorted_prefix(self):
         model_shapes, shapes = 12, 15
