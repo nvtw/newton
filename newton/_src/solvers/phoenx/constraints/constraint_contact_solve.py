@@ -1168,13 +1168,13 @@ def contact_cached_warmstart_lean(
     parallel_id: wp.int32,
 ):
     """Apply cached rigid contact warm-start impulses without rebuilding J."""
-    if constraints.articulation_owner[cid] >= wp.int32(0):
-        return
+    # The owner and the column header load together.
+    owner = constraints.articulation_owner[cid]
     b1 = contact_get_body1(constraints, cid)
     b2 = contact_get_body2(constraints, cid)
     contact_first = contact_get_contact_first(constraints, cid)
     contact_count = contact_get_contact_count(constraints, cid)
-    if contact_count == 0:
+    if owner >= wp.int32(0) or contact_count == 0:
         return
 
     inv_mass1 = bodies.inverse_mass[b1]
@@ -1233,13 +1233,13 @@ def _contact_cached_warmstart_split(
     parallel_id: wp.int32,
 ):
     """Apply cached rigid contact warm-start impulses without rebuilding J."""
-    if constraints.articulation_owner[cid] >= wp.int32(0):
-        return
+    # The owner and the column header load together.
+    owner = constraints.articulation_owner[cid]
     b1 = contact_get_body1(constraints, cid)
     b2 = contact_get_body2(constraints, cid)
     contact_first = contact_get_contact_first(constraints, cid)
     contact_count = contact_get_contact_count(constraints, cid)
-    if contact_count == 0:
+    if owner >= wp.int32(0) or contact_count == 0:
         return
 
     slot1 = contact_get_slot1(constraints, cid)

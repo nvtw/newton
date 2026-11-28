@@ -33,11 +33,14 @@ def joint_constraint_iterate_inequality(
     use_bias: wp.bool,
 ):
     """Iterate common D6 limit, speed-cap, and friction rows."""
-    if constraints.d6.enabled == wp.int32(0) or constraints.d6.row_count[cid] == wp.int32(0):
+    if constraints.d6.enabled == wp.int32(0):
         return
-
+    # The row count and the body indices load together.
+    count = constraints.d6.row_count[cid]
     body1 = read_int(constraints, _OFF_BODY1, cid)
     body2 = read_int(constraints, _OFF_BODY2, cid)
+    if count == wp.int32(0):
+        return
     body_set_access_mode(bodies, body1, ACCESS_MODE_VELOCITY_LEVEL, idt)
     body_set_access_mode(bodies, body2, ACCESS_MODE_VELOCITY_LEVEL, idt)
     (

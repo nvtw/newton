@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Exercise grouped CUDA joint RHS policy and scalar equivalence."""
 
+import functools
 import unittest
 from unittest.mock import patch
 
@@ -10,11 +11,16 @@ import warp as wp
 
 import newton
 from newton._src.solvers.phoenx import simulation as phoenx_simulation
+from newton._src.solvers.phoenx.body import BodyContainer
+from newton._src.solvers.phoenx.constraints.bilateral_joint import get_iterate_bilateral_joint_block
+from newton._src.solvers.phoenx.constraints.constraint_container import ConstraintContainer
 from newton._src.solvers.phoenx.dispatch.color_groups import (
     get_sweep_block_dim,
     get_sweep_kernel,
     use_cooperative_joint_rhs,
 )
+from newton._src.solvers.phoenx.mass_splitting.copy_state import CopyStateContainer
+from newton._src.solvers.phoenx.particle import ParticleContainer
 from newton._src.solvers.phoenx.tests.test_block_joint_policy import make_model, make_solver
 from newton._src.solvers.phoenx.tests.test_direct_drive import _cuda_with_graph_capture
 
@@ -132,6 +138,102 @@ class TestCooperativeJointRHS(unittest.TestCase):
                     else:
                         for a, b in zip(expected, actual, strict=True):
                             self.assertEqual(a.tobytes(), b.tobytes())
+
+    def test_tile_scatter_matches_scalar_with_and_without_accumulation(self):
+        """The tile's gathered wrench scatter reproduces the scalar block bit for bit.
+
+        Covers the biased iterate, which accumulates row impulses, and the
+        structural projection, which skips spring rows and must leave the
+        accumulated impulses untouched, for zero to six rows.
+        """
+        builder = newton.ModelBuilder(gravity=wp.vec3(0.0))
+        for pair in range(28):
+            parent, child = (
+                builder.add_link(
+                    xform=wp.transform(wp.vec3(3.0 * pair + x, 0.0, 0.0), wp.quat_identity()),
+                    mass=mass,
+                    inertia=wp.mat33(mass, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 3.0),
+                )
+                for x, mass in ((0.0, 1.0), (1.0, 2.0))
+            )
+            options = {
+                "parent_xform": wp.transform(wp.vec3(0.5, 0.0, 0.0), wp.quat_identity()),
+                "child_xform": wp.transform(wp.vec3(-0.5, 0.0, 0.0), wp.quat_identity()),
+            }
+            if pair % 2:
+                # A driven hinge orders its spring row after the structural rows.
+                builder.add_joint_revolute(
+                    parent,
+                    child,
+                    axis=newton.Axis.Z,
+                    target_ke=40.0,
+                    target_kd=1.0,
+                    target_q=0.2,
+                    actuator_mode=newton.JointTargetMode.POSITION,
+                    **options,
+                )
+            else:
+                builder.add_joint_fixed(parent, child, **options)
+        model = builder.finalize(device="cuda:0", skip_validation_joints=True)
+        solver = make_solver(model, sleeping_velocity_threshold=0.0)
+        state = model.state()
+        solver.step(state, state, model.control(), None, 0.001)
+        world = solver.world
+        data = world.constraints.bilateral
+        counts = data.row_count.numpy()
+        self.assertEqual(int(np.count_nonzero(counts == 6)), model.joint_count)
+        self.assertTrue(data.row_dynamic.numpy().any())
+        counts[1::2] = np.arange(model.joint_count // 2) % 7
+        data.row_count.assign(counts)
+        rng = np.random.default_rng(7)
+        arrays = [world.bodies.velocity, world.bodies.angular_velocity, data.accumulated]
+        for array in arrays:
+            array.assign(rng.normal(0.0, 0.1, array.numpy().shape).astype(np.float32))
+        saved = [wp.clone(array) for array in arrays]
+        inputs = [world.constraints, world.bodies, world._particles_or_sentinel(), world._copy_state, model.joint_count]
+        for structural_only in (False, True):
+            results = []
+            for cooperative in (False, True):
+                for destination, source in zip(arrays, saved, strict=True):
+                    wp.copy(destination, source)
+                wp.launch(
+                    _make_block_kernel(cooperative, structural_only),
+                    model.joint_count * (8 if cooperative else 1),
+                    inputs,
+                    device=world.device,
+                )
+                results.append([array.numpy().copy() for array in arrays])
+            with self.subTest(structural_only=structural_only):
+                scalar, tile = results
+                self.assertFalse(np.array_equal(scalar[0], saved[0].numpy()))
+                for a, b in zip(scalar, tile, strict=True):
+                    self.assertEqual(a.tobytes(), b.tobytes())
+                accumulated_changed = not np.array_equal(tile[2], saved[2].numpy())
+                self.assertEqual(accumulated_changed, not structural_only)
+
+
+@functools.cache
+def _make_block_kernel(cooperative: bool, structural_only: bool):
+    """Solve every joint block once, eight lanes per joint or one."""
+    iterate = get_iterate_bilateral_joint_block(
+        cooperative, structural_only=structural_only, accumulate=not structural_only
+    )
+    width = 8 if cooperative else 1
+
+    @wp.kernel(module="unique", enable_backward=False)
+    def run(
+        constraints: ConstraintContainer,
+        bodies: BodyContainer,
+        particles: ParticleContainer,
+        copies: CopyStateContainer,
+        num_joints: wp.int32,
+    ):
+        tid = wp.tid()
+        cid = tid / width
+        if cid < num_joints:
+            iterate(constraints, cid, bodies, particles, copies, bodies.position.shape[0], -1, True, tid % width)
+
+    return run
 
 
 def _simulate_single_world_chains(

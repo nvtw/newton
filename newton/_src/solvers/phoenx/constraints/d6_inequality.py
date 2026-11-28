@@ -165,11 +165,16 @@ def prepare_d6_inequalities(
 
     for row in range(D6_AXIS_COUNT):
         if wp.int32(row) < count:
+            # Load the row's fields before its stores, which would otherwise
+            # order every later load behind them.
             axis_index = data.row_axis[cid, row]
+            row_kind = data.row_kind[cid, row]
+            condense = data.condense_translation[cid, row]
+            warm_start = data.lower_impulse[cid, row] + data.upper_impulse[cid, row] + data.friction_impulse[cid, row]
             wrench0 = wp.spatial_vector()
             wrench1 = wp.spatial_vector()
             coordinate = wp.float32(0.0)
-            if data.row_kind[cid, row] == wp.int32(D6_ROW_DISTANCE):
+            if row_kind == wp.int32(D6_ROW_DISTANCE):
                 distance2 = wp.dot(separation, separation)
                 direction = wp.normalize(wp.quat_rotate(orientation0, data.axis[cid, axis_index]))
                 if distance2 > wp.float32(1.0e-20):
@@ -227,7 +232,7 @@ def prepare_d6_inequalities(
                 + wp.dot(wp.spatial_top(wrench1), wp.spatial_top(response1))
                 + wp.dot(wp.spatial_bottom(wrench1), wp.spatial_bottom(response1))
             )
-            if data.condense_translation[cid, row] != wp.int32(0):
+            if condense != wp.int32(0):
                 # The hinge's translation rows are solved elsewhere, after this
                 # row. Its condensed mass describes a torque together with the
                 # pivot reaction it induces, so the row applies that reaction
@@ -253,7 +258,6 @@ def prepare_d6_inequalities(
             data.wrench0[cid, row] = wrench0
             data.wrench1[cid, row] = wrench1
             data.effective_mass_inverse[cid, row] = effective_mass_inverse
-            warm_start = data.lower_impulse[cid, row] + data.upper_impulse[cid, row] + data.friction_impulse[cid, row]
             v0, w0, v1, w1 = _d6_apply_row_impulse(
                 wrench0,
                 wrench1,
@@ -290,14 +294,21 @@ def iterate_d6_inequalities(
     count = data.row_count[cid]
     for row in range(D6_AXIS_COUNT):
         if wp.int32(row) < count:
+            # Load the whole row before solving it: the impulse stores below
+            # would otherwise order every later load behind them.
             wrench0 = data.wrench0[cid, row]
             wrench1 = data.wrench1[cid, row]
             effective_mass_inverse = data.effective_mass_inverse[cid, row]
+            coordinate = data.coordinate[cid, row]
+            lower = data.lower[cid, row]
+            upper = data.upper[cid, row]
+            speed_limit = data.velocity_limit[cid, row]
+            upper_impulse = data.upper_impulse[cid, row]
+            lower_impulse = data.lower_impulse[cid, row]
+            friction = data.friction[cid, row]
+            friction_impulse = data.friction_impulse[cid, row]
+            slip_scale = data.friction_slip_scale[cid, row]
             if effective_mass_inverse > wp.float32(0.0):
-                coordinate = data.coordinate[cid, row]
-                lower = data.lower[cid, row]
-                upper = data.upper[cid, row]
-                speed_limit = data.velocity_limit[cid, row]
                 upper_enabled = upper < wp.float32(5.0e9)
                 if upper_enabled or speed_limit > wp.float32(0.0):
                     upper_velocity = wp.float32(1.0e30)
@@ -309,7 +320,7 @@ def iterate_d6_inequalities(
                     if speed_limit > wp.float32(0.0):
                         upper_velocity = wp.min(upper_velocity, speed_limit)
                     relative_velocity = _d6_row_velocity(wrench0, wrench1, v0, w0, v1, w1)
-                    old_impulse = data.upper_impulse[cid, row]
+                    old_impulse = upper_impulse
                     new_impulse = wp.min(
                         wp.float32(0.0),
                         old_impulse - sor_boost * (relative_velocity - upper_velocity) / effective_mass_inverse,
@@ -340,7 +351,7 @@ def iterate_d6_inequalities(
                     if speed_limit > wp.float32(0.0):
                         lower_velocity = wp.max(lower_velocity, -speed_limit)
                     relative_velocity = _d6_row_velocity(wrench0, wrench1, v0, w0, v1, w1)
-                    old_impulse = data.lower_impulse[cid, row]
+                    old_impulse = lower_impulse
                     new_impulse = wp.max(
                         wp.float32(0.0),
                         old_impulse - sor_boost * (relative_velocity - lower_velocity) / effective_mass_inverse,
@@ -361,13 +372,11 @@ def iterate_d6_inequalities(
                         w1,
                     )
 
-                friction = data.friction[cid, row]
                 if friction > wp.float32(0.0):
                     relative_velocity = _d6_row_velocity(wrench0, wrench1, v0, w0, v1, w1)
-                    old_impulse = data.friction_impulse[cid, row]
+                    old_impulse = friction_impulse
                     impulse_limit = friction / idt
                     slip_velocity = PHOENX_FRICTION_SLIP_VELOCITY
-                    slip_scale = data.friction_slip_scale[cid, row]
                     if slip_scale > wp.float32(0.0):
                         slip_velocity = slip_scale * effective_mass_inverse * friction
                     gamma = slip_velocity / impulse_limit

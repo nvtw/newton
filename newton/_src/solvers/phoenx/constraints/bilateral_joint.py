@@ -128,14 +128,7 @@ def _get_bilateral_impulse_functions(row_capacity: int, *, accumulate: bool = Tr
     Vector = wp.types.vector(length=row_capacity, dtype=wp.float32)
 
     @wp.func
-    def _backward_bilateral_impulses(
-        data: BilateralJointData,
-        cid: wp.int32,
-        count: wp.int32,
-        structural: wp.int32,
-        solution: Vector,
-    ):
-        lower = data.lower[cid]
+    def _backward_substitute(lower: Mat66, count: wp.int32, solution: Vector):
         # Constant bounds let Warp unroll matrix indexing without changing
         # descending solve rows or ascending subtractions within each row.
         for reverse in range(wp.static(row_capacity)):
@@ -146,8 +139,7 @@ def _get_bilateral_impulse_functions(row_capacity: int, *, accumulate: bool = Tr
                     if j > i and j < count:
                         value -= lower[j, i] * solution[j]
                 solution[i] = value
-
-        return _scatter_bilateral_impulses(data, cid, count, structural, solution)
+        return solution
 
     @wp.func
     def _scatter_bilateral_impulses(
@@ -191,9 +183,10 @@ def _get_bilateral_impulse_functions(row_capacity: int, *, accumulate: bool = Tr
         for i in range(wp.static(row_capacity)):
             if i < count:
                 solution[i] /= diagonal[i]
-        return _backward_bilateral_impulses(data, cid, count, structural, solution)
+        solution = _backward_substitute(lower, count, solution)
+        return _scatter_bilateral_impulses(data, cid, count, structural, solution)
 
-    return _backward_bilateral_impulses, _scatter_bilateral_impulses, _solve_bilateral_impulses
+    return _backward_substitute, _scatter_bilateral_impulses, _solve_bilateral_impulses
 
 
 _scatter_projection_impulses = _get_bilateral_impulse_functions(6, accumulate=False)[1]
@@ -427,6 +420,14 @@ def _prepare_bilateral_joint_blocks_cooperative(
             data.valid[cid] = 1
 
 
+@wp.func
+def _shuffle_bilateral_spatial(value: wp.spatial_vector, source_lane: wp.int32, width: wp.int32) -> wp.spatial_vector:
+    result = wp.spatial_vector()
+    for component in range(6):
+        result[component] = _shuffle_bilateral_rhs_width(wp.float32(value[component]), source_lane, width)
+    return result
+
+
 @functools.cache
 def get_iterate_bilateral_joint_block(
     cooperative: bool = False,
@@ -440,9 +441,10 @@ def get_iterate_bilateral_joint_block(
 
     The cooperative variant uses four CUDA lanes for at most three rows,
     and eight lanes for larger blocks. Row capacity comes from the topology.
-    All lanes take the same enabled/count/valid returns, and gather before
-    nonleaders exit. Each row retains its original component and
-    subtraction order; backward substitution and impulse scatter stay scalar.
+    All lanes take the same enabled/count/valid returns. Each row retains
+    its original component and subtraction order: every lane substitutes
+    backward on the gathered solution, and the leader sums the row wrenches,
+    gathered from the lanes that loaded them, in the scalar scatter order.
 
     Temporal springs solve a fresh force increment each substep. Their existing
     velocity already includes earlier increments, so their residual omits the
@@ -473,7 +475,16 @@ def get_iterate_bilateral_joint_block(
         data = constraints.bilateral
         if data.enabled == 0:
             return
+        # These loads depend only on the joint: issue them together rather
+        # than behind the early returns, each of which costs a load latency.
         count = data.row_count[cid]
+        valid = data.valid[cid]
+        structural = data.structural_index[cid]
+        body0 = constraint_get_body1(constraints, cid)
+        body1 = constraint_get_body2(constraints, cid)
+        lane_row = wp.int32(0)
+        if wp.static(cooperative):
+            lane_row = data.row_indices[cid, wp.min(tile_lane, wp.static(row_capacity - 1))]
         if wp.static(temporal_springs or structural_only):
             if wp.static(structural_only) or not use_bias:
                 # Topology orders structural rows before springs. The leading
@@ -484,11 +495,8 @@ def get_iterate_bilateral_joint_block(
                         if data.row_dynamic[data.row_indices[cid, i]]:
                             count = i
                             break
-        if count == 0 or data.valid[cid] == 0:
+        if count == 0 or valid == 0:
             return
-        structural = data.structural_index[cid]
-        body0 = constraint_get_body1(constraints, cid)
-        body1 = constraint_get_body2(constraints, cid)
         v0, v1, w0, w1, inv_m0, inv_m1, inv_i0, inv_i1, slot0, slot1 = _ms_load_body_pair(
             bodies, particles, copy_state, body0, body1, parallel_id, num_bodies
         )
@@ -497,16 +505,18 @@ def get_iterate_bilateral_joint_block(
         rhs = Vector()
         if wp.static(cooperative):
             rhs_value = wp.float32(0.0)
+            lane_wrench0 = wp.spatial_vector()
+            lane_wrench1 = wp.spatial_vector()
             if tile_lane < count:
-                i = tile_lane
-                row = data.row_indices[cid, i]
-                local = data.row_local[row]
-                residual = _dot6(data.wrench0[structural, local], twist0)
-                residual += _dot6(data.wrench1[structural, local], twist1)
-                if data.row_dynamic[row]:
+                local = data.row_local[lane_row]
+                lane_wrench0 = data.wrench0[structural, local]
+                lane_wrench1 = data.wrench1[structural, local]
+                residual = _dot6(lane_wrench0, twist0)
+                residual += _dot6(lane_wrench1, twist1)
+                if data.row_dynamic[lane_row]:
                     if wp.static(not temporal_springs):
-                        residual += wp.float32(data.accumulated[row]) / wp.float32(data.dynamic_mass[row])
-                    residual -= wp.float32(data.reference[row])
+                        residual += wp.float32(data.accumulated[lane_row]) / wp.float32(data.dynamic_mass[lane_row])
+                    residual -= wp.float32(data.reference[lane_row])
                 elif use_bias:
                     residual += wp.float32(data.bias[structural, local])
                 rhs_value = -residual
@@ -514,19 +524,38 @@ def get_iterate_bilateral_joint_block(
             # Each row subtracts solved earlier rows in the same ascending
             # order as the scalar forward solve. Scaling follows all rows.
             # Each lane needs only its own row; a whole-matrix copy indexed by
-            # the lane would live in local memory.
+            # the lane would live in local memory. The shuffles stay outside
+            # row-count branches: a branch around each one costs a warp
+            # reconvergence, and rows past the count are never read.
             lower_row = _bilateral_lower_row(data.lower, cid, tile_lane)
             for forward_row in range(wp.static(row_capacity)):
-                if forward_row < count:
-                    solved = _shuffle_bilateral_rhs_width(rhs_value, forward_row, wp.static(tile_width))
-                    if tile_lane > forward_row and tile_lane < count:
-                        rhs_value -= lower_row[forward_row] * solved
+                solved = _shuffle_bilateral_rhs_width(rhs_value, forward_row, wp.static(tile_width))
+                if tile_lane > forward_row and tile_lane < count:
+                    rhs_value -= lower_row[forward_row] * solved
             if tile_lane < count:
                 rhs_value /= _bilateral_diagonal(data.diagonal, cid, tile_lane)
-            rhs = Vector()
             for row_lane in range(wp.static(row_capacity)):
-                if row_lane < count:
-                    rhs[row_lane] = _shuffle_bilateral_rhs_width(rhs_value, row_lane, wp.static(tile_width))
+                rhs[row_lane] = _shuffle_bilateral_rhs_width(rhs_value, row_lane, wp.static(tile_width))
+            # Every lane substitutes backward on the gathered solution, adds
+            # its own row's impulse, and the leader sums the row wrenches the
+            # lanes already hold in ascending row order, as the scalar scatter.
+            rhs = backward(data.lower[cid], count, rhs)
+            if wp.static(accumulate):
+                if tile_lane < count:
+                    own = wp.float32(0.0)
+                    for i in range(wp.static(row_capacity)):
+                        if i == tile_lane:
+                            own = rhs[i]
+                    data.accumulated[lane_row] += own
+            impulse0 = wp.spatial_vector()
+            impulse1 = wp.spatial_vector()
+            for i in range(wp.static(row_capacity)):
+                row_wrench0 = _shuffle_bilateral_spatial(lane_wrench0, i, wp.static(tile_width))
+                row_wrench1 = _shuffle_bilateral_spatial(lane_wrench1, i, wp.static(tile_width))
+                if i < count:
+                    impulse = wp.float32(rhs[i])
+                    impulse0 += impulse * row_wrench0
+                    impulse1 += impulse * row_wrench1
             if tile_lane != 0:
                 return
         else:
@@ -544,10 +573,6 @@ def get_iterate_bilateral_joint_block(
                     elif use_bias:
                         residual += wp.float32(data.bias[structural, local])
                     rhs[i] = -residual
-
-        if wp.static(cooperative):
-            impulse0, impulse1 = backward(data, cid, count, structural, rhs)
-        else:
             impulse0, impulse1 = solve(data, cid, count, structural, rhs)
         v0 += inv_m0 * wp.spatial_top(impulse0)
         v1 += inv_m1 * wp.spatial_top(impulse1)

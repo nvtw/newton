@@ -589,11 +589,14 @@ def _joint_constraint_prepare_inequality_full(
     idt: wp.float32,
 ):
     """Prepare common D6 limit, speed-cap, and friction rows."""
-    if constraints.d6.enabled == wp.int32(0) or constraints.d6.row_count[cid] == wp.int32(0):
+    if constraints.d6.enabled == wp.int32(0):
         return
-
+    # The row count and the body indices load together.
+    count = constraints.d6.row_count[cid]
     b1 = read_int(constraints, _OFF_BODY1, cid)
     b2 = read_int(constraints, _OFF_BODY2, cid)
+    if count == wp.int32(0):
+        return
     body_set_access_mode(bodies, b1, ACCESS_MODE_VELOCITY_LEVEL, idt)
     body_set_access_mode(bodies, b2, ACCESS_MODE_VELOCITY_LEVEL, idt)
     (

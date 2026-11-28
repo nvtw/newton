@@ -3639,8 +3639,13 @@ def _joint_frozen(constraints: ConstraintContainer, bodies: BodyContainer, cid: 
     """Both endpoints are asleep or not dynamic, so the joint must not change them."""
     b0 = constraint_get_body1(constraints, cid)
     b1 = constraint_get_body2(constraints, cid)
-    asleep0 = bodies.motion_type[b0] != MOTION_DYNAMIC or bodies.island_root[b0] >= 0
-    asleep1 = bodies.motion_type[b1] != MOTION_DYNAMIC or bodies.island_root[b1] >= 0
+    # Load the four fields together; the short-circuit tests would chain them.
+    motion0 = bodies.motion_type[b0]
+    motion1 = bodies.motion_type[b1]
+    root0 = bodies.island_root[b0]
+    root1 = bodies.island_root[b1]
+    asleep0 = motion0 != MOTION_DYNAMIC or root0 >= 0
+    asleep1 = motion1 != MOTION_DYNAMIC or root1 >= 0
     return asleep0 and asleep1
 
 
@@ -3697,13 +3702,14 @@ def _make_singleworld_dispatch_func(
         constraints: ConstraintContainer,
         bodies: BodyContainer,
     ) -> bool:
+        enabled = joint_pgs_enabled[cid]
         if wp.static(has_sleeping):
             # Sleeping islands keep their joint rows; solving them would move frozen bodies.
             if _joint_frozen(constraints, bodies, cid):
                 return False
         if wp.static(is_prepare or is_cached_prepare):
-            return joint_pgs_enabled[cid] != wp.int32(0)
-        return joint_pgs_enabled[cid] == wp.int32(1)
+            return enabled != wp.int32(0)
+        return enabled == wp.int32(1)
 
     @wp.func
     def _dispatch_one_cid(
@@ -4034,13 +4040,14 @@ def _make_singleworld_rigid_direct_color_func(
         constraints: ConstraintContainer,
         bodies: BodyContainer,
     ) -> bool:
+        enabled = joint_pgs_enabled[cid]
         if wp.static(has_sleeping):
             # Sleeping islands keep their joint rows; solving them would move frozen bodies.
             if _joint_frozen(constraints, bodies, cid):
                 return False
         if wp.static(is_prepare or is_cached_prepare):
-            return joint_pgs_enabled[cid] != wp.int32(0)
-        return joint_pgs_enabled[cid] == wp.int32(1)
+            return enabled != wp.int32(0)
+        return enabled == wp.int32(1)
 
     @wp.func
     def _dispatch_rigid_direct_color(
@@ -4334,12 +4341,11 @@ def _make_structural_projection_color(cooperative: bool, row_capacity: int):
         entry = tile
         while entry < count:
             cid = elements[start + entry]
-            if cid < num_joints and ownership[cid] == 1:
-                b0 = constraint_get_body1(constraints, cid)
-                b1 = constraint_get_body2(constraints, cid)
-                asleep0 = bodies.motion_type[b0] != MOTION_DYNAMIC or bodies.island_root[b0] >= 0
-                asleep1 = bodies.motion_type[b1] != MOTION_DYNAMIC or bodies.island_root[b1] >= 0
-                if not (asleep0 and asleep1):
+            if cid < num_joints:
+                # Both tests load together; a short-circuit would chain them.
+                owned = ownership[cid]
+                frozen = _joint_frozen(constraints, bodies, cid)
+                if owned == 1 and not frozen:
                     if overflow:
                         if tile_lane == 0:
                             project_physical_bilateral_joint(constraints, bodies, cid)
