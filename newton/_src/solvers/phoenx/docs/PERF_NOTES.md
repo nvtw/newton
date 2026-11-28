@@ -525,6 +525,71 @@ about 100 bytes per row.
 
 
 
+## Bottling plant collision pair reuse (2026-11-28)
+
+Same factory and window, two collision passes per frame. Collision kernels
+per frame (nsys, 60 captured frames):
+
+| Kernel | Default before | Default after | Scale 2 before | Scale 2 after |
+| --- | ---: | ---: | ---: | ---: |
+| Implicit-tree query | 1016 us | 91 us | 1382 us | 135 us |
+| Tree keys, sort, leaves, refit | about 190 us | about 50 us | about 190 us | about 50 us |
+| Reuse check and pair pass | -- | 352 us | -- | 445 us |
+| Mesh triangle contacts to reducer | 840 us | 856 us | 1432 us | 1439 us |
+| Split GJK distance (two kernels) | 639 us | 667 us | 1029 us | 1007 us |
+| Manifold | 482 us | 493 us | 667 us | 671 us |
+| Mesh triangle midphase | 328 us | 343 us | 448 us | 404 us |
+| MPR | 239 us | 255 us | 401 us | 411 us |
+
+A collision pass was 1.59 ms (2.32 ms at scale 2): tree build and query,
+then two overlapping chains, the convex pairs (MPR, GJK, manifold) and the
+mesh pairs (midphase, triangle contacts, reducer, export), of which the mesh
+chain ends about 120 us later, then the 8-pass contact sort and the match.
+Now a pass that rebuilds takes 1.44 ms and one that reuses 1.22 ms.
+
+Kept (`BroadPhaseImplicitTree(pair_reuse_slack=)`, plant 1 mm): a tree
+build bounds each shape's sweep over this pass and three more, plus the
+slack, and keeps the pairs of overlapping bounds. Each pass checks every
+leaf against its kept bound. Leaves that left it, started colliding or woke
+are listed (up to 512) and test their current bound against the kept
+bounds of the others; the kept pairs of unlisted leaves get the query's
+exact pair test. More listed leaves or kept-pair overflow rebuild the tree
+(overflow then runs the full query). The candidate set equals a full query
+on every pass, so contacts and states stay bitwise identical (per-pass
+contact hashes, frames 400-700 default and 400-600 at scale 2).
+
+| Commit | Change | Default FPS | Scale 2 FPS |
+| --- | --- | ---: | ---: |
+| base | -- | 64.1-64.2 | 46.8 |
+| `1c64b6cab` | Keep pairs, rebuild on any escape | 65.8-65.9 | 47.9 |
+| `211c7b0f0` | Escaped leaves query their own pairs | 67.1 | 48.9 |
+| `9cce28f17` | Full query on kept-pair overflow (safety) | 67.1 | 49.2 |
+
+Builds per 1,400 passes: 1,207 with one escape forcing a rebuild, 358
+with listed leaves. The escapes came from eight KR10 packer arms (links
+at about 0.45 m/s and 1 rad/s) on almost every pass. The reuse pass
+costs 100 us right after a build (kept pairs only) and grows to 200-400
+us as listed leaves accumulate.
+
+Measured and not kept:
+
+| Change | Result |
+| --- | --- |
+| Look-ahead of one pass instead of three (with listed leaves) | 66.9 FPS, 701 builds |
+| Look-ahead of five passes | 67.05 FPS, 246 builds |
+| 128 or 2048 listed leaves instead of 512 | 66.96, 67.19 FPS |
+| Bounds tested first in the shared exact pair test | 67.17 FPS (noise) |
+| Rebuild on any escape with 2- or 4-pass look-ahead | 65.8-65.9 FPS (as 1 pass) |
+
+The mesh-triangle contact kernel (74k hull-vs-deck triangle pairs, 71.9k
+of them bottle base hulls on the pasteuriser deck, 2-4 triangles each) is
+now the longest collision kernel and on the critical path. Writing one
+contact instead of the manifold cuts it only from 405 to 305 us (replay
+of a saved frame), so the MPR and seam handling, not the manifold, set its
+latency. The contact sort uses 59-bit keys (18-bit shape indices, 23-bit
+sub-key), hence 8 radix passes; a 20-bit sub-key would save one pass, about
+12 us per collision pass.
+
 Contacts on non-tree `maximal_direct` mechanisms are solved through the exact
 constrained mobility (`DirectContactResponse`). The Caterpillar (three
 floating mechanisms of 39/46/46 bodies, 220/230/230 rows, 107 manifolds,
