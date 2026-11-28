@@ -313,14 +313,17 @@ class TestBroadPhaseImplicitTree(unittest.TestCase):
         with wp.ScopedCapture(device=device) as capture:
             launch(tree, pairs, count, filter_data=data)
 
-        def step(expect_rebuild):
+        def step(expect_rebuild: bool | None, eager: bool = False):
             builds = int(tree._rebuild.numpy()[1])
             lower.assign(centers - half)
             upper.assign(centers + half)
             displacement.assign(velocity * dt)
             flags.assign(flags_np)
             data.active.assign(active)
-            wp.capture_launch(capture.graph)
+            if eager:
+                launch(tree, pairs, count, filter_data=data)
+            else:
+                wp.capture_launch(capture.graph)
             launch(oracle, oracle_pairs, oracle_count)
             # The oracle read the flags once; apply the current ones.
             expected = {
@@ -332,7 +335,8 @@ class TestBroadPhaseImplicitTree(unittest.TestCase):
             found = {tuple(p) for p in pairs.numpy()[:size]}
             self.assertEqual(len(found), size)
             self.assertEqual(found, expected)
-            self.assertEqual(int(tree._rebuild.numpy()[1]) - builds, int(expect_rebuild))
+            if expect_rebuild is not None:
+                self.assertEqual(int(tree._rebuild.numpy()[1]) - builds, int(expect_rebuild))
             return len(expected)
 
         self.assertGreater(step(True), 200)
@@ -341,22 +345,28 @@ class TestBroadPhaseImplicitTree(unittest.TestCase):
             centers += velocity * dt
             step(False)
             centers += velocity * dt
-            step(True)
+            step(None)
+        # Everything jumps: too many leaves leave their bounds.
+        centers += 0.05
+        step(True)
         # A shape that falls asleep only loses pairs; one that stops colliding too.
         active[np.flatnonzero(active)[:50]] = 0
         flags_np[1::19] = 0
         centers += velocity * dt
         step(False)
-        # A shape that wakes up, starts colliding, or jumps needs a rebuild.
-        for change in ("wake", "collide", "jump"):
+        # Shapes that wake up, start colliding, or jump query their own pairs, also with each other.
+        neighbor = int(np.argmin(np.linalg.norm(centers[1:] - centers[5], axis=1))) + 1
+        for change in ("wake", "collide", "jump", "pair"):
             if change == "wake":
                 active[next(i for i in passive_at_build if flags_np[i])] = 1
             elif change == "collide":
                 flags_np[0] = int(ShapeFlags.COLLIDE_SHAPES)
-            else:
+            elif change == "jump":
                 centers[5] += 0.05
-            step(True)
+            else:
+                centers[neighbor] = centers[5] + 0.01
             step(False)
+            step(False, eager=True)
 
     def test_indexed_exclusions_match_sorted_prefix(self):
         model_shapes, shapes = 12, 15

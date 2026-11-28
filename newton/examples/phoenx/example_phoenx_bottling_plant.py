@@ -350,7 +350,7 @@ class Example:
                 self.model.shape_flags,
                 dynamic_rows=self.pipeline._dynamic_rows,
                 passive_shape=_passive_shape,
-                # Most shapes move steadily, so the pairs of a tree build often serve the next pass too.
+                # Most shapes move steadily, so the pairs of a tree build serve several passes.
                 pair_reuse_slack=0.001,
                 filter_func=_filter_pair,
                 filter_data_type=_PlantFilter,
