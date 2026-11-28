@@ -1427,12 +1427,19 @@ def _commit_joints_kernel(
     block: _BlockRows,
     active: wp.array[wp.int32],
     free: wp.array[wp.int32],
+    free_row: wp.array[wp.int32],
+    row_slot: wp.array[wp.int32],
     resolved: wp.array[wp.int32],
 ):
     slot = wp.tid()
     old = _resolve(dyn.joint_pool, slot, active, free)
     if slot < resolved.shape[0]:
         resolved[slot] = old
+    # Handles are popped in thread order, so their slots do not follow the rows. Listing free
+    # joints by row pops the lowest free rows, which the descriptor sort then deals out.
+    row = dyn.joint_row[slot]
+    free_row[row] = free[slot]
+    row_slot[row] = slot
     joint = joint_index(dyn, dyn.joint_pool.start + slot)
     if old == _ADDED:
         _write_joint(rows, block, joint, dyn.staged_joints[slot])
@@ -1840,12 +1847,14 @@ def _scatter_lists_kernel(
     active_prefix: wp.array[wp.int32],
     free: wp.array[wp.int32],
     free_prefix: wp.array[wp.int32],
+    free_slot: wp.array[wp.int32],
 ):
     slot = wp.tid()
     if active[slot] != 0:
         pool.active_list[active_prefix[slot]] = slot
     if free[slot] != 0:
-        pool.free_list[free_prefix[slot]] = slot
+        # A ranked pool flags free rows instead of slots, so the free list pops the lowest rows first.
+        pool.free_list[free_prefix[slot]] = wp.where(free_slot.shape[0] > 0, free_slot[slot], slot)
     last = pool.state.shape[0] - 1
     if slot == last:
         pool.counts[0] = active_prefix[last] + active[last]
@@ -1856,7 +1865,7 @@ def _scatter_lists_kernel(
 class _HostPool:
     """Host owner of one :class:`SlotPool` and its commit scratch."""
 
-    def __init__(self, start: int, capacity: int, device):
+    def __init__(self, start: int, capacity: int, device, ranked: bool = False):
         cap = max(1, capacity)
         self.capacity = capacity
         self.data = SlotPool()
@@ -1869,16 +1878,20 @@ class _HostPool:
         self.free = wp.zeros(cap, dtype=wp.int32, device=device)
         self.active_prefix = wp.zeros(cap, dtype=wp.int32, device=device)
         self.free_prefix = wp.zeros(cap, dtype=wp.int32, device=device)
+        # Ranked pools list free slots by row: per row, whether it is free and its slot.
+        self.free_row = wp.zeros(cap if ranked else 0, dtype=wp.int32, device=device)
+        self.row_slot = wp.zeros(cap if ranked else 0, dtype=wp.int32, device=device)
 
     def rebuild_lists(self):
         if self.capacity == 0:
             return
+        free = self.free_row if self.free_row.shape[0] else self.free
         wp.utils.array_scan(self.active, self.active_prefix, inclusive=False)
-        wp.utils.array_scan(self.free, self.free_prefix, inclusive=False)
+        wp.utils.array_scan(free, self.free_prefix, inclusive=False)
         wp.launch(
             _scatter_lists_kernel,
             dim=self.capacity,
-            inputs=[self.data, self.active, self.active_prefix, self.free, self.free_prefix],
+            inputs=[self.data, self.active, self.active_prefix, free, self.free_prefix, self.row_slot],
             device=self.active.device,
         )
 
@@ -1903,7 +1916,7 @@ class Dynamics:
         self.capacity = capacity
         self.bodies = _HostPool(capacity.body_start, capacity.body_count, device)
         self.shapes = _HostPool(capacity.shape_start, capacity.shape_count, device)
-        self.joints = _HostPool(capacity.joint_start, capacity.joint_count, device)
+        self.joints = _HostPool(capacity.joint_start, capacity.joint_count, device, ranked=True)
         self.articulations = _HostPool(0, capacity.articulation_count, device)
         self._sleeping = solver._sleeping_enabled
         self._solver = solver
@@ -2356,6 +2369,8 @@ class Dynamics:
                     self._block_rows,
                     self.joints.active,
                     self.joints.free,
+                    self.joints.free_row,
+                    self.joints.row_slot,
                     self._resolved_joint_state,
                 ],
                 device=device,

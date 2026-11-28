@@ -207,6 +207,59 @@ def _run_chain(order: list[int], remove_last: bool = False) -> tuple[np.ndarray,
     return rows.numpy(), state_0.body_q.numpy()
 
 
+@wp.kernel
+def _hang_kernel(dyn: phoenx.DynamicsData, bodies: wp.array[int], link: int, handles: wp.array[int]):
+    """Hang box ``link`` from the world by a ball joint at its centre."""
+    body = bodies[link]
+    anchor = wp.transform(wp.vec3(_CHAIN_SPACING * float(link), 0.0, 2.0), wp.quat_identity())
+    desc = phoenx.joint_desc(-1, body, anchor, wp.transform_identity())
+    desc.angular_axes = wp.identity(3, dtype=float)
+    desc.angular_count = 3
+    handles[link] = phoenx.add_joint(dyn, desc)
+
+
+def _rehang(first: list[int]) -> tuple[np.ndarray, np.ndarray]:
+    """Hang boxes in the thread order ``first``, release them, then hang box 2 alone.
+
+    Returns the rows of the final joint and the final poses.
+    """
+    builder = newton.ModelBuilder()
+    bodies = []
+    for link in range(3):
+        body = builder.add_body(xform=wp.transform(wp.vec3(_CHAIN_SPACING * link, 0.0, 2.0), wp.quat_identity()))
+        builder.add_shape_box(body, hx=0.04, hy=0.04, hz=0.04)
+        bodies.append(body)
+    builder.reserve_dynamic_capacity(joints=4)
+    model = builder.finalize()
+    solver = newton.solvers.SolverPhoenX(model, joint_mode="maximal_pgs", step_layout="single_world", substeps=4)
+    state_0, state_1 = model.state(), model.state()
+    control = model.control()
+    dyn = solver.dynamics.data
+    body_array = wp.array(bodies, dtype=int)
+    handles = wp.full(3, -1, dtype=int)
+
+    def step():
+        solver.step(state_0, state_1, control, None, _DT)
+        state_0.assign(state_1)
+
+    with wp.ScopedCapture() as capture:
+        step()
+    for link in first:
+        # One launch per joint fixes the order in which handles are popped.
+        wp.launch(_hang_kernel, dim=1, inputs=[dyn, body_array, link, handles])
+    for _ in range(3):
+        wp.capture_launch(capture.graph)
+    wp.launch(_remove_joint_kernel, dim=len(first), inputs=[dyn, handles])
+    for _ in range(3):
+        wp.capture_launch(capture.graph)
+    wp.launch(_hang_kernel, dim=1, inputs=[dyn, body_array, 2, handles])
+    for _ in range(10):
+        wp.capture_launch(capture.graph)
+    rows = wp.zeros(1, dtype=int)
+    wp.launch(_joint_rows_kernel, dim=1, inputs=[dyn, handles[2:], rows])
+    return rows.numpy(), state_0.body_q.numpy()
+
+
 class _Scene:
     """Ground plane plus reserved rows, stepped by one captured collide + step graph."""
 
@@ -369,6 +422,17 @@ class TestDynamicBodies(unittest.TestCase):
         gaps = np.linalg.norm(np.diff(released_q[:, :3], axis=0), axis=1)
         self.assertGreater(float(gaps[-1]), 2.0 * _CHAIN_SPACING)
         np.testing.assert_allclose(gaps[:-1], _CHAIN_SPACING, atol=0.01)
+
+    def test_rows_of_later_joints_ignore_earlier_thread_order(self):
+        """Joints added after earlier ones were released take the same rows whatever order those were added in.
+
+        Thread order decides which handle each earlier joint got; its row follows its descriptor.
+        A later joint must not inherit the handles' order through the free list.
+        """
+        forward_rows, forward_q = _rehang([0, 1])
+        reverse_rows, reverse_q = _rehang([1, 0])
+        np.testing.assert_array_equal(forward_rows, reverse_rows)
+        np.testing.assert_array_equal(forward_q, reverse_q)
 
     def test_body_removal_cascades_to_shapes_and_joints(self):
         scene = _Scene(bodies=1, shapes=1, joints=1)
