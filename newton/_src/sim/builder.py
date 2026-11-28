@@ -85,7 +85,7 @@ from ..geometry.inertia import (
 )
 from ..geometry.rest_shape import _dihedral_angles, _tet_rest_geometry, _triangle_rest_geometry
 from ..geometry.sdf_utils import _resolve_paired_samples_flag
-from ..geometry.support_function import _CONVEX_HULL_VALID, _MESH_COPLANAR_EDGES
+from ..geometry.support_function import _CONVEX_HULL_VALID, _MESH_COPLANAR_EDGES, TRIANGLE_SEAM_RECORD
 from ..geometry.types import Heightfield, _ConvexSupportData, _normalize_texture_input
 from ..geometry.utils import RemeshingMethod, compute_inertia_obb, remesh_convex_hull, remesh_mesh
 from ..math import quat_between_vectors_robust
@@ -324,12 +324,12 @@ _CONVEX_SUPPORT_LUT_RESOLUTION = 32
 
 
 def _coplanar_triangle_edges(source: Mesh) -> np.ndarray:
-    """Mark manifold interior edges shared by consistently wound coplanar faces."""
+    """Return each triangle's seam record (``TRIANGLE_SEAM_RECORD``) of its coplanar manifold neighbors."""
     vertices, remap = np.unique(np.asarray(source.vertices, dtype=np.float64), axis=0, return_inverse=True)
-    triangles = remap[np.asarray(source.indices).reshape(-1, 3)]
-    masks = np.zeros(len(triangles), dtype=np.int32)
+    triangles = remap.reshape(-1)[np.asarray(source.indices).reshape(-1, 3)]
+    records = np.zeros((len(triangles), TRIANGLE_SEAM_RECORD), dtype=np.int32)
     if len(triangles) < 2:
-        return masks
+        return records
     points = vertices[triangles]
     normals = np.cross(points[:, 1] - points[:, 0], points[:, 2] - points[:, 0])
     lengths = np.linalg.norm(normals, axis=1)
@@ -349,9 +349,33 @@ def _coplanar_triangle_edges(source: Mesh) -> np.ndarray:
         & np.all(edges[first] == edges[second, ::-1], axis=1)
         & (np.sum(normals[a] * normals[b], axis=1) > 1.0 - 1.0e-12)
     )
-    np.bitwise_or.at(masks, a[valid], 1 << (first[valid] % 3))
-    np.bitwise_or.at(masks, b[valid], 1 << (second[valid] % 3))
-    return masks
+    first, second = first[valid], second[valid]
+    masks = np.zeros(len(triangles), dtype=np.int32)
+    np.bitwise_or.at(masks, first // 3, 1 << (first % 3))
+    np.bitwise_or.at(masks, second // 3, 1 << (second % 3))
+    # Each coplanar edge records its neighbor: the vertex opposite the shared
+    # edge, and whether the neighbor's two other edges bound the coplanar patch.
+    triangle = np.r_[first // 3, second // 3]
+    edge = np.r_[first % 3, second % 3]
+    neighbor = np.r_[second // 3, first // 3]
+    neighbor_edge = np.r_[second % 3, first % 3]
+    corners = points[triangle]
+    opposite = points[neighbor, (neighbor_edge + 2) % 3]
+    basis = np.stack((corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0]), axis=-1)
+    gram = np.einsum("nik,nil->nkl", basis, basis)
+    rhs = np.einsum("nik,ni->nk", basis, opposite - corners[:, 0])
+    uv = np.linalg.solve(gram, rhs[..., None])[..., 0].astype(np.float32)
+    # Shared edge k runs start -> end; the neighbor holds it as end -> start, so
+    # its edge (start, opposite) follows the shared one and (opposite, end) precedes it.
+    after = ((masks[neighbor] >> ((neighbor_edge + 1) % 3)) & 1) == 0
+    before = ((masks[neighbor] >> ((neighbor_edge + 2) % 3)) & 1) == 0
+    records[:, 0] = masks
+    np.bitwise_or.at(records[:, 0], triangle, (after.astype(np.int32) << (3 + 2 * edge)))
+    np.bitwise_or.at(records[:, 0], triangle, (before.astype(np.int32) << (4 + 2 * edge)))
+    coordinates = np.zeros((len(triangles), 3, 2), dtype=np.float32)
+    coordinates[triangle, edge] = uv
+    records[:, 1:] = coordinates.reshape(len(triangles), 6).view(np.int32)
+    return records
 
 
 def _convex_hull_adjacency(source: Mesh, *, certify: bool = True) -> tuple[list[set[int]], np.ndarray] | None:
@@ -17131,12 +17155,15 @@ class ModelBuilder:
                 if isinstance(source, Mesh):
                     source_key = hash(source)
                     if source_key not in triangle_cache:
-                        masks = _coplanar_triangle_edges(source)
+                        records = _coplanar_triangle_edges(source)
                         cached = (-1, -1, -1, 0)
-                        if np.any(masks):
+                        if np.any(records[:, 0]):
                             cached = (-1, -1, neighbor_offset, _MESH_COPLANAR_EDGES)
-                            support_neighbor_chunks.append(masks)
-                            neighbor_offset += len(masks)
+                            support_neighbor_chunks.append(records.reshape(-1))
+                            neighbor_offset += records.size
+                            if neighbor_offset >= 1 << 27:
+                                # GenericShapeData.smooth_edges packs record starts into 27 bits.
+                                raise ValueError("Mesh seam records exceed 2**27 ints; use fewer mesh triangles")
                         triangle_cache[source_key] = cached
                     shape_support_data[shape_idx] = triangle_cache[source_key]
 

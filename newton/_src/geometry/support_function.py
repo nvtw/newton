@@ -43,6 +43,18 @@ _CENTERED_BOX_SUPPORT_TIE_EPSILON = 1.0e-6
 _CONVEX_HULL_VALID = wp.constant(1 << 16)
 _MESH_COPLANAR_EDGES = wp.constant(1 << 17)
 _CONVEX_SUPPORT_RESOLUTION_MASK = wp.constant((1 << 16) - 1)
+TRIANGLE_SEAM_RECORD = 7
+"""Topology int32 values per triangle of a mesh with coplanar edges.
+
+Value 0 flags in bit ``k`` that edge ``k`` (AB, BC, CA) is shared with a coplanar,
+consistently wound neighbor, and in bits ``3 + 2k`` and ``4 + 2k`` that the
+neighbor's edges (start, opposite) and (opposite, end) bound the coplanar patch.
+Values ``1 + 2k`` and ``2 + 2k`` hold the float32 bits of the barycentric
+coordinates ``(u, v)`` of the neighbor's opposite vertex on the triangle.
+"""
+_TRIANGLE_SEAM_RECORD = wp.constant(TRIANGLE_SEAM_RECORD)
+_SMOOTH_EDGE_BITS = wp.constant(7)
+_SMOOTH_EDGES_MIRRORED = wp.constant(1 << 3)
 
 TRIANGLE_PRISM_EXTRUSION = 1.0
 """Depth [m] a triangle is extruded along -Z to give a heightfield cell volume."""
@@ -57,6 +69,20 @@ return 1.0f / sqrtf(value);
 """)
 def _support_rsqrt_rn(value: float) -> float:
     """Return a round-to-nearest reciprocal square root of a positive value."""
+    ...
+
+
+@wp.func_native("""
+#if defined(__CUDA_ARCH__)
+return __int_as_float(bits);
+#else
+float value;
+memcpy(&value, &bits, sizeof(value));
+return value;
+#endif
+""")
+def _bits_as_float(bits: wp.int32) -> wp.float32:
+    """Reinterpret the bits of an int as a float."""
     ...
 
 
@@ -226,17 +252,56 @@ class GenericShapeData:
     center: wp.vec3  # Precomputed local AABB center for convex seed initialization.
     bounds_half: wp.vec3  # Optional enclosing local AABB half-extents for penetration bounds.
     shape_index: int  # Index for optional model-owned support-map acceleration data.
-    smooth_edges: int  # Mesh triangle AB/BC/CA edges with coplanar manifold neighbors.
+    # Mesh triangle: bits 0-2 flag AB/BC/CA edges with coplanar manifold neighbors, bit 3 a
+    # mirrored mesh, and bits 4 and up hold one more than the start of the triangle's seam record.
+    smooth_edges: int
 
 
 @wp.func
 def triangle_smooth_edges(metadata: wp.vec4i, topology: wp.array[int], triangle: int, scale: wp.vec3) -> int:
-    mask = int(0)
-    if metadata[3] & _MESH_COPLANAR_EDGES:
-        mask = topology[metadata[2] + triangle]
-        if scale[0] * scale[1] * scale[2] < 0.0:
-            mask = ((mask & 1) << 2) | (mask & 2) | ((mask & 4) >> 2)
-    return mask
+    """Return ``smooth_edges`` of a mesh triangle; see :class:`GenericShapeData`."""
+    if (metadata[3] & _MESH_COPLANAR_EDGES) == 0:
+        return int(0)
+    record = metadata[2] + _TRIANGLE_SEAM_RECORD * triangle
+    mask = topology[record] & _SMOOTH_EDGE_BITS
+    packed = (record + 1) << 4
+    if scale[0] * scale[1] * scale[2] < 0.0:
+        # Mirroring swaps vertices B and C, so the AB and CA edges trade places.
+        mask = ((mask & 1) << 2) | (mask & 2) | ((mask & 4) >> 2)
+        packed = packed | _SMOOTH_EDGES_MIRRORED
+    return mask | packed
+
+
+@wp.func
+def triangle_coplanar_neighbor(
+    geom: GenericShapeData, topology: wp.array[int], edge: int
+) -> tuple[bool, wp.vec3, bool, bool]:
+    """Return the coplanar neighbor across edge ``edge`` of mesh triangle ``geom``.
+
+    Edge ``k`` runs from vertex ``k`` to vertex ``k + 1`` of (A, B, C), with A at
+    the origin of the triangle frame. Returns whether the neighbor is known, its
+    vertex opposite the shared edge in the triangle frame, and whether its edges
+    (start, opposite) and (opposite, end) bound the coplanar patch.
+    """
+    record = (geom.smooth_edges >> 4) - 1
+    if record < 0 or (geom.smooth_edges & (1 << edge)) == 0:
+        return False, wp.vec3(0.0), False, False
+    mirrored = (geom.smooth_edges & _SMOOTH_EDGES_MIRRORED) != 0
+    # A mirrored triangle lists its edges, and each edge's ends, in reverse.
+    stored = edge
+    if mirrored:
+        stored = 2 - edge
+    flags = topology[record] >> (3 + 2 * stored)
+    after = (flags & 1) != 0
+    before = (flags & 2) != 0
+    u = _bits_as_float(topology[record + 1 + 2 * stored])
+    v = _bits_as_float(topology[record + 2 + 2 * stored])
+    opposite = u * geom.scale + v * geom.auxiliary
+    if mirrored:
+        # Barycentric coordinates are invariant under the mesh's scale and pose.
+        opposite = v * geom.scale + u * geom.auxiliary
+        return True, opposite, before, after
+    return True, opposite, after, before
 
 
 @wp.func
@@ -267,7 +332,7 @@ def triangle_seam_normal(
     Returns:
         Whether the witness lies on a coplanar seam, and the face normal if so.
     """
-    mask = geom.smooth_edges
+    mask = geom.smooth_edges & _SMOOTH_EDGE_BITS
     if mask == 0:
         return False, normal
     ab, ac = geom.scale, geom.auxiliary

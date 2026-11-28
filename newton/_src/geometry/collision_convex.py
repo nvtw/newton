@@ -24,6 +24,7 @@ from .penetration import create_solve_box_penetration
 from .simplex_solver import GJK_CUTOFF_TOLERANCE, coordinate_scale, create_solve_closest_distance
 from .support_function import (
     triangle_contains_projection,
+    triangle_coplanar_neighbor,
     triangle_edge_outward,
     triangle_seam_normal,
     triangle_witness_tolerance,
@@ -153,8 +154,34 @@ def create_write_convex_query_result(
     return write_convex_query_result
 
 
+@wp.func
+def _triangle_corner(geom: Any, index: int) -> wp.vec3:
+    """Return vertex A, B, or C of a mesh triangle in its frame, where A is the origin."""
+    if index == 1:
+        return geom.scale
+    if index == 2:
+        return geom.auxiliary
+    return wp.vec3(0.0)
+
+
 def _create_triangle_seam_contact(support_map_b: Any):
     """Create the resolution of contacts at coplanar mesh seams."""
+
+    @wp.func
+    def reaches_past(
+        start: wp.vec3,
+        end: wp.vec3,
+        opposite: wp.vec3,
+        geom_b: Any,
+        relative_orientation_b: wp.quat,
+        relative_position_b: wp.vec3,
+        data_provider: Any,
+        tolerance: float,
+    ) -> bool:
+        """Return whether B extends, in the face plane, past the line of edge ``start``-``end`` away from ``opposite``."""
+        outward = triangle_edge_outward(start, end, opposite)
+        reach = support_map_b(geom_b, outward, relative_orientation_b, relative_position_b, data_provider)
+        return wp.dot(outward, reach - start) > tolerance
 
     @wp.func
     def reaches_past_boundary(
@@ -165,28 +192,46 @@ def _create_triangle_seam_contact(support_map_b: Any):
         data_provider: Any,
         tolerance: float,
     ) -> bool:
-        """Return whether B extends, in the face plane, past an edge of triangle A without a coplanar neighbor."""
-        # Triangle vertex A is the frame origin; B and C are stored relative to it.
-        a = wp.vec3(0.0)
-        b = geom_a.scale
-        c = geom_a.auxiliary
-        mask = geom_a.smooth_edges
-        # Edge bits: 1 = AB, 2 = BC, 4 = CA.
-        if (mask & 1) == 0:
-            outward = triangle_edge_outward(a, b, c)
-            reach = support_map_b(geom_b, outward, relative_orientation_b, relative_position_b, data_provider)
-            if wp.dot(outward, reach - a) > tolerance:
-                return True
-        if (mask & 2) == 0:
-            outward = triangle_edge_outward(b, c, a)
-            reach = support_map_b(geom_b, outward, relative_orientation_b, relative_position_b, data_provider)
-            if wp.dot(outward, reach - b) > tolerance:
-                return True
-        if (mask & 4) == 0:
-            outward = triangle_edge_outward(c, a, b)
-            reach = support_map_b(geom_b, outward, relative_orientation_b, relative_position_b, data_provider)
-            if wp.dot(outward, reach - c) > tolerance:
-                return True
+        """Return whether B extends, in the face plane, past the boundary of triangle A's coplanar patch.
+
+        The patch boundary is each edge without a coplanar neighbor and, where B
+        crosses a coplanar edge, the boundary edges of the neighbor across it.
+        """
+        for edge in range(3):
+            start = _triangle_corner(geom_a, edge)
+            end = _triangle_corner(geom_a, (edge + 1) % 3)
+            opposite = _triangle_corner(geom_a, (edge + 2) % 3)
+            if reaches_past(
+                start, end, opposite, geom_b, relative_orientation_b, relative_position_b, data_provider, tolerance
+            ):
+                if (geom_a.smooth_edges & (1 << edge)) == 0:
+                    return True
+                # B crosses into the coplanar neighbor; it must stay within that triangle's boundary edges.
+                known, vertex, after, before = triangle_coplanar_neighbor(geom_a, data_provider.support_neighbors, edge)
+                if known and after:
+                    if reaches_past(
+                        start,
+                        vertex,
+                        end,
+                        geom_b,
+                        relative_orientation_b,
+                        relative_position_b,
+                        data_provider,
+                        tolerance,
+                    ):
+                        return True
+                if known and before:
+                    if reaches_past(
+                        vertex,
+                        end,
+                        start,
+                        geom_b,
+                        relative_orientation_b,
+                        relative_position_b,
+                        data_provider,
+                        tolerance,
+                    ):
+                        return True
         return False
 
     @wp.func

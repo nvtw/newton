@@ -1,0 +1,1 @@
+Fix mesh-triangle contacts certifying a deep face contact for a shape that crosses a coplanar seam and leaves the face across a boundary edge of the neighboring triangle, such as a pallet board lying across the side-face diagonal of a box-mesh conveyor strand.

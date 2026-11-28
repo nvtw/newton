@@ -641,6 +641,89 @@ def test_refinement_triangle_board_across_strand_side(test, device):
     test.assertGreater(min(depths), -0.002, (normals, depths))
 
 
+def test_refinement_triangle_board_across_strand_side_quad(test, device):
+    """Keep a board lying across a strand's side-face diagonal from a deep side-face contact.
+
+    A pallet board lies across a narrow chain strand (an asset box mesh whose
+    side quads split along a diagonal), sunk 0.16 mm into its top face, its
+    front edge 9 mm short of the strand's end. There the side quad's diagonal
+    lies 0.12 mm below the top edge, so the board's bottom face reaches below
+    it into the lower triangle, whose own edges are the diagonal, the end, and
+    the bottom. The board's far end, 79 mm beyond the side face, projects into
+    that triangle, but the board also reaches past the side quad's top edge,
+    which belongs to the coplanar neighbor across the diagonal. A 79 mm
+    side-face contact pushed a loaded pallet sideways at 0.83 m/s on the
+    bottling plant's wrap line. A mirrored strand (negative Y scale) has the
+    same geometry and triangulation.
+    """
+    corners = np.array(
+        [
+            [-1, -1, -1], [-1, -1, 1], [-1, 1, 1], [-1, 1, -1],
+            [1, -1, -1], [1, -1, 1], [1, 1, 1], [1, 1, -1],
+            [-1, -1, -1], [-1, -1, 1], [1, -1, 1], [1, -1, -1],
+            [-1, 1, -1], [-1, 1, 1], [1, 1, 1], [1, 1, -1],
+            [-1, -1, -1], [-1, 1, -1], [1, 1, -1], [1, -1, -1],
+            [-1, -1, 1], [-1, 1, 1], [1, 1, 1], [1, -1, 1],
+        ],
+        dtype=np.float32,
+    )  # fmt: skip
+    faces = np.array(
+        [[0, 1, 2], [0, 2, 3], [4, 6, 5], [4, 7, 6], [8, 10, 9], [8, 11, 10],
+         [12, 13, 14], [12, 14, 15], [16, 17, 18], [16, 18, 19], [20, 22, 21], [20, 23, 22]]
+    )  # fmt: skip
+    for mirror in (1.0, -1.0):
+        builder = newton.ModelBuilder()
+        strand = newton.Mesh(0.5 * corners, faces.ravel(), compute_inertia=False)
+        builder.add_shape_mesh(
+            -1,
+            mesh=strand,
+            xform=wp.transform(wp.vec3(81.9105, 50.8225, 0.48), wp.quat_identity()),
+            scale=(2.97, mirror * 0.036, 0.04),
+            cfg=builder.ShapeConfig(density=0.0, gap=0.01, margin=0.0),
+        )
+        # Pallet pose at the collision pass before the kick.
+        pallet = wp.transform(
+            wp.vec3(83.143768, 51.36116, 0.49974275),
+            wp.normalize(wp.quat(1.4826131e-06, -3.9620915e-08, -1.0, -1.6811082e-05)),
+        )
+        board = builder.add_body(
+            xform=wp.transform_multiply(pallet, wp.transform(wp.vec3(-0.1927, 0.0, 0.0101), wp.quat_identity())),
+            mass=1.0,
+            inertia=wp.mat33(np.eye(3)),
+        )
+        builder.add_shape_box(
+            board, hx=0.05, hy=0.6, hz=0.01, cfg=builder.ShapeConfig(density=0.0, gap=0.001, margin=0.0)
+        )
+        model = builder.finalize(device)
+        pipeline = newton.CollisionPipeline(model, speculative_contact_gap_max=0.005)
+        contacts = pipeline.contacts()
+        state = model.state()
+        state.body_qd.assign(np.array([[0.2002, 0.0, -0.0035, 0.0, 0.0, 0.0]], dtype=np.float32))
+        pipeline.collide(state, contacts, dt=1.0 / 120.0)
+        count = int(contacts.rigid_contact_count.numpy()[0])
+        test.assertGreater(count, 0, f"the strand lost the board's support (mirror {mirror})")
+        normals = contacts.rigid_contact_normal.numpy()[:count]
+        points0 = contacts.rigid_contact_point0.numpy()[:count]
+        points1 = contacts.rigid_contact_point1.numpy()[:count]
+        shape_body = model.shape_body.numpy()
+        shape0 = contacts.rigid_contact_shape0.numpy()[:count]
+        shape1 = contacts.rigid_contact_shape1.numpy()[:count]
+        pose = state.body_q.numpy()
+        world = []
+        for shape, point in ((shape0, points0), (shape1, points1)):
+            body = shape_body[shape]
+            moved = np.array(
+                [
+                    wp.transform_point(wp.transform(pose[b, :3], pose[b, 3:]), wp.vec3(p))
+                    for b, p in zip(body, point, strict=True)
+                ]
+            )
+            world.append(np.where((body < 0)[:, None], point, moved))
+        depths = np.einsum("ij,ij->i", normals, world[1] - world[0])
+        # Honest contacts here are the 0.16 mm top-face sink.
+        test.assertGreater(min(depths), -0.002, (mirror, normals, depths))
+
+
 def test_refinement_triangle_box_tilted_rest(test, device):
     """Keep a slightly tilted mesh resting on a wide box at its true depth.
 
@@ -929,6 +1012,7 @@ for function in (
     test_refinement_triangle_hull_rim_on_seam,
     test_refinement_triangle_capsule_sunk_across_seam,
     test_refinement_triangle_board_across_strand_side,
+    test_refinement_triangle_board_across_strand_side_quad,
     test_refinement_triangle_box_tilted_rest,
     test_refinement_triangle_thin_box_face,
     test_refinement_triangle_box_tilted_face,
